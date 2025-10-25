@@ -48,6 +48,7 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 - [Docker Compose](https://docs.docker.com/compose/install/)  
 
 - Un **nodo Meshtastic** accesible por TCP (normalmente en `IP_DEL_NODO:4403`).
+- Otro **nodo Meshtastic** accesible por TCP (normalmente en `IP_DEL_NODO:4403`) por si queremos hacer 'bridge' entre nodos y 'preset' diferentes.
 - (Opcional) Un **TNC KISS por TCP** (ej. Direwolf o Soundmodem) en el host: `host.docker.internal:8100` en Windows/macOS o `127.0.0.1:8100` en Linux.
 - (Opcional) Credenciales de **APRS-IS** (indicativo con SSID y *passcode*) para subir posiciones etiquetadas.
 - Un **bot de Telegram** (Token) y, opcionalmente, lista de administradores.
@@ -74,50 +75,124 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 git clone https://github.com/jmmpcc/MeshNet-Bot.git
 cd MeshNet-Bot
 
-Nota: Actualizar a una nueva version:
- docker compose pull
- docker compose up -d
-
-.git
-cd MeshNet-Bot
-
-Nota: Actualizar a una nueva version:
- docker compose pull
- docker compose up -d
-
-
 ```
 2. Copiar el archivo de variables de entorno y editarlo con tus datos:
 
 ```bash
 cp .env-example .env
 ```
-3. Descargar las imágenes de GHCR
-
-```bash
-docker compose pull
-
-```
-4.- Levantar servicios
-```bash
-Levantar todo:
- docker compose up -d
-
-levantar por partes:
- docker compose up -d broker
- docker compose up -d bot
-
-# (Opcional APRS) Sólo radioaficionados con indicativo.
- docker compose up -d aprs
-
-```
-4. Ver logs
-docker compose logs -f broker
-docker compose logs -f bot
-docker compose logs -f aprs
 
  Consejo: Si vas a usar **Direwolf**/**Soundmodem** en el host, arráncalo primero y verifica que el puerto TCP (p.ej. 8100) está escuchando.
 ### Mensaje diario automático
+
+## 1) Construir imágenes con Docker Compose (método recomendado)
+
+Compila **todas** las imágenes del proyecto:
+
+```bash
+docker compose build
+```
+
+Compilar sin usar caché:
+
+```bash
+docker compose build --no-cache
+```
+Compilar y refrescar bases:
+
+```bash
+docker compose build --pull
+```
+
+Compilar servicios concretos (por ejemplo, solo broker y bot):
+
+```bash
+docker compose build broker bot
+```
+
+> Los nombres de servicio más habituales del proyecto son: `broker`, `bot`, `aprs`, `bridge`. Usa los que existan en tu `docker-compose.yml`.
+
+## 2) (Alternativa) Construcción manual por Dockerfile
+
+Si prefieres construir cada imagen directamente por Dockerfile:
+
+```bash
+# Broker (Dockerfile en raíz)
+docker build -f Dockerfile -t MeshNet-Bot/broker:local .
+
+# Bot (si comparte Dockerfile o tiene target/etiqueta distinta, ajusta según tu estructura)
+docker build -f Dockerfile -t MeshNet-Bot/bot:local .
+
+# APRS
+docker build -f Dockerfile.aprs -t MeshNet-Bot/aprs:local .
+
+# Bridge (pasarela de presets)
+docker build -f Dockerfile.bridge -t MeshNet-Bot/bridge:local .
+```
+
+> Si tu `Dockerfile` usa **targets** de multi-stage, añade `--target <nombreTarget>`.  
+> Si tu build requiere argumentos, usa `--build-arg CLAVE=valor`.
+
+## 3) Arrancar los servicios
+
+Con Compose (tras compilar):
+
+```bash
+# Levantar todo
+docker compose up -d
+
+# O levantar por servicio
+docker compose up -d broker
+docker compose up -d bot
+docker compose up -d aprs
+docker compose up -d bridge
+```
+
+Ver logs:
+
+```bash
+docker compose logs -f broker
+docker compose logs -f bot
+```
+
+Parar:
+
+```bash
+docker compose down
+```
+
+> **Nota:** `docker compose down -v` borra también volúmenes (y los datos que contengan).
+
+## 4) Verificar que todo está funcionando
+
+```bash
+docker ps
+docker compose ps
+```
+
+Comprueba además que los contenedores no reinician en bucle y que los logs no muestran errores de conexión con el nodo.
+
+## 5) Reconstruir tras cambiar código
+
+Si has tocado el código o `.env` y quieres forzar rebuild:
+
+```bash
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+```
+
+## 6) Limpieza de artefactos (opcional)
+
+```bash
+# Imágenes sin usar
+docker image prune -f
+
+# Contenedores/paravolúmenes/redes huérfanas
+docker system prune -f
+```
+
+
 ```text
 /diario 12:00 canal 2 Avisos del mediodía
 ```
