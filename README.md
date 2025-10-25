@@ -6,7 +6,7 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 - 📡 **APRS Gateway** → Pasarela bidireccional entre Meshtastic y APRS (vía KISS TCP).  
 - 🤖 **Telegram Bot** → Control remoto y consulta del estado de la red Meshtastic desde Telegram.  
 
-👉 No se expone el código fuente. Todo se distribuye mediante **imágenes Docker** publicadas en **GitHub Container Registry (GHCR)**.
+👉 Todo se distribuye mediante **imágenes Docker** publicadas en **GitHub Container Registry (GHCR)**.
 
 ## 🧾 Historial de versiones
 
@@ -814,4 +814,5 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
 
 ---
+
 
