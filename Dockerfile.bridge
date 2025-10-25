@@ -1,0 +1,22 @@
+# Dockerfile.bridge
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Paquetes de sistema mínimos (certs + tzdata opcional)
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata && rm -rf /var/lib/apt/lists/*
+
+# Instala dependencias mínimas para la pasarela
+# meshtastic trae el SDK y pubsub es el bus de eventos
+RUN pip install --upgrade pip && pip install meshtastic pubsub
+
+# Directorio de trabajo
+WORKDIR /app
+
+# Copiamos solo el script de pasarela; el resto lo montamos como volumen si hace falta
+COPY mesh_preset_bridge.py /app/mesh_preset_bridge.py
+
+# Comando por defecto (puede sobreescribirse en compose)
+CMD ["python","-u","/app/mesh_preset_bridge.py"]
