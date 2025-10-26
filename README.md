@@ -478,19 +478,6 @@ Ambos bridges:
 
 > Puedes montar `bot_data` como volumen para persistir datos entre reinicios.
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ## 📦 Ejemplos de `docker compose`
 
@@ -502,19 +489,6 @@ Los servicios están definidos para que:
 
 > Si no deseas APRS, puedes levantar solo `broker` y `bot`.
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ## 🔐 Seguridad / buenas prácticas
 
@@ -522,19 +496,6 @@ Los servicios están definidos para que:
 - Usa **IDs de admin** reales para limitar comandos avanzados.
 - Mapea puertos de broker solo dentro de tu red local a no ser que necesites acceso externo.
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ## 🧪 Pruebas rápidas
 
@@ -553,19 +514,6 @@ Los servicios están definidos para que:
 - `/en 5 canal 0 Recordatorio` ⇒ mensaje en 5 minutos por canal 0.
 - `/tareas` para revisar estado.
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ## 🛠 Solución de problemas
 
@@ -575,19 +523,6 @@ Los servicios están definidos para que:
 - **Duplicados**: el sistema hace *de‑dup* básico en APRS y gestiona ACKs por aplicación para minimizar repeticiones.
 - **Heartbeat del SDK**: el broker incluye *guards* para proteger `sendHeartbeat` y evitar olores a *loopback*.
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ## 📥 Actualización
 
@@ -708,19 +643,6 @@ Información resumida del enlace LoRa y parámetros relevantes.
   - `/aprs_status` → estado de KISS/APRS‑IS.
   - `/aprs_on` / `/aprs_off` → habilita/inhabilita uplink a APRS‑IS.
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ### 🔒 Permisos y roles
 - **Usuarios**: acceso a consultas estándar y envíos por canal.
@@ -759,38 +681,11 @@ Información resumida del enlace LoRa y parámetros relevantes.
 - Puedes inspeccionar y descargar las imágenes en:  
   👉 https://github.com/jmmpcc?tab=packages&repo_name=the-boss-docker_PUBLIC  
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ## 📄 Licencia
 
 Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 
-
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ## 🤖 Guía de comandos del Bot (v6.0)
 
@@ -806,19 +701,6 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 | `/estado` | Muestra el estado actual del sistema: broker, APRS, nodo y latencia. | `/estado` |
 | `/reconectar` | Ordena al broker reconectar con el nodo Meshtastic. | `/reconectar` |
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ### 🌐 Nodos y red Mesh
 
@@ -829,20 +711,6 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 | `/traceroute <!id|alias>` | Ejecuta un traceroute hasta un nodo. | `/traceroute !06c756f0` |
 | `/telemetria [!id|alias] [minutos]` | Muestra métricas del nodo o red (batería, SNR, voltaje, temperatura, etc.). | `/telemetria !06c756f0 30` |
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
-
 ### ✉️ Envíos y mensajes
 
 | Comando | Descripción | Ejemplo |
@@ -851,19 +719,6 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 | `/enviar <!id|alias> <texto>` | Envía un mensaje directo (unicast). | `/enviar Zgz_Romareda Mensaje` |
 | `/enviar_ack <!id|alias> <texto>` | Envía mensaje unicast con confirmación ACK. | `/enviar_ack !06c756f0 Test` |
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ### 🕒 Programación y tareas
 
@@ -879,19 +734,6 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 > Ejemplo: `/en 5,10,25 canal 0 Recordatorio` enviará el mensaje en 5, 10 y 25 minutos.
 | `/diario <HH:MM> canal <n> <texto>` | Programa un envío **diario** a la hora local (Europe/Madrid). | `/diario 09:00 canal 2 Buenos días` |
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ### 📡 APRS
 
@@ -905,19 +747,6 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 
 > Solo los mensajes que contienen la etiqueta `[CHx]` o `[CANAL x]` se reinyectan desde APRS a la red Mesh.
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ### 📍 Posiciones y cobertura
 
@@ -927,19 +756,6 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 | `/position_mapa` | Genera un mapa HTML/KML con las posiciones conocidas. | `/position_mapa` |
 | `/cobertura` | Genera mapa de cobertura a partir de posiciones y SNR. | `/cobertura` |
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ### 👂 Escucha activa
 
@@ -948,19 +764,7 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 | `/escuchar` | Activa modo escucha (el bot reporta nuevos nodos detectados). | `/escuchar` |
 | `/parar_escucha` | Detiene el modo escucha. | `/parar_escucha` |
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
 
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ### 📊 Administrador (solo para `ADMIN_IDS`)
 
@@ -969,19 +773,7 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 | `/estadistica` | Muestra estadísticas de uso del bot por usuario y fecha. | `/estadistica` |
 | `/lora` | Muestra parámetros técnicos LoRa del nodo. | `/lora` |
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
 
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ## 🧾 Ejemplos rápidos
 
