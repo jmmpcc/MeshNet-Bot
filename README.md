@@ -6,7 +6,7 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 - 📡 **APRS Gateway** → Pasarela bidireccional entre Meshtastic y APRS (vía KISS TCP).  
 - 🤖 **Telegram Bot** → Control remoto y consulta del estado de la red Meshtastic desde Telegram.  
 
-👉 Todo se distribuye mediante **imágenes Docker** publicadas en **GitHub Container Registry (GHCR)**.
+👉 No se expone el código fuente. Todo se distribuye mediante **imágenes Docker** publicadas en **GitHub Container Registry (GHCR)**.
 
 ## 🧾 Historial de versiones
 
@@ -26,21 +26,6 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 ---
 
-
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
-
 ## 🚀 Requisitos
 
 - **Docker** y **Docker Compose v2** (o `docker compose` integrado).
@@ -48,24 +33,10 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 - [Docker Compose](https://docs.docker.com/compose/install/)  
 
 - Un **nodo Meshtastic** accesible por TCP (normalmente en `IP_DEL_NODO:4403`).
-- Otro **nodo Meshtastic** accesible por TCP (normalmente en `IP_DEL_NODO:4403`) por si queremos hacer 'bridge' entre nodos y 'preset' diferentes.
 - (Opcional) Un **TNC KISS por TCP** (ej. Direwolf o Soundmodem) en el host: `host.docker.internal:8100` en Windows/macOS o `127.0.0.1:8100` en Linux.
 - (Opcional) Credenciales de **APRS-IS** (indicativo con SSID y *passcode*) para subir posiciones etiquetadas.
 - Un **bot de Telegram** (Token) y, opcionalmente, lista de administradores.
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ## 📦 Instalación
 
@@ -75,136 +46,67 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 git clone https://github.com/jmmpcc/MeshNet-Bot.git
 cd MeshNet-Bot
 
+Nota: Actualizar a una nueva version:
+ docker compose pull
+ docker compose up -d
+
+.git
+cd MeshNet-Bot
+
+Nota: Actualizar a una nueva version:
+ docker compose pull
+ docker compose up -d
+
+
 ```
 2. Copiar el archivo de variables de entorno y editarlo con tus datos:
 
 ```bash
 cp .env-example .env
+# Abre .env y rellena al menos:
+# - MESHTASTIC_HOST=...
+# - TELEGRAM_TOKEN=...
+# - ADMIN_IDS=...
+# Recomendado en Docker: DISABLE_BOT_TCP=1
+# (Opcional APRS/Bridge: KISS_HOST, KISS_PORT, BRIDGE_ENABLED, B_HOST, etc.)
+
 ```
-
- Consejo: Si vas a usar **Direwolf**/**Soundmodem** en el host, arráncalo primero y verifica que el puerto TCP (p.ej. 8100) está escuchando.
-### Mensaje diario automático
-
-## 1) Construir imágenes con Docker Compose (método recomendado)
-
-Compila **todas** las imágenes del proyecto:
+3. Descargar las imágenes de GHCR
 
 ```bash
-docker compose build
+docker compose pull
+
 ```
-
-Compilar sin usar caché:
-
+4.- Levantar servicios
 ```bash
-docker compose build --no-cache
+Levantar todo:
+ docker compose up -d
+
+levantar por partes:
+ docker compose up -d broker
+ docker compose up -d bot
+
+# (Opcional APRS) Sólo radioaficionados con indicativo.
+ docker compose up -d aprs
+
 ```
-Compilar y refrescar bases:
-
-```bash
-docker compose build --pull
-```
-
-Compilar servicios concretos (por ejemplo, solo broker y bot):
-
-```bash
-docker compose build broker bot
-```
-
-> Los nombres de servicio más habituales del proyecto son: `broker`, `bot`, `aprs`, `bridge`. Usa los que existan en tu `docker-compose.yml`.
-
-## 2) (Alternativa) Construcción manual por Dockerfile
-
-Si prefieres construir cada imagen directamente por Dockerfile:
-
-```bash
-# Broker (Dockerfile en raíz)
-docker build -f Dockerfile -t MeshNet-Bot/broker:local .
-
-# Bot (si comparte Dockerfile o tiene target/etiqueta distinta, ajusta según tu estructura)
-docker build -f Dockerfile -t MeshNet-Bot/bot:local .
-
-# APRS
-docker build -f Dockerfile.aprs -t MeshNet-Bot/aprs:local .
-
-# Bridge (pasarela de presets)
-docker build -f Dockerfile.bridge -t MeshNet-Bot/bridge:local .
-```
-
-> Si tu `Dockerfile` usa **targets** de multi-stage, añade `--target <nombreTarget>`.  
-> Si tu build requiere argumentos, usa `--build-arg CLAVE=valor`.
-
-## 3) Arrancar los servicios
-
-Con Compose (tras compilar):
-
-```bash
-# Levantar todo
-docker compose up -d
-
-# O levantar por servicio
-docker compose up -d broker
-docker compose up -d bot
-docker compose up -d aprs
-docker compose up -d bridge
-```
-
-Ver logs:
-
+4. Ver logs
 ```bash
 docker compose logs -f broker
 docker compose logs -f bot
+docker compose logs -f aprs
+
+ Consejo: Si vas a usar **Direwolf**/**Soundmodem** en el host, arráncalo primero y verifica que el puerto TCP (p.ej. 8100) está escuchando.
 ```
 
-Parar:
-
+5. Actualizar a una nueva versiön
 ```bash
-docker compose down
+git pull              # (si quieres actualizar el código/compose)
+docker compose pull   # baja nuevas imágenes desde GHCR
+docker compose up -d  # recrea con la nueva versión
+
+ Consejo: Si vas a usar **Direwolf**/**Soundmodem** en el host, arráncalo primero y verifica que el puerto TCP (p.ej. 8100) está escuchando.
 ```
-
-> **Nota:** `docker compose down -v` borra también volúmenes (y los datos que contengan).
-
-## 4) Verificar que todo está funcionando
-
-```bash
-docker ps
-docker compose ps
-```
-
-Comprueba además que los contenedores no reinician en bucle y que los logs no muestran errores de conexión con el nodo.
-
-## 5) Reconstruir tras cambiar código
-
-Si has tocado el código o `.env` y quieres forzar rebuild:
-
-```bash
-docker compose down
-docker compose build --no-cache
-docker compose up -d
-```
-
-## 6) Limpieza de artefactos (opcional)
-
-```bash
-# Imágenes sin usar
-docker image prune -f
-
-# Contenedores/paravolúmenes/redes huérfanas
-docker system prune -f
-```
-
-
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ## ⚙️ Variables de entorno (`.env`)
 
@@ -244,19 +146,271 @@ Crea un archivo `.env` en la raíz (puedes partir de `.env-example.txt`). Mínim
 >
 > **Linux:** usa `127.0.0.1` solo si compartes *network namespace* con el broker; si no, mapea el puerto del host (`-p 8100:8100`).
 
-### Mensaje diario automático
+### FUNCIONES PRINCIPALES DEL BOT
+
+### Mensaje diario automático por horas separados por comas
 ```text
-/diario 12:00 canal 2 Avisos del mediodía
+/diario <HH:MM[,HH:MM,...]> [mesh|aprs|ambos] [grupo <id>]
+            <destino[:canal] | canal N | CALL|broadcast> [aprs <CALL|broadcast>:] <texto…>
+
+    Ejemplos:
+      /diario 09:00 mesh canal 2 Parte diario Mesh
+      /diario 08:00,12:30 ambos grupo fiestas2025 canal 2 aprs EA1ABC: Programa de fiestas
+      /diario 18:45 aprs EA1ABC: Aviso para APRS
 ```
 👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
 
 ### Envío múltiple por minutos separados por comas
 ```text
-/en 5,10,25 canal 0 Recordatorio periódico
+ /en <minutos|m1,m2,...> <destino[:canal] | canal N> <texto…>
+    Ejemplos:
+      /en 15 canal 0 Buenos días a todos
+      /en 5 !b03df4cc:1 Aviso rápido
+      /en 5,10,25 canal 0 Mensaje      ← múltiples envíos programados
 ```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
 
----
+### Envío directo 
+```text
+  /enviar canal <n> <texto>
+    /enviar <número|!id|alias> <texto>
+    - NO refresca nodos ni llama a API; usa sólo nodos.txt (cargar_aliases_desde_nodes).
+    - Envío priorizando la cola del BROKER (dispara bridge A→B) con fallback al pool y adapter resiliente.
+    - Broadcast (node_id=None) sin ACK; unicast sin ACK aquí (para evitar duplicados).
+    - Añade feedback local: '✅ Nodo local confirmó transmisión' si ok y hay packet_id.
+```
+
+### Envío directo con ACK
+```text
+  /enviar_ack [reintentos=N espera=S backoff=X] <dest|broadcast[:canal] | canal N> <texto…>
+      - Unicast (!id/alias/índice): intenta usar broker-queue con ACK; si no está disponible, usa pool con waitForAck y fallback de reintentos.
+      - Broadcast (explícito o 'canal N'): no existe ACK de aplicación → broker-queue primero para disparar bridge A→B.
+    """
+```
+
+### Programar mensajes 
+```text
+/programar <YYYY-MM-DD HH:MM> <destino[:canal] | canal N> <texto...> [ack]
+    Ejemplos:
+      /programar 2025-09-02 09:30 canal 0 broadcast Buenos días a todos
+      /programar 2025-09-02 21:45 !b03df4cc:1 Aviso crítico ack
+    ZH: Europe/Madrid (por defecto). Guarda en bot_data/scheduled_tasks.jsonl.
+    
+```
+
+### Envío de mensajes por APRS
+```text
+Formatos aceptados (inmediato):
+      • /aprs canal N <texto>
+      • /aprs N <texto>
+      • /aprs <CALL|broadcast>: <texto> [canal N]
+    Formatos nuevos (programado; múltiple con comas):
+      • /aprs en M canal N <texto>         (M = 5  o  5,10,25)
+      • /aprs en M N <texto>               (atajo: N equivale a 'canal N')
+    Troceo APRS inmediato: si el texto excede APRS_MAX_LEN (p.e. 67), se trocea.
+    
+```
+
+### Activar el GATE APRS -> MESH (tráfico recibido en APRS se reenciará a la malla)
+```text
+/aprs_on
+    Activa el gate APRS→Mesh (tráfico recibido en APRS se reenviará a la malla).
+
+/aprs_off
+    Desactiva el gate APRS→Mesh.
+    
+```
+
+### Programar mensaje para ENVIAR MAÑANA
+```text
+/mañana <HH:MM> <destino[:canal] | canal N> <texto…>
+    Ejemplos:
+      /mañana 09:30 canal 0 Buenos días
+      /mañana 21:45 !b03df4cc:1 Aviso crítico
+    Programa un mensaje para mañana a la hora indicada.
+    
+```
+### Ver las TAREAS PROGAMADAS y CANCELAR TAREAS
+```text
+/tareas [pending|done|failed|canceled]
+    Lista tareas desde bot_data/scheduled_tasks.jsonl
+
+/cancelar_tarea
+    Cancelar tarea por ID mostrado en TAREAS PROGRAMADAS
+    
+```
+
+### Escuchar canal o canales en directo
+```text
+ Suscribe este chat a los mensajes TEXT_MESSAGE_APP del broker.
+    Uso: /escuchar [N|all]
+      - N   → escuchar solo ese canal lógico
+      - all → escuchar todos los canales
+
+    Cambios:
+    - Evita escuchas duplicadas por chat.
+    - Lanza una task asyncio propia que conecta al broker y reenvía mensajes.
+    - Guarda estado y task en context.chat_data para poder parar luego.
+    
+```
+### Parar Escuchar sobre canal o canales en directo
+```text
+Detiene la escucha activa de este chat.
+    - Cancela la task de escucha si existe.
+    - Cierra el writer TCP si está abierto.
+    - Limpia el flag context.chat_data["listen_state"].
+    - Informa del canal que estaba en escucha (o 'todos los canales').
+    
+```
+
+### Traceroute y Traceroute Status
+```text
+/traceroute <!id|alias>  [timeout_s]
+      - Prefiere ejecutar el traceroute vía broker (BacklogServer) y leer los TRACEROUTE_APP del backlog.
+      - Si el broker no puede lanzarlo, fallback CLI con: PAUSAR → ejecutar CLI → REANUDAR.
+
+/traceroute_status [N]
+    /traceroute_status <!id|alias>
+      - Sin args: muestra el último registro.
+      - Con N: muestra los últimos N (máx 10).
+      - Con !id|alias: muestra el último para ese destino.
+    
+```
+
+### Telemetria
+```text
+/telemetria [!id|alias] [mins|max_n] [timeout]
+      - Sin destino: listado rápido de métricas "en vivo" (pool persistente), ordenado por recencia.
+        * [max_n] (opcional) limita filas. [timeout] (opcional) espera pool.
+      - Con destino (!id o alias): métricas "en vivo" + HISTÓRICO desde el broker (FETCH_TELEMETRY).
+        * [mins] (opcional) ventana en minutos para el histórico (por defecto 30 min).
+        * [timeout] (opcional) espera pool.
+      Campos habituales si existen: SNR, RSSI, batería/voltaje, temperatura, airmon, etc.
+    
+```
+
+### Ver nodos recibidos 
+```text
+/ver_nodos [max_n] [timeout]
+      - Lee nodos del pool persistente, sin abrir nuevas conexiones al 4403.
+      - Orden por recencia (más recientes primero).
+      - Muestra alias, !id, SNR y 'visto hace'.
+    
+```
+
+### Ver nodos vecinos 
+```text
+/vecinos [max_n] [hops_max]
+    - Sin args: muestra como /ver_nodos pero aplicable a 'vecinos' (sin filtro de hops).
+    - 1er arg numérico: max_n
+    - 2º arg numérico: hops_max (mantiene solo hops <= hops_max)
+    
+```
+### Ver las programaciones DIARIAS realizadas para enviar  mensajes 
+```text
+/mis_diarios [estado] [grupo <group_id>]
+    Lista las tareas que tienen meta.repeat == 'daily'.
+    Estados: pending|done|failed|canceled (por defecto: pending)
+    Filtro opcional por grupo: daily_group_id
+    
+```
+### PARAR un GRUPO DIARIO realizado por NOMBRE DE GRUPO 
+```text
+/parar_diario_grupo <group_id>
+    Cancela todas las tareas diarias asociadas a ese grupo.
+    
+```
+### PARAR un ENVIO DIARIO realizado por ID 
+```text
+/parar_diario <task_id>
+    Alias de cancelar para tareas diarias (pero sirve para cualquier task ID).
+    
+```
+
+### Ver el ESTADO LORA del nodo 
+```text
+/lora status
+    /lora ignore_incoming on|off
+    /lora ignore_mqtt on|off
+    /lora set ignore_incoming=on ignore_mqtt=off
+    
+```
+
+### Ver las POSICIONES DE NODOS y POSICIONES EN HEADMAP
+```text
+/position <N>[min] | /position <|id|alias>[min][N]
+    Ver últimas posiciones de nodos recibidos en mapa headmap
+
+/position_mapa <kml|gpx> [N] [min]
+    Ver últimas posiciones de nodos recibidos en mapa headmap
+    
+```
+
+### Ver la COBERTURA de los nodos recibidos
+```text
+/cobertura [!id|alias] [Xh] [entorno]
+      - Genera un mapa de cobertura a partir del BacklogServer (sin abrir sockets al nodo).
+      - HTML: Heatmap + Círculos (si Folium). KML: polígonos circulares + pines.
+      - 'entorno' ∈ {urbano, suburbano, abierto}. Por defecto: urbano.
+      - Ejemplos:
+        /cobertura
+        /cobertura 12h
+        /cobertura !9eeb1328 48h suburbano
+        /cobertura Quasimodo abierto
+    
+```
+
+### Ver los CANALES configurados en el nodo
+```text
+/canales — Muestra lista de canales (número + nombre/PSK si existe).
+    Intenta reutilizar la interfaz del pool; si no está lista, fuerza ensure_connected
+    y recurre a las rutas alternativas del pool (session/run_with_interface/acquire/get).
+    
+```
+
+### RECONECTAR EL NODO
+```text
+/reconectar [seg]
+    Fuerza reconexión del broker 
+    
+```
+
+### Activar/Desctivaciones de avisos de tareas
+```text
+/notificaciones [on|off|estado]  → Activa/Desactiva o muestra el estado
+    Alias: /notify, /notifs
+    Solo administradores (ADMIN_IDS).
+    
+```
+### Bloquear/Desbloquear nodos por su ID's
+```text
+/bloquear <id1,id2,...>     → añade IDs
+    /bloquear lista             → lista IDs actuales
+    (solo admin)
+
+/desbloquear <id1,id2,...>  (solo admin)
+    
+```
+### Estadística
+```text
+/estadistica 
+    Uso del bot
+```
+
+### Ayuda
+```text
+/ayuda 
+    Ayuda completa de comandos y parámetros
+```
+
+### Mostrar menú principal
+```text
+/start 
+    Muestra el menú principal
+
+/menu
+    Abre el menú principal
+```
+
 
 ## 🔗 Bridge A↔B (Embebido y externo)
 👉  Permite enviar y recibir mensajes de uno nodo a otro y viceversa con diferentes preset
@@ -315,19 +469,6 @@ Ambos bridges:
   - Sube a **APRS‑IS** si `APRSIS_USER` y `APRSIS_PASSCODE` están definidos.
   - **Reinyecta a malla SOLO** tramas que lleven `[CHx]` o `[CANAL x]` en el comentario.
 
-### Mensaje diario automático
-```text
-/diario 12:00 canal 2 Avisos del mediodía
-```
-👉 Creará una tarea **diaria** a las 12:00 (hora local). Revisa `/tareas` para ver su ID y estado. Para detenerla: `/cancelar_tarea <id>`.
-
-### Envío múltiple por minutos separados por comas
-```text
-/en 5,10,25 canal 0 Recordatorio periódico
-```
-👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
-
----
 
 ## 🗂 Estructura de volúmenes y datos
 
@@ -889,5 +1030,4 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
 
 ---
-
 
