@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  broker:
+    image: ghcr.io/TU-USUARIO/meshtastic-broker:latest
+    container_name: meshtastic-broker
+    env_file:
+      - .env
+    volumes:
+      - ./bot_data:/data
+    ports:
+      - "${BROKER_PORT:-8765}:8765"
+      - "${BROKER_CTRL_PORT:-8766}:8766"
+    restart: unless-stopped
+
+  bot:
+    image: ghcr.io/TU-USUARIO/meshtastic-bot:latest
+    container_name: meshtastic-bot
+    depends_on:
+      - broker
+    env_file:
+      - .env
+    volumes:
+      - ./bot_data:/data
+    restart: unless-stopped
+
+  aprs:
+    image: ghcr.io/TU-USUARIO/meshtastic-aprs:latest
+    container_name: meshtastic-aprs
+    depends_on:
+      - broker
+    network_mode: "service:broker"
+    env_file:
+      - .env
+    volumes:
+      - ./bot_data:/data
+    restart: unless-stopped
+
+volumes:
+  bot_data:
+    driver: local

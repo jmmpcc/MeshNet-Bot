@@ -1,0 +1,81 @@
+version: "3.9"
+
+services:
+  broker:
+    image: python:3.11-slim
+    container_name: meshtastic-broker
+    working_dir: /app
+    env_file:
+      - .env
+    volumes:
+      - ./:/app:ro
+      - ./bot_data:/data
+    command: >
+      sh -c "
+        pip install --no-cache-dir -r /app/requirements.txt &&
+        python Meshtastic_Broker_v5.5.py
+          --host ${MESHTASTIC_HOST}
+          --mesh-port ${MESHTASTIC_PORT:-4403}
+          --bind 0.0.0.0
+          --port ${BROKER_PORT:-8765}
+          --ctrl-port ${BROKER_CTRL_PORT:-8766}
+          --data-dir /data
+      "
+    ports:
+      - "${BROKER_PORT:-8765}:8765"
+      - "${BROKER_CTRL_PORT:-8766}:8766"
+    restart: unless-stopped
+
+  bot:
+    image: python:3.11-slim
+    container_name: meshtastic-bot
+    depends_on:
+      - broker
+    working_dir: /app
+    env_file:
+      - .env
+    volumes:
+      - ./:/app:ro
+      - ./bot_data:/data
+    command: >
+      sh -c "
+        pip install --no-cache-dir -r /app/requirements.txt &&
+        python Telegram_Bot_Broker_API_v5.7.py
+          --broker-host broker
+          --broker-port ${BROKER_PORT:-8765}
+          --ctrl-host broker
+          --ctrl-port ${BROKER_CTRL_PORT:-8766}
+          --data-dir /data
+          --start-delay ${BOT_START_DELAY:-90}
+      "
+    restart: unless-stopped
+
+  aprs:
+    image: python:3.11-slim
+    container_name: meshtastic-aprs
+    depends_on:
+      - broker
+    network_mode: "service:broker"   # comparte red con broker → 127.0.0.1
+    working_dir: /app
+    env_file:
+      - .env
+    volumes:
+      - ./:/app:ro
+      - ./bot_data:/data
+    command: >
+      sh -c "
+        pip install --no-cache-dir -r /app/requirements.txt &&
+        python meshtastic_to_aprs_v5.4.py
+          --broker-host 127.0.0.1
+          --broker-port ${BROKER_PORT:-8765}
+          --ctrl-host 127.0.0.1
+          --ctrl-port ${BROKER_CTRL_PORT:-8766}
+          --kiss-host ${KISS_HOST}
+          --kiss-port ${KISS_PORT}
+          --data-dir /data
+      "
+    restart: unless-stopped
+
+volumes:
+  bot_data:
+    driver: local
