@@ -8,6 +8,25 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 ---
 
+### 🌐 Guía BROKER
+
+> 🔄 Documentación detallada del sistema del BROKER  
+> incluyendo configuración, ejemplos, variables de entorno y modos de operación.
+
+📘 **[Abrir guía completa → BROKER_README.md](./docs/BROKER_README.md)**
+
+---
+
+### 🌐 Guía configuración del BOT
+
+> 🔄 Documentación detallada del sistema del BOT  
+> incluyendo configuración, ejemplos, variables de entorno y modos de operación.
+
+📘 **[Abrir guía completa → BOT_README.md](./docs/BOT_README.md)**
+
+---
+
+
 ### 🌐 Guía APRS Gateway
 
 > 🔄 Documentación detallada del sistema de pasarela entre Meshtastic y APRS,  
