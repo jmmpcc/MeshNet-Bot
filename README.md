@@ -41,6 +41,26 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 ## 🧾 Historial de versiones
 
+##  🟢 v6.1.1 (Octubre 2025)
+
+- **Bridge embebido más robusto (A→B)**:
+  - **Detección de peer caído** (lado B) y **supresión de reenvíos** durante un **backoff configurable**.
+  - **Marcado de caída** solo si falla un envío A→B; **limpieza automática** al primer éxito posterior.
+  - **Estado visible en `status()`**: `peer_offline_until`, `peer_offline_remaining`, `peer_down_backoff_sec`, `is_peer_suppressed`.
+- **Limpieza de imports**: eliminado `PoolTCPIF` no usado en `bridge_in_broker.py`.
+- **Mejoras de logging**: trazas explícitas `SKIP (B offline, Ns restantes)` y mensajes de transición `B OFFLINE → ...` / `B volvió ONLINE → ...`.
+
+### Variables nuevas / modificadas
+| Variable | Desde | Descripción |
+|---------|------|-------------|
+| `BRIDGE_PEER_DOWN_BACKOFF` | v6.1.1 | Segundos de “gracia” tras detectar que **B** está caído (por defecto `60`). Durante este tiempo no se reintentan envíos A→B. |
+
+**Ejemplo en `.env`:**
+```env
+# --- Bridge embebido ---
+BRIDGE_PEER_DOWN_BACKOFF=60
+```
+
 ### 🟢 v6.1 (Octubre 2025)
 - Añadido bridge embebido y externo.
 - Mejoras APRS (eco, troceo, APRS‑IS).
