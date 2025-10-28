@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-mini_broker.py V6.1
+mini_broker.py V6.1.1
 --------------
 Listener JSONL ultraligero para Raspberry Pi 2B.
 

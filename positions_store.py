@@ -1,5 +1,5 @@
 # positions_store.py
-# Version v6.1
+# Version v6.1.1
 
 import os, json, time
 from datetime import datetime, timezone, timedelta

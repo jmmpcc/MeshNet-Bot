@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-preset_bridge.py v6.1 — Pasarela entre dos nodos Meshtastic (IP↔IP) con presets/canales distintos.
+preset_bridge.py v6.1.1 — Pasarela entre dos nodos Meshtastic (IP↔IP) con presets/canales distintos.
 Funciones públicas clave:
   - start_preset_bridge(...)
   - stop_preset_bridge(...)

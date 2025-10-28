@@ -1,6 +1,6 @@
 # === broker_resilience.py ===
 # NUEVO fichero - utilidades de resiliencia para el broker
-# Version v6.1
+# Version v6.1.1
 
 import time
 import threading

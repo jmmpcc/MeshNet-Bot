@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Version v6.1
+# Version v6.1.1
 """
 Meshtastic Relay Checker – versión portable y robusta.
 

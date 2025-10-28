@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.1.py
+Meshtastic_Broker_v6.1.1.py
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 

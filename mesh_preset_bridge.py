@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-mesh_preset_bridge.py v6.1 — Pasarela entre dos nodos Meshtastic (IP↔IP) con presets distintos.
+mesh_preset_bridge.py v6.1.1 — Pasarela entre dos nodos Meshtastic (IP↔IP) con presets distintos.
 
 - Conecta por TCP a Nodo A y Nodo B y reenvía mensajes entre ambos.
 - Anti-bucle y anti-duplicados.

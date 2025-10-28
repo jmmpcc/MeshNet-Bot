@@ -1,4 +1,4 @@
-# broker_tasks_v6.1.py
+# broker_tasks_v6.1.1 py
 # ─────────────────────────────────────────────────────────────────────────────
 # Gestor común de TAREAS programadas de envío para el ecosistema Meshtastic.
 # - Reutilizable desde el broker y el bot (sin duplicar código).

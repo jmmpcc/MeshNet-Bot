@@ -43,6 +43,15 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 ##  🟢 v6.1.1 (Octubre 2025)
 
+> [Ver CHANGELOG completo →](./docs/CHANGELOG_v6.1.1.md)
+
+Principales mejoras:
+- Mayor estabilidad del broker TCP.
+- Nuevo sistema de notificaciones persistentes en el bot.
+- Integración ampliada APRS bidireccional.
+- Resiliencia avanzada (CircuitBreaker + Watchdog).
+- Bridge A↔B optimizado entre presets distintos.
+
 - **Bridge embebido más robusto (A→B)**:
   - **Detección de peer caído** (lado B) y **supresión de reenvíos** durante un **backoff configurable**.
   - **Marcado de caída** solo si falla un envío A→B; **limpieza automática** al primer éxito posterior.

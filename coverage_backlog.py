@@ -1,6 +1,6 @@
 # coverage_backlog.py
 # Cobertura desde BacklogServer: Heatmap + Círculos (HTML) y KML con polígonos
-# Version v6.1
+# Version v6.1.1
 
 from __future__ import annotations
 import os, json, socket, math, time
