@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Paquetes base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl \
+  && rm -rf /var/lib/apt/lists/*
+
+# Dependencias Python para el panel
+RUN pip install --no-cache-dir fastapi uvicorn[standard] websockets
+
+# App
+WORKDIR /app
+COPY web_admin.py /app/web_admin.py
+# (Opcional) Si en el futuro quieres incluir coverage_backlog.py, añade un COPY aquí.
+# COPY coverage_backlog.py /app/coverage_backlog.py
+
+# Directorio de mapas servido por /maps/*
+RUN mkdir -p /app/bot_data/maps
+
+# Entrypoint (el script está en docker/entrypoint_web.sh)
+COPY docker/entrypoint_web.sh /entrypoint_web.sh
+COPY coverage_backlog.py /app/coverage_backlog.py
+
+# Quitar CRLF (Windows) y dar permisos de ejecución
+RUN sed -i 's/\r$//' /entrypoint_web.sh && chmod +x /entrypoint_web.sh
+
+EXPOSE 8080
+ENTRYPOINT ["/entrypoint_web.sh"]
+

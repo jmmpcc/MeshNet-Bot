@@ -1039,59 +1039,222 @@ def backlog_append(row: dict) -> None:
     except Exception as e:
         print(f"⚠️ backlog_append error: {e}", flush=True)
 
-def append_offline_log(packet: dict):
+# === Meshtastic_Broker.py ===
+# Sustituye COMPLETA la función append_offline_log por esta versión:
+
+def append_offline_log(rec: dict):
     """
-    NUEVO: guarda el paquete en broker_offline_log.jsonl si es TEXT_MESSAGE_APP.
-    No lanza excepción hacia arriba (seguro para ser llamado en el hot path).
+    Persistencia JSONL compatible con panel + retrocompatible con v6 (paquete plano).
+    Admite DOS formatos de entrada:
+      1) rec = {"packet": {..., "decoded": {...}}}    (formato "nuevo")
+      2) rec = {..., "portnum": "...", "text": "..."} (formato "plano" v6)
+
+    Graba:
+      - TEXT_MESSAGE_APP  -> text (+payload_hex si existe)
+      - POSITION_APP      -> position (+lat/lon/alt atajos)
+      - TELEMETRY_APP     -> telemetry (+battery/voltage/channelUtilization/airUtilTx atajos)
+      - NODEINFO_APP      -> user (+nodeinfo_* atajos)
+      - (Opcional) TRACEROUTE_APP / ROUTING_APP / NEIGHBORINFO_APP (si las añades al set ALLOWED)
     """
     try:
-        # Detecta TEXT_MESSAGE_APP según tu parseo (decoded.portnum o portnum plano)
-        portnum = None
-        dec = packet.get("decoded") or {}
-        if isinstance(dec, dict):
-            portnum = dec.get("portnum") or dec.get("port")
-        if not portnum:
-            portnum = packet.get("portnum")
+        import os, json, time as _t
 
-        if str(portnum) != "TEXT_MESSAGE_APP":
-            return  # solo persistimos textos
+        # --- Normalización de orígenes ---
+        # v6 pasaba el paquete "plano"; la versión nueva lo envuelve en rec["packet"].
+        pkt = (rec or {}).get("packet") or rec or {}
+        dec = pkt.get("decoded") or (rec.get("decoded") if isinstance(rec, dict) else {}) or {}
 
-        # Extraer texto si lo tienes
-        text_val = None
-        if "text" in packet:
-            text_val = packet.get("text")
-        elif "payload" in packet and isinstance(packet["payload"], (str, bytes)):
-            text_val = packet["payload"] if isinstance(packet["payload"], str) else packet["payload"].decode("utf-8", "ignore")
+        # --- Detección de puerto (robusta) ---
+        port = (
+            dec.get("portnum")
+            or dec.get("port")
+            or pkt.get("portnum")
+            or rec.get("portnum")
+            or ""
+        )
+        port = str(port).upper().strip()
+        if not port:
+            return
 
-        # Normalización de campos habituales (sin inventar nada raro)
+        # Tipos permitidos (igual que tu versión nueva + fácil de ampliar)
+        ALLOWED = {
+            "TEXT_MESSAGE_APP",
+            "POSITION_APP",
+            "TELEMETRY_APP",
+            "NODEINFO_APP",
+            # Descomenta si quieres también estos en el offline:
+            # "TRACEROUTE_APP", "ROUTING_APP", "NEIGHBORINFO_APP",
+        }
+        if port not in ALLOWED:
+            return
+
+        # --- Campos base (manteniendo nombres históricos) ---
+        rx_time_val = (
+            pkt.get("rx_time")
+            or pkt.get("rxTime")
+            or rec.get("rx_time")
+            or rec.get("ts")
+            or int(_t.time())
+        )
+
+        user_dec = dec.get("user") or {}
+        from_alias_val = (
+            rec.get("from_alias")
+            or pkt.get("from_alias")
+            or user_dec.get("longName")
+            or user_dec.get("shortName")
+        )
+
+        TYPE_MAP = {
+            "TEXT_MESSAGE_APP": "text",
+            "POSITION_APP": "position",
+            "TELEMETRY_APP": "telemetry",
+            "NODEINFO_APP": "nodeinfo",
+        }
+        row_type = TYPE_MAP.get(port)
+        if not row_type:
+            return
+
         obj = {
-            "id": packet.get("id"),
-            "rx_time": packet.get("rx_time") or int(time.time()),
-            "channel": packet.get("channel"),
-            "portnum": "TEXT_MESSAGE_APP",
-            "from": packet.get("from"),
-            "to": packet.get("to"),
-             # ↓↓↓ NUEVO: copiar alias si vienen, o intentar sacar de decoded.user
-            "from_alias": packet.get("from_alias") or ((packet.get("decoded") or {}).get("user") or {}).get("longName")
-                        or ((packet.get("decoded") or {}).get("user") or {}).get("shortName"),
-            "to_alias":   packet.get("to_alias"),  # normalmente no viene en texto, lo dejamos si alguien lo pasa
-
-            "rx_rssi": packet.get("rx_rssi"),
-            "rx_snr": packet.get("rx_snr"),
-            "hop_limit": packet.get("hop_limit"),
-            "hop_start": packet.get("hop_start"),
-            "relay_node": packet.get("relay_node"),
-            "text": text_val
+            "id": pkt.get("id") or rec.get("id"),
+            "rx_time": rx_time_val,
+            "channel": (
+                pkt.get("channel")
+                or (pkt.get("meta") or {}).get("channelIndex")
+                or rec.get("channel")
+                or (rec.get("summary") or {}).get("canal")
+            ),
+            "portnum": port,
+            "type": row_type,  # usado por el panel
+            "from": rec.get("from") or pkt.get("from"),
+            "to": rec.get("to") or pkt.get("to"),
+            "from_alias": from_alias_val,
+            "to_alias": rec.get("to_alias") or pkt.get("to_alias"),
+            "rx_rssi": (
+                rec.get("rx_rssi")
+                if rec.get("rx_rssi") is not None else
+                pkt.get("rx_rssi")
+                if pkt.get("rx_rssi") is not None else
+                pkt.get("rxRssi")
+                if pkt.get("rxRssi") is not None else
+                (rec.get("summary") or {}).get("rssi")
+            ),
+            "rx_snr": (
+                rec.get("rx_snr")
+                if rec.get("rx_snr") is not None else
+                pkt.get("rx_snr")
+                if pkt.get("rx_snr") is not None else
+                pkt.get("rxSnr")
+                if pkt.get("rxSnr") is not None else
+                (rec.get("summary") or {}).get("snr")
+            ),
+            "hop_limit": pkt.get("hop_limit") or pkt.get("hopLimit") or rec.get("hop_limit"),
+            "hop_start": pkt.get("hop_start") or pkt.get("hopStart") or rec.get("hop_start"),
+            "relay_node": pkt.get("relay_node") or pkt.get("relayNode") or rec.get("relay_node"),
         }
 
-        _ensure_dir(OFFLINE_LOG_PATH)
-        line = json.dumps(obj, ensure_ascii=False) + "\n"
-        with _append_lock:
-            with open(OFFLINE_LOG_PATH, "a", encoding="utf-8") as f:
-                f.write(line)
+        # --- Por tipo ---
+        useful = False
+
+        if port == "TEXT_MESSAGE_APP":
+            # Texto: mira decoded.text, rec.text, pkt.text o summary.text; payload (bytes/str) como último recurso
+            text_val = (
+                (dec.get("text") if isinstance(dec, dict) else None)
+                or rec.get("text")
+                or pkt.get("text")
+                or (rec.get("summary") or {}).get("text")
+            )
+            if text_val is None:
+                payload = pkt.get("payload") or rec.get("payload")
+                if isinstance(payload, bytes):
+                    try:
+                        text_val = payload.decode("utf-8", "ignore")
+                    except Exception:
+                        text_val = None
+                elif isinstance(payload, str):
+                    text_val = payload
+
+            if text_val:
+                obj["text"] = text_val
+                useful = True
+
+            payload_hex = (rec.get("summary") or {}).get("payload_hex")
+            if payload_hex:
+                obj["payload_hex"] = payload_hex
+
+        elif port == "POSITION_APP":
+            pos = dec.get("position") or pkt.get("position") or rec.get("position") or {}
+            if pos:
+                obj["position"] = pos
+                if "latitude" in pos and "longitude" in pos:
+                    obj["lat"] = pos["latitude"]
+                    obj["lon"] = pos["longitude"]
+                if "altitude" in pos:
+                    obj["alt"] = pos["altitude"]
+                useful = True
+
+        elif port == "TELEMETRY_APP":
+            tel = dec.get("telemetry") or pkt.get("telemetry") or rec.get("telemetry") or {}
+            if tel:
+                obj["telemetry"] = tel
+                dm = tel.get("deviceMetrics") or {}
+                if "batteryLevel" in dm:       obj["battery"]  = dm["batteryLevel"]
+                if "voltage" in dm:            obj["voltage"]  = dm["voltage"]
+                if "channelUtilization" in dm: obj["ch_util"]  = dm["channelUtilization"]
+                if "airUtilTx" in dm:          obj["air_tx"]   = dm["airUtilTx"]
+                useful = True
+
+        elif port == "NODEINFO_APP":
+            usr = dec.get("user") or pkt.get("user") or rec.get("user") or {}
+            if usr:
+                obj["user"] = usr
+                node_id = usr.get("id") or pkt.get("fromId") or rec.get("fromId")
+                if node_id:               obj["nodeinfo_id"] = node_id
+                if usr.get("longName"):   obj["nodeinfo_longName"] = usr["longName"]
+                if usr.get("shortName"):  obj["nodeinfo_shortName"] = usr["shortName"]
+                if usr.get("hwModel"):    obj["nodeinfo_hwModel"] = usr["hwModel"]
+                if usr.get("macaddr"):    obj["nodeinfo_macaddr"] = usr["macaddr"]
+                if usr.get("publicKey"):  obj["nodeinfo_publicKey"] = usr["publicKey"]
+                if "isUnmessagable" in usr:
+                    obj["nodeinfo_isUnmessagable"] = bool(usr["isUnmessagable"])
+                if not obj.get("from_alias"):
+                    alias = usr.get("longName") or usr.get("shortName")
+                    if alias:
+                        obj["from_alias"] = alias
+                useful = True
+
+        if not useful:
+            return
+
+        # --- Persistencia + rotación (igual que ya tenías) ---
+        path = OFFLINE_LOG_PATH
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        try:
+            max_bytes = int(os.getenv("OFFLINE_LOG_MAX_BYTES", "52428800"))  # 50 MiB
+        except Exception:
+            max_bytes = 52428800
+
+        try:
+            if os.path.exists(path) and os.path.getsize(path) > max_bytes:
+                bak = f"{path}.1"
+                try:
+                    if os.path.exists(bak):
+                        os.remove(bak)
+                except Exception:
+                    pass
+                try:
+                    os.replace(path, bak)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
     except Exception as e:
-        print(f"⚠️ append_offline_log error: {e}", flush=True)
+        _log_ex("append_offline_log failed", e)
 
 
 def _iter_backlog_jsonl(since_ts: int | None, until_ts: int | None, channel: int | None, portnums: list[str] | None, limit: int | None):
@@ -1239,7 +1402,6 @@ class _BacklogServer(threading.Thread):
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                 return
         
-
             # --- NUEVO: envío de texto vía la iface persistente del broker ---
             elif cmd == "SEND_TEXT":
 
@@ -1292,6 +1454,51 @@ class _BacklogServer(threading.Thread):
                     resp = {"ok": False, "error": f"queue_error: {e}"}
 
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); return
+
+            # --- NUEVO: estado del bridge embebido ---
+            elif cmd == "BRIDGE_STATUS":
+                try:
+                    st = bridge_status_in_broker()  # dict con info del bridge
+                    # Normalizamos por si el helper devuelve None
+                    if not isinstance(st, dict):
+                        st = {"enabled": False}
+                    resp = {"ok": True, **st}
+                except Exception as e:
+                    resp = {"ok": False, "error": f"bridge_status_failed: {type(e).__name__}: {e}"}
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); 
+                return
+
+            # --- NUEVO: envío de texto vía lado B del bridge ---
+            elif cmd == "SEND_TEXT_VIA":
+                params = req.get("params") or {}
+                side = (params.get("side") or "B").upper()
+                text = (params.get("text") or "").strip()
+                try:
+                    ch = int(params.get("ch") if params.get("ch") is not None else 0)
+                except Exception:
+                    ch = 0
+
+                if side != "B":
+                    resp = {"ok": False, "error": "only_side_B_supported"}
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); 
+                    return
+                if not text:
+                    resp = {"ok": False, "error": "missing text"}
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); 
+                    return
+
+                try:
+                    # Este helper se encarga de reflejar el paquete hacia el lado B
+                    bridge_mirror_outgoing_from_broker(
+                        payload={"type": "text", "text": text, "channel": ch},
+                        direction="A2B"  # semántica: enviamos desde A hacia B
+                    )
+                    resp = {"ok": True, "mirrored": True, "via": "B"}
+                except Exception as e:
+                    resp = {"ok": False, "error": f"bridge_send_failed: {type(e).__name__}: {e}"}
+
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); 
+                return
 
             # --- control del broker (pausa/reanuda/estado/desconexion) ---
             elif cmd in {"BROKER_PAUSE", "BROKER_RESUME", "BROKER_STATUS", "BROKER_DISCONNECT", "FORCE_RECONNECT", "BROKER_QUIT"}:
@@ -2673,14 +2880,102 @@ class MeshReceiver:
                     # No interrumpir el flujo del broker si falla un guardado puntual
                     print(f"⚠️ no se pudo guardar posición: {e_save} (from {who_from} → {who_to})", flush=True)
 
+                # === [NUEVO] Persistir POSITION_APP en backlog JSONL ===
+                try:
+                    _ts = pkt.get("rxTime") or pkt.get("timestamp") or time.time()
+                    pos = decoded.get("position") or pkt.get("position") or {}
+                    lat = pos.get("lat"); lon = pos.get("lon")
+                    if (lat is not None) and (lon is not None):
+                        rec_pos = {
+                            "ts":        int(_ts),
+                            "rx_time":   int(_ts),          # 👈 lo usa _iter_backlog_jsonl() para filtrar since_ts
+                            "channel":   canal,
+                            "portnum":   "POSITION_APP",
+                            "from":      who_from,
+                            "to":        who_to,
+                            "from_alias": from_alias or None,
+                            "to_alias":   to_alias   or None,
+                            "lat":       lat,
+                            "lon":       lon,
+                            "rssi":      rssi,
+                            "snr":       snr,
+                        }
+                        append_offline_log(rec_pos)
+                except Exception as e_off:
+                    if self.verbose:
+                        print(f"⚠️ offline_log POSITION_APP: {e_off}", flush=True)
+
+
+
             # === [NUEVO] Handler TELEMETRY_APP ===========================================
             if str(portnum) == "TELEMETRY_APP" and TELE_STORE is not None:
                 try:
                     TELE_STORE.ingest_packet(pkt)
                 except Exception as e:
                     logging.warning(f"[telemetry] fallo al ingerir telemetría: {e}")
-            # === [FIN TELEMETRY_APP] ======================================================
-            
+           
+                # === [NUEVO] Persistir TELEMETRY_APP en backlog JSONL ===
+                try:
+                    _ts = pkt.get("rxTime") or pkt.get("timestamp") or time.time()
+                    tel = (decoded.get("telemetry") or pkt.get("telemetry") or {}) if isinstance(decoded, dict) else {}
+                    # Normalización de campos típicos
+                    telemetry_norm = {}
+                    if isinstance(tel, dict):
+                        telemetry_norm = {
+                            "battery":     tel.get("battery") or tel.get("batt"),
+                            "voltage":     tel.get("voltage") or tel.get("volt"),
+                            "temperature": tel.get("temperature") or tel.get("temp"),
+                            "humidity":    tel.get("humidity") or tel.get("hum"),
+                            "pressure":    tel.get("pressure") or tel.get("press"),
+                        }
+                    # Solo persistimos si hay algo útil
+                    if any(v is not None for v in telemetry_norm.values()):
+                        rec_tel = {
+                            "ts":        int(_ts),
+                            "rx_time":   int(_ts),
+                            "channel":   canal,
+                            "portnum":   "TELEMETRY_APP",
+                            "from":      who_from,
+                            "to":        who_to,
+                            "from_alias": from_alias or None,
+                            "to_alias":   to_alias   or None,
+                            "telemetry": telemetry_norm,
+                            "rssi":      rssi,
+                            "snr":       snr,
+                        }
+                        append_offline_log(rec_tel)
+                except Exception as e_off:
+                    if self.verbose:
+                        print(f"⚠️ offline_log TELEMETRY_APP: {e_off}", flush=True)
+                    
+           
+           # === [FIN TELEMETRY_APP] ======================================================
+   
+            # === [OPCIONAL] Persistir NEIGHBORINFO_APP en backlog JSONL ===
+            if str(portnum) == "NEIGHBORINFO_APP":
+                try:
+                    _ts = pkt.get("rxTime") or pkt.get("timestamp") or time.time()
+                    hops_val = decoded.get("hops") if isinstance(decoded, dict) else None
+                    rec_nei = {
+                        "ts":        int(_ts),
+                        "rx_time":   int(_ts),
+                        "channel":   canal,
+                        "portnum":   "NEIGHBORINFO_APP",
+                        "from":      who_from,
+                        "to":        who_to,
+                        "from_alias": from_alias or None,
+                        "to_alias":   to_alias   or None,
+                        "hops":      hops_val if isinstance(hops_val, int) else None,
+                        "rssi":      rssi,
+                        "snr":       snr,
+                    }
+                    append_offline_log(rec_nei)
+                except Exception as e_off:
+                    if self.verbose:
+                        print(f"⚠️ offline_log NEIGHBORINFO_APP: {e_off}", flush=True)
+
+
+
             # === [NUEVO] Handler TRACEROUTE_* → persistir en OFFLINE_LOG =================
             try:
                 port = (decoded.get("portnum") or pkt.get("portnum") or "").upper()

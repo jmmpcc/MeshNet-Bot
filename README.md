@@ -41,6 +41,43 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 ## 🧾 Historial de versiones
 
+### 🆕 **v6.1.2** — _“Corrección de grabación offline y compatibilidad”_ (Noviembre 2025)
+
+#### ✨ Novedades principales
+- **Corrección del registro de mensajes offline**
+  - Se restaura la grabación correcta de mensajes en `broker_offline_log.jsonl` cuando se detiene la escucha con `/parar_escucha`.
+  - Los mensajes recibidos durante la pausa se reenvían automáticamente al reanudar la escucha con `/escuchar`.
+  - Recupera el comportamiento estable de la versión **6.0**, garantizando compatibilidad total con el bot.
+
+- **Mejoras en `append_offline_log()`**
+  - Acepta ambos formatos de entrada:
+    - Formato **plano** (v6.0): `{"portnum": "TEXT_MESSAGE_APP", "text": "..."}`
+    - Formato **anidado** (v6.1): `{"packet": {"decoded": {...}}}`
+  - Mantiene los nombres de campos anteriores (`rx_time`, `channel`, `portnum`, `from`, `to`, `text`, etc.)
+    e incluye los nuevos (`type`, `lat`, `lon`, `battery`, etc.) usados por el panel web.
+  - Soporta también tramas `POSITION_APP`, `TELEMETRY_APP` y `NODEINFO_APP`.
+
+- **Sin cambios rompientes**
+  - Los comandos `/parar_escucha` y `/escuchar` vuelven a funcionar igual que en la versión 6.0.
+  - El panel web y las integraciones existentes siguen funcionando sin modificaciones.
+
+#### 🧰 Cambios técnicos
+- **Actualizado:** `Meshtastic_Broker.py`
+  - Se reescribió `append_offline_log()` para fusionar compatibilidad entre versiones antiguas y nuevas.
+  - Se añadieron lecturas de campos en nivel superior (`portnum`, `text`, `rx_rssi`, `rx_snr`, `channel`).
+  - Se mantiene la rotación del archivo JSONL (`broker_offline_log.jsonl`, copia `.1`).
+
+- **Sin cambios:**  
+  `Telegram_Bot_Broker.py`, `docker-compose.yml`, `.env`
+
+#### ✅ Resultado
+- Los mensajes recibidos mientras la escucha está detenida vuelven a grabarse correctamente.  
+- Al reanudar la escucha, el bot reenvía los mensajes pendientes.  
+- El panel web continúa leyendo el archivo JSONL sin necesidad de cambios.
+
+---
+
+
 ##  🟢 v6.1.1 (Octubre 2025)
 
 > [Ver CHANGELOG completo →](./docs/CHANGELOG_v6.1.1.md)
