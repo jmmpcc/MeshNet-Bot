@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-meshtastic_to_aprs.py (v6.1.1)
-Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
+#!/usr/bin/env python3 	   	 	 	    	   		 
+# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
+""" 	  		 	 					 	  		 
+meshtastic_to_aprs.py (v6.1.3)	 		  	 	 			  		 		 
+Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.	    	   			 		    	 
 
-- /aprs (bot) -> UDP local -> TX APRS (troceo automático).
-- APRS -> Mesh: si el comentario/status contiene [CHx], se reenvía al canal x del broker.
-Con verificacion en APRS-IS:
+- /aprs (bot) -> UDP local -> TX APRS (troceo automático).			 	   		  	 	 			 	
+- APRS -> Mesh: si el comentario/status contiene [CHx], se reenvía al canal x del broker.		 		    	 				  	 	 
+Con verificacion en APRS-IS:					 			 		   		 		 
     python meshtastic_to_aprs_v5.4.py --aprsis-user EB2XXX-10 --aprsis-passcode 12345
 Sin verificacion APRS-IS
     python meshtastic_to_aprs_v5.4.py
@@ -26,6 +26,25 @@ if not (0 <= KISS_CHANNEL <= 15):
     KISS_CHANNEL = 0
 
 _APRS_ALLOWED = set(chr(c) for c in range(32, 127))  # 0x20..0x7E
+
+# --- Lista blanca de indicativos APRS autorizados (RF -> Mesh/Control)
+# Formato: variable de entorno APRS_ALLOWED_SOURCES="EA2XXX-7,EA2YYY-9"
+APRS_ALLOWED_SOURCES = {
+    s.strip().upper()
+    for s in os.getenv("APRS_ALLOWED_SOURCES", "").split(",")
+    if s.strip()
+}
+
+def _aprs_source_allowed(src: str) -> bool:
+    """
+    Devuelve True si el indicativo de origen está autorizado.
+    Si APRS_ALLOWED_SOURCES está vacío, no se filtra nada (todo permitido).
+    """
+    if not APRS_ALLOWED_SOURCES:
+        return True
+    return (src or "").strip().upper() in APRS_ALLOWED_SOURCES
+
+
 
 def _aprs_ascii(s: str) -> str:
     if not s:
@@ -147,7 +166,7 @@ class _AprsISClient:
         # (Re)conectar si hace falta
         if self._is is None:
             try:
-                self._is = aprslib.IS(self.user, passwd=self.passcode, host=self.host, port=self.port, force_login=True)
+                self._is = aprslib.IS(self.user, passwd=self.passcode, host=self.host, port=self.port)
                 self._is.connect()
                 if self.filt:
                     try:
@@ -464,13 +483,21 @@ def parse_ax25_ui(frame: bytes) -> dict | None:
 # =========================
 # === Canal en comentario ==
 # =========================
-_CH_REGEX = re.compile(r"\[(?:CH|CANAL)\s*([0-9]{1,2})\]", re.IGNORECASE)
+# Soporta:
+#   [CH 1] Texto
+#   [CH1] Texto
+#   [CANAL 3] Texto
+#   [CH 1+10] Texto  (delay 10 min)
+#   [CANAL3+5] Texto (delay 5 min)
+_CH_REGEX = re.compile(
+    r"\[(?:CH|CANAL)\s*([0-9]{1,2})(?:\s*([+])\s*([0-9]{1,4}))?\]",
+    re.IGNORECASE,
+)
 
-# === NUEVO: solo canal si hay etiqueta explícita ===
 def extract_channel_if_tagged(comment: str) -> tuple[Optional[int], str]:
     """
-    Devuelve (canal, texto_sin_etiqueta) únicamente si hay [CHx] / [CANAL x].
-    Si no hay etiqueta, devuelve (None, comment).
+    Devuelve (canal, texto_sin_etiqueta) únicamente si hay [CHx] / [CANAL x] / [CHx+N].
+    Ignora el sufijo +N. Si no hay etiqueta, devuelve (None, comment).
     No aplica canal por defecto (evita inyectar sin prefijo).
     """
     if not comment:
@@ -482,9 +509,8 @@ def extract_channel_if_tagged(comment: str) -> tuple[Optional[int], str]:
         ch = int(m.group(1))
     except Exception:
         return (None, comment.strip())
-    ch = max(0, min(15, ch))  # límites seguros 0..15
+    ch = max(0, min(15, ch))
     text = (comment[:m.start()] + comment[m.end():]).strip()
-    # Limpia espacios duplicados
     import re as _re
     text = _re.sub(r"\s{2,}", " ", text)
     return (ch, text)
@@ -492,8 +518,9 @@ def extract_channel_if_tagged(comment: str) -> tuple[Optional[int], str]:
 
 def extract_channel_from_comment(comment: str, default_ch: int = MESHTASTIC_CHANNEL) -> Tuple[int, str]:
     """
-    [CH2] Texto..., [CANAL 5] Aviso...
+    [CH2] Texto..., [CANAL 5] Aviso..., [CH 1+10] ...
     Devuelve (canal, texto_sin_etiqueta). Si no hay etiqueta, (default_ch, comment).
+    Ignora el sufijo de programación (+N).
     """
     if not comment:
         return (int(default_ch), "")
@@ -505,19 +532,85 @@ def extract_channel_from_comment(comment: str, default_ch: int = MESHTASTIC_CHAN
     except Exception:
         ch = int(default_ch)
 
-     # === NUEVO: limita a 0..15 y limpia espacios duplicados ===
     ch = max(0, min(15, ch))
     text = (comment[:m.start()] + comment[m.end():]).strip()
     text = re.sub(r"\s{2,}", " ", text)
     return (ch, text)
+
+def extract_channel_and_delay(comment: str) -> tuple[Optional[int], Optional[int], str]:
+    """
+    Versión extendida para APRS→Mesh:
+      - [CH 1] Hola      → (1, None, "Hola")
+      - [CH1+10] Aviso   → (1, 10, "Aviso")   (10 minutos)
+      - [CANAL 3+5] Test → (3, 5, "Test")
+
+    Además, heurística para casos colapsados:
+      - [CH42] → ch=4, delay=2   (cuando 42 > 15)
+
+    delay_min está en minutos si se usa '+N' o se infiere por heurística; si no, None.
+    """
+    if not comment:
+        return (None, None, "")
+
+    m = _CH_REGEX.search(comment)
+    if not m:
+        return (None, None, comment.strip())
+
+    raw = (m.group(1) or "").strip()
+    sign = m.group(2)
+    val  = m.group(3)
+
+    ch: Optional[int] = None
+    delay_min: Optional[int] = None
+
+    # 1) Caso normal con '+N' explícito: [CH4+2], [CANAL 3+10], etc.
+    if sign == "+" and val is not None:
+        try:
+            ch_val = int(raw)
+        except Exception:
+            return (None, None, comment.strip())
+        ch = max(0, min(15, ch_val))
+        try:
+            delay_min = max(0, int(val))
+        except Exception:
+            delay_min = None
+
+    # 2) Caso colapsado sin '+': [CH42] → si 42>15 y tiene 2 dígitos, interpretamos ch=4, delay=2
+    else:
+        try:
+            ch_val = int(raw)
+        except Exception:
+            return (None, None, comment.strip())
+
+        if ch_val > 15 and len(raw) == 2:
+            # heurística específica APRS: primer dígito = canal, segundo = delay (minutos)
+            try:
+                ch = int(raw[0])
+                delay_min = int(raw[1])
+            except Exception:
+                ch = ch_val
+                delay_min = None
+        else:
+            ch = ch_val
+
+        ch = max(0, min(15, ch))
+
+    # Texto sin la etiqueta
+    text = (comment[:m.start()] + comment[m.end():]).strip()
+    import re as _re
+    text = _re.sub(r"\s{2,}", " ", text)
+
+    return (ch, delay_min, text)
+
 
 def _is_position_pkt(pkt: dict) -> bool:
     """True si el payload APRS es de posición: empieza por ! / = @"""
     info = pkt.get("info") or ""
     return bool(info) and info[0] in "!/=@"
 
+
 def _has_ch_tag_in_info(pkt: dict) -> bool:
-    """True si en el campo info aparece [CHx] / [CANAL x]"""
+    """True si en el campo info aparece [CHx] / [CANAL x] (con o sin +N)"""
     return bool(_CH_REGEX.search(pkt.get("info") or ""))
 
 
@@ -594,6 +687,93 @@ def _broker_send_text(ch: int, text: str, dest: str | None = None, ack: bool = F
         return {"ok": False, "error": f"bad json: {e}"}
 
 # =========================
+# === Helpers APRS→Mesh ===
+# =========================
+
+def _parse_ch_and_delay_from_pkt(pkt: dict, default_ch: int = MESHTASTIC_CHANNEL) -> tuple[Optional[int], Optional[int], str]:
+    """
+    Igual que _pick_ch_and_text, pero devolviendo también delay_min (minutos) si se usa [CH x+N].
+    - 'status' y 'message': usan pkt['text']
+    - resto: usan pkt['info']
+    """
+    if not pkt:
+        return (None, None, "")
+
+    if pkt.get("type") in {"status", "message"}:
+        ch, delay_min, msg = extract_channel_and_delay(pkt.get("text", ""))
+        return (ch, delay_min, msg) if (ch is not None and msg) else (None, None, "")
+
+    info = (pkt.get("info") or "").strip()
+    if not info:
+        return (None, None, "")
+
+    ch, delay_min, msg = extract_channel_and_delay(info)
+    return (ch, delay_min, msg) if (ch is not None and msg) else (None, None, "")
+
+
+def _schedule_aprs_to_mesh(ch: int, msg: str, delay_min: int, src: str) -> None:
+    """
+    Programación local en este proceso (no en el broker):
+      [CH 1+10] Texto  → envía a CH1 dentro de 10 minutos vía _broker_send_text.
+    Funciona sin bot y sin Internet.
+    """
+    delay_sec = max(0, int(delay_min) * 60)
+
+    async def _job():
+        try:
+            await asyncio.sleep(delay_sec)
+            if not _aprs_gate_is_enabled():
+                print(f"[aprs→mesh sched] GATE OFF al ejecutar CH{ch} (+{delay_min}m) ← {src}: {msg[:120]}")
+                return
+            res = _broker_send_text(ch, msg, dest=None, ack=False)
+            ok = bool(res.get("ok"))
+            print(f"[aprs→mesh sched] CH{ch} (+{delay_min}m) ← {src}: {msg[:120]} -> {'OK' if ok else 'KO'}")
+        except Exception as e:
+            print(f"[aprs→mesh sched] ❌ {type(e).__name__}: {e}")
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_job())
+    except RuntimeError:
+        # Si no hay loop (caso raro), ejecuta inmediato
+        try:
+            res = _broker_send_text(ch, msg, dest=None, ack=False)
+            ok = bool(res.get("ok"))
+            print(f"[aprs→mesh sched/now] CH{ch} (+{delay_min}m≡0) ← {src}: {msg[:120]} -> {'OK' if ok else 'KO'}")
+        except Exception as e:
+            print(f"[aprs→mesh sched/now] ❌ {type(e).__name__}: {e}")
+
+
+def _handle_aprs_control_from_rf(src: str, msg: str) -> bool:
+    """
+    Comandos de control en CH0, por APRS, desde indicativo autorizado:
+
+      [CH 0] APRS ON
+      [CH 0] APRS OFF
+
+    Actúan sobre APRS_GATE_ENABLED (gate APRS→Mesh).
+    Devuelve True si ha gestionado el comando (para NO reenviar a la malla).
+    """
+    global APRS_GATE_ENABLED
+
+    t = (msg or "").strip().upper()
+    if not t:
+        return False
+
+    if t in ("APRS ON", "APRS GATE ON", "APRS-ON", "ON"):
+        APRS_GATE_ENABLED = 1
+        print(f"[aprs ctrl] {src}: APRS GATE → ON")
+        return True
+
+    if t in ("APRS OFF", "APRS GATE OFF", "APRS-OFF", "OFF"):
+        APRS_GATE_ENABLED = 0
+        print(f"[aprs ctrl] {src}: APRS GATE → OFF")
+        return True
+
+    return False
+
+
+# =========================
 # === APRS → Mesh ==========
 # =========================
 # === NUEVO: extractor unificado de canal+texto desde un paquete APRS ===
@@ -638,28 +818,34 @@ async def task_aprs_to_meshtastic():
                 data = await reader.read(4096)
                 if not data:
                     raise ConnectionError("KISS closed")
+                
                 buf.extend(data)
+
                 for fr in kiss_iter_frames_from_buffer(buf):
                     pkt = parse_ax25_ui(fr)
                     if not pkt:
                         continue
 
-                    src  = pkt.get("src", "?")
+                    src  = (pkt.get("src", "?") or "?").strip().upper()
                     dest = pkt.get("dest", "?")
                     path = ",".join(pkt.get("path", []))
                     typ  = pkt.get("type") or "ui"
                     preview = (pkt.get("text") or pkt.get("info") or "").replace("\n", " ")[:160]
                     print(f"[aprs] RX {typ} src={src} dest={dest} path={path} info='{preview}'")
-                  
-                    # === Parseo con aprslib (opcional) para datos de posición ===
+
+                    # --- Filtro por indicativo de origen (si APRS_ALLOWED_SOURCES está definido) ---
+                    if not _aprs_source_allowed(src):
+                        _aprs_dbg(f"[aprs] drop(src not allowed) src={src}")
+                        continue
+
+                    # === Parseo con aprslib (opcional) para datos de posición (solo log) ===
                     try:
                         tnc2 = f"{src}>{dest}{(',' + path) if path else ''}:{pkt.get('info', '')}"
                         ap = aprslib.parse(tnc2)
-                        # Si hay coordenadas, las mostramos (solo log)
                         if 'latitude' in ap and 'longitude' in ap:
                             lat = ap['latitude']; lon = ap['longitude']
-                            course = ap.get('course'); speed = ap.get('speed')  # km/h si aprslib lo normaliza; a veces kt
-                            alt = ap.get('altitude')   # metros (según parser), puede faltar
+                            course = ap.get('course'); speed = ap.get('speed')
+                            alt = ap.get('altitude')
                             print(f"[aprs] POS aprslib lat={lat:.6f} lon={lon:.6f}"
                                   f"{'' if course is None else f' crs={int(course):03d}°'}"
                                   f"{'' if speed is None else f' spd={int(speed)}'}"
@@ -667,29 +853,60 @@ async def task_aprs_to_meshtastic():
                     except Exception:
                         ap = None
 
-
-
-                    picked = _pick_ch_and_text(pkt, default_ch=MESHTASTIC_CHANNEL) if '_pick_ch_and_text' in globals() else None
-                    if not picked:
-                        # Sin etiqueta [CHx] → NO se reinyecta
-                        ch, msg = (None, "")
-                    else:
-                        ch, msg = picked
-
+                    # --- Extraer canal + posible delay (+N minutos) desde [CH x] / [CANAL x+N] ---
+                    ch, delay_min, msg = _parse_ch_and_delay_from_pkt(pkt, default_ch=MESHTASTIC_CHANNEL)
                     if ch is None or not msg:
-                        # Log opcional de descarte
                         _aprs_dbg(f"[aprs] drop(no CH) {pkt.get('type','ui')} src={pkt.get('src','?')}")
                         continue
 
+                   # --- Si es posición APRS, convertir a enlace de mapa ---
+                    try:
+                        if ap and isinstance(ap, dict) and 'latitude' in ap and 'longitude' in ap and _is_position_pkt(pkt):
+                            lat = ap['latitude']
+                            lon = ap['longitude']
+                            link = f"https://maps.google.com/?q={lat:.6f},{lon:.6f}"
 
+                            comment = (ap.get('comment') or '').strip()
+                            if comment:
+                                # Limpiamos cualquier [CH…] del comentario mostrado
+                                _c_ch, _c_delay, clean_comment = extract_channel_and_delay(comment)
+                                if clean_comment:
+                                    comment = clean_comment
+
+                                msg = f"{comment} {link}"
+                            else:
+                                msg = link
+                    except Exception as _e:
+                        _aprs_dbg(f"[aprs] maplink error: {type(_e).__name__}: {_e}")
+
+
+                    # --- Comandos de control en CH0 (no reinyectar a Mesh) ---
+                    if ch == 0:
+                        if _handle_aprs_control_from_rf(src, msg):
+                            # Comando gestionado (APRS ON/OFF); no se envía a la malla
+                            continue
+                        _aprs_dbg(f"[aprs ctrl] CH0 sin comando conocido desde {src}: {msg[:80]}")
+                        continue
+
+                    # --- Gate APRS→Mesh ON/OFF ---
                     if not _aprs_gate_is_enabled():
                         print(f"[aprs→mesh] GATE OFF: descartado CH{ch} ← {src}: {msg[:120]}")
                         continue
 
-                    res = _broker_send_text(ch, msg, dest=None, ack=False)
-                    ok = bool(res.get("ok"))
-                    print(f"[aprs→mesh] CH{ch} ← {src}: {msg[:120]}  -> {'OK' if ok else 'KO'}")
-                                        # --- (OPCIONAL) Uplink APRS-IS: SOLO posiciones con [CHx], respetando NOGATE/RFONLY ---
+                    # --- Programación local con [CH x+N] ---
+                    if delay_min is not None and delay_min > 0:
+                        print(f"[aprs→mesh] PROGRAMADO CH{ch} (+{delay_min}m) ← {src}: {msg[:120]}")
+                        _schedule_aprs_to_mesh(ch, msg, delay_min, src)
+                    else:
+                        # Envío inmediato al broker (como antes)
+                        res = _broker_send_text(ch, msg, dest=None, ack=False)
+                        ok = bool(res.get("ok"))
+                        print(f"[aprs→mesh] CH{ch} ← {src}: {msg[:120]}  -> {'OK' if ok else 'KO'}")
+
+
+
+                    # --- (OPCIONAL) Uplink APRS-IS: SOLO posiciones con [CHx], respetando NOGATE/RFONLY ---
+
                     if _aprsis_ready() and _is_position_pkt(pkt) and _has_ch_tag_in_info(pkt) and not _should_not_gate(pkt.get('info','')):
                         try:
                             global _aprsis_client

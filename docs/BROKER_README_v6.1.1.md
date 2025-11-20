@@ -78,12 +78,61 @@ sirviendo de **punto único de entrada/salida** para la red Mesh.
 |----------|-----|
 | `Meshtastic_Broker.py` | Núcleo principal del broker (TCP + JSONL + Backlog). |
 | `broker_task.py` | Ejecuta y mantiene las tareas programadas. |
-| `bridge_in_broker.py` | Pasarela interna opcional entre brokers o presets. |
+| `bridge_in_broker.py` | **Pasarela interna** entre brokers/presets. **Desde v6.1.1**: incorpora supresión A→B cuando B está caído (*peer-down backoff*), y expone el estado en `status()`. |
 | `.env` | Define los parámetros de conexión, puertos y tiempos de espera. |
 
 ---
 
-## 📋 Ejemplo de log
+## 🆕 Novedades **v6.1.1**
+
+- **Bridge embebido más robusto (A→B)**:
+  - **Detección de peer caído** (lado B) y **supresión de reenvíos** durante un **backoff configurable**.
+  - **Marcado de caída** solo si falla un envío A→B; **limpieza automática** al primer éxito posterior.
+  - **Estado visible en `status()`**: `peer_offline_until`, `peer_offline_remaining`, `peer_down_backoff_sec`, `is_peer_suppressed`.
+- **Limpieza de imports**: eliminado `PoolTCPIF` no usado en `bridge_in_broker.py`.
+- **Mejoras de logging**: trazas explícitas `SKIP (B offline, Ns restantes)` y mensajes de transición `B OFFLINE → ...` / `B volvió ONLINE → ...`.
+
+### Variables nuevas / modificadas
+| Variable | Desde | Descripción |
+|---------|------|-------------|
+| `BRIDGE_PEER_DOWN_BACKOFF` | v6.1.1 | Segundos de “gracia” tras detectar que **B** está caído (por defecto `60`). Durante este tiempo no se reintentan envíos A→B. |
+
+**Ejemplo en `.env`:**
+```env
+# --- Bridge embebido ---
+BRIDGE_PEER_DOWN_BACKOFF=60
+```
+
+---
+
+## 🔎 Ejemplos de log (bridge embebido)
+
+```
+[2025-10-27 08:00:01] [bridge] A2B ch 0->0 txt OK
+[2025-10-27 09:00:00] [bridge] A2B ch 2->2 SKIP (B offline, 41s restantes)
+[2025-10-27 09:00:00] [bridge] B OFFLINE → suprime A2B 60s (BrokenPipeError: [Errno 32] Broken pipe)
+[2025-10-27 09:01:05] [bridge] B volvió ONLINE → reanudo A2B
+[2025-10-27 09:01:05] [bridge] A2B ch 2->2 txt OK
+```
+
+> Notas:
+> - `SKIP (B offline, Ns restantes)` indica que no se reenviará hacia B hasta que termine el backoff.
+> - Al primer **éxito** tras la caída, se limpia el estado y vuelven los reenvíos normales.
+
+---
+
+## 🧯 Troubleshooting (bridge A→B)
+
+- **Veo reintentos continuos cuando B está fuera**  
+  → Desde v6.1.1 se evita automáticamente. Asegúrate de tener `BRIDGE_PEER_DOWN_BACKOFF` definido (o usa el valor por defecto `60`).
+- **Quiero saber si el bridge está suprimido**  
+  → Consulta `status()` del bridge: revisa `peer_state.is_peer_suppressed` y `peer_offline_remaining`.
+- **Quiero logs más compactos**  
+  → Se emite una sola notificación al marcar *peer-down*; durante el backoff solo verás `SKIP …`.
+
+---
+
+## 📋 Ejemplo de log (broker)
 
 ```
 [2025-10-19 23:27:43] 🛡️ Guards anti-heartbeat activos (sendHeartbeat protegido).
@@ -101,10 +150,10 @@ sirviendo de **punto único de entrada/salida** para la red Mesh.
 | **Conexión principal** | TCP persistente a Meshtastic |
 | **Puertos locales** | 8765 (JSONL), 8766 (control) |
 | **Soporte APRS** | Bidireccional mediante `meshtastic_to_aprs.py` |
-| **Compatibilidad** | Total con el bot y bridge v6.1 |
+| **Compatibilidad** | Bot/Bridge v6.1+; Bridge con *peer-down backoff* desde **v6.1.1** |
 
 ---
 
 📍 **Autor:** [jmmpcc / MeshNet "The Boss"](https://github.com/jmmpcc)  
-📦 **Versión:** v6.1 — *sin soporte USB (modo TCP/IP)*  
+📦 **Versión:** **v6.1.1** — *sin soporte USB (modo TCP/IP)*  
 🛰️ **Módulo:** `Meshtastic_Broker.py`

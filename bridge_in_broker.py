@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-bridge_in_broker.py V6.1.1 — Pasarela A<->B embebida en el broker usando el pool persistente.
+#!/usr/bin/env python3 	   	 	 	    	   		 
+# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
+""" 	  		 	 					 	  		 
+bridge_in_broker.py V6.1.3 — Pasarela A<->B embebida en el broker usando el pool persistente.	 		  	 	 			  		 		 
 
-- Reutiliza la interfaz del nodo A (la que YA usa el broker).
-- Abre (solo si se activa) la interfaz del nodo B con el mismo pool persistente.
-- Reenvía TEXT_MESSAGE_APP (y opcional POS/TELEMETRY como resumen) con anti-bucle, dedup y rate-limit.
-- Filtro por canal mediante mapas A2B/B2A.
+- Reutiliza la interfaz del nodo A (la que YA usa el broker).	    	   			 		    	 
+- Abre (solo si se activa) la interfaz del nodo B con el mismo pool persistente.			 	   		  	 	 			 	
+- Reenvía TEXT_MESSAGE_APP (y opcional POS/TELEMETRY como resumen) con anti-bucle, dedup y rate-limit.		 		    	 				  	 	 
+- Filtro por canal mediante mapas A2B/B2A.					 			 		   		 		 
 """
 
 from __future__ import annotations

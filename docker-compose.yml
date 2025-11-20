@@ -22,7 +22,7 @@ services:
       - "8766:8766"
 
     volumes:
-      - bot_data:/app/bot_data:rw
+      - ./bot_data:/app/bot_data:rw
 
   bot:
     image: meshtastic-suite:latest
@@ -48,7 +48,7 @@ services:
       BOT_TASK_SCHEDULER: 0   # el scheduler lo lleva el broker
       BOT_DATA_DIR: /app/bot_data   # ← opcional pero recomendable
     volumes:
-      - bot_data:/app/bot_data:rw
+      - ./bot_data:/app/bot_data:rw
 
   aprs:
     build:
@@ -70,8 +70,13 @@ services:
       - KISS_HOST=${KISS_HOST:-host.docker.internal}
       - KISS_PORT=${KISS_PORT:-8100}
       - TASK_NOTIFY=0 
+      - APRSIS_USER=${APRSIS_USER:-}
+      - APRSIS_PASSCODE=${APRSIS_PASSCODE:-}
+      - APRSIS_HOST=${APRSIS_HOST:-rotate.aprs2.net}
+      - APRSIS_PORT=${APRSIS_PORT:-14580}
+      - APRSIS_FILTER=${APRSIS_FILTER:-}
     volumes:
-      - bot_data:/app/bot_data:rw
+      - ./bot_data:/app/bot_data:rw
 
   bridge:
     build:
@@ -132,7 +137,3 @@ services:
       - "8080:8080"
     restart: unless-stopped
 
-
-# ⬇️ ESTA PARTE VA FUERA DE "services:"
-volumes:
-  bot_data:

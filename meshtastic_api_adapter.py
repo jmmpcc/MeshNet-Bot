@@ -1,13 +1,13 @@
-# meshtastic_api_adapter.py
-# -*- coding: utf-8 -*-
-# Version v6.1.1
+# meshtastic_api_adapter.py 	   	 	 	    	   		 
+# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
+# Version v6.1.3 	  		 	 					 	  		 
 
-"""
-Capa 'API-first' para Meshtastic.
+"""	 		  	 	 			  		 		 
+Capa 'API-first' para Meshtastic.	    	   			 		    	 
 
-Objetivo
---------
-Usar preferentemente la API Python (TCPInterface) para:
+Objetivo			 	   		  	 	 			 	
+--------		 		    	 				  	 	 
+Usar preferentemente la API Python (TCPInterface) para:					 			 		   		 		 
   - Listar nodos
   - Traceroute
   - Solicitud de telemetría

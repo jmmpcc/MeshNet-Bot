@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Version v6.1
+#!/usr/bin/env python3 	   	 	 	    	   		 
+# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
+# Version v6.1.3 	  		 	 					 	  		 
 
-from __future__ import annotations
-"""
-Meshtastic_Broker_v6.1.1.py
---------------------------------
-Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
+from __future__ import annotations	 		  	 	 			  		 		 
+"""	    	   			 		    	 
+Meshtastic_Broker_v6.1.3.py			 	   		  	 	 			 	
+--------------------------------		 		    	 				  	 	 
+Broker JSONL para Meshtastic (TCPInterface) con salida limpia.					 			 		   		 		 
 
 Cambios v3.3:
 - Restaurada inferencia de canal lógico=0 para puertos de sistema (marcado con '*').
@@ -95,6 +95,10 @@ else:
 CLIENTS = {}  # {sock: {"buf": bytearray(), "last_ok": time.time()}}
 MAX_CLIENT_BUF = 256 * 1024  # 256 KB por cliente antes de cortar
 SLOW_CLIENT_GRACE = 6.0      # segundos de gracia de lentitud
+
+# --- Throttle de logs de espera TX ---
+_TX_WAIT_LOG_TS = 0.0
+
 
 def _setup_client_sock(s):
     try:
@@ -342,6 +346,16 @@ HEARTBEAT_SILENT = False       # Si True, no imprime ningún heartbeat
 
 # === [NUEVO] Cooldown broker tras caída de conexión ===
 COOLDOWN_SECS = int(os.getenv("BROKER_COOLDOWN_SECS", "90"))
+
+# === Nodo B del bridge (usado por /ver_nodos_b y /vecinos_b) ===
+B_HOST = (
+    os.getenv("BRIDGE_B_HOST", "").strip()
+    or os.getenv("B_HOST", "").strip()
+)
+try:
+    B_PORT = int(os.getenv("BRIDGE_B_PORT", os.getenv("B_PORT", "4403")))
+except Exception:
+    B_PORT = 4403
 
 
 import builtins, sys, time
@@ -829,13 +843,34 @@ def start_backlog_worker():
         _worker_instance.start()
 
 
+def _iface_ready_reason() -> tuple[bool, str]:
+    """
+    Devuelve (ready, reason): False si la TX no es oportuna ahora.
+    Razones: paused | cooldown | disconnected
+    """
+    try:
+        mgr = globals().get("BROKER_IFACE_MGR")
+        c   = globals().get("COOLDOWN")
+        if mgr and hasattr(mgr, "is_paused") and mgr.is_paused():
+            return False, "paused"
+        if c and hasattr(c, "is_active") and c.is_active():
+            return False, "cooldown"
+        # conectado si hay iface viva
+        iface = getattr(mgr, "iface", None)
+        if iface is None:
+            return False, "disconnected"
+        return True, ""
+    except Exception:
+        return False, "unknown"
+
+
 def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     """
     msg: {"channel":int, "text":str, "destination":None|"!id", "require_ack":bool}
-    Respeta CircuitBreaker; usa tu ruta preferente de v5 (_tasks_send_adapter) que ya envía por la iface del broker y
-    cae al adapter resiliente si hace falta.
+    Respeta CircuitBreaker y sólo intenta TX cuando la interfaz está lista.
+    Si no lo está, reencola sin ruido (con un aviso amortiguado) y sale.
     """
-    # === LOG AL DESENCOLAR SEND_TEXT (AÑADIR AL INICIO DE LA FUNCIÓN) ===
+    # --- Log al desencolar (diagnóstico útil) ---
     try:
         _ch   = int(msg.get("channel", 0) or 0)
         _dest = msg.get("destination") or "broadcast"
@@ -843,11 +878,37 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
         print(f"[ctrl] SEND_TEXT dequeued ch={_ch} dest={_dest} len={len(_txt.encode('utf-8'))}", flush=True)
     except Exception as _e:
         print(f"[ctrl] SEND_TEXT dequeue log error: {type(_e).__name__}: {_e}", flush=True)
-    # === FIN LOG DESENCOLADO ===
 
-
+    # --- CircuitBreaker: si está abierto, reencola y sal silencioso ---
     if not CIRCUIT_BREAKER.can_attempt():
+        try:
+            SENDQ.offer(msg, coalesce=False)  # no coalesce para no perder ACK/flags
+        except Exception:
+            pass
         return False
+
+    # --- Comprobación de estado de interfaz del broker ---
+    ready, reason = _iface_ready_reason()
+    if not ready:
+        # Reencola y emite un aviso amortiguado cada ~5 s para evitar bucle de logs
+        try:
+            SENDQ.offer(msg, coalesce=False)
+        except Exception:
+            pass
+        try:
+            import time as _t
+            global _TX_WAIT_LOG_TS
+            now = _t.time()
+            if (now - float(_TX_WAIT_LOG_TS or 0.0)) >= 5.0:
+                print(f"[ctrl] TX en espera — {reason}. Reintentará al reconectar.", flush=True)
+                _TX_WAIT_LOG_TS = now
+            # Pequeño backoff para que el worker no haga busy-loop
+            _t.sleep(0.35)
+        except Exception:
+            pass
+        return False
+
+    # --- Interfaz lista: ejecutar ruta de envío real ---
     try:
         r = _tasks_send_adapter(
             int(msg.get("channel", 0)),
@@ -862,16 +923,21 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
             CIRCUIT_BREAKER.record_error()
         return ok
     except Exception:
+        # Error en el camino de envío: marcar error y solicitar reconnect suave
         CIRCUIT_BREAKER.record_error()
-        # Pedimos reconexión suave del broker (no abrimos sockets nuevos aquí)
         try:
             mgr = globals().get("BROKER_IFACE_MGR")
             if mgr and hasattr(mgr, "signal_disconnect"):
                 mgr.signal_disconnect()
         except Exception:
             pass
+        # Reencola para no perder el mensaje
+        try:
+            SENDQ.offer(msg, coalesce=False)
+        except Exception:
+            pass
         return False
-   
+
 
 def _tasks_send_adapter(channel: int, message: str, destination: str, require_ack: bool) -> dict:
     """
@@ -1447,6 +1513,8 @@ class _BacklogServer(threading.Thread):
 
                 # === [NUEVO] Encolar (no coalesce para textos de usuario)
                 try:
+
+                    
                     SENDQ.offer({"channel": ch, "text": text, "destination": dest, "require_ack": ack_flag, "type": "text"},
                                 coalesce=False)
                     resp = {"ok": True, "queued": True, "path": "broker-queue"}
@@ -1656,6 +1724,12 @@ class _BacklogServer(threading.Thread):
                                 "cooldown_remaining": (rem if is_cd else 0),
                                 # --- [NUEVO]
                                 "connected": bool(globals().get("_IS_CONNECTED", False)),
+                                # --- [NUEVO] contexto útil para el bot/UI ---
+                                "node_host": str(globals().get("RUNTIME_MESH_HOST") or ""),
+                                "node_port": int(globals().get("RUNTIME_MESH_PORT") or 4403),
+                                # opcionales de diagnóstico (si los tienes a mano):
+                                "mgr_paused": bool(is_paused),
+                                "tx_blocked": bool(TX_BLOCKED.is_set()) if 'TX_BLOCKED' in globals() else False,
                             }
 
                             # [TRAZA extra (debug de referencia)]:

@@ -1,13 +1,13 @@
-# coverage_backlog.py
-# Cobertura desde BacklogServer: Heatmap + Círculos (HTML) y KML con polígonos
-# Version v6.1.1
+# coverage_backlog.py 	   	 	 	    	   		 
+# Cobertura desde BacklogServer: Heatmap + Círculos (HTML) y KML con polígonos 	  	   	 	 	     	 	
+# Version v6.1.3 	  		 	 					 	  		 
 
-from __future__ import annotations
-import os, json, socket, math, time
-from datetime import datetime, timezone
-from typing import List, Tuple, Optional
+from __future__ import annotations	 		  	 	 			  		 		 
+import os, json, socket, math, time	    	   			 		    	 
+from datetime import datetime, timezone			 	   		  	 	 			 	
+from typing import List, Tuple, Optional		 		    	 				  	 	 
 
-BACKLOG_HOST = "127.0.0.1"
+BACKLOG_HOST = "127.0.0.1"					 			 		   		 		 
 BACKLOG_PORT = 8766
 
 def _now_utc() -> int:

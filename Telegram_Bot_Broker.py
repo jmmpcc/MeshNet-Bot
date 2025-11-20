@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Telegram_Bot_Broker_v6.1.1 py
------------------------------
-Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
-Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
+#!/usr/bin/env python3 	   	 	 	    	   		 
+# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
+""" 	  		 	 					 	  		 
+Telegram_Bot_Broker_v6.1.3 py	 		  	 	 			  		 		 
+-----------------------------	    	   			 		    	 
+Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.			 	   		  	 	 			 	
+Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.		 		    	 				  	 	 
 
-Novedades v4.5:
+Novedades v4.5:					 			 		   		 		 
 - /ver_nodos [N|false]: si pasas 'false' no imprime métricas (RSSI/SNR/ruta) y muestra la lista clásica (más ágil).
 - Ver nodos enriquecido por defecto: añade RSSI/SNR, ruta y calidad del enlace (🟢🟠🔴) combinando API + broker.
 - /enviar y /enviar_ack diferenciados (broadcast vs unicast con ACK), usando TCPInterfacePool persistente.
@@ -43,6 +43,8 @@ import broker_task as broker_tasks
 
 from meshtastic import tcp_interface
 from positions_store import read_positions_recent, build_kml, build_gpx
+
+from auditoria_red import auditoria_red_cmd, auditoria_integral_cmd
 
 # === [NUEVO] Helper para compatibilizar funciones sync/async ===
 import inspect
@@ -204,6 +206,7 @@ except Exception:
     _NOTIFY_JOB_LOCK = None  # fallback si algo raro
 # ──────────────────────────────────────────────────────────────────────────
 
+DEBUG_KM = (os.getenv("DEBUG_KM", "0").strip().lower() in {"1","true","t","yes","y","on","si","sí"})
 
 # === [NUEVO] Helpers: pausar/reanudar IO + CLI segura con timeout + escritura nodos.txt ===
 import os, json, time, signal, subprocess
@@ -277,6 +280,236 @@ from telegram.ext import CommandHandler
 import socket, json, time, os
 from contextlib import contextmanager
 
+# --- Necesario para cálculo de distancias en TODAS las funciones ---
+import math
+
+# ========= Helpers de ubicación compartidos (DISTANCIA + PROVINCIA/CIUDAD) =========
+
+from html import escape
+
+def _safe_float(v):
+    """Convierte '41,7386° N' → 41.7386 (float) o None si falla."""
+    if v is None:
+        return None
+    try:
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).strip().replace(",", ".")
+        s = "".join(ch for ch in s if ch in "+-0123456789.")
+        if s in ("", "+", "-"):
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+def _calc_distance_km(lat1, lon1, lat2, lon2):
+    """Haversine en km. Redondea a 0.1 km. Devuelve None si falla."""
+    try:
+        R = 6371.0
+        φ1 = math.radians(float(lat1))
+        φ2 = math.radians(float(lat2))
+        dφ = math.radians(float(lat2) - float(lat1))
+        dλ = math.radians(float(lon2) - float(lon1))
+        a = math.sin(dφ/2)**2 + math.cos(φ1)*math.cos(φ2)*math.sin(dλ/2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return round(R * c, 1)
+    except Exception:
+        return None
+
+def _get_province_offline(lat, lon):
+    """
+    reverse_geocoder offline:
+    - prioriza city/name
+    - si no hay, admin2 (provincia); si no, admin1 (CCAA)
+    """
+    try:
+        import reverse_geocoder as rg
+    except Exception:
+        return None
+    try:
+        res = rg.search((float(lat), float(lon)))
+        if isinstance(res, list) and res:
+            r = res[0]
+            return r.get("name") or r.get("admin2") or r.get("admin1")
+    except Exception:
+        return None
+    return None
+
+def _norm_id(nid: str | None) -> str | None:
+    """Normaliza a '!XXXXXXXX'. Acepta '!id', 'id', enteros…"""
+    if not nid:
+        return None
+    s = str(nid).strip()
+    if s.startswith("!"):
+        return s
+    return f"!{s[-8:]}" if len(s) >= 8 else f"!{s}"
+
+def _build_last_positions_map(lookback_minutes: int = 72*60) -> dict[str, tuple[float,float]]:
+    """
+    Mapa de última posición por nodo: {'!id': (lat, lon)}.
+    Fuente 1: BACKLOG (POSITION_APP/TELEMETRY_APP).
+    Fuente 2: nodes.txt (Latitude/Longitude o latitudeI/longitudeI).
+    """
+    posmap: dict[str, tuple[float,float]] = {}
+
+    # 1) Backlog del broker (si existe el RPC)
+    try:
+        since_ts = int(time.time()) - lookback_minutes*60
+        bl = _broker_ctrl("FETCH_BACKLOG",
+                          {"since_ts": since_ts,
+                           "portnums": ["POSITION_APP", "TELEMETRY_APP"]},
+                          timeout=6.0)
+        if bl and bl.get("ok"):
+            for ev in (bl.get("data") or []):
+                nid = _norm_id(ev.get("from") or ev.get("fromId") or ev.get("nodeId"))
+                if not nid:
+                    continue
+                lat = lon = None
+                p = ev.get("position") or (ev.get("decoded") or {}).get("position") or {}
+                if p:
+                    if "latitudeI" in p and "longitudeI" in p:
+                        try:
+                            lat = float(p["latitudeI"]) / 1e7
+                            lon = float(p["longitudeI"]) / 1e7
+                        except Exception:
+                            lat = lon = None
+                    if lat is None and "latitude" in p and "longitude" in p:
+                        lat = _safe_float(p.get("latitude"))
+                        lon = _safe_float(p.get("longitude"))
+                if lat is None or lon is None:
+                    t = (ev.get("decoded") or {}).get("telemetry") or {}
+                    lat = _safe_float(t.get("lat") or t.get("latitude"))
+                    lon = _safe_float(t.get("lon") or t.get("longitude"))
+                if lat is not None and lon is not None:
+                    posmap[nid] = (lat, lon)  # última gana
+    except Exception:
+        pass
+
+    # 2) nodes.txt (si existe el parser del relay)
+    try:
+        rows_file = _parse_nodes_table(NODES_FILE) or []  # ya lo tienes en tu código
+        for rf in rows_file:
+            nid = _norm_id(rf.get("id") or rf.get("nodeId") or rf.get("fromId"))
+            if not nid:
+                continue
+            lat = rf.get("Latitude") or rf.get("lat") or rf.get("latitude")
+            lon = rf.get("Longitude") or rf.get("lon") or rf.get("longitude")
+            if (lat is None or lon is None) and (rf.get("latitudeI") is not None):
+                try:
+                    lat = float(rf["latitudeI"]) / 1e7
+                    lon = float(rf.get("longitudeI") or 0.0) / 1e7
+                except Exception:
+                    lat = lon = None
+            lat_f = _safe_float(lat); lon_f = _safe_float(lon)
+            if lat_f is not None and lon_f is not None:
+                # mantén la prioridad al backlog; solo añade si no existía
+                posmap.setdefault(nid, (lat_f, lon_f))
+    except Exception:
+        pass
+
+    return posmap
+
+
+from typing import Any, Dict, Optional, Tuple
+from telegram.ext import ContextTypes
+
+def _get_home_coords(
+    context: ContextTypes.DEFAULT_TYPE,
+    posmap: Optional[Dict[str, Dict[str, Any]]] = None,
+    lastmap: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Tuple[Optional[float], Optional[float]]:
+    """
+    HOME por prioridad:
+      1) .env HOME_LAT/HOME_LON  (si existen, SIEMPRE se usan)
+      2) Cache en context.bot_data["home_lat"/"home_lon"]
+      3) .env HOME_NODE_ID si su posición está en posmap
+      4) Última posición conocida según lastmap+posmap
+      5) Cualquier posición disponible en posmap
+    """
+
+    import os
+    from dotenv import load_dotenv
+
+    def _sf(v):
+        try:
+            s = str(v).strip().lower().replace(",", ".")
+            s = "".join(ch for ch in s if ch in "+-0123456789.")
+            return float(s) if s not in ("", "+", "-") else None
+        except Exception:
+            return None
+
+    # Asegurarnos de que el .env de /app se ha leído (no pisa variables ya existentes)
+    try:
+        load_dotenv(dotenv_path="/app/.env", override=False)
+    except Exception:
+        pass
+
+    debug_km = str(os.getenv("DEBUG_KM", "0")).lower() in ("1", "true", "yes", "on")
+
+    # === 1) PRIORIDAD ABSOLUTA: HOME_LAT / HOME_LON del .env ==================
+    la_env = _sf(os.getenv("HOME_LAT"))
+    lo_env = _sf(os.getenv("HOME_LON"))
+    if la_env is not None and lo_env is not None:
+        context.bot_data["home_lat"] = la_env
+        context.bot_data["home_lon"] = lo_env
+        if debug_km:
+            print(f"[KM][HOME] from .env HOME_LAT/HOME_LON → ({la_env}, {lo_env})", flush=True)
+        return la_env, lo_env
+
+    # === 2) Cache previa en bot_data ==========================================
+    la_bd = context.bot_data.get("home_lat")
+    lo_bd = context.bot_data.get("home_lon")
+    if isinstance(la_bd, (int, float)) and isinstance(lo_bd, (int, float)):
+        if debug_km:
+            print(f"[KM][HOME] from bot_data cache → ({la_bd}, {lo_bd})", flush=True)
+        return float(la_bd), float(lo_bd)
+
+    # === 3) Intentar HOME_NODE_ID si tiene posición en posmap =================
+    posmap = posmap or {}
+    home_node_id = (os.getenv("HOME_NODE_ID") or "").strip()
+    if home_node_id:
+        entry = posmap.get(home_node_id)
+        if isinstance(entry, dict):
+            la = _sf(entry.get("lat"))
+            lo = _sf(entry.get("lon"))
+            if la is not None and lo is not None:
+                context.bot_data["home_lat"] = la
+                context.bot_data["home_lon"] = lo
+                if debug_km:
+                    print(f"[KM][HOME] from HOME_NODE_ID {home_node_id} → ({la}, {lo})", flush=True)
+                return la, lo
+
+    # === 4) Última posición conocida (lastmap + posmap) =======================
+    lastmap = lastmap or {}
+
+    def _iter_maps_for_home():
+        # primero lastmap (más reciente), luego posmap
+        for nid, e in lastmap.items():
+            yield nid, e
+        for nid, e in posmap.items():
+            yield nid, e
+
+    for nid, entry in _iter_maps_for_home():
+        if not isinstance(entry, dict):
+            continue
+        la = _sf(entry.get("lat"))
+        lo = _sf(entry.get("lon"))
+        if la is not None and lo is not None:
+            context.bot_data["home_lat"] = la
+            context.bot_data["home_lon"] = lo
+            if debug_km:
+                print(f"[KM][HOME] from maps nid={nid} → ({la}, {lo})", flush=True)
+            return la, lo
+
+    # === 5) Sin coordenadas disponibles =======================================
+    if debug_km:
+        print("[KM][HOME] sin coordenadas HOME disponibles", flush=True)
+    return None, None
+
+
+# ===================== Fin helpers ubicación =====================
+
+
 
 def _send_via_broker_queue(text: str, ch: int, dest: str | None = None, ack: bool = False, timeout: float = 3.0) -> dict:
     """
@@ -313,11 +546,9 @@ def _send_via_broker_queue(text: str, ch: int, dest: str | None = None, ack: boo
 
 
 
-
-
-
 # --- /reconectar (admin) → fuerza reset limpio y confirma conexión ---
-async def reconectar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+#Baja 04-11-2025
+async def reconectar_cmd_old(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Si ya tienes otra verificación de admins, usa la tuya:
     if update.effective_user.id not in ADMIN_IDS:
         await update.effective_message.reply_text("⛔ Solo administradores.")
@@ -350,6 +581,79 @@ async def reconectar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Estado: {last.get('status') or '¿?'} • cooldown={last.get('cooldown_remaining')}s • connected={bool(last.get('connected'))}\n"
         f"Revisa que 192.168.1.201:4403 esté accesible y sin otra sesión ocupándolo."
     )
+
+# --- /reconectar (admin) → fuerza reset limpio y confirma conexión ---
+# Alta 04-11-2025
+async def reconectar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Reinicia la conexión persistente del broker y espera a que marque 'connected=True'.
+    - Uso: /reconectar [segundos_espera]
+      Si no se indica, espera 35 s por defecto.
+    Muestra siempre el host:puerto REAL que reporta el broker en BROKER_STATUS.
+    """
+    # Autorización básica
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.effective_message.reply_text("⛔ Solo administradores.")
+        return
+
+    # Parseo de ventana de espera opcional
+    max_wait = 35.0
+    try:
+        if context.args:
+            v = float(context.args[0])
+            if v > 0:
+                max_wait = min(90.0, v)  # cap sensato
+    except Exception:
+        pass
+
+    await update.effective_message.reply_text("🔄 Reseteando broker y reintentando conexión…")
+
+    # 1) Reset limpio en el broker
+    r = _broker_ctrl("FORCE_RECONNECT", None, timeout=6.0)
+    if not (r and r.get("ok")):
+        await update.effective_message.reply_text(
+            f"❌ No se pudo forzar el reset: {(r or {}).get('error') or 'sin respuesta'}"
+        )
+        return
+
+    # 2) Espera activa hasta ver running + connected (máx. configurable)
+    import time, asyncio
+    t0 = time.time()
+    last = {}
+    while (time.time() - t0) < max_wait:
+        st = _broker_ctrl("BROKER_STATUS", None, timeout=3.0) or {}
+        last = st
+
+        # Campos extra para mensaje (si el broker los expone)
+        node_host = st.get("node_host") or "¿host?"
+        node_port = st.get("node_port") or "¿puerto?"
+
+        # Estados
+        ok = bool(st.get("ok"))
+        status = (st.get("status") or "").lower()
+        connected = bool(st.get("connected"))
+        cd = int(st.get("cooldown_remaining") or 0)
+
+        # Si estaba en cooldown, dejamos respirar 1 segundo extra tras bajar a 0
+        if ok and status == "running" and connected:
+            await update.effective_message.reply_text(
+                f"✅ Broker reseteado y **conectado** al nodo ({node_host}:{node_port})."
+            )
+            return
+
+        # Pequeño sleep entre polls
+        await asyncio.sleep(1.2)
+
+    # 3) Timeout: informar con datos reales (sin IP fija)
+    node_host = last.get("node_host") or "¿host?"
+    node_port = last.get("node_port") or "¿puerto?"
+    cd = int(last.get("cooldown_remaining") or 0)
+    await update.effective_message.reply_text(
+        "⚠️ Reset enviado, pero **no conecta** al nodo en el tiempo de espera.\n"
+        f"Estado: {last.get('status') or '¿?'} • cooldown={cd}s • connected={bool(last.get('connected'))}\n"
+        f"Revisa que **{node_host}:{node_port}** esté accesible y sin otra sesión ocupándolo."
+    )
+
 
 # === [NUEVO] Vecinos vía CLI con pausa breve del broker ===
 # === [NUEVO] Vecinos vía CLI con pausa breve del broker ===
@@ -578,8 +882,9 @@ def _save_bot_settings(d: dict) -> None:
 
 # Bandera inicial desde .env (1=on, 0=off)
 _NOTIFY_ENV = os.getenv("NOTIFY_DONE", "1")
-NOTIFY_DONE_ENABLED = bool(int(_NOTIFY_ENV))  # valor por defecto
+# valor por defecto
 
+NOTIFY_DONE_ENABLED = bool(int(_NOTIFY_ENV))  
 # Sobrescribir con valor persistente si existe
 _settings = _load_bot_settings()
 if "notify_done_enabled" in _settings:
@@ -598,6 +903,7 @@ try:
     _LAST_SENT_TTL_SEC = float(os.getenv("NOTIFY_DONE_TTL", str(_LAST_SENT_TTL_SEC)))
 except Exception:
     pass
+
 
 
 # === BEGIN notify_done: persistencia por task_id → last_run_ts ===
@@ -4212,7 +4518,8 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("traceroute_status", "Ver los últimos traceroute"),   # ← NUEVO
         BotCommand("telemetria", "Telemetría a un nodo ([!id|alias] [max_n|timeout] [timeout]) + historico"),
         BotCommand("lora", "Configurar LoRa: ignore_* (status/set)"),  # ← NUEVO
-        BotCommand("ver_nodos", "Ver últimos nodos o sincronizar: /ver_nodos [max_n] [timeout]"),      
+        BotCommand("ver_nodos", "Ver últimos nodos o sincronizar: /ver_nodos [max_n] [timeout]"),   
+        BotCommand("refrescar_nodos", "Refrescar nodos: /refrescar_nodos [api|cli] [Nodos]max [Timeout]sg"),   
         BotCommand("vecinos", "Listar vecinos directos:  /vecinos [max_n] [hops_mode]"),        
         BotCommand("estado", "Comprobar estado host/broker"),
         BotCommand("programar", "<YYYY-MM-DD HH:MM> <destino[:canal] | canal N> <texto...> Programar envío en fecha/hora"),
@@ -4227,6 +4534,8 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("position", "Ver últimas posiciones /position <N> [min] | /position <!id|alias> [min] [N]"),
         BotCommand("position_mapa", "Ver últimas mapa de posiciones GPS ([N] [T] (mn))"),
         BotCommand("cobertura", "Mapa de cobertura: heatmap + circulos. cobertura [!id|alias] [Xh] [entorno]"),
+        BotCommand("auditoria_red", "Auditoría rápida de red (SNR/hops/recomendaciones)"),
+        BotCommand("auditoria_integral", "Auditoría completa de la red (carga LoRa y tráfico)"),
         BotCommand("canales", "Ver canales configurados en el nodo"),
         BotCommand("aprs", "/aprs [en] [min1,min2,..] | [canal N] texto | /aprs N texto | /aprs CALL: texto"),
         BotCommand("aprs_on", "Activa el gate APRS→Mesh (tráfico recibido en APRS SE reenviará a la malla)"),
@@ -4442,33 +4751,31 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     s_diario = (
-    "────────────────────────────────────────────────\n"
-    "<b>Programación diaria</b>\n"
-    "• <code>/diario &lt;HH:MM[,HH:MM…]&gt; [mesh|aprs|ambos] [grupo &lt;id&gt;] "
-    "&lt;destino[:canal] | canal N | CALL|broadcast&gt; [aprs &lt;CALL|broadcast&gt;:] &lt;texto…&gt;</code>\n"
-    "   Repite el envío todos los días a las horas indicadas (zona <i>Europe/Madrid</i>).\n"
-    "\n"
-    "<u>Modos de transporte</u>:\n"
-    "• <code>mesh</code>  → Solo malla Meshtastic.\n"
-    "• <code>aprs</code>  → Solo APRS (pasarela). Usa <code>CALL</code> (p.ej. <code>EA2XXX-10</code>) o <code>broadcast</code>.\n"
-    "• <code>ambos</code> → Envío por MESH y, además, reenvío por APRS.\n"
-    "   En modo ambos puedes fijar destino APRS con el token <code>aprs &lt;CALL|broadcast&gt;</code> en la línea.\n"
-    "\n"
-    "<u>Gestión</u>:\n"
-    "• <code>/mis_diarios [pending|done|failed|canceled] [grupo &lt;group_id&gt;]</code> → Listar (con texto, transporte y grupo).\n"
-    "• <code>/parar_diario &lt;task_id&gt;</code> → Detener una tarea diaria por ID.\n"
-    "• <code>/parar_diario_grupo &lt;group_id&gt;</code> → Detener todas las diarias del grupo.\n"
-    "\n"
-    "<u>Ejemplos</u>:\n"
-    "• <code>/diario 08:30 mesh canal 0 Parte diario</code>\n"
-    "• <code>/diario 22:00 aprs EB2EAS-11: Mensaje de prueba</code>\n"
-    "• <code>/diario 07:45 ambos canal 1 aprs broadcast Aviso general</code>\n"
-    "• <code>/diario 08:30,14:00,21:45 ambos grupo mantenimiento canal 2 aprs broadcast Aviso en tres horarios</code>\n"
-    "• <code>/mis_diarios pending grupo daily-mantenimiento</code>\n"
-    "• <code>/parar_diario_grupo daily-mantenimiento</code>\n"
+        "────────────────────────────────────────────────\n"
+        "<b>Programación diaria</b>\n"
+        "• <code>/diario &lt;HH:MM[,HH:MM…]&gt; [mesh|aprs|ambos] [grupo &lt;id&gt;] "
+        "&lt;destino[:canal] | canal N | CALL|broadcast&gt; [aprs &lt;CALL|broadcast&gt;:] &lt;texto…&gt;</code>\n"
+        "   Repite el envío todos los días a las horas indicadas (zona <i>Europe/Madrid</i>).\n"
+        "\n"
+        "<u>Modos de transporte</u>:\n"
+        "• <code>mesh</code>  → Solo malla Meshtastic.\n"
+        "• <code>aprs</code>  → Solo APRS (pasarela). Usa <code>CALL</code> (p.ej. <code>EA2XXX-10</code>) o <code>broadcast</code>.\n"
+        "• <code>ambos</code> → Envío por MESH y, además, reenvío por APRS.\n"
+        "   En modo ambos puedes fijar destino APRS con el token <code>aprs &lt;CALL|broadcast&gt;</code> en la línea.\n"
+        "\n"
+        "<u>Gestión</u>:\n"
+        "• <code>/mis_diarios [pending|done|failed|canceled] [grupo &lt;group_id&gt;]</code> → Listar (con texto, transporte y grupo).\n"
+        "• <code>/parar_diario &lt;task_id&gt;</code> → Detener una tarea diaria por ID.\n"
+        "• <code>/parar_diario_grupo &lt;group_id&gt;</code> → Detener todas las diarias del grupo.\n"
+        "\n"
+        "<u>Ejemplos</u>:\n"
+        "• <code>/diario 08:30 mesh canal 0 Parte diario</code>\n"
+        "• <code>/diario 22:00 aprs EB2EAS-11: Mensaje de prueba</code>\n"
+        "• <code>/diario 07:45 ambos canal 1 aprs broadcast Aviso general</code>\n"
+        "• <code>/diario 08:30,14:00,21:45 ambos grupo mantenimiento canal 2 aprs broadcast Aviso en tres horarios</code>\n"
+        "• <code>/mis_diarios pending grupo daily-mantenimiento</code>\n"
+        "• <code>/parar_diario_grupo daily-mantenimiento</code>\n"
     )
-
-
 
 
     s_telemetria = (
@@ -4486,6 +4793,13 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<b>Nodos</b>\n"
         "• <code>/ver_nodos [N|false]</code> — Lista enriquecida con RSSI, SNR, ruta y calidad. <code>false</code> imprime rapido.\n"
         "  -> Se incluyen hops reales cuando hay metadatos: <code>hops = hop_limit - hop_start</code>.\n"
+    )
+
+    s_refresnodos = (
+        "\n\n<b>Refresco de tabla</b>\n"
+        "• <code>/refrescar_nodos</code>  (auto)\n"
+        "• <code>/refrescar_nodos api 50</code>  (API-only, 50 máx.)\n"
+        "• <code>/refrescar_nodos cli 100 12</code>  (CLI-only, 100 máx., 12s timeout)\n"
     )
 
     s_vecinos = (
@@ -4506,6 +4820,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <code>/vecinos all</code> → todos los vecinos (ignora hops).\n"
         "• <code>/vecinos>=2</code> → muestra vecinos con más o igual a 2 hops.\n"
     )
+   
     s_rutas = (
         "────────────────────────────────────────────────\n"
         "<b>Rutas</b>\n"
@@ -4623,7 +4938,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<b>Formatos:</b>\n"
         "• <code>/aprs canal N &lt;texto&gt;</code>\n"
         "• <code>/aprs N &lt;texto&gt;</code>\n"
-        "• <code>/aprs &lt;CALL|broadcast&gt;: &lt;texto&gt; [canal N]</code>\n"
+        "• <code>/aprs &lt;CALL|broadcast&gt;: &lt;texto&gt;</code>\n"
         "• <code>/aprs en &lt;min|m1,m2,&gt; canal N &lt;texto&gt;</code>\n"
         "  (Si no indicas canal, usa el por defecto del bot)\n\n"
         "<b>Ejemplos:</b>\n"
@@ -4634,13 +4949,68 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <code>broadcast</code> envía como <i>status</i> APRS (no a un destinatario concreto).\n"
         "• <code>CALL</code> envía como <i>message</i> APRS a ese indicativo (p.ej. EB2XXX-7).\n"
         "• Se respetan los límites de tamaño APRS: el bot divide en varias tramas si hace falta.\n"
+        "\n"
+        "────────────────────────────────────────────────\n"
+        "<b>APRS desde RF → malla Meshtastic</b>\n"
+        "Desde APRS (walkie, cliente APRS) puedes inyectar mensajes en la malla usando etiquetas en el comentario:\n"
+        "\n"
+        "<b>Envío inmediato a la malla</b>\n"
+        "• <code>[CH n] texto</code>\n"
+        "• <code>[CANAL n] texto</code>\n"
+        "Ejemplos:\n"
+        "• <code>[CH 1] Hola a todos</code>\n"
+        "• <code>[CANAL4] Revisión enlace oeste</code>\n"
+        "El texto se envía inmediatamente al canal Mesh <code>n</code>.\n"
+        "\n"
+        "<b>Envío programado desde APRS</b>\n"
+        "• <code>[CH n+M] texto</code>  (M = minutos de retraso)\n"
+        "Ejemplos:\n"
+        "• <code>[CH 3+10] Aviso en 10 minutos</code>\n"
+        "• <code>[CANAL1+5] Recordatorio breve</code>\n"
+        "El gateway APRS programa el envío localmente y, pasado el tiempo, manda el mensaje al canal Mesh.\n"
+        "\n"
+        "<b>Control del gateway APRS→Mesh</b>\n"
+        "Solo desde indicativos autorizados en <code>APRS_ALLOWED_SOURCES</code>:\n"
+        "• <code>[CH 0] APRS ON</code>   → habilita el reenvío APRS → Mesh\n"
+        "• <code>[CH 0] APRS OFF</code>  → deshabilita temporalmente el reenvío\n"
+        "Cualquier otro texto en <code>[CH 0]</code> se ignora por seguridad.\n"
+        "\n"
+        "<b>Posiciones APRS → enlace de mapa</b>\n"
+        "Cuando el paquete APRS lleva coordenadas, el gateway añade un enlace clicable:\n"
+        "• <code>https://maps.google.com/?q=lat,lon</code>\n"
+        "junto con el comentario APRS si existe.\n"
+        "Ejemplo de lo que verá la malla:\n"
+        "• <code>qrv R70-R72 sdr:in91np.ddns.net:8073 Abierto https://maps.google.com/?q=41.638500,-0.903833</code>\n"
     )
 
+    s_auditorias = (
+        "────────────────────────────────────────────────\n"
+        "<b>Auditorías de red</b>\n"
+        "• <code>/auditoria_red [horas]</code>\n"
+        "  Diagnóstico rápido usando cobertura/posiciones recientes.\n"
+        "  • Calcula por vecino: SNR (p50/p90/avg), hops (avg/máx), RSSI medio y muestras válidas.\n"
+        "  • Sugiere configuración para tu nodo: rol (CLIENT/CLIENT_MUTE/ROUTER), potencia TX, <i>hop_limit</i>, baliza y telemetría.\n"
+        "  • Adjunta CSV (métricas por vecino) y JSON (resumen + recomendación).\n"
+        "  • Por defecto analiza 72 h. Ej.: <code>/auditoria_red 48</code>\n"
+        "\n"
+        "• <code>/auditoria_integral [horas]</code>\n"
+        "  Auditoría completa con carga de canal y mapa de calor.\n"
+        "  • Analiza: <code>coverage.jsonl</code>, <code>positions.jsonl</code>, <code>messages.jsonl</code>, "
+        "<code>telemetry.jsonl</code>, <code>broker_offline_log.jsonl</code> (si existen).\n"
+        "  • Incluye: SNR/RSSI/hops, duplicados, payload medio, distribución por aplicación, estimación de <i>airtime</i>/duty-cycle LoRa.\n"
+        "  • Genera: CSV de vecinos, CSV de recomendaciones por vecino, JSON integral y mapa de calor HTML.\n"
+        "  • Por defecto 72 h. Ej.: <code>/auditoria_integral 168</code>\n"
+        "\n"
+        "<u>Notas</u>:\n"
+        "• Los umbrales se ajustan por variables de entorno: <code>AUD_*</code> (p.ej. <code>AUD_HOPS_MAX</code>, "
+        "<code>AUD_P90_STRONG</code>, <code>AUD_BEACON_R</code>, <code>AUD_BEACON_C</code>…).\n"
+        "• Salidas en <code>bot_data/reportes/</code>. El mapa HTML se guarda también ahí (o en <code>BOT_MAPS_DIR</code> si está definido).\n"
+    )
 
     full = "\n\n".join([
-        s_intro, s_conv, s_mensajeria, s_programacion, s_diario, s_telemetria, s_nodos, s_vecinos,
+        s_intro, s_conv, s_mensajeria, s_programacion, s_diario, s_telemetria, s_nodos, s_refresnodos, s_vecinos,
         s_rutas, s_cobertura, s_escucha, s_lora, s_estado, s_broker_admin,  s_params, s_errores,
-        s_ejemplos, s_cli, s_aprs
+        s_ejemplos, s_cli, s_aprs, s_auditorias
     ])
 
     await _send_html_chunks(update, full, block_title="Ayuda")
@@ -4900,722 +5270,70 @@ def _is_listen_active(context) -> bool:
     st = context.chat_data.get("listen_state") or {}
     return bool(st.get("active"))
 
-async def ver_nodos_cmd_old(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    /ver_nodos [max_n] [timeout]
-      - Lee nodos del pool persistente, sin abrir nuevas conexiones al 4403.
-      - Orden por recencia (más recientes primero).
-      - Muestra alias, !id, SNR y 'visto hace'.
-    """
-    bump_stat(update.effective_user.id, update.effective_user.username or "", "ver_nodos")
-  
+# =========================
+# ver_nodos_cmd — COMPLETA (km + ciudad/provincia)
+# =========================
 
-    # Parseo robusto de args (sin helpers nuevos)
-    args = (context.args or []) + [None, None]
-    try:
-        max_n = int(args[0]) if args[0] and str(args[0]).isdigit() else 20
-    except Exception:
-        max_n = 20
-    try:
-        timeout = float(args[1]) if args[1] and str(args[1]).replace('.', '', 1).isdigit() else 4.0
-    except Exception:
-        timeout = 4.0
-
-    # Pool/host/port ya existentes en bot_data (no creamos nada nuevo)
-    pool = context.bot_data.get("tcp_pool")
-    host = context.bot_data.get("mesh_host")
-    port = context.bot_data.get("mesh_port", 4403)
-    if not pool or not host:
-        await update.effective_message.reply_text("⚠️ Config no inicializada (pool/host).")
-        return ConversationHandler.END
-
-    import time
-    now = int(time.time())
-    now2 = int(time.time())
-    # --- Función local de extracción (inline, sin helpers nuevos) ---
-    def _extract_nodes_from_iface(iface):
-        nodes = []
-        raw_nodes = getattr(iface, "nodes", None)
-        if raw_nodes and isinstance(raw_nodes, dict):
-            iterable = raw_nodes.values()
-        elif isinstance(raw_nodes, list):
-            iterable = raw_nodes
-        else:
-            getnodes = getattr(iface, "getNodes", None)
-            iterable = getnodes() if callable(getnodes) else []
-
-        for n in (iterable or []):
-            usr = n.get("user") or {}
-            uid = usr.get("id") or n.get("id") or n.get("num") or n.get("nodeId")
-            alias = usr.get("longName") or usr.get("shortName") or n.get("name") or uid or "¿sin_alias?"
-            metrics = n.get("deviceMetrics") or n.get("metrics") or {}
-            snr = metrics.get("snr", n.get("snr"))
-            last_heard = n.get("lastHeard") or n.get("last_heard") or n.get("heard")
-            last_heard = int(last_heard) if isinstance(last_heard, (int, float)) else 0
-            ago = (now - last_heard) if last_heard else None
-            nodes.append({"id": uid, "alias": alias, "snr": snr, "ago": ago})
-
-        # Orden por recencia (None al final)
-        nodes.sort(key=lambda x: (x["ago"] if x["ago"] is not None else 10**9))
-        # Límite
-        if max_n and max_n > 0:
-            nodes[:] = nodes[:max_n]
-        return nodes
-
-    # === PRIMERO: intenta leer vía broker (MISMA conexión del broker) ===
-    try:
-        r = _broker_ctrl(
-            "LIST_NODES",
-            {"limit": max_n},
-            timeout=min(10.0, max(2.0, timeout + 1.0)),
-        )
-        if r and r.get("ok"):
-          
-            data = r.get("data") or []
-
-            import time as _t
-            now2 = int(_t.time())
-
-            def _fmt_db(val, unit):
-                try:
-                    return f"{float(val):.1f} {unit}"
-                except Exception:
-                    return "—"
-
-            def fmt_ago(sec):
-                if sec is None:
-                    return "—"
-                m, s = divmod(max(0, int(sec)), 60)
-                h, m = divmod(m, 60)
-                if h: return f"{h}h {m}m"
-                if m: return f"{m}m {s}s"
-                return f"{s}s"
-
-            def _get_any(d: dict, *keys, default=None):
-                for k in keys:
-                    if k in d and d[k] is not None:
-                        return d[k]
-                return default
-
-            def _compute_hops_relaxed(evt: dict) -> int | None:
-                try:
-                    hl = _get_any(evt, "hop_limit", "hopLimit")
-                    hs = _get_any(evt, "hop_start", "hopStart")
-                    if hl is None or hs is None:
-                        r0 = evt.get("routing") or {}
-                        if hl is None: hl = _get_any(r0, "hop_limit", "hopLimit")
-                        if hs is None: hs = _get_any(r0, "hop_start", "hopStart")
-                    if hl is None or hs is None:
-                        return None
-                    hl = int(hl); hs = int(hs)
-                    return max(0, min(hl - hs, 7))
-                except Exception:
-                    return None
-
-            # 1) Normaliza nodos del broker
-            norm = []
-            for n in data:
-                nid   = n.get("id") or "¿id?"
-                alias = (n.get("alias") or nid).strip()
-                snr   = n.get("snr")
-                rssi  = n.get("rssi")
-
-                last  = (n.get("lastHeard") or n.get("last_heard") or
-                        n.get("heard") or n.get("last_seen") or n.get("ts"))
-                try:
-                    last = int(last) if last is not None else None
-                except Exception:
-                    last = None
-
-                hops = n.get("hops")
-                if hops is None:
-                    try:
-                        # Ya existe en tu bot; si falla, seguimos.
-                        hops = _compute_real_hops(n)  # noqa: F821
-                    except Exception:
-                        hops = None
-                if hops is None:
-                    hops = _compute_hops_relaxed(n)
-                try:
-                    hops = int(hops) if hops is not None else 0
-                except Exception:
-                    hops = 0
-
-                norm.append({
-                    "id": nid, "alias": alias, "snr": snr, "rssi": rssi,
-                    "last": last, "hops": hops
-                })
-
-            # 2) Refresca 'last' con BACKLOG reciente (no abre TCP)
-            try:
-                since = now2 - 30*60   # 30 minutos de ventana
-                bl = _broker_ctrl("FETCH_BACKLOG",
-                                {"since": since,
-                                "kinds": ["TEXT_MESSAGE_APP", "POSITION_APP", "TELEMETRY_APP"]},
-                                timeout=5.0)
-                if bl and bl.get("ok"):
-                    lastmap = {}  # node_id -> ts más reciente
-                    for ev in (bl.get("data") or []):
-                        src = (ev.get("from") or ev.get("fromId") or ev.get("srcId") or ev.get("nodeId"))
-                        ts  = (ev.get("ts") or ev.get("time") or ev.get("timestamp"))
-                        try:
-                            if src and ts is not None:
-                                ts = int(ts)
-                                if (src not in lastmap) or (ts > lastmap[src]):
-                                    lastmap[src] = ts
-                        except Exception:
-                            pass
-                    if lastmap:
-                        for x in norm:
-                            nid = x["id"]
-                            if nid in lastmap and (x["last"] is None or lastmap[nid] > x["last"]):
-                                x["last"] = lastmap[nid]
-            except Exception:
-                pass
-
-            # 3) Recalcula 'ago' ahora y ordena por recencia
-            for x in norm:
-                x["ago"] = (now2 - x["last"]) if x["last"] is not None else None
-
-            norm.sort(key=lambda x: (x["ago"] if x["ago"] is not None else 10**9))
-
-            # 4) Recorta a max_n (ya parseado arriba)
-            if max_n and max_n > 0:
-                norm = norm[:max_n]
-
-            # 5) Formatea salida
-            lines = []
-            for i, n0 in enumerate(norm, 1):
-                nid   = n0["id"]
-                alias = n0["alias"]
-                snr   = n0.get("snr")
-                rssi  = n0.get("rssi")
-                hops  = n0.get("hops", 0)
-                ago_t = fmt_ago(n0.get("ago"))
-                parts = [
-                    f"{i}. {alias} ({nid})",
-                    f"SNR: {_fmt_db(snr,'dB')}",
-                    f"visto hace {ago_t}",
-                    f"hops: {hops}",
-                ]
-                # Si también quieres RSSI, descomenta:
-                # parts.insert(2, f"RSSI: {_fmt_db(rssi,'dBm')}")
-                lines.append(" — ".join(parts))
-
-            await update.effective_message.reply_text(
-                "📡 Últimos nodos (broker):\n\n" + ("\n\n".join(lines) if lines else "(sin datos)")
-            )
-            return ConversationHandler.END
-    except Exception:
-        pass  # si falla el broker, seguimos con el pool como hasta ahora
-
-    # === FALLBACK INMEDIATO: fichero/API (formato clásico con mins & hops) ===
-    try:
-        tuples = load_nodes_with_hops(n_max=max_n)  # [(nid, alias, mins, hops)]
-        if tuples:
-            # Índice para selección por número en otros comandos (/enviar N ...)
-            idx_map = {}
-            lines_out = []
-            for i, (nid, alias, mins, hops) in enumerate(tuples, start=1):
-                nid = (nid or "").strip()
-                alias = (alias or nid).strip()
-                try:
-                    mins_i = int(mins)
-                except Exception:
-                    mins_i = mins if mins is not None else 0
-                hops_txt = f"{hops} hops" if (isinstance(hops, int) or (isinstance(hops, str) and hops.isdigit())) else "? hops"
-
-                idx_map[str(i)] = nid
-                lines_out.append(f"{i:2d}.  {nid}  {alias}    {mins_i} min    {hops_txt}")
-
-            context.user_data["nodes_index"] = idx_map
-            await update.effective_message.reply_text(
-                "📡 Nodos (archivo/API):\n\n" + "\n".join(lines_out)
-            )
-            return ConversationHandler.END
-    except Exception:
-        # Si load_nodes_with_hops falla por cualquier motivo, continuamos al pool
-        pass
-
-
-    # ================================
-    # 0) NUEVO: get_iface_wait (pool)
-    # ================================
-    nodes = []
-    try:
-        iface = None
-        if hasattr(pool, "get_iface_wait"):
-            # Reutilizar la misma conexión, esperando hasta 'timeout'
-            iface = pool.get_iface_wait(timeout=timeout, interval=0.3)
-        else:
-            # Compatibilidad: espera manual hasta 'timeout'
-            t_end = time.time() + float(timeout)
-            while time.time() < t_end:
-                try:
-                    if hasattr(pool, "get_iface"):
-                        iface = pool.get_iface()
-                    elif hasattr(pool, "get_interface"):
-                        iface = pool.get_interface()
-                    else:
-                        iface = getattr(pool, "iface", None)
-                    if iface is not None:
-                        break
-                except Exception:
-                    pass
-                time.sleep(0.3)
-        if iface is not None:
-            nodes = _extract_nodes_from_iface(iface)
-    except Exception:
-        nodes = []
-
-    # --- Ejecutar contra el POOL (sin sockets nuevos) ---
-    # 1) session(...)
-    if not nodes:
-        session_cm = getattr(pool, "session", None)
-        if callable(session_cm):
-            try:
-                with pool.session(host, port, timeout=timeout) as iface:
-                    nodes = _extract_nodes_from_iface(iface)
-            except Exception:
-                nodes = []
-    # 2) run_with_interface(...)
-    if not nodes:
-        run_with_iface = getattr(pool, "run_with_interface", None)
-        if callable(run_with_iface):
-            try:
-                nodes = run_with_iface(host, port, timeout, _extract_nodes_from_iface)
-            except Exception:
-                nodes = []
-    # 3) acquire() / release()
-    if not nodes:
-        acquire_fn = getattr(pool, "acquire", None)
-        if callable(acquire_fn):
-            iface = None
-            try:
-                iface = pool.acquire(host, port, timeout=timeout)
-                nodes = _extract_nodes_from_iface(iface)
-            except Exception:
-                nodes = []
-            finally:
-                try:
-                    if iface and hasattr(iface, "release"):
-                        iface.release()
-                except Exception:
-                    pass
-    # 4) get()/ensure_connected()
-    if not nodes:
-        get_fn = getattr(pool, "get", None) or getattr(pool, "get_or_create", None)
-        ensure_fn = getattr(pool, "ensure_connected", None)
-        if callable(get_fn):
-            try:
-                iface = get_fn(host, port)
-                if callable(ensure_fn):
-                    ensure_fn(host, port, timeout=timeout)
-                nodes = _extract_nodes_from_iface(iface)
-            except Exception:
-                nodes = []
-
-    if not nodes:
-        await update.effective_message.reply_text("📡 Últimos nodos:\n\n(sin datos ahora mismo)")
-        return ConversationHandler.END
-
-    # Formateo inline (sin helpers nuevos)
-    def fmt_ago(sec):
-        if sec is None:
-            return "—"
-        m, s = divmod(max(0, int(sec)), 60)
-        h, m = divmod(m, 60)
-        if h: return f"{h}h {m}m"
-        if m: return f"{m}m {s}s"
-        return f"{s}s"
-
-    lines = []
-    for i, n in enumerate(nodes, 1):
-        alias = str(n.get("alias") or n.get("id") or "¿sin_alias?").strip()
-        nid   = n.get("id") or "¿id?"
-        snr   = n.get("snr")
-        ago   = fmt_ago(n.get("ago"))
-        snr_txt = f"{snr:.2f} dB" if isinstance(snr, (int, float)) else "—"
-        lines.append(f"{i}. {alias} ({nid}) — SNR: {snr_txt} — visto hace {ago}")
-
-    await update.effective_message.reply_text("📡 Últimos nodos:\n\n" + "\n\n".join(lines))
-    return ConversationHandler.END
-
+# =========================
+# ver_nodos_cmd — wrapper sobre /vecinos (sin filtro de hops)
+# =========================
 async def ver_nodos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     /ver_nodos [max_n] [timeout]
-      - Lee nodos del pool persistente, sin abrir nuevas conexiones al 4403.
-      - Orden por recencia (más recientes primero).
-      - Muestra alias, !id, SNR y 'visto hace'.
-    """
-    bump_stat(update.effective_user.id, update.effective_user.username or "", "ver_nodos")
-  
 
-    # Parseo robusto de args (sin helpers nuevos)
-    args = (context.args or []) + [None, None]
+    Implementación simplificada y robusta:
+    - Reutiliza exactamente la misma lógica que /vecinos_cmd.
+    - No aplica filtro de hops (equivalente a /vecinos con "todos los hops").
+    - Mantiene el parámetro max_n y timeout.
+
+    Sintaxis:
+      /ver_nodos
+      /ver_nodos 30
+      /ver_nodos 30 60
+    """
+
+    user = update.effective_user
+    bump_stat(user.id, user.username or "", "ver_nodos")
+
+    # Parseo de argumentos local (solo para max_n y timeout)
+    args = context.args or []
+
+    # max_n
     try:
-        max_n = int(args[0]) if args[0] and str(args[0]).isdigit() else 20
+        max_n = int(args[0]) if len(args) >= 1 and str(args[0]).lstrip("-").isdigit() else 20
     except Exception:
         max_n = 20
+
+    # timeout (se reenvía a vecinos_cmd, que ya lo entiende)
     try:
-        timeout = float(args[1]) if args[1] and str(args[1]).replace('.', '', 1).isdigit() else 4.0
+        timeout = int(args[1]) if len(args) >= 2 and str(args[1]).lstrip("-").isdigit() else 60
     except Exception:
-        timeout = 4.0
+        timeout = 60
 
-    # Pool/host/port ya existentes en bot_data (no creamos nada nuevo)
-    pool = context.bot_data.get("tcp_pool")
-    host = context.bot_data.get("mesh_host")
-    port = context.bot_data.get("mesh_port", 4403)
-    if not pool or not host:
-        await update.effective_message.reply_text("⚠️ Config no inicializada (pool/host).")
-        return ConversationHandler.END
+    # Preparamos args para vecinos_cmd:
+    #   /vecinos [max_n] [timeout] [hops_mode]
+    # Aquí NO queremos filtrar hops, así que usamos hops_mode="all"
+    context.args = [str(max_n), str(timeout), "all"]
 
-    import time
-    now = int(time.time())
-    now2 = int(time.time())
-    # --- Función local de extracción (inline, sin helpers nuevos) ---
-    def _extract_nodes_from_iface(iface):
-        nodes = []
-        raw_nodes = getattr(iface, "nodes", None)
-        if raw_nodes and isinstance(raw_nodes, dict):
-            iterable = raw_nodes.values()
-        elif isinstance(raw_nodes, list):
-            iterable = raw_nodes
-        else:
-            getnodes = getattr(iface, "getNodes", None)
-            iterable = getnodes() if callable(getnodes) else []
-
-        for n in (iterable or []):
-            usr = n.get("user") or {}
-            uid = usr.get("id") or n.get("id") or n.get("num") or n.get("nodeId")
-            alias = usr.get("longName") or usr.get("shortName") or n.get("name") or uid or "¿sin_alias?"
-            metrics = n.get("deviceMetrics") or n.get("metrics") or {}
-            snr = metrics.get("snr", n.get("snr"))
-            last_heard = n.get("lastHeard") or n.get("last_heard") or n.get("heard")
-            last_heard = int(last_heard) if isinstance(last_heard, (int, float)) else 0
-            ago = (now - last_heard) if last_heard else None
-            nodes.append({"id": uid, "alias": alias, "snr": snr, "ago": ago})
-
-        # Orden por recencia (None al final)
-        nodes.sort(key=lambda x: (x["ago"] if x["ago"] is not None else 10**9))
-        # Límite
-        if max_n and max_n > 0:
-            nodes[:] = nodes[:max_n]
-        return nodes
-
-    # === PRIMERO: intenta leer vía broker (MISMA conexión del broker) ===
-    try:
-        r = _broker_ctrl(
-            "LIST_NODES",
-            {"limit": max_n},
-            timeout=min(10.0, max(2.0, timeout + 1.0)),
-        )
-        if r and r.get("ok"):
-          
-            data = r.get("data") or []
-
-            import time as _t
-            now2 = int(_t.time())
-
-            def _fmt_db(val, unit):
-                try:
-                    return f"{float(val):.1f} {unit}"
-                except Exception:
-                    return "—"
-
-            def fmt_ago(sec):
-                if sec is None:
-                    return "—"
-                m, s = divmod(max(0, int(sec)), 60)
-                h, m = divmod(m, 60)
-                if h: return f"{h}h {m}m"
-                if m: return f"{m}m {s}s"
-                return f"{s}s"
-
-            def _get_any(d: dict, *keys, default=None):
-                for k in keys:
-                    if k in d and d[k] is not None:
-                        return d[k]
-                return default
-
-            def _compute_hops_relaxed(evt: dict) -> int | None:
-                try:
-                    hl = _get_any(evt, "hop_limit", "hopLimit")
-                    hs = _get_any(evt, "hop_start", "hopStart")
-                    if hl is None or hs is None:
-                        r0 = evt.get("routing") or {}
-                        if hl is None: hl = _get_any(r0, "hop_limit", "hopLimit")
-                        if hs is None: hs = _get_any(r0, "hop_start", "hopStart")
-                    if hl is None or hs is None:
-                        return None
-                    hl = int(hl); hs = int(hs)
-                    return max(0, min(hl - hs, 7))
-                except Exception:
-                    return None
-
-            # 1) Normaliza nodos del broker
-            norm = []
-            for n in data:
-                nid   = n.get("id") or "¿id?"
-                alias = (n.get("alias") or nid).strip()
-                snr   = n.get("snr")
-                rssi  = n.get("rssi")
-
-                last  = (n.get("lastHeard") or n.get("last_heard") or
-                        n.get("heard") or n.get("last_seen") or n.get("ts"))
-                try:
-                    last = int(last) if last is not None else None
-                except Exception:
-                    last = None
-
-                hops = n.get("hops")
-                if hops is None:
-                    try:
-                        # Ya existe en tu bot; si falla, seguimos.
-                        hops = _compute_real_hops(n)  # noqa: F821
-                    except Exception:
-                        hops = None
-                if hops is None:
-                    hops = _compute_hops_relaxed(n)
-                try:
-                    hops = int(hops) if hops is not None else 0
-                except Exception:
-                    hops = 0
-
-                norm.append({
-                    "id": nid, "alias": alias, "snr": snr, "rssi": rssi,
-                    "last": last, "hops": hops
-                })
-
-            # 2) Refresca 'last' con BACKLOG reciente (no abre TCP)
-            try:
-                since = now2 - 30*60   # 30 minutos de ventana
-                bl = _broker_ctrl("FETCH_BACKLOG",
-                                {"since": since,
-                                "kinds": ["TEXT_MESSAGE_APP", "POSITION_APP", "TELEMETRY_APP"]},
-                                timeout=5.0)
-                if bl and bl.get("ok"):
-                    lastmap = {}  # node_id -> ts más reciente
-                    for ev in (bl.get("data") or []):
-                        src = (ev.get("from") or ev.get("fromId") or ev.get("srcId") or ev.get("nodeId"))
-                        ts  = (ev.get("ts") or ev.get("time") or ev.get("timestamp"))
-                        try:
-                            if src and ts is not None:
-                                ts = int(ts)
-                                if (src not in lastmap) or (ts > lastmap[src]):
-                                    lastmap[src] = ts
-                        except Exception:
-                            pass
-                    if lastmap:
-                        for x in norm:
-                            nid = x["id"]
-                            if nid in lastmap and (x["last"] is None or lastmap[nid] > x["last"]):
-                                x["last"] = lastmap[nid]
-            except Exception:
-                pass
-
-            # 2.b) Enriquecer HOPS desde nodos.txt (parser del Relay)
-            try:
-                def _norm_id(s: str) -> str:
-                    s = (s or "").strip()
-                    if not s:
-                        return s
-                    return s if s.startswith("!") else f"!{s[-8:]}"
-                # Cargamos nodos del fichero (tabla 'bonita' o el formato que haya)
-                rows_file = _parse_nodes_table(NODES_FILE)
-                hops_map = {}
-                for rf in (rows_file or []):
-                    nid_f = _norm_id(rf.get("id"))
-                    hv = rf.get("hops")
-                    if nid_f and hv is not None:
-                        try:
-                            hops_map[nid_f] = int(hv)
-                        except Exception:
-                            pass
-
-                # Completa/Remplaza hops en los nodos del broker cuando vengan 0/None
-                if hops_map:
-                    for x in norm:
-                        nid_x = _norm_id(x.get("id"))
-                        if nid_x in hops_map:
-                            # si broker dio 0/None, o si quieres forzar el del fichero, sustituye:
-                            if x.get("hops") in (None, 0):
-                                x["hops"] = hops_map[nid_x]
-            except Exception:
-                pass
-
-
-            # 3) Recalcula 'ago' ahora y ordena por recencia
-            for x in norm:
-                x["ago"] = (now2 - x["last"]) if x["last"] is not None else None
-
-            norm.sort(key=lambda x: (x["ago"] if x["ago"] is not None else 10**9))
-
-            # 4) Recorta a max_n (ya parseado arriba)
-            if max_n and max_n > 0:
-                norm = norm[:max_n]
-
-            # 5) Formatea salida
-            lines = []
-            for i, n0 in enumerate(norm, 1):
-                nid   = n0["id"]
-                alias = n0["alias"]
-                snr   = n0.get("snr")
-                rssi  = n0.get("rssi")
-                hops  = n0.get("hops", 0)
-                ago_t = fmt_ago(n0.get("ago"))
-                parts = [
-                    f"{i}. {alias} ({nid})",
-                    f"SNR: {_fmt_db(snr,'dB')}",
-                    f"visto hace {ago_t}",
-                    f"hops: {hops}",
-                ]
-                # Si también quieres RSSI, descomenta:
-                # parts.insert(2, f"RSSI: {_fmt_db(rssi,'dBm')}")
-                lines.append(" — ".join(parts))
-
-            await update.effective_message.reply_text(
-                "📡 Últimos nodos (broker):\n\n" + ("\n\n".join(lines) if lines else "(sin datos)")
-            )
-            return ConversationHandler.END
-    except Exception:
-        pass  # si falla el broker, seguimos con el pool como hasta ahora
-
-       # === FALLBACK INMEDIATO: nodos.txt via Relay (con mins & hops) ===
-    try:
-        tuples = get_visible_nodes_with_hops(NODES_FILE)  # [(id, alias, mins, hops|None)]
-        if max_n and max_n > 0:
-            tuples = tuples[:max_n]
-        if tuples:
-            idx_map = {}
-            lines_out = []
-            for i, (nid, alias, mins, hops) in enumerate(tuples, start=1):
-                nid = (nid or "").strip()
-                alias = (alias or nid).strip()
-                mins_i = parse_minutes(mins) if mins is not None else 0  # robusto (Relay)
-                hops_txt = f"{hops} hops" if (hops is not None and str(hops).isdigit()) else "? hops"
-                idx_map[str(i)] = nid
-                lines_out.append(f"{i:2d}.  {nid}  {alias}    {mins_i} min    {hops_txt}")
-
-            context.user_data["nodes_index"] = idx_map
-            await update.effective_message.reply_text(
-                "<b>📡 Nodos (archivo/API)</b>\n\n" + "\n".join(lines_out),
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
-            return ConversationHandler.END
-    except Exception:
-        # Si fallara el parseo por cualquier motivo, seguimos con tu lógica de pool
-        pass
-
-        
-
-
-    # ================================
-    # 0) NUEVO: get_iface_wait (pool)
-    # ================================
-    nodes = []
-    try:
-        iface = None
-        if hasattr(pool, "get_iface_wait"):
-            # Reutilizar la misma conexión, esperando hasta 'timeout'
-            iface = pool.get_iface_wait(timeout=timeout, interval=0.3)
-        else:
-            # Compatibilidad: espera manual hasta 'timeout'
-            t_end = time.time() + float(timeout)
-            while time.time() < t_end:
-                try:
-                    if hasattr(pool, "get_iface"):
-                        iface = pool.get_iface()
-                    elif hasattr(pool, "get_interface"):
-                        iface = pool.get_interface()
-                    else:
-                        iface = getattr(pool, "iface", None)
-                    if iface is not None:
-                        break
-                except Exception:
-                    pass
-                time.sleep(0.3)
-        if iface is not None:
-            nodes = _extract_nodes_from_iface(iface)
-    except Exception:
-        nodes = []
-
-    # --- Ejecutar contra el POOL (sin sockets nuevos) ---
-    # 1) session(...)
-    if not nodes:
-        session_cm = getattr(pool, "session", None)
-        if callable(session_cm):
-            try:
-                with pool.session(host, port, timeout=timeout) as iface:
-                    nodes = _extract_nodes_from_iface(iface)
-            except Exception:
-                nodes = []
-    # 2) run_with_interface(...)
-    if not nodes:
-        run_with_iface = getattr(pool, "run_with_interface", None)
-        if callable(run_with_iface):
-            try:
-                nodes = run_with_iface(host, port, timeout, _extract_nodes_from_iface)
-            except Exception:
-                nodes = []
-    # 3) acquire() / release()
-    if not nodes:
-        acquire_fn = getattr(pool, "acquire", None)
-        if callable(acquire_fn):
-            iface = None
-            try:
-                iface = pool.acquire(host, port, timeout=timeout)
-                nodes = _extract_nodes_from_iface(iface)
-            except Exception:
-                nodes = []
-            finally:
-                try:
-                    if iface and hasattr(iface, "release"):
-                        iface.release()
-                except Exception:
-                    pass
-    # 4) get()/ensure_connected()
-    if not nodes:
-        get_fn = getattr(pool, "get", None) or getattr(pool, "get_or_create", None)
-        ensure_fn = getattr(pool, "ensure_connected", None)
-        if callable(get_fn):
-            try:
-                iface = get_fn(host, port)
-                if callable(ensure_fn):
-                    ensure_fn(host, port, timeout=timeout)
-                nodes = _extract_nodes_from_iface(iface)
-            except Exception:
-                nodes = []
-
-    if not nodes:
-        await update.effective_message.reply_text("📡 Últimos nodos:\n\n(sin datos ahora mismo)")
-        return ConversationHandler.END
-
-    # Formateo inline (sin helpers nuevos)
-    def fmt_ago(sec):
-        if sec is None:
-            return "—"
-        m, s = divmod(max(0, int(sec)), 60)
-        h, m = divmod(m, 60)
-        if h: return f"{h}h {m}m"
-        if m: return f"{m}m {s}s"
-        return f"{s}s"
-
-    lines = []
-    for i, n in enumerate(nodes, 1):
-        alias = str(n.get("alias") or n.get("id") or "¿sin_alias?").strip()
-        nid   = n.get("id") or "¿id?"
-        snr   = n.get("snr")
-        ago   = fmt_ago(n.get("ago"))
-        snr_txt = f"{snr:.2f} dB" if isinstance(snr, (int, float)) else "—"
-        lines.append(f"{i}. {alias} ({nid}) — SNR: {snr_txt} — visto hace {ago}")
-
-    await update.effective_message.reply_text("📡 Últimos nodos:\n\n" + "\n\n".join(lines))
-    return ConversationHandler.END
+    # Reutilizamos la lógica probada de vecinos_cmd
+    return await vecinos_cmd(update, context)
 
 
 async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /position <N> [min]
+    - Muestra las últimas posiciones (≤ min) con:
+      * Distancia (km) desde HOME_LAT/HOME_LON del .env (parseo tolerante)
+      * Ciudad (reverse_geocoder: name → admin2 → admin1)
+      * Mantiene alt, SNR, RSSI y enlace a Google Maps
+    """
+    # === Garantiza que el .env está cargado en este proceso ===
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path="/app/.env", override=True)
+    except Exception:
+        pass
+
     if not context.args:
         await update.effective_message.reply_text("Uso: /position <Nodos> [T] [min]")
         return
@@ -5629,26 +5347,82 @@ async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("📍 Sin posiciones recientes.")
         return
 
-    # === MOD: cachear el mapa de nodos para resolver alias si el registro no lo trae ===
+    # === Cache alias/nodos ===
     nodes_map = context.user_data.get("nodes_map")
     if nodes_map is None:
         try:
-            # Usa tu helper existente (ajusta el import si lo tienes en otro módulo)
             nodes_map = build_nodes_mapping()
             context.user_data["nodes_map"] = nodes_map
         except Exception:
             nodes_map = {}
-    # === FIN MOD ===
 
-    # Función auxiliar para dividir mensajes (igual que la tuya)
+    # Helpers locales
+
+    from datetime import datetime
+
+    def _to_float_coord(v):
+        if v is None:
+            return None
+        try:
+            if isinstance(v, (int, float)): return float(v)
+            s = str(v).strip().replace(",", ".")
+            s = "".join(ch for ch in s if ch in "+-0123456789.")
+            if s in ("", "+", "-"): return None
+            return float(s)
+        except Exception:
+            return None
+
+    def _haversine_km(lat1, lon1, lat2, lon2):
+        try:
+            R = 6371.0
+            dlat = math.radians(float(lat2) - float(lat1))
+            dlon = math.radians(float(lon2) - float(lon1))
+            a = math.sin(dlat/2)**2 + math.cos(math.radians(float(lat1))) * math.cos(math.radians(float(lat2))) * math.sin(dlon/2)**2
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+            return round(R * c, 1)
+        except Exception:
+            return None
+
+    _rg_resolver = None
+    def _ensure_rg():
+        nonlocal _rg_resolver
+        if _rg_resolver is not None: return
+        try:
+            import reverse_geocoder as rg
+            def _rg(lat, lon):
+                try:
+                    res = rg.search([(float(lat), float(lon))])
+                    if isinstance(res, list) and res:
+                        r = res[0]
+                        return r.get("name") or r.get("admin2") or r.get("admin1") or None
+                except Exception:
+                    return None
+                return None
+            _rg_resolver = _rg
+        except Exception:
+            _rg_resolver = None
+
+    def _place_of(lat, lon):
+        if lat is None or lon is None: return None
+        _ensure_rg()
+        if _rg_resolver is None: return None
+        try:
+            return _rg_resolver(lat, lon)
+        except Exception:
+            return None
+
+    # HOME del .env (tolerante)
+    la = os.getenv("HOME_LAT"); lo = os.getenv("HOME_LON")
+    home_lat = _to_float_coord(la) if la is not None else None
+    home_lon = _to_float_coord(lo) if lo is not None else None
+
+    # Envío con chunks (tu función existente)
     async def send_message_chunks(message_text, max_length=4096):
         if len(message_text) <= max_length:
             await update.effective_message.reply_html(message_text, disable_web_page_preview=True)
             return
-        
         lines = message_text.split('\n')
         current_chunk = ""
-        
         for line in lines:
             if len(line) > max_length:
                 if current_chunk:
@@ -5656,16 +5430,11 @@ async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     current_chunk = ""
                 while line:
                     chunk_size = max_length
-                    if len(line) > chunk_size:
-                        cut_pos = line.rfind(' ', 0, chunk_size)
-                        if cut_pos == -1:
-                            cut_pos = chunk_size
-                    else:
-                        cut_pos = len(line)
+                    cut_pos = line.rfind(' ', 0, chunk_size) if len(line) > chunk_size else len(line)
+                    if cut_pos == -1: cut_pos = chunk_size
                     await update.effective_message.reply_html(line[:cut_pos], disable_web_page_preview=True)
                     line = line[cut_pos:].lstrip()
                 continue
-            
             test_chunk = current_chunk + '\n' + line if current_chunk else line
             if len(test_chunk) > max_length:
                 if current_chunk:
@@ -5673,22 +5442,17 @@ async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 current_chunk = line
             else:
                 current_chunk = test_chunk
-        
         if current_chunk:
             await update.effective_message.reply_html(current_chunk, disable_web_page_preview=True)
-    
-    # Construir el mensaje
+
+    # Construcción del mensaje
     lines = [f"📍 Últimas posiciones (≤{last_min} min):"]
-    
     for i, r in enumerate(rows, 1):
-        # === MOD: normalizar id y resolver alias de forma robusta ===
         nid_raw = str(r.get("id") or "")
-        nid = nid_raw.lstrip("!")                # evita "!!id"
+        nid = nid_raw.lstrip("!")
         id_str = f"!{nid}" if nid else "!?"
-        
-        # 1) alias del propio registro (si viene)
+
         alias = (r.get("alias") or r.get("name") or r.get("shortName") or r.get("longName") or "").strip()
-        # 2) si no vino en el registro, intenta en el mapa de nodos
         if not alias and nid:
             info = (nodes_map or {}).get(nid) or {}
             for k in ("alias", "name", "shortName", "longName"):
@@ -5696,21 +5460,76 @@ async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 if isinstance(v, str) and v.strip():
                     alias = v.strip()
                     break
-        
-        # 3) encabezado sin duplicaciones
-        if not alias or alias in (nid, nid_raw, id_str):
-            head = id_str
-        else:
-            head = f"{alias} ({id_str})"
-        # === FIN MOD ===
+        head = id_str if (not alias or alias in (nid, nid_raw, id_str)) else f"{alias} ({id_str})"
 
-        # Lat/Lon (como tenías)
         lat, lon = r.get("lat"), r.get("lon")
-        # (opcional) tolera enteros escalados *_i si los llegas a guardar
-        if lat is None and isinstance(r.get("latitude_i"), int):
-            lat = r["latitude_i"] / 1e7
-        if lon is None and isinstance(r.get("longitude_i"), int):
-            lon = r["longitude_i"] / 1e7
+        if lat is None and isinstance(r.get("latitude_i"), int): lat = r["latitude_i"] / 1e7
+        if lon is None and isinstance(r.get("longitude_i"), int): lon = r["longitude_i"] / 1e7
+
+        have_coords = False
+        try:
+            lat_f = float(lat); lon_f = float(lon)
+            have_coords = True
+            gmap = f"https://maps.google.com/?q={lat_f},{lon_f}"
+            line = f"{i}. {head} — {lat_f:.5f},{lon_f:.5f}"
+        except Exception:
+            gmap = None
+            line = f"{i}. {head}"
+
+        if r.get("alt") is not None:
+            try:    line += f" • alt {float(r['alt']):.1f} m"
+            except: line += f" • alt {r['alt']} m"
+        if r.get("rx_snr") is not None:
+            try:    line += f" • SNR {float(r['rx_snr']):.1f} dB"
+            except: line += f" • SNR {r['rx_snr']} dB"
+        if r.get("rx_rssi") is not None:
+            try:    line += f" • RSSI {float(r['rx_rssi']):.1f} dBm"
+            except: line += f" • RSSI {r['rx_rssi']} dBm"
+
+                # Distancia + Ciudad/Provincia (robusto)
+        try:
+            def _f(v):
+                try:
+                    if v is None: return None
+                    if isinstance(v, (int, float)): return float(v)
+                    s = str(v).strip().replace(",", ".")
+                    s = "".join(ch for ch in s if ch in "+-0123456789.")
+                    if s in ("", "+", "-"): return None
+                    return float(s)
+                except Exception:
+                    return None
+
+            la = _f(os.getenv("HOME_LAT"))
+            lo = _f(os.getenv("HOME_LON"))
+            lt = _f(lat_f if have_coords else None)
+            ln = _f(lon_f if have_coords else None)
+
+            dist_txt = None
+            place_txt = None
+
+            if la is not None and lo is not None and lt is not None and ln is not None:
+                try:
+                    dkm = _haversine_km(la, lo, lt, ln)
+                    if dkm is not None:
+                        dist_txt = f"{dkm:.1f}"
+                except Exception:
+                    pass
+
+            if lt is not None and ln is not None:
+                try:
+                    p = _place_of(lt, ln)
+                    if p: place_txt = p
+                except Exception:
+                    pass
+
+            if dist_txt is not None or place_txt is not None:
+                line += " • 📍 "
+                line += (dist_txt + " km") if dist_txt is not None else "? km"
+                line += " — "
+                line += place_txt if place_txt is not None else "?"
+        except Exception:
+            # Si algo fallase, nunca rompemos la salida
+            pass
 
         # Timestamp
         try:
@@ -5719,43 +5538,13 @@ async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             ts = "—"
 
-        # Google Maps
-        try:
-            lat_f = float(lat)
-            lon_f = float(lon)
-            gmap = f"https://maps.google.com/?q={lat_f},{lon_f}"
-            line = f"{i}. {head} — {lat_f:.5f},{lon_f:.5f}"
-        except Exception:
-            gmap = None
-            line = f"{i}. {head}"
-
-        # Métricas (igual que las tuyas, con pequeños try)
-        if r.get("alt") is not None:
-            try:
-                line += f" • alt {float(r['alt']):.1f} m"
-            except Exception:
-                line += f" • alt {r['alt']} m"
-        if r.get("rx_snr") is not None:
-            try:
-                line += f" • SNR {float(r['rx_snr']):.1f} dB"
-            except Exception:
-                line += f" • SNR {r['rx_snr']} dB"
-        if r.get("rx_rssi") is not None:
-            try:
-                line += f" • RSSI {float(r['rx_rssi']):.1f} dBm"
-            except Exception:
-                line += f" • RSSI {r['rx_rssi']} dBm"
-
         if gmap:
             line += f"\n   ⏱️ {ts} • 🌍 <a href=\"{gmap}\">Ver en Google Maps</a>"
         else:
             line += f"\n   ⏱️ {ts}"
-        
         lines.append(line)
-    
-    # Enviar usando la función de chunks
-    full_message = "\n".join(lines)
-    await send_message_chunks(full_message)
+
+    await send_message_chunks("\n".join(lines))
 
 
 async def position_mapa_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -7389,260 +7178,568 @@ def _parse_hops_filter(token: str) -> tuple[int | None, int | None]:
         return None, n - 1 if n > 0 else 0
     return None, None
 
-# === REHECHA: /vecinos ===
-# === REHECHA: /vecinos ===
 async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    /vecinos [max_n] [hops_max]
-    - Sin args: muestra como /ver_nodos pero aplicable a 'vecinos' (sin filtro de hops).
-    - 1er arg numérico: max_n
-    - 2º arg numérico: hops_max (mantiene solo hops <= hops_max)
+    /vecinos [max_n] [hops_max] [timeout]
+    Igual que /ver_nodos en lógica, formato y enriquecimiento (km + ciudad/provincia),
+    con la ÚNICA diferencia de filtrar por hops <= hops_max si se indica.
+    Parámetros:
+      - max_n     : cantidad máxima a mostrar (por defecto 20)
+      - hops_max  : filtra nodos con hops <= hops_max (por defecto None = sin filtro)
+      - timeout   : opcional, sólo para el tercer fallback (pool TCP). Por defecto 4.0 s
     """
+    bump_stat(update.effective_user.id, update.effective_user.username or "", "vecinos")
+
+    # 0) .env
     try:
-        # ---- Parseo simple y directo (alineado a /vecinos 10 5) ----
-        args = context.args or []
-        def _get_int(ix, default=None):
-            try:
-                v = args[ix]
-                return int(v) if str(v).lstrip("-").isdigit() else default
-            except Exception:
-                return default
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path="/app/.env", override=True)
+    except Exception:
+        pass
 
-        max_n    = _get_int(0, 20)   # por defecto como /ver_nodos
-        hops_max = _get_int(1, None) # None = sin filtro por hops
+    # 1) Args
+    args = context.args or []
 
-        # --- Helpers locales de formato (idénticos a ver_nodos enriquecido) ---
-        import time as _t
-        now2 = int(_t.time())
-
-        def _fmt_db(val, unit):
-            try:
-                return f"{float(val):.1f} {unit}"
-            except Exception:
-                return "—"
-
-        def fmt_ago(sec):
-            if sec is None:
-                return "—"
-            m, s = divmod(max(0, int(sec)), 60)
-            h, m = divmod(m, 60)
-            if h: return f"{h}h {m}m"
-            if m: return f"{m}m {s}s"
-            return f"{s}s"
-
-        def _get_any(d: dict, *keys, default=None):
-            for k in keys:
-                if k in d and d[k] is not None:
-                    return d[k]
+    def _to_int(x, default=None):
+        try:
+            return int(x) if str(x).lstrip("-").isdigit() else default
+        except Exception:
             return default
 
-        def _compute_hops_relaxed(evt: dict) -> int | None:
-            # Misma heurística que usas como respaldo cuando no hay hops directos
-            try:
-                hl = _get_any(evt, "hop_limit", "hopLimit")
-                hs = _get_any(evt, "hop_start", "hopStart")
-                if hl is None or hs is None:
-                    r0 = evt.get("routing") or {}
-                    if hl is None: hl = _get_any(r0, "hop_limit", "hopLimit")
-                    if hs is None: hs = _get_any(r0, "hop_start", "hopStart")
-                if hl is None or hs is None:
-                    return None
-                hl = int(hl); hs = int(hs)
-                return max(0, min(hl - hs, 7))
-            except Exception:
-                return None
+    def _is_num_str(s: str) -> bool:
+        if s is None:
+            return False
+        ss = str(s).strip()
+        return ss.count(".") <= 1 and ss.replace(".", "", 1).lstrip("-").isdigit()
 
-        # === Ruta principal: broker LIST_NODES → normaliza → refresca con BACKLOG ===
-        try:
-            r = _broker_ctrl(
-                "LIST_NODES",
-                {"limit": max(50, max_n * 2)},   # margen para filtrar y recortar a max_n
-                timeout=min(10.0, max(2.0, 4.0 + 1.0)),
-            )
-            if r and r.get("ok"):
-                data = r.get("data") or []
+    max_n    = _to_int(args[0] if len(args) > 0 else None, 20)
+    hops_max = _to_int(args[1] if len(args) > 1 else None, None)
 
-                # 1) Normaliza nodos del broker
-                norm = []
-                for n in data:
-                    nid   = n.get("id") or "¿id?"
-                    alias = (n.get("alias") or nid).strip()
-                    snr   = n.get("snr")
-                    rssi  = n.get("rssi")
+    try:
+        timeout = float(args[2]) if (len(args) > 2 and _is_num_str(args[2])) else 4.0
+    except Exception:
+        timeout = 4.0
 
-                    last  = (n.get("lastHeard") or n.get("last_heard") or
-                             n.get("heard") or n.get("last_seen") or n.get("ts"))
-                    try:
-                        last = int(last) if last is not None else None
-                    except Exception:
-                        last = None
-
-                    hops = n.get("hops")
-                    if hops is None:
-                        try:
-                            # helper ya existente en tu bot
-                            hops = _compute_real_hops(n)  # noqa: F821
-                        except Exception:
-                            hops = None
-                    if hops is None:
-                        hops = _compute_hops_relaxed(n)
-                    try:
-                        hops = int(hops) if hops is not None else 0
-                    except Exception:
-                        hops = 0
-
-                    norm.append({
-                        "id": nid, "alias": alias, "snr": snr, "rssi": rssi,
-                        "last": last, "hops": hops
-                    })
-
-                # 2) Refresca 'last' con BACKLOG reciente (no abre TCP)
-                try:
-                    since = now2 - 30*60  # 30 minutos
-                    bl = _broker_ctrl("FETCH_BACKLOG",
-                                      {"since": since,
-                                       "kinds": ["TEXT_MESSAGE_APP", "POSITION_APP", "TELEMETRY_APP"]},
-                                      timeout=5.0)
-                    if bl and bl.get("ok"):
-                        for evt in (bl.get("data") or []):
-                            nid = evt.get("from") or evt.get("id") or evt.get("node_id")
-                            ts  = evt.get("ts") or evt.get("rx_time") or evt.get("time")
-                            try:
-                                ts = int(ts) if ts is not None else None
-                            except Exception:
-                                ts = None
-                            if not nid or ts is None:
-                                continue
-                            for x in norm:
-                                if x.get("id") == nid:
-                                    x["last"] = max(int(x.get("last") or 0), int(ts))
-
-                except Exception:
-                    pass
-
-                # 3) Completa/Reemplaza hops con nodos.txt si están a 0/None
-                try:
-                    def _norm_id(s: str | None) -> str:
-                        s = (s or "").strip()
-                        if not s:
-                            return s
-                        return s if s.startswith("!") else f"!{s[-8:]}"
-                    rows_file = _parse_nodes_table(NODES_FILE)
-                    hops_map = {}
-                    for rf in (rows_file or []):
-                        nid_f = _norm_id(rf.get("id"))
-                        hv = rf.get("hops")
-                        if nid_f and hv is not None:
-                            try:
-                                hops_map[nid_f] = int(hv)
-                            except Exception:
-                                pass
-                    if hops_map:
-                        for x in norm:
-                            nid_x = _norm_id(x.get("id"))
-                            if nid_x in hops_map and x.get("hops") in (None, 0):
-                                x["hops"] = hops_map[nid_x]
-                except Exception:
-                    pass
-
-                # 4) Recalcula 'ago' ahora
-                for x in norm:
-                    x["ago"] = (now2 - x["last"]) if x["last"] is not None else None
-
-                # 5) Aplica filtro de hops si procede (<= hops_max)
-                if hops_max is not None:
-                    norm = [x for x in norm if isinstance(x.get("hops"), int) and x["hops"] <= int(hops_max)]
-
-                # 6) Ordena por recencia y recorta
-                norm.sort(key=lambda x: (x["ago"] if x["ago"] is not None else 10**9))
-                if max_n and max_n > 0:
-                    norm = norm[:max_n]
-
-                # 7) Formatea salida (como ver_nodos)
-                if not norm:
-                    msg = "📡 Últimos nodos (broker):\n\n"
-                    if hops_max is not None:
-                        msg += f"(sin vecinos con hops ≤ {hops_max} en este momento)"
-                    else:
-                        msg += "(sin datos)"
-                    await update.effective_message.reply_text(msg)
-                    return ConversationHandler.END
-
-                lines = []
-                for i, n0 in enumerate(norm, 1):
-                    nid   = n0["id"]
-                    alias = n0["alias"]
-                    snr   = n0.get("snr")
-                    rssi  = n0.get("rssi")
-                    hops  = n0.get("hops", 0)
-                    ago_t = fmt_ago(n0.get("ago"))
-                    parts = [
-                        f"{i}. {alias} ({nid})",
-                        f"SNR: {_fmt_db(snr,'dB')}",
-                        f"visto hace {ago_t}",
-                        f"hops: {hops}",
-                    ]
-                    # Si quieres añadir RSSI:
-                    # parts.insert(2, f"RSSI: {_fmt_db(rssi,'dBm')}")
-                    lines.append(" — ".join(parts))
-
-                await update.effective_message.reply_text(
-                    "📡 Últimos nodos (broker):\n\n" + "\n\n".join(lines)
-                )
-                return ConversationHandler.END
-        except Exception:
-            pass  # sigue al fallback
-
-        # === FALLBACK: nodos.txt (Relay) con mins & hops ===
-        try:
-            tuples = get_visible_nodes_with_hops(NODES_FILE)  # [(id, alias, mins, hops|None)]
-            if not tuples:
-                await update.effective_message.reply_text("📡 Últimos nodos:\n\n(sin datos)")
-                return ConversationHandler.END
-
-            # filtro hops si procede
-            if hops_max is not None:
-                tuples = [t for t in tuples if (t[3] is not None and int(t[3]) <= int(hops_max))]
-
-            # ordenar por 'mins' ascendente (más recientes primero)
-            tuples.sort(key=lambda t: (t[2] if t[2] is not None else 10**9))
-            if max_n and max_n > 0:
-                tuples = tuples[:max_n]
-
-            if not tuples:
-                msg = "📡 Últimos nodos:\n\n"
-                msg += f"(sin vecinos con hops ≤ {hops_max} en este momento)" if hops_max is not None else "(sin datos)"
-                await update.effective_message.reply_text(msg)
-                return ConversationHandler.END
-
-            # salida similar
-            lines_out = []
-            for i, (nid, alias, mins, hops) in enumerate(tuples, start=1):
-                alias = (alias or nid).strip()
-                ago_t = f"{mins}m" if mins is not None else "—"
-                parts = [
-                    f"{i}. {alias} ({nid})",
-                    "SNR: —",
-                    f"visto hace {ago_t}",
-                    f"hops: {hops if hops is not None else '—'}",
-                ]
-                lines_out.append(" — ".join(parts))
-
-            await update.effective_message.reply_text("📡 Últimos nodos:\n\n" + "\n\n".join(lines_out))
-            return ConversationHandler.END
-
-        except Exception:
-            await update.effective_message.reply_text("📡 Últimos nodos:\n\n(no disponible ahora mismo)")
-            return ConversationHandler.END
-
-    except Exception as e:
-        try:
-            await update.effective_message.reply_text(f"❌ Error en /vecinos: {e}")
-        except Exception:
-            pass
+    pool = context.bot_data.get("tcp_pool")
+    host = context.bot_data.get("mesh_host")
+    port = context.bot_data.get("mesh_port", 4403)
+    if not host:
+        await update.effective_message.reply_text("⚠️ Config no inicializada (host).")
         return ConversationHandler.END
 
-# === REHECHA: /vecinosX ===
+    now = int(time.time())
+    now2 = int(time.time())
+
+    # ---------- Helpers ----------
+    def _fmt_db(val, unit):
+        try: return f"{float(val):.1f} {unit}"
+        except Exception: return "—"
+
+    def fmt_ago(sec):
+        if sec is None: return "—"
+        m, s = divmod(max(0, int(sec)), 60)
+        h, m = divmod(m, 60)
+        if h: return f"{h}h {m}m"
+        if m: return f"{m}m {s}s"
+        return f"{s}s"
+
+    def _get_any(d: dict, *keys, default=None):
+        for k in keys:
+            if k in d and d[k] is not None:
+                return d[k]
+        return default
+
+    def _compute_hops_relaxed(evt: dict) -> int | None:
+        try:
+            hl = _get_any(evt, "hop_limit", "hopLimit")
+            hs = _get_any(evt, "hop_start", "hopStart")
+            if hl is None or hs is None:
+                r0 = evt.get("routing") or {}
+                if hl is None: hl = _get_any(r0, "hop_limit", "hopLimit")
+                if hs is None: hs = _get_any(r0, "hop_start", "hopStart")
+            if hl is None or hs is None:
+                return None
+            hl = int(hl); hs = int(hs)
+            return max(0, min(hl - hs, 7))
+        except Exception:
+            return None
+
+    def _norm_id(s: str) -> str:
+        s = (s or "").strip()
+        if not s: return s
+        return s if s.startswith("!") else (f"!{s[-8:]}" if len(s) >= 8 else f"!{s}")
+
+    def _to_float_coord(v) -> float | None:
+        if v is None: return None
+        try:
+            if isinstance(v, (int, float)): return float(v)
+            s = str(v).strip().replace(",", ".")
+            s = "".join(ch for ch in s if ch in "+-0123456789.")
+            if s in ("", "+", "-"): return None
+            return float(s)
+        except Exception:
+            return None
+
+    def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float | None:
+        try:
+            R = 6371.0
+            dlat = math.radians(float(lat2) - float(lat1))
+            dlon = math.radians(float(lon2) - float(lon1))
+            a = math.sin(dlat/2)**2 + math.cos(math.radians(float(lat1))) * math.cos(math.radians(float(lat2))) * math.sin(dlon/2)**2
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+            return round(R * c, 1)
+        except Exception:
+            return None
+
+    _rg_resolver = None
+    def _ensure_rg():
+        nonlocal _rg_resolver
+        if _rg_resolver is not None: return
+        try:
+            import reverse_geocoder as rg
+            def _rg(lat: float, lon: float) -> str | None:
+                try:
+                    res = rg.search([(float(lat), float(lon))])
+                    if isinstance(res, list) and res:
+                        r = res[0]
+                        return r.get("name") or r.get("admin2") or r.get("admin1") or None
+                except Exception:
+                    return None
+                return None
+            _rg_resolver = _rg
+        except Exception:
+            _rg_resolver = None
+
+    def _place_of(lat: float | None, lon: float | None) -> str | None:
+        if lat is None or lon is None: return None
+        _ensure_rg()
+        if _rg_resolver is None: return None
+        try: return _rg_resolver(lat, lon)
+        except Exception: return None
+
+    def _extract_pos(ev: dict):
+        try:
+            pkt = ev.get("packet") if isinstance(ev, dict) else None
+            nid = _norm_id(
+                _get_any(ev, "from", "fromId", "nodeId", "id")
+                or (_get_any(pkt or {}, "from") if isinstance(pkt, dict) else None)
+            )
+            lat = _get_any(ev, "lat", "latitude", "Latitude")
+            lon = _get_any(ev, "lon", "longitude", "Longitude")
+            if lat is None and _get_any(ev, "latitudeI") is not None:
+                try:
+                    lat = float(ev["latitudeI"]) / 1e7
+                    lon = float(_get_any(ev, "longitudeI") or 0.0) / 1e7
+                except Exception:
+                    lat = lon = None
+            if (lat is None or lon is None) and isinstance(pkt, dict):
+                dec = pkt.get("decoded") or {}
+                pos = dec.get("position") or {}
+                if pos:
+                    if pos.get("latitudeI") is not None:
+                        try:
+                            lat = float(pos["latitudeI"]) / 1e7
+                            lon = float(_get_any(pos, "longitudeI") or 0.0) / 1e7
+                        except Exception:
+                            lat = lon = None
+                    else:
+                        lat = lat or _get_any(pos, "lat", "latitude")
+                        lon = lon or _get_any(pos, "lon", "longitude")
+            la = _to_float_coord(lat); lo = _to_float_coord(lon)
+            ts = _get_any(ev, "ts", "time", "rx_time", "rxTime")
+            if ts is None and isinstance(pkt, dict):
+                ts = _get_any(pkt, "rxTime") or _get_any((pkt.get("decoded") or {}).get("position") or {}, "time")
+            try:
+                ts = int(ts) if ts is not None else None
+            except Exception:
+                ts = None
+            return nid, la, lo, ts
+        except Exception:
+            return None, None, None, None
+    # -----------------------------
+
+    # ====================================================
+    # 1) Broker LIST_NODES + FETCH_BACKLOG
+    # ====================================================
+    try:
+        r = _broker_ctrl("LIST_NODES", {"limit": max(50, max_n * 2)}, timeout=min(10.0, max(2.0, timeout + 1.0)))
+        if r and r.get("ok"):
+            data = r.get("data") or []
+
+            norm = []
+            for n in data:
+                nid   = _norm_id(n.get("nodeId") or n.get("id") or n.get("fromId"))
+                alias = (n.get("alias") or nid or "").strip()
+                snr   = _get_any(n, "snr","SNR","rx_snr","rxSNR")
+                rssi  = _get_any(n, "rssi","RSSI","rx_rssi","rxRSSI")
+                last  = _get_any(n, "last","lastHeard","last_heard","heard","last_seen","ts")
+                try:
+                    last = int(last) if last is not None else None
+                except Exception:
+                    last = None
+
+                hops = _get_any(n, "hops","HOPS","hop_count","hopCount")
+                if hops is None:
+                    try:
+                        hops = _compute_real_hops(n)  # si existe
+                    except Exception:
+                        hops = None
+                if hops is None:
+                    hops = _compute_hops_relaxed(n)
+                try:
+                    hops = int(hops) if hops is not None else 0
+                except Exception:
+                    hops = 0
+
+                norm.append({"id": nid, "alias": alias, "snr": snr, "rssi": rssi, "last": last, "hops": hops})
+
+            # Filtro inicial
+            if hops_max is not None:
+                try:
+                    hmax = int(hops_max)
+                    norm = [n for n in norm if (n.get("hops") is not None and int(n["hops"]) <= hmax)]
+                except Exception:
+                    pass
+
+            # Backlog → last/pos
+            lastmap: dict[str, int] = {}
+            posmap:  dict[str, tuple[float, float]] = {}
+            try:
+                since_ts = now2 - 12*3600
+                bl = _broker_ctrl(
+                    "FETCH_BACKLOG",
+                    {"since_ts": since_ts,
+                     "portnums": ["TEXT_MESSAGE_APP", "POSITION_APP", "TELEMETRY_APP", "NODEINFO_APP"]},
+                    timeout=5.0
+                )
+                if bl and bl.get("ok"):
+                    for ev in (bl.get("data") or []):
+                        nid_ev, la_ev, lo_ev, ts_ev = _extract_pos(ev)
+                        if nid_ev and ts_ev is not None:
+                            if (nid_ev not in lastmap) or (ts_ev > lastmap[nid_ev]):
+                                lastmap[nid_ev] = ts_ev
+                        if nid_ev and la_ev is not None and lo_ev is not None:
+                            posmap[nid_ev] = (la_ev, lo_ev)
+            except Exception:
+                pass
+
+            # nodos.txt → enriquecer (hops/pos)
+            try:
+                rows_file = _parse_nodes_table(NODES_FILE) or []
+            except Exception:
+                rows_file = []
+
+            try:
+                def _to_int_hops(v) -> int | None:
+                    if v is None: return None
+                    try:
+                        s = str(v).strip().lower()
+                        for junk in ("hops","hop","≈","~"): s = s.replace(junk,"")
+                        s = s.replace(",", ".")
+                        s = "".join(ch for ch in s if ch in "+-0123456789.")
+                        if s in ("", "+", "-"): return None
+                        i = int(round(float(s)))
+                        return i if i >= 0 else None
+                    except Exception:
+                        return None
+
+                hops_map: dict[str, int] = {}
+                for rf in rows_file:
+                    nid_f = _norm_id(rf.get("id") or rf.get("nodeId") or rf.get("fromId"))
+                    if not nid_f: continue
+                    hv = None
+                    for k in ("hops","HOPS","Hops","hop","Hop","HOP","hops_text","hopsText"):
+                        if k in rf and rf[k] is not None:
+                            hv = _to_int_hops(rf[k]); 
+                            if hv is not None: break
+                    if nid_f and hv is not None:
+                        hops_map[nid_f] = hv
+
+                if hops_map:
+                    for x in norm:
+                        nid_x = _norm_id(x.get("id"))
+                        if nid_x in hops_map and (x.get("hops") in (None, 0)):
+                            x["hops"] = hops_map[nid_x]
+            except Exception:
+                pass
+
+            try:
+                for rf in rows_file:
+                    nid = _norm_id(rf.get("id") or rf.get("nodeId") or rf.get("fromId"))
+                    if not nid: continue
+                    lat = (rf.get("Latitude") or rf.get("lat") or rf.get("latitude"))
+                    lon = (rf.get("Longitude") or rf.get("lon") or rf.get("longitude"))
+                    if (lat is None or lon is None) and (rf.get("latitudeI") is not None):
+                        try:
+                            lat = float(rf["latitudeI"]) / 1e7
+                            lon = float(rf.get("longitudeI") or 0.0) / 1e7
+                        except Exception:
+                            lat = lon = None
+                    lat_f = _to_float_coord(lat); lon_f = _to_float_coord(lon)
+                    if lat_f is not None and lon_f is not None:
+                        posmap[nid] = (lat_f, lon_f)
+            except Exception:
+                pass
+
+            # Calcular ago/orden
+            for x in norm:
+                x["ago"] = (now2 - x["last"]) if x["last"] is not None else None
+
+            # === GUARD HOPS: volver a filtrar justo antes de pintar ===
+            if hops_max is not None:
+                try:
+                    hmax = int(hops_max)
+                    norm = [n for n in norm if (n.get("hops") is not None and int(n["hops"]) <= hmax)]
+                except Exception:
+                    pass
+            # ==========================================================
+
+            norm.sort(key=lambda x: (x["ago"] if x["ago"] is not None else 10**9))
+            if max_n and max_n > 0:
+                norm = norm[:max_n]
+
+            # HOME
+            try:
+                home_lat, home_lon = _get_home_coords(context, posmap=posmap, lastmap=lastmap)
+            except Exception:
+                home_lat = _to_float_coord(os.getenv("HOME_LAT"))
+                home_lon = _to_float_coord(os.getenv("HOME_LON"))
+                if (home_lat is None or home_lon is None) and posmap:
+                    try:
+                        best_nid = None; best_ts = -1
+                        for nid_k, ts_v in (lastmap or {}).items():
+                            if nid_k in posmap and ts_v > best_ts:
+                                best_ts = ts_v; best_nid = nid_k
+                        if best_nid:
+                            home_lat, home_lon = posmap[best_nid]
+                        else:
+                            nid0 = next(iter(posmap.keys()))
+                            home_lat, home_lon = posmap[nid0]
+                    except Exception:
+                        pass
+
+            # Render
+            lines = []
+            for i, n0 in enumerate(norm, 1):
+                nid   = n0["id"]
+                alias = n0["alias"]
+                snr   = n0.get("snr")
+                rssi  = n0.get("rssi")
+                hops  = n0.get("hops", 0)
+                ago_t = fmt_ago(n0.get("ago"))
+
+                dist_txt = "?"
+                place_txt = "?"
+
+                try:
+                    lat = lon = None
+                    if nid in posmap:
+                        lat, lon = posmap[nid]
+
+                    def _f(v):
+                        try:
+                            if v is None: return None
+                            if isinstance(v, (int, float)): return float(v)
+                            s = str(v).strip().replace(",", ".")
+                            s = "".join(ch for ch in s if ch in "+-0123456789.")
+                            if s in ("", "+", "-"): return None
+                            return float(s)
+                        except Exception:
+                            return None
+
+                    la = _f(home_lat); lo = _f(home_lon)
+                    lt = _f(lat);      ln = _f(lon)
+
+                    if la is not None and lo is not None and lt is not None and ln is not None:
+                        dkm = _haversine_km(la, lo, lt, ln)
+                        if dkm is not None:
+                            dist_txt = f"{dkm:.1f}"
+
+                    if lt is not None and ln is not None:
+                        try:
+                            p = _place_of(lt, ln) or _get_province_offline(lt, ln)
+                        except Exception:
+                            p = None
+                        if p:
+                            place_txt = p
+                except Exception:
+                    pass
+
+                parts = [
+                    f"{i}. {alias} ({nid}) - ",
+                    f"Visto hace {ago_t}\n",
+                    f" SNR: {_fmt_db(snr,'dB')}\n",
+                    f" hops: {hops}\n",
+                    f"📍 <b>{dist_txt}</b> km — <b>{place_txt}</b>",
+                ]
+                lines.append("".join(parts))
+
+            await update.effective_message.reply_text(
+                "📡 Últimos vecinos (broker):\n\n" + ("\n\n".join(lines) if lines else "(sin datos)"),
+                parse_mode="HTML"
+            )
+            return ConversationHandler.END
+    except Exception:
+        pass  # broker falló → seguimos
+
+    # ====================================================
+    # 2) FALLBACK: nodos.txt + filtro hops
+    # ====================================================
+    try:
+        tuples = get_visible_nodes_with_hops(NODES_FILE)
+
+        # filtro temprano
+        if hops_max is not None:
+            def _to_int_hops(v):
+                if v is None: return None
+                try:
+                    s = str(v).strip().lower()
+                    for junk in ("hops","hop","≈","~"): s = s.replace(junk,"")
+                    s = s.replace(",", ".")
+                    s = "".join(ch for ch in s if ch in "+-0123456789.")
+                    return int(float(s))
+                except Exception:
+                    return None
+            try:
+                hmax = int(hops_max)
+                tuples = [t for t in tuples if (t[3] is not None and _to_int_hops(t[3]) is not None and _to_int_hops(t[3]) <= hmax)]
+            except Exception:
+                pass
+
+        if max_n and max_n > 0:
+            tuples = tuples[:max_n]
+
+        if tuples:
+            posmap_file: dict[str, tuple[float,float]] = {}
+            try:
+                rows_file = _parse_nodes_table(NODES_FILE) or []
+                for rf in rows_file:
+                    nid = _norm_id(rf.get("id") or rf.get("nodeId") or rf.get("fromId"))
+                    if not nid: continue
+                    lat = (rf.get("Latitude") or rf.get("lat") or rf.get("latitude"))
+                    lon = (rf.get("Longitude") or rf.get("lon") or rf.get("longitude"))
+                    if (lat is None or lon is None) and (rf.get("latitudeI") is not None):
+                        try:
+                            lat = float(rf["latitudeI"]) / 1e7
+                            lon = float(rf.get("longitudeI") or 0.0) / 1e7
+                        except Exception:
+                            lat = lon = None
+                    lat_f = _to_float_coord(lat); lon_f = _to_float_coord(lon)
+                    if lat_f is not None and lon_f is not None:
+                        posmap_file[nid] = (lat_f, lon_f)
+            except Exception:
+                posmap_file = {}
+
+            home_lat = _to_float_coord(os.getenv("HOME_LAT"))
+            home_lon = _to_float_coord(os.getenv("HOME_LON"))
+            if (home_lat is None or home_lon is None) and posmap_file:
+                try:
+                    _, (la0, lo0) = next(iter(posmap_file.items()))
+                    home_lat, home_lon = la0, lo0
+                except Exception:
+                    pass
+
+            # === GUARD HOPS también aquí justo antes de pintar ===
+            if hops_max is not None:
+                try:
+                    hmax = int(hops_max)
+                    tuples = [t for t in tuples if (t[3] is not None and _to_int_hops(t[3]) is not None and _to_int_hops(t[3]) <= hmax)]
+                except Exception:
+                    pass
+            # =====================================================
+
+            lines_out = []
+            for i, (nid, alias, mins, hops) in enumerate(tuples, start=1):
+                nid = _norm_id(nid); alias = (alias or nid).strip()
+                mins_i = parse_minutes(mins) if mins is not None else 0
+                ago_t = fmt_ago(mins_i * 60 if isinstance(mins_i, (int, float)) else None)
+                hops_t = f"{hops}" if (hops is not None and str(hops).strip() != "") else "?"
+
+                dist_txt = "?"
+                place_txt = "?"
+                if nid in posmap_file and home_lat is not None and home_lon is not None:
+                    lat, lon = posmap_file[nid]
+                    dkm = _haversine_km(home_lat, home_lon, lat, lon)
+                    if dkm is not None: dist_txt = f"{dkm:.1f}"
+                    try:
+                        p = _place_of(lat, lon) or _get_province_offline(lat, lon)
+                    except Exception:
+                        p = None
+                    if p: place_txt = p
+
+                lines_out.append(
+                    f"{i}. {alias} ({nid}) — visto hace {ago_t} — hops: {hops_t} — 📍 {dist_txt} km — {place_txt}"
+                )
+
+            await update.effective_message.reply_text(
+                "📡 Últimos vecinos (nodos.txt):\n\n" + ("\n\n".join(lines_out) if lines_out else "(sin datos)"),
+                disable_web_page_preview=True
+            )
+            return ConversationHandler.END
+    except Exception:
+        pass
+
+    # ====================================================
+    # 3) Pool (compatibilidad)
+    # ====================================================
+    nodes = []
+    def _extract_nodes_from_iface(iface):
+        raw_nodes = getattr(iface, "nodes", None)
+        iterable = raw_nodes.values() if isinstance(raw_nodes, dict) else (
+            raw_nodes if isinstance(raw_nodes, list) else (getattr(iface, "getNodes", lambda: [])() or [])
+        )
+        out = []
+        for n in (iterable or []):
+            usr = n.get("user") or {}
+            uid = usr.get("id") or n.get("id") or n.get("num") or n.get("nodeId")
+            alias = usr.get("longName") or usr.get("shortName") or n.get("name") or uid or "¿sin_alias?"
+            metrics = n.get("deviceMetrics") or n.get("metrics") or {}
+            snr = metrics.get("snr", n.get("snr"))
+            last_heard = n.get("lastHeard") or n.get("last_heard") or n.get("heard")
+            last_heard = int(last_heard) if isinstance(last_heard, (int, float)) else 0
+            ago = (now - last_heard) if last_heard else None
+            out.append({"id": _norm_id(uid), "alias": alias, "snr": snr, "ago": ago})
+        out.sort(key=lambda x: (x["ago"] if x["ago"] is not None else 10**9))
+        if max_n and max_n > 0: out[:] = out[:max_n]
+        return out
+
+    try:
+        iface = None
+        if hasattr(pool, "get_iface_wait"):
+            iface = pool.get_iface_wait(timeout=timeout, interval=0.3)
+        else:
+            t_end = time.time() + float(timeout)
+            while time.time() < t_end:
+                try:
+                    iface = getattr(pool, "get_iface", getattr(pool, "get_interface", lambda *a, **k: None))()
+                except Exception:
+                    iface = getattr(pool, "iface", None)
+                if iface is not None:
+                    break
+                time.sleep(0.3)
+        if iface is not None:
+            nodes = _extract_nodes_from_iface(iface)
+    except Exception:
+        nodes = []
+
+    if not nodes:
+        await update.effective_message.reply_text("📡 Últimos vecinos:\n\n(sin datos ahora mismo)")
+        return ConversationHandler.END
+
+    lines = []
+    for i, n in enumerate(nodes, 1):
+        alias = str(n.get("alias") or n.get("id") or "¿sin_alias?").strip()
+        nid   = n.get("id") or "¿id?"
+        snr   = n.get("snr")
+        ago   = fmt_ago(n.get("ago"))
+        snr_txt = f"{snr:.2f} dB" if isinstance(snr, (int, float)) else "—"
+        lines.append(f"{i}. {alias} ({nid}) — SNR: {snr_txt} — visto hace {ago}")
+
+    await update.effective_message.reply_text("📡 Últimos vecinos:\n\n" + "\n\n".join(lines))
+    return ConversationHandler.END
+
+
+
 # === REHECHA: /vecinosX (atajo) ===
 async def vecinosX_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
@@ -11976,6 +12073,97 @@ async def escuchar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"Para detener: /parar_escucha"
     )
 
+# === NUEVO: /refrescar_nodos ================================================
+# === /refrescar_nodos (usando SOLO helpers existentes) =======================
+async def refrescar_nodos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /refrescar_nodos [auto|api|cli] [max_n=50] [timeout=12]
+    - auto: usa ensure_nodes_file_fresh(0, max_n, True) y, si queda pobre, completa por API
+    - api:  fuerza API (load_nodes_with_hops)
+    - cli:  fuerza CLI (sync_nodes_and_save) — ya pausa internamente con with_broker_paused
+
+    Escribe/actualiza bot_data/nodos.txt y responde con el nº de entradas detectadas.
+    """
+    user = update.effective_user
+    bump_stat(user.id, user.username or "", "refrescar_nodos")
+
+    args = context.args or []
+    mode = (args[0].strip().lower() if args else "auto")
+    try:
+        max_n = int(args[1]) if len(args) >= 2 and str(args[1]).lstrip("-").isdigit() else 50
+    except Exception:
+        max_n = 50
+    # timeout se acepta por compatibilidad pero NO se utiliza porque los helpers no lo soportan
+    try:
+        timeout = int(args[2]) if len(args) >= 3 and str(args[2]).lstrip("-").isdigit() else 12
+    except Exception:
+        timeout = 12
+
+    ensure_nodes_path_exists()
+
+    await update.effective_message.reply_text(
+        f"🔄 Refrescando nodos ({mode})…\n"
+        f"• max={max_n}  • timeout={timeout}s"
+    )
+
+    def _count_file_rows() -> int:
+        try:
+            rows = _parse_nodes_table(NODES_FILE)
+            return len(rows or [])
+        except Exception:
+            return 0
+
+    mode = mode if mode in {"auto", "api", "cli"} else "auto"
+    updated_via = []
+    total = 0
+
+    if mode == "api":
+        try:
+            nodes = load_nodes_with_hops(n_max=max_n)
+            total = len(nodes or [])
+            updated_via.append("API")
+        except Exception as e:
+            await update.effective_message.reply_text(f"⚠️ API falló: {type(e).__name__}: {e}")
+
+    elif mode == "cli":
+        try:
+            # Este helper YA pausa el broker internamente con with_broker_paused
+            sync_nodes_and_save(max_n)
+            total = _count_file_rows()
+            updated_via.append("CLI")
+        except Exception as e:
+            await update.effective_message.reply_text(f"⚠️ CLI falló: {type(e).__name__}: {e}")
+
+    else:  # auto
+        try:
+            # Fuerza “frescura” del fichero con el máximo pedido
+            ensure_nodes_file_fresh(max_age_s=0, max_rows=max_n, force_if_empty=True)
+            updated_via.append("CLI")  # La ruta AUTO usa el refresco de fichero por CLI
+        except Exception:
+            pass
+
+        total = _count_file_rows()
+        if total < max(5, max_n // 3):
+            try:
+                nodes = load_nodes_with_hops(n_max=max_n)
+                total = max(total, len(nodes or []))
+                updated_via.append("API")
+            except Exception:
+                pass
+
+    final_total = max(total, _count_file_rows())
+    via_txt = " + ".join(updated_via) if updated_via else "—"
+
+    await update.effective_message.reply_text(
+        f"✅ Refresco completado.\n"
+        f"• Vía: {via_txt}\n"
+        f"• Entradas en nodos.txt: {final_total}"
+    )
+
+
+
+
+
 # =========================
 # Helpers para /escuchar (JSONL broker)
 # =========================
@@ -12312,7 +12500,7 @@ async def estado_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         ok_cli, out = run_command(
             ["--host", mesh_host, "--info"],
-            timeout=10
+            timeout=20
         )
         host_line += "OK" if ok_cli else "KO"
     except Exception:
@@ -12808,6 +12996,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("vecinos", vecinos_cmd))
     app.add_handler(CommandHandler("vecinos5", vecinosX_cmd))  # NUEVO
     app.add_handler(CommandHandler("reconectar", reconectar_cmd))
+    app.add_handler(CommandHandler("refrescar_nodos", refrescar_nodos_cmd))
+
 
     app.add_handler(CommandHandler("bloquear", bloquear_cmd))
     app.add_handler(CommandHandler("desbloquear", desbloquear_cmd))
@@ -12820,6 +13010,8 @@ def build_application() -> Application:
 # === [AÑADIDO] Registro de /broker_status ===
 
     app.add_handler(CommandHandler("broker_status", broker_status_cmd))
+    app.add_handler(CommandHandler("auditoria_red", auditoria_red_cmd))
+    app.add_handler(CommandHandler("auditoria_integral", auditoria_integral_cmd))
 
 # ...
   
