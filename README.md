@@ -1,5 +1,6 @@
 # 🌐 Meshtastic Broker + APRS Gateway + Telegram Bot (Docker)
 
+
 Este proyecto proporciona un **stack completo** basado en Docker con tres servicios principales:
 
 - 🔌 **Broker** → Conecta al nodo Meshtastic y expone una API JSONL.  
@@ -29,7 +30,8 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 ### 🌐 Guía APRS Gateway
 
-> 🔄 Documentación detallada del sistema de pasarela entre Meshtastic y APRS,  
+> 🔄 Documentación detallada del sistema de pasarela entre Meshtastic y APRS,
+> se incluye nuevas funciones de comunicación de EMERGENCIAS: APRS -> MESH <- APRS  
 > incluyendo configuración, ejemplos, variables de entorno y modos de operación.
 
 📘 **[Abrir guía completa → APRS_GATEWAY.md](./docs/APRS_GATEWAY.md)**
@@ -159,12 +161,59 @@ Nota: Actualizar a una nueva version:
 2. Copiar el archivo de variables de entorno y editarlo con tus datos:
 
 ```bash
-cp .env-example .env
-# Abre .env y rellena al menos:
-# - MESHTASTIC_HOST=...
-# - TELEGRAM_TOKEN=...
-# - ADMIN_IDS=...
-# Recomendado en Docker: DISABLE_BOT_TCP=1
+ 1.- Editar .env y rellena al menos, estas variables:
+    # === Telegram ===
+    #TELEGRAM_TOKEN=
+    #ADMIN_IDS=
+
+    # === Nodos Meshtastic ===
+
+    # Nodo principal
+    #MESHTASTIC_HOST=
+    #Nodo secundario - SI EXISTE -
+    #MESH_NODE_HOST=
+
+    #DEBUG_KM=1
+    #HOME_NODE_ID= el Id del Nodo Principal
+
+    # Mapa Live (opcional)
+    #HOME_LAT=
+    #HOME_LON=
+    
+    # Raspberry,, siempre never
+    #BOT_PAUSE_MODE=never
+
+    # Windows: auto o always
+    #BOT_PAUSE_MODE= always
+
+    # === APRS-IS (iGate hacia Internet) ===
+    #APRSIS_USER=       # tu indicativo-SSID de iGate
+    #APRSIS_PASSCODE=   # passcode APRS-IS de de indicativo
+
+    # 1 Pasarela ACTIVA (APRS <-> MESH) 0 Pasarela NO ACTIVA
+    # APRS_GATE_ENABLED=1
+  
+    #sólo se permiten mensajes de estos indicativos, separados por comas
+    #APRS_ALLOWED_SOURCES=
+
+    # === APRS ===
+    # Indicativo de la pasarela
+    #APRS_CALL=
+    
+    # Activa o desactiva el eco del mensaje enviaso de APRS a MESH
+    #APRS_ECHO_HOME_ENABLED=1
+
+    # Nodo B (el segundo nodo, con preset distinto)
+    #B_HOST=
+    
+    # =========================
+    # Bridge embebido en el broker (opcional)
+    # =========================
+    # 1=activar dentro del broker, 0=desactivar
+    #BRIDGE_ENABLED=1
+
+    #     Recomendado en Docker: DISABLE_BOT_TCP=1
+  2.- Revisar:
 # (Opcional APRS/Bridge: KISS_HOST, KISS_PORT, BRIDGE_ENABLED, B_HOST, etc.)
 
 ```
