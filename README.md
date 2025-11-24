@@ -1,5 +1,24 @@
 # 🌐 Meshtastic Broker + APRS Gateway + Telegram Bot (Docker)
 
+## Atribución obligatoria
+
+Este proyecto ha sido desarrollado por **José Miguel Molina (EB2EAS)**.
+
+Cualquier uso, redistribución, modificación, integración o creación de
+derivados deberá incluir una referencia clara y visible al autor original
+y un enlace al repositorio principal.
+
+Ejemplo recomendado:
+“Basado en el proyecto desarrollado por José Miguel Molina (EB2EAS)”.
+
+## Condición para forks y proyectos derivados
+
+Cualquier fork o proyecto derivado que emplee una parte sustancial de este
+código deberá incluir en su README un apartado visible reconociendo al autor
+original: “Proyecto basado en el trabajo de José Miguel Molina (EB2EAS)”.
+
+Esta condición forma parte de la licencia MIT utilizada en este repositorio.
+
 
 Este proyecto proporciona un **stack completo** basado en Docker con tres servicios principales:
 
