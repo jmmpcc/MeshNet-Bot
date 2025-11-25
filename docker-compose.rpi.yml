@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  broker:
+    build: null
+    image: ghcr.io/jmmpcc/meshnet-bot-broker:latest
+
+  bot:
+    build: null
+    image: ghcr.io/jmmpcc/meshnet-bot-bot:latest
+
+  aprs:
+    build: null
+    image: ghcr.io/jmmpcc/meshnet-bot-aprs:latest
+
+  bridge:
+    build: null
+    image: ghcr.io/jmmpcc/meshnet-bot-bridge:latest

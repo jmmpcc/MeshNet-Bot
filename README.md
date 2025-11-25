@@ -155,32 +155,16 @@ BRIDGE_PEER_DOWN_BACKOFF=60
 - (Opcional) Credenciales de **APRS-IS** (indicativo con SSID y *passcode*) para subir posiciones etiquetadas.
 - Un **bot de Telegram** (Token) y, opcionalmente, lista de administradores.
 
+# 🖥️ Instalación en Windows (Docker Desktop)
 
-## 📦 Instalación
-
-1. Clonar este repositorio:
-
-```bash
+## 1. Clonar el repositorio
+```powershell
 git clone https://github.com/jmmpcc/MeshNet-Bot.git
 cd MeshNet-Bot
-
-Nota: Actualizar a una nueva version:
- docker compose pull
- docker compose up -d
-
-.git
-cd MeshNet-Bot
-
-Nota: Actualizar a una nueva version:
- docker compose pull
- docker compose up -d
-
-
 ```
-2. Copiar el archivo de variables de entorno y editarlo con tus datos:
-
+  
 ```bash
- 1.- Editar .env y rellena al menos, estas variables:
+ Editar .env y rellena al menos, estas variables:
     # === Telegram ===
     #TELEGRAM_TOKEN=
     #ADMIN_IDS=
@@ -236,42 +220,177 @@ Nota: Actualizar a una nueva version:
 # (Opcional APRS/Bridge: KISS_HOST, KISS_PORT, BRIDGE_ENABLED, B_HOST, etc.)
 
 ```
-3. Descargar las imágenes de GHCR
 
+---
+
+# ✔ Formas de ejecutar el proyecto en Windows
+
+Existen **dos modos diferentes** de arrancar el sistema. Ambos funcionan correctamente, pero sirven para distintos casos.
+
+---
+
+# 🅰 Opción A — Construir localmente (modo recomendado para desarrollo)
+
+Esta opción usa tu ordenador para construir las imágenes Docker con los Dockerfile del proyecto.
+
+```powershell
+docker compose up -d
+```
+
+### Ventajas:
+- Perfecto si vas a modificar código Python o Dockerfiles.  
+- Permite reconstruir rápidamente mientras desarrollas.  
+- No dependes de internet para reconstrucciones posteriores.
+
+### Inconvenientes:
+- Construye las imágenes en tu PC.  
+- No garantiza usar exactamente la misma imagen que en Raspberry.
+
+---
+
+# 🅱 Opción B — Usar imágenes oficiales precompiladas desde GHCR (modo “sin compilación”)
+
+Aquí Windows **no construye nada**.  
+Descarga directamente las imágenes multi-arch ya generadas por GitHub Actions:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.rpi.yml up -d
+```
+
+### Ventajas:
+- Mucho más rápido.  
+- Usa exactamente las mismas imágenes que Raspberry Pi.  
+- No compila nada en tu ordenador.
+
+### Inconvenientes:
+- No recomendado si vas a modificar el código.  
+- Depende de que el repositorio GHCR esté actualizado.
+
+---
+
+# ¿Qué opción elegir?
+
+| Situación | Opción recomendada |
+|----------|--------------------|
+| Quieres modificar código o desarrollar | **Opción A (build local)** |
+| Quieres instalar y usar sin complicaciones | **Opción B (GHCR)** |
+| Notas que tu PC va justo de recursos | **Opción B (GHCR)** |
+| Quieres que Windows use la misma imagen que Raspberry | **Opción B (GHCR)** |
+
+---
+
+# 🍓 Instalación en Raspberry Pi
+
+Compatible con Raspberry Pi **2B**, **3**, **4**, **5**.  
+La arquitectura correcta se selecciona automáticamente (arm/v7 o arm64).
+
+## 1. Instalar Docker + Docker Compose Plugin
 ```bash
-docker compose pull
+curl -sSL https://get.docker.com | sh
+sudo apt install -y docker-compose-plugin
+```
+
+## 2. Clonar el repositorio
+```bash
+git clone https://github.com/jmmpcc/MeshNet-Bot.git
+cd MeshNet-Bot
+```
+
+## 3. Descargar imágenes multi-arch desde GHCR
+```bash
+docker compose -f docker-compose.yml -f docker-compose.rpi.yml pull
+```
+
+## 4. Arrancar el sistema
+```bash
+docker compose -f docker-compose.yml -f docker-compose.rpi.yml up -d
+```
+
+---
+
+# 🧩 Ficheros del proyecto
+
+- **docker-compose.yml** → Uso general en Windows.  
+- **docker-compose.rpi.yml** → Override para Raspberry Pi.  
+- **Dockerfile / Dockerfile.aprs / Dockerfile.bridge** → Construcción por servicio.  
+- **bot_data/** → Datos persistentes del bot.  
+- **.github/workflows/** → Compilación multi-arch automática.
+
+---
+
+# 🔄 Actualización del proyecto
+
+## Windows
+```powershell
+git pull
+docker compose up -d --build
+```
+
+## Raspberry Pi
+```bash
+git pull
+docker compose -f docker-compose.yml -f docker-compose.rpi.yml pull
+docker compose -f docker-compose.yml -f docker-compose.rpi.yml up -d
+```
+
+---
+
+# 🧪 Logs
+
+## Broker
+```bash
+docker logs -f meshnet-broker
+```
+
+## Bot
+```bash
+docker logs -f meshnet-bot
+```
+
+## APRS
+```bash
+docker logs -f aprs-gateway
+```
+
+## Bridge
+```bash
+docker logs -f meshnet-bot-bridge
+```
+
+---
+
+# 🐳 Cómo funcionan las imágenes multi-arch
+
+GitHub Actions compila automáticamente para:
+
+- `linux/amd64` (PC / Windows)  
+- `linux/arm/v7` (Raspberry Pi 2B / 3)  
+- `linux/arm64` (Raspberry Pi 4 / 5)  
+
+y publica en GHCR:
 
 ```
-4.- Levantar servicios
-```bash
-Levantar todo:
- docker compose up -d
-
-levantar por partes:
- docker compose up -d broker
- docker compose up -d bot
-
-# (Opcional APRS) Sólo radioaficionados con indicativo.
- docker compose up -d aprs
-
+ghcr.io/<usuario>/meshnet-bot-broker:latest
+ghcr.io/<usuario>/meshnet-bot-bot:latest
+ghcr.io/<usuario>/meshnet-bot-aprs:latest
+ghcr.io/<usuario>/meshnet-bot-bridge:latest
 ```
-4. Ver logs
+
+Docker descarga la variante correcta según tu hardware.
+
+---
+
+# 🛠 Detener el sistema
 ```bash
-docker compose logs -f broker
-docker compose logs -f bot
-docker compose logs -f aprs
+docker compose down
+```
+
+Con volúmenes:
+```bash
+docker compose down -v
+```
 
  Consejo: Si vas a usar **Direwolf**/**Soundmodem** en el host, arráncalo primero y verifica que el puerto TCP (p.ej. 8100) está escuchando.
-```
-
-5. Actualizar a una nueva versiön
-```bash
-git pull              # (si quieres actualizar el código/compose)
-docker compose pull   # baja nuevas imágenes desde GHCR
-docker compose up -d  # recrea con la nueva versión
-
- Consejo: Si vas a usar **Direwolf**/**Soundmodem** en el host, arráncalo primero y verifica que el puerto TCP (p.ej. 8100) está escuchando.
-```
 
 ## ⚙️ Variables de entorno (`.env`)
 

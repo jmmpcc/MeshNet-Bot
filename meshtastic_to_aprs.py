@@ -1,12 +1,12 @@
-#!/usr/bin/env python3 	   	 	 	    	   		 
-# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
-""" 	  		 	 					 	  		 
-meshtastic_to_aprs.py (v6.1.3)	 		  	 	 			  		 		 
-Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.	    	   			 		    	 
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+meshtastic_to_aprs.py (v6.1.3)
+Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
-- /aprs (bot) -> UDP local -> TX APRS (troceo automático).			 	   		  	 	 			 	
-- APRS -> Mesh: si el comentario/status contiene [CHx], se reenvía al canal x del broker.		 		    	 				  	 	 
-Con verificacion en APRS-IS:					 			 		   		 		 
+- /aprs (bot) -> UDP local -> TX APRS (troceo automático).
+- APRS -> Mesh: si el comentario/status contiene [CHx], se reenvía al canal x del broker.
+Con verificacion en APRS-IS:
     python meshtastic_to_aprs_v5.4.py --aprsis-user EB2XXX-10 --aprsis-passcode 12345
 Sin verificacion APRS-IS
     python meshtastic_to_aprs_v5.4.py
@@ -73,8 +73,8 @@ BROKER_PORT = int(os.getenv("BROKER_PORT", "8765"))
 KISS_HOST = os.getenv("KISS_HOST", "127.0.0.1").strip()
 KISS_PORT = int(os.getenv("KISS_PORT", "8100"))
 
-MY_CALL = os.getenv("APRS_CALL", "EB2EAS-11").strip()
-GATEWAY_DEST_PREFIX = os.getenv("APRS_GATEWAY_PREFIX", "EB2EAS").strip().upper()
+MY_CALL = os.getenv("APRS_CALL", "").strip()
+GATEWAY_DEST_PREFIX = os.getenv("APRS_GATEWAY_PREFIX", "").strip().upper()
 APRS_PATH = [p for p in (os.getenv("APRS_PATH", "WIDE1-1,WIDE2-1").strip() or "").split(",") if p]
 
 MAX_MSG_LEN = int(os.getenv("APRS_MSG_MAX", "67"))
@@ -100,6 +100,8 @@ APRSIS_PASSCODE = os.getenv("APRSIS_PASSCODE", "").strip() # passcode APRS-IS pa
 APRSIS_HOST     = os.getenv("APRSIS_HOST", "rotate.aprs2.net").strip()
 APRSIS_PORT     = int(os.getenv("APRSIS_PORT", "14580"))
 APRSIS_FILTER   = os.getenv("APRSIS_FILTER", "").strip()   # opcional, p.ej. "m/50"
+HOME_NODE_ID = os.getenv("HOME_NODE_ID", "").strip()
+
 
 def _aprsis_ready() -> bool:
     return bool(APRSIS_USER and APRSIS_PASSCODE)
@@ -112,11 +114,27 @@ _recent_aprs_keys: dict[str, float] = {}
 
 # --- Debug opcional para APRS ---
 import os as _os
-APRS_DEBUG = int(_os.getenv("APRS_DEBUG", "1"))  # 1=log activo (por defecto), 0=callado
+APRS_DEBUG = int(_os.getenv("APRS_DEBUG", "0"))  # 0=log desactivo (por defecto), 0=callado
 
 def _aprs_dbg(msg: str) -> None:
     if APRS_DEBUG:
         print(msg)
+
+# === AÑADIR TIMESTAMP EN LOS LOGS DE LA CONSOLA APRS ===
+import builtins, time, sys
+_original_print = builtins.print
+
+def _print_with_ts(*args, **kwargs):
+    file = kwargs.pop("file", sys.stdout)
+    end = kwargs.pop("end", "\n")
+    sep = kwargs.pop("sep", " ")
+    flush = kwargs.pop("flush", True)
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    _original_print(f"[{ts}]", *args, sep=sep, end=end, file=file, flush=flush)
+
+# Reemplazar print global
+builtins.print = _print_with_ts
+
 
 # --- Gate APRS→Mesh: 1=ON (por defecto), 0=OFF ---
 APRS_GATE_ENABLED = int(os.getenv("APRS_GATE_ENABLED", "1"))
@@ -124,7 +142,286 @@ APRS_GATE_ENABLED = int(os.getenv("APRS_GATE_ENABLED", "1"))
 def _aprs_gate_is_enabled() -> bool:
     return bool(APRS_GATE_ENABLED)
 
+# --- Emergencias APRS → Mesh (configurable por entorno) ---
+# Lista de palabras clave que activan el modo emergencia si aparecen en el texto.
+# Formato por defecto: "EMERGENCIA,EMERGENCY,MAYDAY,SOS,AYUDA"
+_EMERG_KEYWORDS = {
+    w.strip().upper()
+    for w in os.getenv("APRS_EMERGENCY_KEYWORDS", "EMERGENCIA,EMERGENCY,MAYDAY,SOS,AYUDA").split(",")
+    if w.strip()
+}
 
+# Lista de destinos APRS (campo DEST) que se consideran de emergencia, p.ej. "EMERGENCY,SOS"
+_EMERG_DEST_CALLS = {
+    w.strip().upper()
+    for w in os.getenv("APRS_EMERGENCY_DESTS", "EMERGENCY,EMERG,SOS").split(",")
+    if w.strip()
+}
+
+# Canales Mesh de emergencia dedicados (lista separada por comas, 0..15).
+# Si está vacía, se usa sólo el canal indicado por [CH x].
+_EMERG_MESH_CHANNELS: list[int] = []
+for _tok in os.getenv("MESH_EMERGENCY_CHANNELS", "").replace(";", ",").split(","):
+    _tok = _tok.strip()
+    if not _tok:
+        continue
+    try:
+        _ch_val = int(_tok)
+        if 0 <= _ch_val <= 15:
+            _EMERG_MESH_CHANNELS.append(_ch_val)
+    except Exception:
+        continue
+
+# Geo-fencing opcional: radio máximo en km para considerar una emergencia "local".
+# 0 o valor no válido → desactiva el filtro (todas se consideran sin distancia).
+try:
+    _EMERG_MAX_KM = float(os.getenv("APRS_EMERGENCY_MAX_KM", "0").strip() or "0")
+    if _EMERG_MAX_KM < 0:
+        _EMERG_MAX_KM = 0.0
+except Exception:
+    _EMERG_MAX_KM = 0.0
+
+
+# Coordenadas HOME para calcular distancia (si están disponibles).
+def _safe_float_env(name: str) -> float | None:
+    """
+    Intenta leer un float desde una variable de entorno, tolerando coma decimal
+    y caracteres extra. Devuelve None si no es válido.
+    """
+    raw = os.getenv(name)
+    if not raw:
+        return None
+    s = str(raw).strip().lower().replace(",", ".")
+    # Deja sólo signos y dígitos/punto
+    clean = "".join(ch for ch in s if ch in "+-0123456789.")
+    if clean in ("", "+", "-"):
+        return None
+    try:
+        return float(clean)
+    except Exception:
+        return None
+
+
+_HOME_LAT = _safe_float_env("HOME_LAT")
+_HOME_LON = _safe_float_env("HOME_LON")
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Distancia aproximada entre 2 puntos WGS84 en kilómetros.
+    Implementación local para mantener el script autosuficiente.
+    """
+    from math import radians, sin, cos, asin, sqrt
+    r = 6371.0
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2.0) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2.0) ** 2
+    c = 2 * asin(sqrt(a))
+    return r * c
+
+
+def _classify_aprs_emergency(pkt: dict, ap: dict | None, msg_for_humans: str) -> dict | None:
+    """
+    Heurística ligera para marcar una trama APRS como emergencia.
+
+    Devuelve un dict con:
+      {
+        "src": CALL,
+        "dest": DEST,
+        "path": "WIDE1-1,...",
+        "reason": "keyword|dest",
+        "text": msg_for_humans,
+        "lat": float|None,
+        "lon": float|None,
+        "dist_km": float|None,
+        "is_local": bool|None,
+      }
+    o None si no se considera emergencia.
+    """
+    if not pkt:
+        return None
+
+    src = (pkt.get("src") or "").strip().upper()
+    dest = (pkt.get("dest") or "").strip().upper()
+    path = ",".join(pkt.get("path") or [])
+
+    # Texto candidato: mensaje, comentario e info
+    t_parts = [
+        pkt.get("text") or "",
+        (ap or {}).get("comment") or "",
+        pkt.get("info") or "",
+        msg_for_humans or "",
+    ]
+    t_all = " ".join(str(p) for p in t_parts if p).strip()
+    t_up = t_all.upper()
+
+    reason: str | None = None
+
+    if _EMERG_DEST_CALLS and dest in _EMERG_DEST_CALLS:
+        reason = f"dest={dest}"
+    elif _EMERG_KEYWORDS and any(k in t_up for k in _EMERG_KEYWORDS):
+        reason = "keyword"
+
+    if not reason:
+        return None
+
+    lat = None
+    lon = None
+    if ap and isinstance(ap, dict):
+        try:
+            if "latitude" in ap and "longitude" in ap:
+                lat = float(ap["latitude"])
+                lon = float(ap["longitude"])
+        except Exception:
+            lat = lon = None
+
+    dist = None
+    is_local: bool | None = None
+    if (
+        lat is not None and lon is not None
+        and _HOME_LAT is not None and _HOME_LON is not None
+        and _EMERG_MAX_KM > 0
+    ):
+        try:
+            dist = _haversine_km(_HOME_LAT, _HOME_LON, lat, lon)
+            is_local = dist <= _EMERG_MAX_KM
+        except Exception:
+            dist = None
+            is_local = None
+
+    return {
+        "src": src,
+        "dest": dest,
+        "path": path,
+        "reason": reason,
+        "text": msg_for_humans,
+        "lat": lat,
+        "lon": lon,
+        "dist_km": dist,
+        "is_local": is_local,
+    }
+
+# --- Notificación opcional a Telegram para emergencias APRS ---
+from html import escape as _html_escape
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+
+
+def _parse_id_list_env(value: str) -> list[int]:
+    """
+    Convierte una cadena con IDs separados por coma/semicolon en lista de enteros.
+    Ignora elementos no numéricos.
+    """
+    ids: list[int] = []
+    if not value:
+        return ids
+    for tok in value.replace(";", ",").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            ids.append(int(tok))
+        except Exception:
+            continue
+    return ids
+
+
+_TELEGRAM_EMERG_CHAT_IDS: list[int] = _parse_id_list_env(
+    os.getenv("TELEGRAM_EMERG_CHAT_IDS", "") or os.getenv("ADMIN_IDS", "")
+)
+
+
+def _format_emergency_telegram_text(info: dict, mesh_channels: list[int]) -> str:
+    """
+    Construye el texto HTML que se enviará por Telegram cuando se detecta
+    una emergencia APRS.
+    """
+    src = info.get("src") or "?"
+    dest = info.get("dest") or "?"
+    path = info.get("path") or "-"
+    reason = info.get("reason") or "-"
+    text = info.get("text") or ""
+    lat = info.get("lat")
+    lon = info.get("lon")
+    dist = info.get("dist_km")
+    is_local = info.get("is_local")
+
+    scope = "LOCAL" if is_local else ("REMOTA" if is_local is False else "DESCONOCIDA")
+    ch_txt = ", ".join(str(c) for c in mesh_channels) if mesh_channels else "-"
+
+    lines = [
+        "⚠️ <b>Emergencia APRS recibida</b>",
+        f"• Origen: <code>{_html_escape(str(src))}</code>",
+        f"• Destino: <code>{_html_escape(str(dest))}</code>",
+        f"• PATH: <code>{_html_escape(str(path))}</code>",
+        f"• Alcance: <b>{_html_escape(scope)}</b>",
+        f"• Canales Mesh destino: <code>{_html_escape(ch_txt)}</code>",
+        f"• Motivo detección: <code>{_html_escape(str(reason))}</code>",
+    ]
+
+    if lat is not None and lon is not None:
+        lines.append(f"• Posición: <code>{lat:.5f}, {lon:.5f}</code>")
+        g = f"https://maps.google.com/?q={lat:.6f},{lon:.6f}"
+        lines.append(f"• Mapa: <a href=\"{_html_escape(g)}\">Google Maps</a>")
+
+    if dist is not None:
+        lines.append(f"• Distancia aproximada a HOME: {dist:.1f} km")
+
+    if text:
+        lines.append("")
+        lines.append("<b>Mensaje:</b>")
+        lines.append(_html_escape(str(text)))
+
+    return "\n".join(lines)
+
+
+def _notify_telegram_emergency_sync(info: dict, mesh_channels: list[int]) -> None:
+    """
+    Envío síncrono (bloqueante) de una notificación de emergencia a Telegram.
+    Se ejecuta normalmente en un executor para no bloquear el loop.
+    """
+    if not TELEGRAM_TOKEN or not _TELEGRAM_EMERG_CHAT_IDS or not info:
+        return
+    try:
+        import urllib.parse
+        import urllib.request
+    except Exception:
+        return
+
+    text = _format_emergency_telegram_text(info, mesh_channels)
+
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data_common = {
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "false",
+    }
+
+    for chat_id in _TELEGRAM_EMERG_CHAT_IDS:
+        try:
+            payload = data_common.copy()
+            payload["chat_id"] = str(chat_id)
+            data = urllib.parse.urlencode(payload).encode("utf-8")
+            req = urllib.request.Request(base_url, data=data, method="POST")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                _ = resp.read()
+        except Exception as e:
+            print(f"[aprs→telegram] ❌ {type(e).__name__}: {e}")
+
+
+async def _notify_telegram_emergency(info: dict, mesh_channels: list[int]) -> None:
+    """
+    Envoltura asíncrona para enviar notificaciones de emergencia a Telegram
+    sin bloquear el loop principal.
+    """
+    if not TELEGRAM_TOKEN or not _TELEGRAM_EMERG_CHAT_IDS or not info:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _notify_telegram_emergency_sync(info, mesh_channels)
+        return
+    await loop.run_in_executor(None, _notify_telegram_emergency_sync, info, mesh_channels)
 
 def _dedup_key(dest: str, text: str) -> str:
     d = (dest or "broadcast").strip().lower()
@@ -728,6 +1025,18 @@ def _schedule_aprs_to_mesh(ch: int, msg: str, delay_min: int, src: str) -> None:
             res = _broker_send_text(ch, msg, dest=None, ack=False)
             ok = bool(res.get("ok"))
             print(f"[aprs→mesh sched] CH{ch} (+{delay_min}m) ← {src}: {msg[:120]} -> {'OK' if ok else 'KO'}")
+           
+            # === ECO OPCIONAL AL NODO HOME ===
+            if HOME_NODE_ID:
+                try:
+                    eco_txt = f"[APRS eco de {src}] {msg}"
+                    res_eco = _broker_send_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
+                    ok_eco = bool(res_eco.get("ok"))
+                    print(f"[aprs→mesh ECO] CH{ch} → {HOME_NODE_ID}: {eco_txt[:120]} -> {'OK' if ok_eco else 'KO'}")
+                except Exception as _e:
+                    print(f"[aprs→mesh ECO] ❌ {type(_e).__name__}: {_e}")
+            # === FIN ECO OPCIONAL ===
+        
         except Exception as e:
             print(f"[aprs→mesh sched] ❌ {type(e).__name__}: {e}")
 
@@ -740,6 +1049,18 @@ def _schedule_aprs_to_mesh(ch: int, msg: str, delay_min: int, src: str) -> None:
             res = _broker_send_text(ch, msg, dest=None, ack=False)
             ok = bool(res.get("ok"))
             print(f"[aprs→mesh sched/now] CH{ch} (+{delay_min}m≡0) ← {src}: {msg[:120]} -> {'OK' if ok else 'KO'}")
+            # === ECO OPCIONAL AL NODO HOME ===
+            if HOME_NODE_ID:
+                try:
+                    eco_txt = f"[APRS eco de {src}] {msg}"
+                    res_eco = _broker_send_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
+                    ok_eco = bool(res_eco.get("ok"))
+                    print(f"[aprs→mesh ECO] CH{ch} → {HOME_NODE_ID}: {eco_txt[:120]} -> {'OK' if ok_eco else 'KO'}")
+                except Exception as _e:
+                    print(f"[aprs→mesh ECO] ❌ {type(_e).__name__}: {_e}")
+            # === FIN ECO OPCIONAL ===
+
+        
         except Exception as e:
             print(f"[aprs→mesh sched/now] ❌ {type(e).__name__}: {e}")
 
@@ -859,29 +1180,42 @@ async def task_aprs_to_meshtastic():
                         _aprs_dbg(f"[aprs] drop(no CH) {pkt.get('type','ui')} src={pkt.get('src','?')}")
                         continue
 
-                   # --- Si es posición APRS, convertir a enlace de mapa ---
+                    # --- Si es posición APRS, convertir a enlace de mapa ---
+                   
+                   # --- Procesado de posición APRS (RF) ---
+                    # Convertimos la trama RF ya parseada a formato TNC2 estándar
+                    ap = None
                     try:
-                        if ap and isinstance(ap, dict) and 'latitude' in ap and 'longitude' in ap and _is_position_pkt(pkt):
-                            lat = ap['latitude']
-                            lon = ap['longitude']
+                        tnc2 = f"{src}>{dest}{(',' + path) if path else ''}:{pkt.get('info','')}"
+                        ap = aprslib.parse(tnc2)
+                    except Exception:
+                        ap = None
+
+                    # Si hay coordenadas, generar enlace Google Maps
+                    try:
+                        if isinstance(ap, dict) and "latitude" in ap and "longitude" in ap:
+                            lat = ap["latitude"]
+                            lon = ap["longitude"]
                             link = f"https://maps.google.com/?q={lat:.6f},{lon:.6f}"
-
-                            comment = (ap.get('comment') or '').strip()
-                            if comment:
-                                # Limpiamos cualquier [CH…] del comentario mostrado
-                                _c_ch, _c_delay, clean_comment = extract_channel_and_delay(comment)
-                                if clean_comment:
-                                    comment = clean_comment
-
-                                msg = f"{comment} {link}"
-                            else:
-                                msg = link
+                            msg_clean = (msg or "").strip()
+                            msg = f"{msg_clean} {link}" if msg_clean else link
                     except Exception as _e:
-                        _aprs_dbg(f"[aprs] maplink error: {type(_e).__name__}: {_e}")
+                        _aprs_dbg(f"[aprs RF] maplink error: {type(_e).__name__}: {_e}")
+
 
 
                     # --- Comandos de control en CH0 (no reinyectar a Mesh) ---
-                    if ch == 0:
+                                       # --- Detección de mensaje de EMERGENCIA APRS (antes de aplicar filtros de CH0/GATE) ---
+                    try:
+                        emerg_info = _classify_aprs_emergency(pkt, ap, msg)
+                    except Exception as _e:
+                        emerg_info = None
+                        _aprs_dbg(f"[aprs] emergency detect error: {type(_e).__name__}: {_e}")
+                    is_emergency = bool(emerg_info)
+
+                    # --- Comandos de control en CH0 (no reinyectar a Mesh) ---
+                    #     EXCEPTO si se ha detectado emergencia, en cuyo caso se fuerza el bypass.
+                    if ch == 0 and not is_emergency:
                         if _handle_aprs_control_from_rf(src, msg):
                             # Comando gestionado (APRS ON/OFF); no se envía a la malla
                             continue
@@ -889,8 +1223,84 @@ async def task_aprs_to_meshtastic():
                         continue
 
                     # --- Gate APRS→Mesh ON/OFF ---
-                    if not _aprs_gate_is_enabled():
+                    #     Si el gate está OFF pero el mensaje es de emergencia, se hace bypass igualmente.
+                    if (not _aprs_gate_is_enabled()) and (not is_emergency):
                         print(f"[aprs→mesh] GATE OFF: descartado CH{ch} ← {src}: {msg[:120]}")
+                        continue
+
+                    # --- Selección de canales Mesh destino para emergencias ---
+                    if is_emergency:
+                        base_ch = ch if ch is not None else MESHTASTIC_CHANNEL
+                        if base_ch is None:
+                            base_ch = MESHTASTIC_CHANNEL
+
+                        # Lista de canales finales según geo-fencing y configuración
+                        channels: list[int] = []
+                        is_local = emerg_info.get("is_local") if emerg_info else None
+                        if is_local is True and _EMERG_MESH_CHANNELS:
+                            # Emergencia local: canales dedicados + canal original (si es distinto)
+                            channels = list(dict.fromkeys(
+                                _EMERG_MESH_CHANNELS
+                                + ([base_ch] if base_ch not in _EMERG_MESH_CHANNELS else [])
+                            ))
+                        elif _EMERG_MESH_CHANNELS:
+                            # Emergencia remota o sin distancia: sólo canal original para no saturar
+                            channels = [base_ch]
+                        else:
+                            # Sin configuración específica: sólo canal indicado por [CHx]
+                            channels = [base_ch]
+
+                        # Prefijo de estado / heartbeat mínimo de red
+                        scope_txt = (
+                            "LOCAL"
+                            if emerg_info and emerg_info.get("is_local")
+                            else ("REMOTA" if emerg_info and emerg_info.get("is_local") is False else "DESCONOCIDA")
+                        )
+                        gate_txt = "ON" if _aprs_gate_is_enabled() else "OFF"
+                        prefix = f"[EMERG APRS][{scope_txt}] src={src} gate={gate_txt}"
+
+                        mesh_text = f"{prefix}\n{msg}"
+
+                        for ch_target in channels:
+                            try:
+                                # Envío normal de la emergencia a la malla
+                                res = _broker_send_text(ch_target, mesh_text, dest=None, ack=False)
+                                ok = bool(res.get("ok"))
+                                print(
+                                    f"[aprs→mesh EMERG] CH{ch_target} ← {src}: {msg[:120]} -> {'OK' if ok else 'KO'}"
+                                )
+
+                                # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE ---
+                                if HOME_NODE_ID:
+                                    try:
+                                        eco_txt = f"[APRS eco de {src}] {msg}"
+                                        res_eco = _broker_send_text(
+                                            ch_target, eco_txt, dest=HOME_NODE_ID, ack=False
+                                        )
+                                        ok_eco = bool(res_eco.get("ok"))
+                                        print(
+                                            f"[aprs→mesh ECO] CH{ch_target} → {HOME_NODE_ID}: "
+                                            f"{eco_txt[:120]} -> {'OK' if ok_eco else 'KO'}"
+                                        )
+                                    except Exception as _e:
+                                        print(f"[aprs→mesh ECO] ❌ {type(_e).__name__}: {_e}")
+                                # --- FIN ECO ---
+                            except Exception as _e:
+                                print(f"[aprs→mesh EMERG] ❌ {type(_e).__name__}: {_e}")
+
+
+                            
+                            except Exception as _e:
+                                print(f"[aprs→mesh EMERG] ❌ {type(_e).__name__}: {_e}")
+
+                        # Notificación inmediata a Telegram (mejor esfuerzo, no bloqueante)
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(_notify_telegram_emergency(emerg_info, channels))
+                        except Exception as _e:
+                            _aprs_dbg(f"[aprs] emergency telegram notify error: {type(_e).__name__}: {_e}")
+
+                        # Emergencias ya gestionadas, no procesar por la ruta normal
                         continue
 
                     # --- Programación local con [CH x+N] ---
@@ -902,8 +1312,18 @@ async def task_aprs_to_meshtastic():
                         res = _broker_send_text(ch, msg, dest=None, ack=False)
                         ok = bool(res.get("ok"))
                         print(f"[aprs→mesh] CH{ch} ← {src}: {msg[:120]}  -> {'OK' if ok else 'KO'}")
-
-
+                            # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE ---
+                        if HOME_NODE_ID:
+                            try:
+                                eco_txt = f"[APRS eco de {src}] {msg}"
+                                res_eco = _broker_send_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
+                                ok_eco = bool(res_eco.get("ok"))
+                                print(f"[aprs→mesh ECO] CH{ch} → {HOME_NODE_ID}: {eco_txt[:120]} -> {'OK' if ok_eco else 'KO'}")
+                                    # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE (APRS-IS) ---
+                                  
+                            except Exception as _e:
+                                print(f"[aprs→mesh ECO] ❌ {type(_e).__name__}: {_e}")
+                        # --- FIN ECO ---
 
                     # --- (OPCIONAL) Uplink APRS-IS: SOLO posiciones con [CHx], respetando NOGATE/RFONLY ---
 
@@ -923,6 +1343,206 @@ async def task_aprs_to_meshtastic():
         except Exception:
             await asyncio.sleep(backoff)
             backoff = min(30.0, backoff * 1.5)
+
+
+async def task_aprsis_to_meshtastic():
+    """
+    Lee el feed APRS-IS (si hay credenciales configuradas) y reinyecta a la malla
+    los mensajes que lleven un marcador [CHx] / [CANAL x] en el payload.
+
+    - Respeta APRS_GATE_ENABLED (ON/OFF).
+    - Respeta APRS_ALLOWED_SOURCES (lista blanca de indicativos).
+    - Respeta NOGATE / RFONLY en el texto.
+    - Soporta third-party frames (IGATE>APRS:}SRC>DEST,PATH:payload)
+      desenrollando la parte interna antes de parsear canal y mensaje.
+    """
+    if not _aprsis_ready():
+        return
+
+    backoff = 5.0
+    while True:
+        try:
+            reader, writer = await asyncio.open_connection(APRSIS_HOST, APRSIS_PORT)
+
+            flt = APRSIS_FILTER or "m/50"
+            login = (
+                f"user {APRSIS_USER} pass {APRSIS_PASSCODE} "
+                f"vers MESH-APRS 0.1 filter {flt}\n"
+            )
+            try:
+                writer.write(login.encode("ascii", "ignore"))
+                await writer.drain()
+            except Exception as e:
+                print(f"[aprs←IS] ❌ Error enviando login inicial: {e}")
+                writer.close()
+                await writer.wait_closed()
+                raise
+
+            print(
+                f"[aprs←IS] Conectado a {APRSIS_HOST}:{APRSIS_PORT} "
+                f"como {APRSIS_USER} con filtro '{flt}'"
+            )
+            backoff = 5.0
+
+            while True:
+                line = await reader.readline()
+                if not line:
+                    raise ConnectionError("APRS-IS cerró la conexión")
+
+                try:
+                    s = line.decode("utf-8", "ignore").strip()
+                except Exception:
+                    continue
+
+                if not s:
+                    continue
+
+                # Log bruto de TODO lo que llega (con APRS_DEBUG=1 lo verás)
+                _aprs_dbg(f"[aprs←IS RAW] {s}")
+
+                if s.startswith("#"):
+                    continue  # comentarios/keepalive
+
+                if ":" not in s or ">" not in s:
+                    _aprs_dbg(f"[aprs←IS] línea no TNC2 descartada: {s[:120]}")
+                    continue
+
+                # Cabecera exterior (puede ser IGATE>APRS,...:)
+                try:
+                    outer_hdr, outer_info = s.split(":", 1)
+                except ValueError:
+                    _aprs_dbg(f"[aprs←IS] sin ':' descartada: {s[:120]}")
+                    continue
+
+                # Detectar third-party: }SRC>DEST,PATH:payload
+                if outer_info.startswith("}"):
+                    inner = outer_info[1:].strip()
+                    if ":" not in inner or ">" not in inner:
+                        _aprs_dbg(
+                            f"[aprs←IS] 3rd-pty malformado descartado: {s[:120]}"
+                        )
+                        continue
+                    inner_tnc2 = inner
+                else:
+                    # Trama directa: usamos la línea completa
+                    inner_tnc2 = s
+
+                # Ahora trabajamos siempre sobre inner_tnc2
+                try:
+                    inner_hdr, inner_info = inner_tnc2.split(":", 1)
+                except ValueError:
+                    _aprs_dbg(
+                        f"[aprs←IS] inner TNC2 sin ':' descartado: {inner_tnc2[:120]}"
+                    )
+                    continue
+
+                try:
+                    src = inner_hdr.split(">")[0].strip()
+                except Exception:
+                    src = "?"
+
+                # Lista blanca
+                if not _aprs_source_allowed(src):
+                    _aprs_dbg(f"[aprs←IS] drop(src not allowed) src={src}")
+                    continue
+
+                # NOGATE / RFONLY sobre el payload real
+                if _should_not_gate(inner_info):
+                    _aprs_dbg(f"[aprs←IS] drop(NOGATE/RFONLY) src={src}")
+                    continue
+
+                # Paquete sintético para reutilizar el parser de canal/delay
+                pkt = {
+                    "type": "message",
+                    "src": src,
+                    "dest": None,
+                    "info": inner_info,
+                    "text": inner_info,
+                }
+
+                ch, delay_min, msg = _parse_ch_and_delay_from_pkt(
+                    pkt, default_ch=MESHTASTIC_CHANNEL
+                )
+                if ch is None or not msg:
+                    # No había [CHx]/[CANAL x]
+                    _aprs_dbg(
+                        f"[aprs←IS] sin [CHx]/[CANAL x] usable desde {src}: {inner_info[:80]}"
+                    )
+                    continue
+
+                if not _aprs_gate_is_enabled():
+                    print(
+                        f"[aprs←IS→mesh] GATE OFF: descartado CH{ch} ← {src}: {msg[:120]}"
+                    )
+                    continue
+
+                # Posición para enlace de mapa (si existe) usando el paquete interno
+                # Intentar extraer posición...
+                ap = None
+                try:
+                    ap = aprslib.parse(inner_tnc2)
+                except Exception:
+                    ap = None
+
+                try:
+                    if ap and isinstance(ap, dict) and "latitude" in ap and "longitude" in ap:
+                        lat = ap["latitude"]
+                        lon = ap["longitude"]
+                        link = f"https://maps.google.com/?q={lat:.6f},{lon:.6f}"
+                        msg_clean = (msg or "").strip()
+                        if msg_clean:
+                            msg = f"{msg_clean} {link}"
+                        else:
+                            msg = link
+                except Exception as _e:
+                    _aprs_dbg(f"[aprs←IS] maplink error: {type(_e).__name__}: {_e}")
+
+
+                # Comandos CH0 (APRS ON/OFF) vía APRS-IS
+                if ch == 0:
+                    if _handle_aprs_control_from_rf(src, msg):
+                        continue
+                    _aprs_dbg(
+                        f"[aprs←IS ctrl] CH0 sin comando conocido desde {src}: {msg[:80]}"
+                    )
+                    continue
+
+                # Programación local con [CHx+N]
+                if delay_min is not None and delay_min > 0:
+                    print(
+                        f"[aprs←IS→mesh] PROGRAMADO CH{ch} (+{delay_min}m) ← {src}: {msg[:120]}"
+                    )
+                    _schedule_aprs_to_mesh(ch, msg, delay_min, src)
+                else:
+                    res = _broker_send_text(ch, msg, dest=None, ack=False)
+                    ok = bool(res.get("ok"))
+                    print(
+                        f"[aprs←IS→mesh] CH{ch} ← {src}: {msg[:120]}  -> {'OK' if ok else 'KO'}"
+                    )
+                    # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE (APRS-IS) ---
+                    if HOME_NODE_ID:
+                        try:
+                            eco_txt = f"[APRS-IS eco de {src}] {msg}"
+                            res_eco = _broker_send_text(
+                                ch, eco_txt, dest=HOME_NODE_ID, ack=False
+                            )
+                            ok_eco = bool(res_eco.get("ok"))
+                            print(
+                                f"[aprs←IS→mesh ECO] CH{ch} → {HOME_NODE_ID}: "
+                                f"{eco_txt[:120]} -> {'OK' if ok_eco else 'KO'}"
+                            )
+                        except Exception as _e:
+                            print(f"[aprs←IS→mesh ECO] ❌ {type(_e).__name__}: {_e}")
+                    # --- FIN ECO ---
+
+                   
+        except Exception as e:
+            print(f"[aprs←IS] ❌ desconectado: {type(e).__name__}: {e}")
+            await asyncio.sleep(backoff)
+            backoff = min(60.0, backoff * 1.7)
+            continue
+
+
 
 async def task_aprsis_connect_on_startup():
     """
@@ -1168,21 +1788,37 @@ def _apply_cli_overrides():
 # === main =================
 # =========================
 async def main():
-    t1 = asyncio.create_task(task_broker_to_aprs())       # stub (operativo)
-    t2 = asyncio.create_task(task_aprs_to_meshtastic())   # APRS -> Mesh
-    t3 = asyncio.create_task(task_control_udp())          # Bot(/aprs) -> APRS
-    t4 = asyncio.create_task(task_aprsis_connect_on_startup())  # <<< NUEVO
-    await asyncio.gather(t1, t2, t3, t4)
-   
+    # Tareas existentes
+    t1 = asyncio.create_task(task_broker_to_aprs())        # Mesh → APRS
+    t2 = asyncio.create_task(task_aprs_to_meshtastic())    # APRS RF → Mesh
+    t3 = asyncio.create_task(task_control_udp())           # Bot(/aprs) → APRS
+    t4 = asyncio.create_task(task_aprsis_connect_on_startup())  # Conexión inicial APRS-IS (uplink)
+
+    tasks = [t1, t2, t3, t4]
+
+    # NUEVO: activar la recepción APRS-IS → Mesh si hay credenciales
+    if _aprsis_ready():
+        print("[aprs←IS] Recepción APRS-IS habilitada (downlink).")
+        t5 = asyncio.create_task(task_aprsis_to_meshtastic())   # <<< NUEVO
+        tasks.append(t5)
+    else:
+        print("[aprs←IS] Downlink deshabilitado (faltan credenciales APRSIS_USER/PASSCODE).")
+
+    # Ejecutar todas las tareas de forma concurrente
+    await asyncio.gather(*tasks)
+
+
 if __name__ == "__main__":
     try:
         _apply_cli_overrides()  # <<< NUEVO
 
         if _aprsis_ready():
             print(f"[aprs→IS] HABILITADO: user={APRSIS_USER} host={APRSIS_HOST}:{APRSIS_PORT} filtro='{APRSIS_FILTER or '-'}'.")
-            print("           Se subirán SOLO POSICIONES con etiqueta [CHx] / [CANAL x] (respeta NOGATE/RFONLY).")
+            print("           Se subirán SOLO POSICIONES con etiqueta [CHx] / [CANAL x].")
+            print("[aprs←IS] Activado: se recibirán tramas desde APRS-IS y se pasarán a Mesh.")
         else:
-            print("[aprs→IS] Deshabilitado (sin credenciales APRSIS_USER + APRSIS_PASSCODE). No se subirá nada a APRS-IS.")
+            print("[aprs→IS] Deshabilitado (sin credenciales APRSIS_USER + APRSIS_PASSCODE).")
+            print("[aprs←IS] Downlink deshabilitado.")
 
         asyncio.run(main())
     except KeyboardInterrupt:

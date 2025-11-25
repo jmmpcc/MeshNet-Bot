@@ -30,6 +30,8 @@ services:
     depends_on:
       - broker
     restart: on-failure
+    env_file:
+      - .env
     entrypoint: ["/usr/local/bin/entrypoint_bot.sh"]
     network_mode: "service:broker"   # ← comparte la red con broker
     environment:
@@ -59,6 +61,8 @@ services:
     depends_on:
       - broker
     restart: unless-stopped
+    env_file:
+      - .env
     entrypoint: ["/usr/local/bin/entrypoint_aprs.sh"]
     network_mode: "service:broker"   # ← comparte la red con broker
     environment:
@@ -98,42 +102,4 @@ services:
       - TAG_BRIDGE=${TAG_BRIDGE:-[BRIDGE]}
     restart: unless-stopped
 
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile.web
-    image: meshtastic-web:latest
-    container_name: meshtastic-web
-    depends_on:
-      - broker
-    environment:
-      # —— Web Admin ——
-      WEB_BIND: "0.0.0.0"
-      WEB_PORT: "8080"
-      # —— Dónde está el broker (mismo compose ⇒ usa nombre de servicio) ——
-      BROKER_HOST: "broker"
-      BROKER_PORT: "8765"
-      BROKER_CTRL_HOST: "broker"
-      BROKER_CTRL_PORT: "8766"   # suele ser broker_port+1
-
-      # —— (Opcional) Bridge UI ——
-      BRIDGE_ENABLED: "${BRIDGE_ENABLED:-0}"
-      TAG_BRIDGE: "${TAG_BRIDGE:-[BRIDGE]}"
-      TAG_BRIDGE_A2B: "${TAG_BRIDGE_A2B:-[BRIDGE] A2B}"
-      TAG_BRIDGE_B2A: "${TAG_BRIDGE_B2A:-[BRIDGE] B2A}"
-
-      # —— (Opcional) Mapa Live ——
-      HOME_LAT: "${HOME_LAT:-}"
-      HOME_LON: "${HOME_LON:-}"
-      MAP_TILE_URL: "${MAP_TILE_URL:-https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png}"
-      MAP_ATTRIBUTION: "${MAP_ATTRIBUTION:-&copy; OpenStreetMap contributors}"
-
-    volumes:
-      # Sirve y persiste mapas generados por /api/cobertura
-      - ./bot_data/maps:/app/bot_data/maps
-      # (Opcional) si coverage_backlog genera HTML/KML en otro directorio, mapea también ese directorio
-      # - ./bot_data:/app/bot_data
-    ports:
-      - "8080:8080"
-    restart: unless-stopped
-
+ 

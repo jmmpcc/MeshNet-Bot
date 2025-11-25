@@ -1,12 +1,12 @@
-#!/usr/bin/env python3 	   	 	 	    	   		 
-# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
-""" 	  		 	 					 	  		 
-Telegram_Bot_Broker_v6.1.3 py	 		  	 	 			  		 		 
------------------------------	    	   			 		    	 
-Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.			 	   		  	 	 			 	
-Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.		 		    	 				  	 	 
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Telegram_Bot_Broker_v6.1.3 py
+-----------------------------
+Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
+Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
 
-Novedades v4.5:					 			 		   		 		 
+Novedades v4.5:
 - /ver_nodos [N|false]: si pasas 'false' no imprime métricas (RSSI/SNR/ruta) y muestra la lista clásica (más ágil).
 - Ver nodos enriquecido por defecto: añade RSSI/SNR, ruta y calidad del enlace (🟢🟠🔴) combinando API + broker.
 - /enviar y /enviar_ack diferenciados (broadcast vs unicast con ACK), usando TCPInterfacePool persistente.
@@ -1997,7 +1997,6 @@ def _aprs_split_directed(text: str, max_len: int | None = None) -> list[str]:
 
 # --- [FIN] Helpers APRS
 
-# === MODIFICADAS/NUEVAS: pausa exclusiva fuerte para operaciones CLI ===
 import threading, time
 _exclusive_lock = threading.RLock()
 _exclusive_count = 0
@@ -2006,10 +2005,20 @@ def pause_broker_for_exclusive(max_wait_s: float = 6.0) -> bool:
     """
     Pide pausa y bloquea reconexiones del pool para ejecutar una operación exclusiva (CLI).
     Compatible con llamadas anidadas.
+
+    Respeta BOT_PAUSE_MODE:
+      - effective == "never" → NO manda BROKER_PAUSE (solo contador).
+      - effective == "always" → comportamiento actual.
     """
     global _exclusive_count
+    mode = _get_pause_mode_effective()
+
     with _exclusive_lock:
         _exclusive_count += 1
+        if mode == "never":
+            # No pedimos pausa al broker, pero mantenemos el contador
+            return True
+
         ok = _broker_ctrl("BROKER_PAUSE").get("ok", False)
         if not ok:
             _exclusive_count -= 1
@@ -2026,29 +2035,49 @@ def pause_broker_for_exclusive(max_wait_s: float = 6.0) -> bool:
     resume_broker_after_exclusive()
     return False
 
+
 def resume_broker_after_exclusive():
     """
     Libera la pausa exclusiva. Si hay más exclusivas anidadas, sólo decrementa el contador.
+
+    Respeta BOT_PAUSE_MODE: en modo "never" no manda BROKER_RESUME.
     """
     global _exclusive_count
+    mode = _get_pause_mode_effective()
+
     with _exclusive_lock:
         if _exclusive_count > 0:
             _exclusive_count -= 1
-        if _exclusive_count == 0:
+
+        if _exclusive_count == 0 and mode != "never":
             _broker_ctrl("BROKER_RESUME")
+
 
 @contextmanager
 def with_broker_paused(max_wait_s: float = 4.0):
     """
-    Contexto: pausa el broker (desconecta su TCP al nodo) y al salir reanuda.
-    /escuchar sigue conectado al broker; solo se corta la “subida” al nodo mientras dura el bloque.
+    Contexto: pausa el broker y al salir reanuda.
+
+    Respeta BOT_PAUSE_MODE:
+      - effective == "never"  → no pausa nunca (modo Raspberry).
+      - effective == "always" → siempre pausa (modo Windows si BOT_PAUSE_MODE=auto/always).
     """
+    mode = _get_pause_mode_effective()
+
+    if mode == "never":
+        # No tocamos al broker, simplemente ejecutamos el bloque.
+        try:
+            yield True
+        finally:
+            # No hay nada que reanudar en este modo.
+            return
+
+    # Modo "always": usamos tu lógica existente de pausa exclusiva.
     ok = pause_broker_for_exclusive(max_wait_s=max_wait_s)
     try:
         yield ok
     finally:
-        resume_broker_from_exclusive()
-
+        resume_broker_after_exclusive()
 
 # Intentamos localizar funciones de control del broker, si existen
 def _try_import_broker_controls():
@@ -12185,6 +12214,42 @@ try:
     BROKER_CHANNEL
 except NameError:
     BROKER_CHANNEL = 0          # canal lógico por defecto si el usuario no indica
+
+
+import os as _os_for_pause_mode
+
+# Modo de pausa del broker para operaciones CLI:
+#  - "auto"   → Windows: pausa / Linux: no pausa
+#  - "always" → siempre pausa
+#  - "never"  → nunca pausa
+_raw_pause_mode = ""
+try:
+    _raw_pause_mode = (_os_for_pause_mode.environ.get("BOT_PAUSE_MODE", "") or "").strip().lower()
+except Exception:
+    _raw_pause_mode = ""
+
+if _raw_pause_mode not in ("auto", "always", "never", ""):
+    _raw_pause_mode = "auto"
+
+BOT_PAUSE_MODE = _raw_pause_mode or "auto"
+
+
+def _get_pause_mode_effective() -> str:
+    """
+    Devuelve el modo efectivo:
+      - auto   → Windows: always, Linux/otros: never
+      - always → siempre pausa broker
+      - never  → nunca pausa broker
+    """
+    m = (BOT_PAUSE_MODE or "auto").strip().lower()
+    if m not in ("auto", "always", "never"):
+        m = "auto"
+    if m == "auto":
+        # En Windows mantenemos la pausa; en Linux/RPi no.
+        return "always" if _os_for_pause_mode.name == "nt" else "never"
+    return m
+
+
 
 # --- Detección robusta de si un evento es de texto ---
 def _evt_is_text(evt: dict) -> bool:
