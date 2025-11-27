@@ -1,18 +1,36 @@
-version: "3.8"
-
 services:
   broker:
-    build: null
+    container_name: meshnet-broker
     image: ghcr.io/jmmpcc/meshnet-bot-broker:latest
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Madrid
+    volumes:
+      - ./bot_data:/app/bot_data
+    ports:
+      - "8765:8765"
+      - "8766:8766"
 
   bot:
-    build: null
+    container_name: meshnet-bot
     image: ghcr.io/jmmpcc/meshnet-bot-bot:latest
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Madrid
+    depends_on:
+      - broker
 
   aprs:
-    build: null
+    container_name: aprs-gateway
     image: ghcr.io/jmmpcc/meshnet-bot-aprs:latest
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Madrid
 
   bridge:
-    build: null
+    container_name: meshnet-bot-bridge
     image: ghcr.io/jmmpcc/meshnet-bot-bridge:latest
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Madrid
+

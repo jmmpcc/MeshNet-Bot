@@ -155,14 +155,14 @@ BRIDGE_PEER_DOWN_BACKOFF=60
 - (Opcional) Credenciales de **APRS-IS** (indicativo con SSID y *passcode*) para subir posiciones etiquetadas.
 - Un **bot de Telegram** (Token) y, opcionalmente, lista de administradores.
 
-# 🖥️ Instalación en Windows (Docker Desktop)
-
 ## 1. Clonar el repositorio
 ```powershell
 git clone https://github.com/jmmpcc/MeshNet-Bot.git
 cd MeshNet-Bot
 ```
   
+# 🖥️ Instalación en Windows (Docker Desktop)
+
 ```bash
  Editar .env y rellena al menos, estas variables:
     # === Telegram ===
@@ -298,12 +298,12 @@ cd MeshNet-Bot
 
 ## 3. Descargar imágenes multi-arch desde GHCR
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.rpi.yml pull
+docker compose -f docker-compose.rpi.yml pull
 ```
 
 ## 4. Arrancar el sistema
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.rpi.yml up -d
+docker compose -f docker-compose.rpi.yml up -d
 ```
 
 ---
