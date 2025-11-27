@@ -155,13 +155,12 @@ BRIDGE_PEER_DOWN_BACKOFF=60
 - (Opcional) Credenciales de **APRS-IS** (indicativo con SSID y *passcode*) para subir posiciones etiquetadas.
 - Un **bot de Telegram** (Token) y, opcionalmente, lista de administradores.
 
-## 1. Clonar el repositorio
+## 1. COMÚN a ambos sistemas (Windows y Raspberry):
+     Clonar el repositorio y Editar archivo de configuración .env
 ```powershell
 git clone https://github.com/jmmpcc/MeshNet-Bot.git
 cd MeshNet-Bot
 ```
-  
-# 🖥️ Instalación en Windows (Docker Desktop)
 
 ```bash
  Editar .env y rellena al menos, estas variables:
@@ -222,6 +221,9 @@ cd MeshNet-Bot
 ```
 
 ---
+
+# 🖥️ Instalación en Windows (Docker Desktop)
+
 
 # ✔ Formas de ejecutar el proyecto en Windows
 
@@ -290,7 +292,7 @@ curl -sSL https://get.docker.com | sh
 sudo apt install -y docker-compose-plugin
 ```
 
-## 2. Clonar el repositorio
+## 2. Clonar el repositorio y editar archivo .env de configuración (Ver paso 1º)
 ```bash
 git clone https://github.com/jmmpcc/MeshNet-Bot.git
 cd MeshNet-Bot
@@ -303,7 +305,47 @@ docker compose -f docker-compose.rpi.yml pull
 
 ## 4. Arrancar el sistema
 ```bash
-docker compose -f docker-compose.rpi.yml up -d
+  1.- Arrancar todos los contenedores
+    docker compose -f docker-compose.rpi.yml up -d
+
+  2.- Arrancar cada contenedor de manera individual
+
+    Broker:
+      docker compose -f docker-compose.rpi.yml up -d broker
+    
+    Bot:
+      docker compose -f docker-compose.rpi.yml up -d bot
+    
+    Aprs:
+      docker compose -f docker-compose.rpi.yml up -d aprs
+
+```
+
+## 5. Comandos relacionados
+```bash
+  1.- Ver estado de todos los contenedores
+    docker ps
+
+  2.- Ver logs de un servicio concreto
+
+    docker logs -f meshnet-broker
+    docker logs -f meshnet-bot
+    docker logs -f aprs-gateway
+    docker logs -f meshtastic-bridge
+
+```
+## 6. Si hicimos 'docker compose down'
+
+```bash
+  Arrancar solo uno:
+
+    docker compose -f docker-compose.rpi.yml up -d broker
+
+  Arrancar todos:
+
+    docker compose -f docker-compose.rpi.yml up -d
+
+
 ```
 
 ---
@@ -329,8 +371,8 @@ docker compose up -d --build
 ## Raspberry Pi
 ```bash
 git pull
-docker compose -f docker-compose.yml -f docker-compose.rpi.yml pull
-docker compose -f docker-compose.yml -f docker-compose.rpi.yml up -d
+docker compose -f docker-compose.rpi.yml pull
+docker compose -f docker-compose.rpi.yml up -d
 ```
 
 ---
@@ -349,15 +391,25 @@ docker logs -f meshnet-bot
 
 ## APRS
 ```bash
-docker logs -f aprs-gateway
+docker logs -f meshtastic-aprs
 ```
 
-## Bridge
+# Parar los servicios
 ```bash
-docker logs -f meshnet-bot-bridge
-```
+Parar todos los servicios:
+  docker compose -f docker-compose.rpi.yml down
 
----
+Parar servicio Broker:
+    docker compose -f docker-compose.rpi.yml stop broker
+
+Parar servicio bot:
+  docker compose -f docker-compose.rpi.yml stop bot
+
+Parar servicio aprs
+  docker compose -f docker-compose.rpi.yml stop aprs
+
+
+```
 
 # 🐳 Cómo funcionan las imágenes multi-arch
 

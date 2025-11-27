@@ -1,30 +1,81 @@
+
+  
+
+version: "3.8"
+
 services:
   broker:
-    container_name: meshnet-broker
     image: ghcr.io/jmmpcc/meshnet-bot-broker:latest
+    container_name: meshnet-broker
     restart: unless-stopped
+    env_file:
+      - .env
+    entrypoint: ["/usr/local/bin/entrypoint_broker.sh"]
     environment:
-      - TZ=Europe/Madrid
-    volumes:
-      - ./bot_data:/app/bot_data
+      - MESHTASTIC_HOST=${MESHTASTIC_HOST:-192.168.1.201}
+      - BROKER_PORT=8765
+      - BACKLOG_PORT=8766
+      - BROKER_CTRL_BIND=0.0.0.0
+      - DISABLE_BOT_TCP=1
+      - TASK_NOTIFY=0
+      - BOT_TASK_SCHEDULER=1
     ports:
       - "8765:8765"
       - "8766:8766"
+    volumes:
+      - ./bot_data:/app/bot_data:rw
 
   bot:
-    container_name: meshnet-bot
     image: ghcr.io/jmmpcc/meshnet-bot-bot:latest
-    restart: unless-stopped
-    environment:
-      - TZ=Europe/Madrid
+    container_name: meshnet-bot
     depends_on:
       - broker
+    restart: on-failure
+    env_file:
+      - .env
+    entrypoint: ["/usr/local/bin/entrypoint_bot.sh"]
+    network_mode: "service:broker"
+    environment:
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
+      ADMIN_IDS: ${ADMIN_IDS}
+      MESHTASTIC_HOST: ${MESHTASTIC_HOST}
+      BROKER_HOST: broker
+      BROKER_PORT: 8765
+      BROKER_CTRL_HOST: broker
+      BROKER_CTRL_PORT: 8766
+      DISABLE_BOT_TCP: 1
+      BOT_START_DELAY: ${BOT_START_DELAY:-45}
+      NODES_FORCE_API_ONLY: 1
+      TASK_NOTIFY: 1
+      BOT_TASK_SCHEDULER: 0
+      BOT_DATA_DIR: /app/bot_data
+    volumes:
+      - ./bot_data:/app/bot_data:rw
 
   aprs:
-    container_name: aprs-gateway
     image: ghcr.io/jmmpcc/meshnet-bot-aprs:latest
+    container_name: meshnet-aprs
+    depends_on:
+      - broker
     restart: unless-stopped
+    env_file:
+      - .env
+    entrypoint: ["/usr/local/bin/entrypoint_aprs.sh"]
+    network_mode: "service:broker"
     environment:
-      - TZ=Europe/Madrid
-  
+      - BROKER_HOST=127.0.0.1
+      - BROKER_PORT=8765
+      - BROKER_CTRL_HOST=127.0.0.1
+      - BROKER_CTRL_PORT=8766
+      - APRS_CALL=${APRS_CALL}
+      - KISS_HOST=${KISS_HOST:-host.docker.internal}
+      - KISS_PORT=${KISS_PORT:-8100}
+      - TASK_NOTIFY=0
+      - APRSIS_USER=${APRSIS_USER:-}
+      - APRSIS_PASSCODE=${APRSIS_PASSCODE:-}
+      - APRSIS_HOST=${APRSIS_HOST:-rotate.aprs2.net}
+      - APRSIS_PORT=${APRSIS_PORT:-14580}
+      - APRSIS_FILTER=${APRSIS_FILTER:-}
+    volumes:
+      - ./bot_data:/app/bot_data:rw
 
