@@ -223,7 +223,238 @@ IGATE>APRS,TCPIP*,qAR,IGATE:}SRC>DEST,PATH:payload
 
 ---
 
-# 8. Registro y depuración
+# 7. Novedades v6.2 — Sistema de Emergencias APRS
+
+-------------------------------------
+## 7.1. Detección automática de emergencias
+
+El sistema identifica emergencias mediante:
+
+### Palabras clave:
+```
+EMERGENCIA, EMERGENCY, SOS, MAYDAY, AYUDA, …
+```
+
+Configurable:
+
+```
+APRS_EMERGENCY_KEYWORDS=EMERGENCIA,EMERGENCY,MAYDAY,SOS,AYUDA
+```
+
+### Destinos APRS especiales:
+```
+APRS_EMERGENCY_DESTS=EMERGENCY,EMERG,SOS
+```
+
+Ejemplos:
+
+```
+[CH1] EMERGENCIA accidente grave
+SOS senderista caída
+```
+
+-------------------------------------
+## 7.2. Bypass total del gateway
+
+Aunque el sistema esté desactivado mediante:
+
+```
+APRS_GATE_ENABLED=0
+```
+o
+```
+[CH0] APRS OFF
+```
+
+→ **Los mensajes de emergencia SIEMPRE se procesan.**
+
+-------------------------------------
+## 7.3. Reenvío redundante en Mesh
+
+Configurable:
+
+```
+MESH_EMERGENCY_CHANNELS=1,2,4
+```
+
+Reglas:
+
+- Emergencia **local** → enviar a `[CHx]` + canales dedicados.
+- Emergencia **remota** → solo al canal `[CHx]`.
+- Si no hay lista de emergencia → solo al canal `[CHx]`.
+
+-------------------------------------
+## 7.4. Geo‑fencing: LOCAL / REMOTA
+
+Variables:
+
+```
+HOME_LAT=41.638
+HOME_LON=-0.902
+APRS_EMERGENCY_MAX_KM=50
+```
+
+Clasificación:
+
+- Dentro del radio → **LOCAL**
+- Fuera del radio → **REMOTA**
+- Sin posición → **DESCONOCIDA**
+
+Ejemplo en Mesh:
+
+```
+[EMERG APRS][LOCAL] src=EA2ABC-7 gate=ON
+incendio forestal
+https://maps.google.com/?q=41.6385,-0.9038
+```
+
+-------------------------------------
+## 7.5. Notificación inmediata a Telegram
+
+Cada emergencia se envía automáticamente a:
+
+```
+TELEGRAM_EMERG_CHAT_IDS=
+```
+
+O a:
+
+```
+ADMIN_IDS
+```
+
+Incluye:
+
+- Indicativo
+- PATH
+- LOCAL / REMOTA
+- Distancia
+- Enlace a mapa
+- Texto original
+- Canales Mesh utilizados
+
+-------------------------------------
+## 7.6. Heartbeat (estado de red)
+
+Cada mensaje de emergencia enviado a Mesh incluye un encabezado:
+
+```
+[EMERG APRS][LOCAL] src=EA2XYZ-9 gate=ON
+```
+
+Actúa como:
+
+- Confirmación del gateway
+- Registro útil para auditoría
+- Diferenciación clara de tráfico crítico
+
+-------------------------------------
+# 8. Ejemplos prácticos
+
+-------------------------------------
+## 8.1. Accidente múltiple
+
+Entrada APRS:
+
+```
+[CH3] EMERGENCIA varios heridos
+```
+
+Salida Mesh:
+
+```
+[EMERG APRS][LOCAL] src=EA2ABC-7 gate=ON
+varios heridos
+```
+
+-------------------------------------
+## 8.2. Senderista perdida con posición
+
+Entrada:
+
+```
+!4138.31N/00054.23W AYUDA no encuentro el camino
+```
+
+Salida:
+
+```
+[EMERG APRS][LOCAL] src=EA2XYZ-9 gate=ON
+no encuentro el camino
+https://maps.google.com/?q=41.6385,-0.9038
+```
+
+-------------------------------------
+## 8.3. Corte de comunicaciones
+
+Incluso con el gateway apagado:
+
+```
+[CH0] APRS OFF
+```
+
+Una trama APRS como:
+
+```
+SOS municipio sin comunicaciones
+```
+
+→ Sí se reenvía.
+
+-------------------------------------
+# 9. Variables completas (incluidas las nuevas)
+
+```
+APRS_GATE_ENABLED=1
+APRS_ALLOWED_SOURCES=
+APRS_EMERGENCY_KEYWORDS=EMERGENCIA,EMERGENCY,MAYDAY,SOS,AYUDA
+APRS_EMERGENCY_DESTS=EMERGENCY,EMERG,SOS
+MESH_EMERGENCY_CHANNELS=1,2
+APRS_EMERGENCY_MAX_KM=50
+HOME_LAT=
+HOME_LON=
+TELEGRAM_EMERG_CHAT_IDS=
+APRSIS_USER=
+APRSIS_PASSCODE=
+APRSIS_FILTER=
+```
+
+-------------------------------------
+# 10. Changelog
+
+## v6.2 — Extensión de emergencias
+✓ Detección automática  
+✓ Bypass completo  
+✓ Geo‑fencing  
+✓ Notificación Telegram  
+✓ Rutas redundantes Mesh  
+✓ Heartbeat de emergencia  
+
+## v6.1.3 — Funciones anteriores  
+✓ Envío `[CHx]` y `[CHx+M]`  
+✓ Limpieza de prefijos  
+✓ Control RF `[CH0]`  
+✓ Uplink APRS‑IS  
+✓ Prevención loops  
+✓ Conversión de posiciones a mapa  
+✓ Heurística canales/delay  
+
+-------------------------------------
+# 11. Conclusión
+
+La pasarela APRS ↔ MeshNet se convierte así en un **sistema robusto de comunicaciones resilientes**, útil para:
+
+- Rescate en montaña  
+- Protección Civil  
+- Catástrofes naturales  
+- Zonas sin infraestructura  
+- Operaciones tácticas y humanitarias  
+
+Si puede emitirse APRS, **MeshNet lo recibe, lo distribuye y alerta a los responsables**, incluso sin internet ni bot.
+
+-------------------------------------
+
+# 12. Registro y depuración
 
 Activa el modo de depuración añadiendo en `.env`:
 
@@ -239,7 +470,7 @@ APRS_DEBUG=1
 
 > Desactívalo con `APRS_DEBUG=0` para un funcionamiento silencioso.
 
-# 9. Resumen técnico interno
+# 13. Resumen técnico interno
 
 Flujo completo en `task_aprs_to_meshtastic`:
 
@@ -256,7 +487,7 @@ Flujo completo en `task_aprs_to_meshtastic`:
 
 ---
 
-# 10. Resumen rápido
+# 14. Resumen rápido
 
 ```
 [CH n] texto       → envío inmediato
@@ -269,7 +500,7 @@ posiciones APRS    → enlace Google Maps
 
 ---
 
-# 11. Formatos válidos
+# 15. Formatos válidos
 
 ```
 [CH4]
@@ -283,7 +514,7 @@ posiciones APRS    → enlace Google Maps
 
 ---
 
-# 12. Variables requeridas
+# 16. Variables requeridas
 
 ```
 APRS_GATE_ENABLED=1
@@ -297,7 +528,7 @@ A tener en cuenta las otras variables expuestas anteriormente.
 
 ---
 
-# 13. Ejemplos completos
+# 17. Ejemplos completos
 
     ### Inmediato:
     ```
@@ -333,17 +564,6 @@ A tener en cuenta las otras variables expuestas anteriormente.
     ```
 
     ---
-
-# 14. Changelog resumido
-
-    ## v6.1.3 – Integración completa APRS→Mesh
-    - Envío inmediato con `[CHn]`
-    - Programación con `[CHn+M]`
-    - Heurística `[CHXY] → (X,Y)`
-    - Comandos `[CH0] APRS ON/OFF`
-    - Conversión de posición a enlace Maps
-    - Limpieza automática del prefijo
-    - Mejoras en logs, parser y robustez
 
 ---
 
