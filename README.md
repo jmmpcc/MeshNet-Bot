@@ -256,7 +256,7 @@ Aquí Windows **no construye nada**.
 Descarga directamente las imágenes multi-arch ya generadas por GitHub Actions:
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.rpi.yml up -d
+docker compose -f docker-compose.yml up -d
 ```
 
 ### Ventajas:
@@ -1158,4 +1158,5 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
 
 ---
+
 
