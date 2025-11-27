@@ -330,9 +330,8 @@ docker compose -f docker-compose.rpi.yml pull
 
     docker logs -f meshnet-broker
     docker logs -f meshnet-bot
-    docker logs -f aprs-gateway
-    docker logs -f meshtastic-bridge
-
+    docker logs -f meshnet-aprs
+    
 ```
 ## 6. Si hicimos 'docker compose down'
 
@@ -1158,5 +1157,6 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
 
 ---
+
 
 
