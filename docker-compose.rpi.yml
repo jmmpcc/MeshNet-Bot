@@ -26,11 +26,5 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Europe/Madrid
-
-  bridge:
-    container_name: meshnet-bot-bridge
-    image: ghcr.io/jmmpcc/meshnet-bot-bridge:latest
-    restart: unless-stopped
-    environment:
-      - TZ=Europe/Madrid
+  
 
