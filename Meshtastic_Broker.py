@@ -1,12 +1,12 @@
-#!/usr/bin/env python3 	   	 	 	    	   		 
-# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
-# Version v6.1.3 	  		 	 					 	  		 
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Version v6.1.3
 
-from __future__ import annotations	 		  	 	 			  		 		 
-"""	    	   			 		    	 
-Meshtastic_Broker_v6.1.3.py			 	   		  	 	 			 	
---------------------------------		 		    	 				  	 	 
-Broker JSONL para Meshtastic (TCPInterface) con salida limpia.					 			 		   		 		 
+from __future__ import annotations
+"""
+Meshtastic_Broker_v6.1.3.py
+--------------------------------
+Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 
 Cambios v3.3:
 - Restaurada inferencia de canal lógico=0 para puertos de sistema (marcado con '*').
@@ -418,20 +418,14 @@ class _CooldownCtrl:
         self._until = 0  # epoch seconds hasta que termina el cooldown
 
     def enter(self, seconds: int = COOLDOWN_SECS):
+        """
+        Activa el cooldown durante 'seconds' segundos.
+        Solo actualiza la ventana temporal; la lógica de pausar la interfaz
+        y bloquear TX se hace en _on_disconnect/_delayed_resume o en
+        comandos de control explícitos (BROKER_PAUSE, BROKER_DISCONNECT, etc.).
+        """
         with self._lock:
             self._until = int(time.time()) + max(1, int(seconds))
-        # Si tenemos gestor de iface, asegúrate de pausar ahora:
-        try:
-             TX_BLOCKED.set() 
-        except Exception:
-            pass
-        # pausar manager si existe (ya lo tenías)
-        try:
-            mgr = globals().get("BROKER_IFACE_MGR")
-            if mgr and hasattr(mgr, "pause"):
-                mgr.pause()
-        except Exception:
-            pass
 
     def is_active(self) -> bool:
         with self._lock:
@@ -3401,11 +3395,17 @@ class MeshReceiver:
             except Exception:
                 pass
 
-            # 3.3) Pausar o señalizar desconexión actual
+            # 3.3) Activar barrera de TX y pausar la interfaz actual
+            try:
+                TX_BLOCKED.set()
+            except Exception:
+                pass
+
             if hasattr(self.iface_mgr, "pause") and callable(self.iface_mgr.pause):
                 self.iface_mgr.pause()
             else:
                 self.iface_mgr.signal_disconnect()
+
 
             # 3.4) Programar reanudación al cumplirse 'target'
             def _delayed_resume():

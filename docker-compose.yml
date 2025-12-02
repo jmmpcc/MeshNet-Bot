@@ -58,29 +58,57 @@ services:
       dockerfile: Dockerfile.aprs
     image: aprs-gateway:latest
     container_name: meshtastic-aprs
-    depends_on:
-      - broker
+    depends_on:  # comentar en caso de que el BROKER esté en otr dirección IP o en otra maquina
+      - broker   # Idem 
     restart: unless-stopped
     env_file:
       - .env
     entrypoint: ["/usr/local/bin/entrypoint_aprs.sh"]
-    network_mode: "service:broker"   # ← comparte la red con broker
+    network_mode: "service:broker"   # ← comparte la red con broker (deshabilitar cuando BROKER en otra IP)
     environment:
+      # BLOQUE REMOTO: apuntar al broker remoto (Raspberry)
+      #- BROKER_HOST=192.168.1.187        # IP de la Raspberry
+      #- BROKER_PORT=8765
+      #- BROKER_CTRL_HOST=192.168.1.187   # si usas control/backlog
+      #- BROKER_CTRL_PORT=8766
+      
+      # IMPORTANTE: escuchar UDP en todas las interfaces del contenedor
+      - APRS_CTRL_HOST=0.0.0.0
+      - APRS_CTRL_PORT=9464
+
+     # FIN BLOQUE REMOTO CONFIGURACION RASPBERRRY
+     
+      #BLOQUE LOCAL: apuntar al broker local (dockers mismo PC)
+     
       - BROKER_HOST=127.0.0.1
       - BROKER_PORT=8765
       - BROKER_CTRL_HOST=127.0.0.1
       - BROKER_CTRL_PORT=8766
+      - APRS_CTRL_HOST=${APRS_CTRL_HOST}
+      - APRS_CTRL_PORT=${APRS_CTRL_PORT}
+     
+     # FIN BLOQUE BROKER LOCAL
+
+
       - APRS_CALL=${APRS_CALL}
+
+      # KISS local en el PC (soundmodem/direwolf)
       - KISS_HOST=${KISS_HOST:-host.docker.internal}
       - KISS_PORT=${KISS_PORT:-8100}
+
       - TASK_NOTIFY=0 
       - APRSIS_USER=${APRSIS_USER:-}
       - APRSIS_PASSCODE=${APRSIS_PASSCODE:-}
       - APRSIS_HOST=${APRSIS_HOST:-rotate.aprs2.net}
       - APRSIS_PORT=${APRSIS_PORT:-14580}
       - APRSIS_FILTER=${APRSIS_FILTER:-}
+    
     volumes:
       - ./bot_data:/app/bot_data:rw
+    # Comentar MODO LOCAL  
+    #ports:
+    #  - "9464:9464/udp"
+
 
   bridge:
     build:

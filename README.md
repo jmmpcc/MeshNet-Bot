@@ -57,10 +57,88 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 ---
 
+### 🛰️ Auditorías MeshNet
+
+> Este documento describe las dos auditorías integradas en MeshNet:
+
+- **Auditoría de Red (`auditoria_red`)**
+- **Auditoría Integral (`auditoria_integral`)**
+
+Ambas funciones analizan la información del backlog, nodos escuchados, métricas SNR/RSSI, distancias y rutas para generar un informe claro del estado real de la malla.
+
+📘 **[Abrir guía completa → AUDITORIAS.md](./docs/AUDITORIAS.md)**
+
+---
+
+### 🌐 Guía APRS Gateway
+
+> 🔄 Documentación detallada del sistema de pasarela entre Meshtastic y APRS,
+> se incluye nuevas funciones de comunicación de EMERGENCIAS: APRS -> MESH <- APRS  
+> incluyendo configuración, ejemplos, variables de entorno y modos de operación.
+
+📘 **[Abrir guía completa → APRS_GATEWAY.md](./docs/APRS_GATEWAY.md)**
+
+---
 
 👉 No se expone el código fuente. Todo se distribuye mediante **imágenes Docker** publicadas en **GitHub Container Registry (GHCR)**.
 
 ## 🧾 Historial de versiones
+
+### v6.1.3 — Estable (Diciembre 2025)
+
+## 🧠 Broker
+- Reconexión persistente robusta.
+- Cooldown seguro con pausa suave.
+- Watchdog + CircuitBreaker integrados.
+- Cola SendQueue con coalescing.
+- BacklogServer mejorado con control remoto.
+- Manejo refinado de sockets y reconexión limpia.
+
+---
+
+# 🗺️ Auditorías incluidas en v6.1.3
+
+## ✔️ Auditoría de Red (`auditoria_red`)
+Nueva auditoría orientada a evaluar **salud y calidad actual de la malla**.
+
+Incluye:
+- SNR mínimo/máximo/promedio por nodo.
+- Clasificación de calidad por colores.
+- Distancia a HOME (Haversine).
+- Provincia/Ciudad con reverse-geocoder offline.
+- Última vez escuchado.
+- Vecinos detectados.
+- Rutas y hops reales.
+- Ranking por calidad.
+- Detección de nodos sin posición o sin métricas.
+
+Salida:
+- Informe estructurado en Telegram.
+- Datos combinados del backlog y nodes.txt.
+
+---
+
+## ✔️ Auditoría Integral (`auditoria_integral`)
+Auditoría avanzada que evalúa:
+
+- Cobertura total de la red.
+- Mapas KML/GPX generados automáticamente.
+- Heatmap de posiciones desde backlog.
+- Análisis temporal (24h / 72h / 7 días).
+- Estadísticas por nodo:
+  - mensajes enviados/recibidos
+  - distancias máximas alcanzadas
+  - saltos medios
+  - SNR promedio
+- Detección de agujeros de cobertura.
+- Rutas poco eficientes.
+- Ranking de cobertura y centralidad.
+
+Salida:
+- KML de cobertura.
+- KML 24h.
+- Histograma básico de calidad.
+- Resumen detallado por nodo.
 
 ### 🆕 **v6.1.2** — _“Corrección de grabación offline y compatibilidad”_ (Noviembre 2025)
 
@@ -256,7 +334,7 @@ Aquí Windows **no construye nada**.
 Descarga directamente las imágenes multi-arch ya generadas por GitHub Actions:
 
 ```powershell
-docker compose -f docker-compose.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.rpi.yml up -d
 ```
 
 ### Ventajas:
@@ -330,8 +408,9 @@ docker compose -f docker-compose.rpi.yml pull
 
     docker logs -f meshnet-broker
     docker logs -f meshnet-bot
-    docker logs -f meshnet-aprs
-    
+    docker logs -f aprs-gateway
+    docker logs -f meshtastic-bridge
+
 ```
 ## 6. Si hicimos 'docker compose down'
 
@@ -1157,6 +1236,4 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
 
 ---
-
-
 

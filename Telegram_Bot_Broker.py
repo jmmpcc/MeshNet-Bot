@@ -506,6 +506,39 @@ def _get_home_coords(
         print("[KM][HOME] sin coordenadas HOME disponibles", flush=True)
     return None, None
 
+def _snr_quality_label(snr) -> str:
+    """
+    Clasifica la calidad del enlace según el SNR y devuelve texto + icono.
+
+      Muy fuerte:      +5 a +20 dB
+      Fuerte:          0 a +5 dB
+      Óptimo:          0 a –10 dB
+      Utilizable:      –10 a –15 dB
+      Crítico:         –15 a –20 dB
+      Casi perdido:    < –20 dB
+    """
+    if snr is None:
+        return "desconocida ⚪"
+
+    try:
+        s = float(snr)
+    except Exception:
+        return "desconocida ⚪"
+
+    # Rangos con iconos redondos
+    if s >= 5:
+        return "muy fuerte 🟢"
+    elif 0 <= s < 5:
+        return "fuerte 🟢"
+    elif -10 <= s < 0:
+        return "óptimo 🟡"
+    elif -15 <= s < -10:
+        return "utilizable 🟠"
+    elif -20 <= s < -15:
+        return "crítico 🔴"
+    else:
+        return "casi perdido ⚫"
+
 
 # ===================== Fin helpers ubicación =====================
 
@@ -2070,7 +2103,7 @@ def with_broker_paused(max_wait_s: float = 4.0):
             yield True
         finally:
             # No hay nada que reanudar en este modo.
-            return
+            pass
 
     # Modo "always": usamos tu lógica existente de pausa exclusiva.
     ok = pause_broker_for_exclusive(max_wait_s=max_wait_s)
@@ -3112,6 +3145,24 @@ def sync_nodes_and_save(n_max: int = 20) -> None:
     except Exception as e:
         log(f"⚠️ CLI --nodes falló: {e}")
         return
+
+    # --- NUEVO: proteger nodos.txt ante timeout o salida sin datos ---
+    try:
+        text = (out or "").strip()
+        # Caso 1: timeout explícito de la CLI
+        if "Tiempo excedido ejecutando CLI Meshtastic" in text:
+            log("⚠️ CLI --nodes: timeout; se conserva NODES_FILE existente (no se sobrescribe).")
+            return
+
+        # Caso 2: salida vacía o casi vacía → no tiene sentido borrar nodos previos
+        if not text:
+            log("⚠️ CLI --nodes devolvió salida vacía; se conserva NODES_FILE existente.")
+            return
+    except Exception as e:
+        # Si algo raro pasa al analizar la salida, mejor no tocar el fichero
+        log(f"⚠️ Error analizando salida de CLI --nodes; se conserva NODES_FILE. Detalle: {e}")
+        return
+
 
     try:
         # Evitar error "'str' object has no attribute 'parent'": pasar Path
@@ -6258,44 +6309,72 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _safe_reply_html(update.effective_message, f"❌ Error al cargar scheduler: <code>{escape(type(e).__name__)}</code>: <code>{escape(str(e))}</code>")
             return
 
+        # Meta común para ambas tareas (Mesh y APRS)
+        base_meta = {
+            "scheduled_by": update.effective_user.username or str(update.effective_user.id),
+            "via": "/aprs",
+            "aprs_dest": "broadcast",
+            "bot_est_parts": est_parts,
+            # Para notificación de ejecución (si la usas en el broker/bot)
+            "chat_id": update.effective_chat.id,
+            "reply_to": update.effective_message.message_id,
+        }
+
         ids, errors = [], []
         for mins in minutes_list:
             when_local_dt = datetime.now(TZ_EUROPE_MADRID) + timedelta(minutes=mins)
             when_local_str = when_local_dt.strftime("%Y-%m-%d %H:%M")
 
+            # 1) Tarea principal: envío por Mesh
             try:
-                res = _bt.schedule_message(
+                res_mesh = _bt.schedule_message(
                     when_local=when_local_str,
                     channel=int(canal),
                     message=texto_norm,
                     destination="broadcast",
                     require_ack=False,
                     meta={
-                        "scheduled_by": update.effective_user.username or str(update.effective_user.id),
-                        "via": "/aprs",
-                        "transport": "both",
-                        "aprs_dest": "broadcast",
-                        "bot_est_parts": est_parts,
-                        # NUEVO → para notificación de ejecución:
-                        "chat_id": update.effective_chat.id,
-                        "reply_to": update.effective_message.message_id
-                    }
+                        **base_meta,
+                        # Transporte explícito por Mesh
+                        "transport": "mesh",
+                    },
                 )
-                if isinstance(res, dict) and res.get("ok"):
-                    ids.append(res.get("task", {}).get("id", "?"))
+                if isinstance(res_mesh, dict) and res_mesh.get("ok"):
+                    ids.append(res_mesh.get("task", {}).get("id", "?"))
                 else:
                     errors.append(f"{mins}min")
                     try:
-                        print(f"[bot:/aprs en] NOK ({mins}min) canal={canal} res={res!r}", flush=True)
+                        print(f"[bot:/aprs en] NOK Mesh ({mins}min) canal={canal} res={res_mesh!r}", flush=True)
                     except Exception:
                         pass
             except Exception as e:
-                errors.append(f"{mins}min:{type(e).__name__}")
+                errors.append(f"{mins}min:Mesh:{type(e).__name__}")
                 try:
-                    print(f"[bot:/aprs en] EXC ({mins}min) canal={canal} {type(e).__name__}: {e}", flush=True)
+                    print(f"[bot:/aprs en] EXC Mesh ({mins}min) canal={canal} {type(e).__name__}: {e}", flush=True)
                 except Exception:
                     pass
 
+            # 2) Tarea gemela: APRS-only (no depende de que Mesh vaya bien)
+            try:
+                _bt.schedule_message(
+                    when_local=when_local_str,
+                    channel=int(canal),
+                    message=texto_norm,
+                    destination="broadcast",
+                    require_ack=False,
+                    meta={
+                        **base_meta,
+                        # Forzamos transporte "aprs" para que el scheduler
+                        # use _aprs_forward_via_udp() directamente.
+                        "transport": "aprs",
+                    },
+                )
+            except Exception as e:
+                # No marcamos error "duro": lo dejamos solo en log.
+                try:
+                    print(f"[bot:/aprs en] EXC APRS ({mins}min) canal={canal} {type(e).__name__}: {e}", flush=True)
+                except Exception:
+                    pass
 
 
         # <<< AÑADE AQUÍ EL LOG >>>
@@ -7207,6 +7286,8 @@ def _parse_hops_filter(token: str) -> tuple[int | None, int | None]:
         return None, n - 1 if n > 0 else 0
     return None, None
 
+
+
 async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     /vecinos [max_n] [hops_max] [timeout]
@@ -7557,6 +7638,9 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 hops  = n0.get("hops", 0)
                 ago_t = fmt_ago(n0.get("ago"))
 
+                # NUEVO: calcular calidad de enlace a partir del SNR
+                quality = _snr_quality_label(snr)
+                
                 dist_txt = "?"
                 place_txt = "?"
 
@@ -7597,7 +7681,7 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 parts = [
                     f"{i}. {alias} ({nid}) - ",
                     f"Visto hace {ago_t}\n",
-                    f" SNR: {_fmt_db(snr,'dB')}\n",
+                    f" SNR: {_fmt_db(snr,'dB')} ({quality})\n",
                     f" hops: {hops}\n",
                     f"📍 <b>{dist_txt}</b> km — <b>{place_txt}</b>",
                 ]
@@ -7762,7 +7846,11 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         snr   = n.get("snr")
         ago   = fmt_ago(n.get("ago"))
         snr_txt = f"{snr:.2f} dB" if isinstance(snr, (int, float)) else "—"
-        lines.append(f"{i}. {alias} ({nid}) — SNR: {snr_txt} — visto hace {ago}")
+
+        # NUEVO: icono de calidad
+        quality = _snr_quality_label(snr)
+
+        lines.append(f"{i}. {alias} ({nid}) — SNR: {snr_txt} ({quality}) — visto hace {ago}")
 
     await update.effective_message.reply_text("📡 Últimos vecinos:\n\n" + "\n\n".join(lines))
     return ConversationHandler.END
@@ -7903,8 +7991,8 @@ async def vecinos_pager_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Si no podemos editar (mensaje muy viejo, etc.), al menos responde
         await q.answer("No se pudo actualizar el mensaje.")
 
-
-async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+# 25-11-2025 18:14
+async def traceroute_cmd_ANTERIOR(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     /traceroute <!id|alias>  [timeout_s]
       - Prefiere ejecutar el traceroute vía broker (BacklogServer) y leer los TRACEROUTE_APP del backlog.
@@ -8467,6 +8555,549 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     return ConversationHandler.END
 
+async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    /traceroute <!id|alias>  [timeout_s]
+      - Prefiere ejecutar el traceroute vía broker (BacklogServer) y leer los TRACEROUTE_APP del backlog.
+      - Si el broker no puede lanzarlo, fallback CLI con: PAUSAR → ejecutar CLI → REANUDAR.
+    """
+    import asyncio, time, json as _j, socket as _s, os
+
+    # 1) cooldown
+    try:
+        if await _abort_if_cooldown(update, context):
+            return ConversationHandler.END
+    except Exception:
+        pass
+
+    try:
+        bump_stat(update.effective_user.id, update.effective_user.username or "", "traceroute")
+    except Exception:
+        pass
+
+    # 2) args
+    args = (context.args or []) + [None]
+    target = (args[0] or "").strip()
+    if not target:
+        await update.effective_message.reply_text("Uso: /traceroute <!id|alias> [timeout_s]")
+        return ConversationHandler.END
+
+    # --- timeout opcional (UNIFICADO) ---
+    raw_t = (args[1] or "")
+    txt = str(raw_t).strip().lower()
+
+    # alias rápidos
+    if txt in {"slow", "lento"}:
+        txt = "60"
+    elif txt in {"slow2", "muylento"}:
+        txt = "90"
+
+    def _isnum(s: str) -> bool:
+        try:
+            float(s)
+            return True
+        except Exception:
+            return False
+
+    # valor base y límites de seguridad
+    try:
+        timeout = float(txt) if _isnum(txt) else 12.0  # por defecto 12 s (como venías usando en la práctica)
+    except Exception:
+        timeout = 12.0
+
+    # límites de seguridad (mantengo 4–45 como tenías en el segundo bloque)
+    timeout = max(4.0, min(45.0, timeout))
+
+    # --- resolver alias seguro ---
+    def _alias_for(node_id: str) -> str:
+        nid = (node_id or "").strip()
+        if not nid:
+            return ""
+        try:
+            if '_build_alias_fallback_from_nodes_file' in globals() and callable(globals()['_build_alias_fallback_from_nodes_file']):
+                a = _build_alias_fallback_from_nodes_file(nid)
+                if a:
+                    return str(a)
+        except Exception:
+            pass
+        try:
+            if 'resolver_alias_o_id' in globals() and callable(globals()['resolver_alias_o_id']):
+                a = resolver_alias_o_id(nid)
+                if a and a.startswith("!"):
+                    pass
+                else:
+                    return str(a)
+        except Exception:
+            pass
+        return ""
+
+    def _canon_node_id(x) -> str:
+        """
+        Normaliza un ID de nodo para que sea una cadena aceptable por el CLI:
+        - Acepta strings, tuplas/listas/dicts con candidatos.
+        - Prefiere forma con '!' + hex; si recibe hex pelado, añade '!'.
+        - Limpia comillas/residuos y fuerza minúsculas.
+        """
+        import string
+        hexd = set(string.hexdigits)
+
+        def _is_hex(s: str) -> bool:
+            s = (s or "").strip()
+            return bool(s) and all(ch in hexd for ch in s)
+
+        # a) aplanar candidatos
+        cands: list[str] = []
+        if isinstance(x, (list, tuple, set)):
+            for v in x:
+                if v is None:
+                    continue
+                cands.append(str(v).strip())
+        elif isinstance(x, dict):
+            for v in x.values():
+                if v is None:
+                    continue
+                cands.append(str(v).strip())
+        else:
+            cands.append(str(x).strip())
+
+        # b) preferir los que ya empiezan por '!' y sean hex válidos
+        for c in cands:
+            s = c.strip().strip("'\"")
+            if s.startswith("!"):
+                body = s[1:].strip().strip("'\"")
+                body = body.replace(")", "").replace("(", "").replace(",", "").strip()
+                if _is_hex(body):
+                    return "!" + body.lower()
+
+        # c) sino, si hay hex pelado, prepender '!'
+        for c in cands:
+            s = c.strip().strip("'\"").replace(")", "").replace("(", "").replace(",", " ").split()[0]
+            if _is_hex(s):
+                return "!" + s.lower()
+
+        # d) fallback: primer token limpio
+        for c in cands:
+            s = c.strip().strip("'\"").replace(")", "").replace("(", "").replace(",", " ").split()[0]
+            if s:
+                return s
+        return ""
+
+    # 3) contexto (compat mayúsc/minúsc)
+    bd = context.bot_data
+    pool = bd.get("tcp_pool") or bd.get("TCP_POOL")
+    host = bd.get("mesh_host") or bd.get("meshtastic_host") or bd.get("MESHTASTIC_HOST") or "127.0.0.1"
+    port = bd.get("mesh_port") or bd.get("meshtastic_port") or bd.get("MESHTASTIC_PORT") or 4403
+    if not pool:
+        await update.effective_message.reply_text("⚠️ Config no inicializada: falta TCP_POOL en bot_data.")
+        return ConversationHandler.END
+
+    backlog_host = bd.get("backlog_host") or "127.0.0.1"
+    backlog_port = int(bd.get("backlog_port") or 8766)
+
+    # Feedback inmediato
+    try:
+        await update.effective_message.reply_text(
+            f"🔎 Iniciando traceroute hacia <code>{target}</code> (timeout {int(timeout)} s)…",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    def _norm(s: str) -> str:
+        return (s or "").strip().lower()
+
+    raw_id = None
+    try:
+        if 'resolver_alias_o_id' in globals() and callable(globals()['resolver_alias_o_id']):
+            raw_id = resolver_alias_o_id(target)  # puede devolver tuple/list/etc.
+    except Exception:
+        raw_id = None
+
+    node_id = _canon_node_id(raw_id or target)
+    if not node_id or not node_id.startswith("!"):
+        await update.effective_message.reply_text(
+            f"⚠️ No pude normalizar el destino '{target}' a un !id válido."
+        )
+        return ConversationHandler.END
+
+    # 4) util cierre iface efímero
+    def _force_close_iface(iface) -> None:
+        try:
+            for m in ("close", "disconnect", "shutdown", "stop", "dispose"):
+                if hasattr(iface, m) and callable(getattr(iface, m)):
+                    try:
+                        getattr(iface, m)()
+                    except Exception:
+                        pass
+            s = getattr(iface, "_socket", None) or getattr(iface, "socket", None)
+            if s:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # 5) helpers BacklogServer
+    async def _broker_cmd(cmd: str, params: dict, recv_timeout: float = 5.0) -> dict | None:
+        # helper global si existe
+        try:
+            if 'fetch_backlog_from_broker' in globals() and callable(globals()['fetch_backlog_from_broker']):
+                return await fetch_backlog_from_broker(cmd, params=params)
+        except Exception:
+            pass
+        # TCP crudo
+        try:
+            with _s.create_connection((backlog_host, backlog_port), timeout=3.0) as s:
+                s.sendall((_j.dumps({"cmd": cmd, "params": params}, ensure_ascii=False) + "\n").encode("utf-8"))
+                s.settimeout(recv_timeout)
+                buf = b""
+                while True:
+                    b = s.recv(65536)
+                    if not b:
+                        break
+                    buf += b
+                    if b"\n" in b:
+                        break
+            txt = buf.decode("utf-8", "ignore").strip()
+            return _j.loads(txt) if txt else None
+        except Exception:
+            return None
+
+    async def _fetch_traceroute_frames(since_ts: int, limit=300) -> list[dict]:
+        portnums = ["TRACEROUTE_APP", "ROUTING_APP", "ADMIN_APP:TRACEROUTE", "ADMIN_TRACEROUTE"]
+        res = await _broker_cmd("FETCH_BACKLOG", {
+            "since_ts": int(since_ts),
+            "until_ts": None,
+            "channel": None,
+            "portnums": portnums,
+            "limit": int(limit)
+        })
+        rows = (res or {}).get("data") or (res or {}).get("items") or []
+        out = []
+        for r in rows:
+            ts = r.get("ts") or r.get("rxTime") or r.get("timestamp") or r.get("time")
+            fr = r.get("from") or r.get("fromId") or r.get("from_id")
+            dec = (r.get("decoded") or {})
+            hop = r.get("hop") or dec.get("hop") or dec.get("hop_index")
+            via = r.get("via") or dec.get("viaNode") or r.get("relay_node")
+            out.append({"ts": ts, "from": fr, "hop": hop if isinstance(hop, int) else None, "via": via, "raw": r})
+        out.sort(key=lambda x: (x["ts"] if isinstance(x["ts"], (int, float)) else 0))
+        return out
+
+    # 5.1) helpers de pausa/reanudación para CLI (idéntico espíritu a /vecinos)
+    async def _pause_broker_for_cli(reason: str, secs: int) -> None:
+        """
+        Intenta pausar el broker (y/o el pool local) para liberar el socket 4403
+        antes de llamar al CLI. Best-effort, no falla si no existe.
+        """
+        # a) pedir al broker que pause
+        try:
+            r = await _broker_cmd("BROKER_PAUSE", {"reason": reason, "secs": int(secs)})
+            if not (isinstance(r, dict) and (r.get("ok") or r.get("status") == "ok")):
+                await _broker_cmd("CTRL", {"action": "pause", "reason": reason, "secs": int(secs)})
+        except Exception:
+            pass
+        # b) pausar pool local si expone API
+        try:
+            if hasattr(pool, "pause_mgr"):
+                pool.pause_mgr()
+            elif hasattr(pool, "pause"):
+                pool.pause()
+            if hasattr(pool, "drop_iface"):
+                try:
+                    pool.drop_iface(host, port)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await asyncio.sleep(1.5)
+
+    async def _resume_broker_after_cli() -> None:
+        """Intenta reanudar broker/pool tras el CLI."""
+        try:
+            r = await _broker_cmd("BROKER_RESUME", {})
+            if not (isinstance(r, dict) and (r.get("ok") or r.get("status") == "ok")):
+                await _broker_cmd("CTRL", {"action": "resume"})
+        except Exception:
+            pass
+        try:
+            if hasattr(pool, "resume_mgr"):
+                pool.resume_mgr()
+            elif hasattr(pool, "resume"):
+                pool.resume()
+        except Exception:
+            pass
+        await asyncio.sleep(0.4)
+
+    # 6) === Lanzado ===
+    since_ts = int(time.time())
+    launched = False
+    used_adapter = False
+    used_cli_fallback = False
+
+    # Intento 0: interfaz del pool ya abierta (sin efímeros)
+    iface = None
+    try:
+        if hasattr(pool, "get_iface_wait"):
+            iface = pool.get_iface_wait(timeout=min(4.0, timeout/2), interval=0.25)
+        elif hasattr(pool, "get_iface"):
+            iface = pool.get_iface()
+    except Exception:
+        iface = None
+
+    # Intento 1: adaptador API si existe (no abre sockets nuevos)
+    if iface:
+        try:
+            from meshtastic_api_adapter import traceroute as adapter_traceroute  # type: ignore
+            adapter_traceroute(iface, node_id, channel=None, timeout=timeout)
+            launched = True
+            used_adapter = True
+        except Exception:
+            pass
+
+    # Intento 2: broker (RUN_TRACEROUTE / RUN_CLI)
+    if not launched:
+        resA = await _broker_cmd("RUN_TRACEROUTE", {"target": node_id, "timeout": int(timeout)})
+        if isinstance(resA, dict) and (resA.get("ok") or resA.get("status") == "ok"):
+            launched = True
+        else:
+            resB = await _broker_cmd("RUN_CLI", {"action": "traceroute", "target": node_id, "timeout": int(timeout)})
+            if isinstance(resB, dict) and (resB.get("ok") or resB.get("status") == "ok"):
+                launched = True
+
+    # Intento 3: efímero con acquire (permitimos crear si no hay)
+    if not launched and hasattr(pool, "acquire") and callable(pool.acquire):
+        temp_iface = None
+        try:
+            try:
+                temp_iface = pool.acquire(host, port, timeout=5.0, reuse_only=False)
+            except TypeError:
+                temp_iface = pool.acquire(host, port, timeout=5.0)
+            if temp_iface and hasattr(temp_iface, "traceroute") and callable(getattr(temp_iface, "traceroute")):
+                temp_iface.traceroute(node_id)
+                launched = True
+        except Exception:
+            pass
+        finally:
+            if temp_iface:
+                try:
+                    if hasattr(temp_iface, "release"):
+                        temp_iface.release()
+                except Exception:
+                    pass
+                _force_close_iface(temp_iface)
+
+    # Intento 4: CLI (último recurso) — PAUSAR (await) → CLI (hilo) → REANUDAR (await)
+    if not launched:
+        used_cli_fallback = True
+
+        import sys
+
+        def _build_cli_variants(host_str: str, node: str) -> list[list[str]]:
+            py = sys.executable or "python"
+            return [
+                [py, "-m", "meshtastic", "--host", host_str, "--traceroute", str(node)],
+                ["meshtastic", "--host", host_str, "--traceroute", str(node)],
+            ]
+
+        def _parse_cli_hops(output: str) -> list[str]:
+            # Normaliza a texto por si 'output' llegó como bytes en un caso extremo
+            if isinstance(output, (bytes, bytearray)):
+                try:
+                    output = output.decode("utf-8", "ignore")
+                except Exception:
+                    output = output.decode(errors="ignore")
+
+            lines = []
+            for raw in (output or "").splitlines():
+                s = raw.strip()
+                if not s:
+                    continue
+                low = s.lower()
+                if low.startswith("hop ") or low.startswith("hop\t") or low.startswith("hop:"):
+                    lines.append(s)
+                    continue
+                if "->" in s:
+                    lines.append(s)
+                    continue
+                if (s[:1].isdigit() and (":" in s or ")" in s)):
+                    lines.append(s)
+            return lines
+
+        launched = False
+        cli_hops_lines: list[str] = []
+
+        # 1) Pausa en el LOOP principal (no pasamos corutinas al hilo)
+        try:
+            await update.effective_message.reply_text("⏸️ Pausando conexión para ejecutar CLI…")
+        except Exception:
+            pass
+        await _pause_broker_for_cli(reason="cli_traceroute", secs=int(timeout) + 10)
+
+        try:
+            # Pequeña espera extra en Windows para soltar el socket (evita reconexión inmediata)
+            await asyncio.sleep(1.5)
+
+            for cmd in _build_cli_variants(host, node_id):
+                try:
+                    await update.effective_message.reply_text(
+                        f"💻 Ejecutando: <code>{' '.join(cmd)}</code>",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+
+                rc, out, err, was_to = await asyncio.to_thread(run_cli_exclusive, cmd, float(timeout))
+                combined = (out or "") + ("\n" + err if err else "")
+                parsed = _parse_cli_hops(combined)
+
+                if was_to or rc == 124:
+                    await update.effective_message.reply_text("⏰ Traceroute sin respuesta en el tiempo límite.")
+                    continue
+
+                ok = (rc == 0) or bool(parsed)
+                if ok:
+                    launched = True
+                    if parsed:
+                        cli_hops_lines = parsed
+                    break
+
+                show = combined.strip()
+                if len(show) > 1500:
+                    show = show[:1500] + "\n…(truncado)…"
+                await update.effective_message.reply_text(
+                    f"⚠️ CLI código {rc}. Salida:\n<pre>{show}</pre>", parse_mode="HTML"
+                )
+        finally:
+            try:
+                await update.effective_message.reply_text("▶️ Reanudando conexión…")
+            except Exception:
+                pass
+            await _resume_broker_after_cli()
+
+        if launched and cli_hops_lines:
+            header = f"🛰️ <b>Traceroute (CLI)</b> → <code>{node_id}</code>\n"
+            body = "\n".join(cli_hops_lines)
+            await update.effective_message.reply_text(header + body, parse_mode="HTML")
+            return ConversationHandler.END
+
+    # margen para que lleguen los frames al backlog
+    await asyncio.sleep(0.9)
+
+    # 7) === Espera respuestas TRACEROUTE_APP en backlog ===
+    deadline = time.time() + timeout
+    hops = []
+    while time.time() < deadline:
+        frames = await _fetch_traceroute_frames(since_ts=since_ts, limit=400)
+        new = []
+        for f in frames:
+            dec = (f.get("raw") or {}).get("decoded") or {}
+            dst = dec.get("dst") or dec.get("dstId") or dec.get("to") or None
+            if dst:
+                dnorm = _norm(str(dst))
+                nnorm = _norm(str(node_id))
+                if dnorm != nnorm and (dnorm[1:] if dnorm.startswith("!") else dnorm) != (nnorm[1:] if nnorm.startswith("!") else nnorm):
+                    continue
+            new.append(f)
+        if new:
+            hops = new
+            break
+        await asyncio.sleep(0.8)
+
+    # 8) Salidas
+    if not launched and not hops:
+        await update.effective_message.reply_text("❌ No se pudo lanzar el traceroute (broker/interfaz) ni hay respuestas en el backlog.")
+        return ConversationHandler.END
+
+    if not hops:
+        await update.effective_message.reply_text("⏳ Traceroute lanzado, pero sin respuestas dentro del tiempo de espera.")
+        return ConversationHandler.END
+
+    # Orden por hop si existe, si no por ts
+    def _key_sort(f):
+        hop = f.get("hop")
+        ts = f.get("ts")
+        if isinstance(hop, int):
+            return (0, hop, ts if isinstance(ts, (int, float)) else 0)
+        return (1, 10**9, ts if isinstance(ts, (int, float)) else 0)
+
+    hops.sort(key=_key_sort)
+
+    # tiempos relativos
+    t0 = next((f.get("ts") for f in hops if isinstance(f.get("ts"), (int, float))), None)
+    total_secs = 0.0
+    if t0 is not None:
+        last_ts = t0
+        for f in hops:
+            ts = f.get("ts") if isinstance(f.get("ts"), (int, float)) else None
+            if ts is None:
+                f["dt"] = None
+                f["t_rel"] = None
+                continue
+            f["dt"] = float(ts - last_ts) if last_ts is not None else None
+            f["t_rel"] = float(ts - t0)
+            last_ts = ts
+        total_secs = float(last_ts - t0) if last_ts is not None else 0.0
+
+    def _fmt_time(ts):
+        import time as _t
+        return _t.strftime("%H:%M:%S", _t.localtime(ts)) if isinstance(ts, (int, float)) else "—"
+
+    def _fmt_secs(x):
+        if x is None:
+            return "—"
+        if x < 1.0:
+            return f"{x*1000:.0f} ms"
+        return f"{x:.1f} s"
+
+    lines = []
+    resumen = f"🧭 Traceroute a {node_id} — saltos: {len(hops)}"
+    if total_secs and total_secs > 0:
+        resumen += f" • duración: {_fmt_secs(total_secs)}"
+    if used_cli_fallback:
+        resumen += " • ⚠️ fallback CLI (pausa/reanuda)"
+    if used_adapter:
+        resumen += " • API adapter"
+    lines.append(resumen)
+
+    idx = 0
+    for f in hops:
+        idx += 1
+        hop = f.get("hop")
+        hop_s = f"hop {hop}" if hop is not None else f"hop {idx}"
+        fr = f.get("from") or ""
+        via = f.get("via") or ""
+        fr_alias = _alias_for(fr)
+        via_alias = _alias_for(via)
+        fr_label = f"{fr_alias} ({fr})" if fr_alias else str(fr or "—")
+        via_label = f"{via_alias} ({via})" if via and via_alias else (via or None)
+        ts_s = _fmt_time(f.get("ts"))
+        dt_s = _fmt_secs(f.get("dt"))
+        trel_s = _fmt_secs(f.get("t_rel"))
+        core = f"  • {hop_s}"
+        if via_label:
+            core += f"  via {via_label}"
+        core += f"  from {fr_label}"
+        extras = f"[t={ts_s}"
+        if f.get("dt") is not None:
+            extras += f", +{dt_s}"
+        if f.get("t_rel") is not None:
+            extras += f", T={trel_s}"
+        extras += "]"
+        lines.append(f"{core}  {extras}")
+
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        await update.effective_message.reply_text(text[:3900])
+        resto = text[3900:]
+        while resto:
+            await update.effective_message.reply_text(resto[:3900])
+            resto = resto[3900:]
+    else:
+        await update.effective_message.reply_text(text)
+
+    return ConversationHandler.END
 
 
 
@@ -8477,163 +9108,6 @@ async def rt_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     Alias directo a /traceroute sin duplicar lógica.
     """
     return await traceroute_cmd(update, context)
-
-
-async def traceroute_cmd_anterior(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    /traceroute <!id|alias|número>
-      - Intenta traceroute por API usando la interfaz persistente del pool (rápido, sin abrir sockets nuevos).
-      - Si la API no lo soporta o falla, cae a CLI: `meshtastic --host <host> --traceroute <id>`,
-        pausando IO del broker durante la ejecución para evitar colisiones.
-      - Muestra hops y ruta, resolviendo alias cuando sea posible.
-      - Registra el resultado en bot_data/broker_traceroute_log.jsonl (best-effort).
-    """
-    # 1) Estadística y parsing de argumentos
-    try:
-        bump_stat(update.effective_user.id, update.effective_user.username or "", "traceroute")
-    except Exception:
-        pass
-
-    msg = update.effective_message
-    args = context.args or []
-    if not args:
-        await msg.reply_text(
-            "Uso: /traceroute <!id|alias|número>\n"
-            "Ej.: /traceroute !b03bd52c   o   /traceroute Zgz_Romareda_CL-868"
-        )
-        return ConversationHandler.END
-
-    raw_target = args[0].strip()
-    # 2) Resolver destino a !id usando mapeos existentes
-    try:
-        mapping = build_nodes_mapping(100)  # reutilizamos utilidad existente
-    except Exception:
-        mapping = {}
-
-    def _to_bang_id(token: str) -> str:
-        t = token.strip()
-        if t.startswith("!"):
-            return t
-        # ¿está en mapping? (alias/índice)
-        if mapping:
-            m = mapping.get(t.lower()) or mapping.get(t)  # alias o índice "1","2",...
-            if m:
-                return m if str(m).startswith("!") else (f"!{m}" if len(str(m)) <= 8 else f"!{str(m)[-8:]}")
-        # ¿parece hex de 8?  (e.g., b03bd52c)
-        import re
-        if re.fullmatch(r"[0-9a-fA-F]{8}", t):
-            return f"!{t.lower()}"
-        # ¿número decimal de nodeNum?
-        if t.isdigit():
-            try:
-                num = int(t)
-                return f"!{num:08x}"
-            except Exception:
-                pass
-        return t  # lo devolvemos tal cual; la API/CLI intentará entenderlo
-
-    dest = _to_bang_id(raw_target)
-
-    # 3) Traceroute por API (pool persistente)
-    api_res = None
-    try:
-        api_res = traceroute_node(dest, timeout=TRACEROUTE_TIMEOUT)
-    except Exception as e:
-        api_res = None
-
-    # 4) Fallback a CLI si la API no está disponible o no devuelve ruta válida
-    use_cli = (not api_res) or (isinstance(api_res, dict) and not api_res.get("ok")) \
-              or (hasattr(api_res, "ok") and not getattr(api_res, "ok"))
-    cli_res = None
-    cli_used = False
-
-    if use_cli:
-        try:
-            # Pausamos IO del broker mientras corre la CLI (evita colisiones con la TCP del nodo)
-            with with_broker_paused(max_wait_s=8.0):
-                out = run_command(["--host", MESHTASTIC_HOST, "--traceroute", dest.lstrip("!")], timeout=TRACEROUTE_TIMEOUT)
-            cli_res = parse_traceroute_output(out)
-            cli_used = True
-        except Exception as e:
-            cli_res = None
-
-    # 5) Elegir mejor resultado disponible
-    class _R:
-        def __init__(self, ok, hops, route, raw, source):
-            self.ok = bool(ok); self.hops = int(hops or 0); self.route = list(route or []); self.raw = str(raw or ""); self.source = source
-
-    if api_res and getattr(api_res, "ok", False):
-        best = _R(api_res.ok, api_res.hops, api_res.route, api_res.raw, "API")
-    elif cli_res and getattr(cli_res, "ok", False):
-        best = _R(cli_res.ok, cli_res.hops, cli_res.route, cli_res.raw, "CLI")
-    else:
-        # Ninguno OK → responder con detalle de error
-        raw_api = (getattr(api_res, "raw", None) if api_res else None)
-        raw_cli = (getattr(cli_res, "raw", None) if cli_res else None)
-        err_txt = "No se pudo obtener la ruta.\n"
-        if raw_api:
-            err_txt += f"\n— API: {str(raw_api)[:500]}"
-        if raw_cli:
-            err_txt += f"\n— CLI: {str(raw_cli)[:500]}"
-        await _safe_reply_html(msg, f"❌ <b>Traceroute fallido</b>\n{escape(err_txt)}")
-        return ConversationHandler.END
-
-    # 6) Resolver alias para presentación
-    try:
-        alias_dict = cargar_aliases_desde_nodes(str(NODES_FILE))
-    except Exception:
-        alias_dict = {}
-
-    def _alias_of(bang: str) -> str:
-        if not isinstance(bang, str):
-            return ""
-        key = bang if bang.startswith("!") else f"!{bang}"
-        return (alias_dict.get(key) or "").strip()
-
-    # Cabecera amigable
-    dest_alias = _alias_of(dest)
-    header = f"🧭 <b>Traceroute</b> a {escape(dest)}" + (f" ({escape(dest_alias)})" if dest_alias else "")
-    hops_line = f"<b>Hops</b>: {best.hops}  •  <i>fuente</i>: {best.source}"
-
-    # Ruta bonita con alias
-    def _fmt_hop(bang: str) -> str:
-        ali = _alias_of(bang)
-        return (f"{escape(bang)} ({escape(ali)})" if ali else escape(bang))
-
-    if best.route:
-        route_fmt = "  " + "  →  ".join(_fmt_hop(x) for x in best.route)
-    else:
-        route_fmt = "  (sin detalle de ruta)"
-
-    text_html = f"{header}\n{hops_line}\n\n{route_fmt}"
-
-    await _safe_reply_html(msg, text_html)
-
-    # 7) Registrar resultado en JSONL (best-effort)
-    try:
-        rec = {
-            "ts": int(time.time()),
-            "cmd": "traceroute",
-            "dest": dest,
-            "dest_alias": dest_alias or None,
-            "ok": best.ok,
-            "hops": best.hops,
-            "route": best.route,
-            "source": best.source,         # "API" o "CLI"
-            "raw_len": len(best.raw or ""),
-            "user": {
-                "id": update.effective_user.id if update and update.effective_user else None,
-                "username": (update.effective_user.username if update and update.effective_user else None)
-            }
-        }
-        os.makedirs("bot_data", exist_ok=True)
-        with open(os.path.join("bot_data", "broker_traceroute_log.jsonl"), "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-
-    return ConversationHandler.END
-
 
 
 # === NUEVO: /traceroute_status [N] | /traceroute_status <!id|alias> ===
@@ -11524,6 +11998,9 @@ async def _broker_listen_loop_OLD(chat_id: int, listen_chan: Optional[int], cont
                 hl_txt = str(hop_limit) if hop_limit is not None else "¿?"
                 hs_txt = str(hop_start) if hop_start is not None else "¿?"
                 rn_txt = str(relay) if relay is not None else "¿?"
+               
+                # NUEVO: calcular calidad de enlace a partir del SNR
+                quality = _snr_quality_label(snr)
 
                 # Envío al chat (mismo formato que escuchar_cmd + canal visible)
                 try:
@@ -11532,7 +12009,7 @@ async def _broker_listen_loop_OLD(chat_id: int, listen_chan: Optional[int], cont
                         text=(
                             f"📩 {origen_txt} (canal {canal_str}):\n"
                             f"{texto}\n"
-                            f"   • RX: RSSI {rssi_txt} | SNR {snr_txt}\n"
+                            f"   • RX: RSSI {rssi_txt} | SNR {snr_txt} ({quality})\n"
                             f"   • Hops reales: {hops_real_txt}\n"
                             f"   • hop_limit: {hl_txt} | hop_start: {hs_txt} | relay_node: {rn_txt}"
                         )
@@ -11769,6 +12246,9 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 hs_txt = str(hop_start) if hop_start is not None else "¿?"
                 rn_txt = str(relay) if relay is not None else "¿?"
 
+                 # NUEVO: calcular calidad de enlace a partir del SNR
+                quality = _snr_quality_label(snr)
+
                 # Envío al chat (mismo formato que escuchar_cmd + canal visible)
                 try:
                     await context.bot.send_message(
@@ -11776,7 +12256,7 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                         text=(
                             f"📩 {origen_txt} (canal {canal_str}):\n"
                             f"{texto}\n"
-                            f"   • RX: RSSI {rssi_txt} | SNR {snr_txt}\n"
+                            f"   • RX: RSSI {rssi_txt} | SNR {snr_txt} ({quality})\n"
                             f"   • Hops reales: {hops_real_txt}\n"
                             f"   • hop_limit: {hl_txt} | hop_start: {hs_txt} | relay_node: {rn_txt}"
                         )
