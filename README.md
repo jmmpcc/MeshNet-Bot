@@ -238,6 +238,11 @@ BRIDGE_PEER_DOWN_BACKOFF=60
 ```powershell
 git clone https://github.com/jmmpcc/MeshNet-Bot.git
 cd MeshNet-Bot
+
+IMPORTANTE: Revisar configuración de docker-compose.yml (Windows) o de docker-compose.rpi.yml para adaptarlo, según indicaciones
+            en el propio fichero. Por ejemplo: Que el contenedor APRS esté en otro dispositivo diferente de donde se encuentra el
+            BROKER y el BOT.
+
 ```
 
 ```bash
@@ -334,7 +339,7 @@ Aquí Windows **no construye nada**.
 Descarga directamente las imágenes multi-arch ya generadas por GitHub Actions:
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.rpi.yml up -d
+docker compose -f docker-compose.yml up -d
 ```
 
 ### Ventajas:
