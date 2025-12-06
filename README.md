@@ -73,7 +73,7 @@ Ambas funciones analizan la información del backlog, nodos escuchados, métrica
 
 > 🔄 Guía oficial de despliegue en emergencias MeshNet The Boss
 
-📘 **[Abrir guía completa → APRS_Remote_KISS_Emergency_Deployment.md](./docs/APRS_Remote_KISS_Emergency_Deployment.md)**
+📘 **[Abrir guía completa → APRS_Remote_KISS_Emergency_Deployment.md](./docs/APRS_Remote_KISS_Emergency.md)**
 
 ---
 
