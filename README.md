@@ -302,8 +302,106 @@ IMPORTANTE: Revisar configuración de docker-compose.yml (Windows) o de docker-c
 # (Opcional APRS/Bridge: KISS_HOST, KISS_PORT, BRIDGE_ENABLED, B_HOST, etc.)
 
 ```
-
 ---
+
+# APRS con KISS-TCP en un Equipo Remoto
+  
+  ## Configuración Oficial — MeshNet The Boss
+
+Este documento explica cómo usar Direwolf o Soundmodem en un ordenador distinto
+del que ejecuta el Broker + Bot + APRS Gateway (contenedor `meshtastic-aprs`).
+
+```
+# 1. Qué se modifica en la configuración
+
+Solo se cambia **una cosa** en el `.env` de la máquina donde corre Docker:
+
+KISS_HOST=IP_DEL_PC_REMOTO
+KISS_PORT=8100
+
+KISS_HOST=192.168.1.100
+KISS_PORT=8100
+
+```
+  ## Configuración del PC donde corre Soundmodem/Direwolf — MeshNet The Boss
+
+
+  1. Soundmodem
+```
+      En Settings → KISS Server:
+
+      . Enable KISS over TCP
+      . Address: 0.0.0.0
+      . Port: 8100
+```
+
+  2. Direwolf
+
+    Comando típico:
+
+      direwolf -t 0 -p -r 48000 -D 1
+
+      Y en direwolf.conf:
+
+        KISSHOST 0.0.0.0
+        KISSPORT 8100
+
+
+Esto permite que la Raspberry/PC principal se conecte sin firewall local.
+
+  3. Probar conectividad entre APRS y el PC remoto
+
+```
+    En la máquina donde corre Docker:
+
+      telnet IP_DEL_PC_REMOTO 8100
+
+    Si sale:
+
+      Connected
+
+    la comunicación está bien.
+```
+
+  4. Reiniciar APRS para aplicar cambios:
+
+
+       docker restart meshtastic-aprs
+
+    o si usas compose:
+
+      docker compose up -d aprs
+
+  5. Qué debe aparecer en los logs si todo está bien
+
+```
+    En docker logs -f meshtastic-aprs:
+
+    [aprs] KISS=192.168.1.30:8100 CALL=EB2XXX-11 PATH=WIDE1-1,WIDE2-1
+    [aprs] Conectado a KISS TCP remoto
+```
+6. Ventajas de esta arquitectura
+   
+```
+
+  APRS Gateway permanece junto al broker → máxima estabilidad.
+  No se usa APRS remoto → se elimina toda complejidad JSONL/UDP entre hosts.
+  Solo se expone KISS TCP hacia la red local.
+  Ideal para emergencias (RPi alimentada por batería).
+  Soundmodem/Direwolf pueden correr en varios PCs sin modificar la arquitectura.
+   
+```
+7. Resumen rápido
+    
+  ```
+  Componente	          Dónde corre	      Ajuste necesario
+
+  Broker                Raspberry/PC	      Sin cambios
+  Bot	                  Raspberry/PC	      Sin cambios
+  APRS Gateway	      Raspberry/PC	      KISS_HOST=IP_DEL_PC
+  Soundmodem/Direwolf	  PC remoto	          Escucha en 0.0.0.0:8100
+
+```
 
 # 🖥️ Instalación en Windows (Docker Desktop)
 

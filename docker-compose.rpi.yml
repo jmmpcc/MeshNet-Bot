@@ -1,100 +1,69 @@
-
-  
-
-version: "3.8"
-
 services:
   broker:
     image: ghcr.io/jmmpcc/meshnet-bot-broker:latest
     container_name: meshnet-broker
     restart: unless-stopped
+
     env_file:
       - .env
+
     entrypoint: ["/usr/local/bin/entrypoint_broker.sh"]
-    environment:
-      - MESHTASTIC_HOST=${MESHTASTIC_HOST:-192.168.1.126}
-      - BROKER_PORT=8765
-      - BACKLOG_PORT=8766
-      - BROKER_CTRL_BIND=0.0.0.0
-      - DISABLE_BOT_TCP=1
-      - TASK_NOTIFY=0
-      - BOT_TASK_SCHEDULER=1
-      - APRS_CTRL_HOST=${APRS_CTRL_HOST}
-      - APRS_CTRL_PORT=${APRS_CTRL_PORT}
+
+    # Puertos expuestos hacia la red local de la Raspberry
     ports:
-      - "8765:8765"
-      - "8766:8766"
+      - "${BROKER_PORT_HOST:-8765}:${BROKER_PORT:-8765}"
+      - "${BACKLOG_PORT_HOST:-8766}:${BACKLOG_PORT:-8766}"
+      - "${WEB_PORT_HOST:-8080}:${WEB_PORT:-8080}"
+
+    # Datos persistentes de bot/broker (backlogs, mapas, auditorías, etc.)
     volumes:
       - ./bot_data:/app/bot_data:rw
+
+    stop_grace_period: 15s
+
 
   bot:
     image: ghcr.io/jmmpcc/meshnet-bot-bot:latest
     container_name: meshnet-bot
+
     depends_on:
       - broker
+
     restart: on-failure
+
     env_file:
       - .env
+
     entrypoint: ["/usr/local/bin/entrypoint_bot.sh"]
+
+    # Comparte red con el broker: BROKER_HOST=127.0.0.1 del .env sigue siendo válido
     network_mode: "service:broker"
-    environment:
-      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
-      ADMIN_IDS: ${ADMIN_IDS}
-      MESHTASTIC_HOST: ${MESHTASTIC_HOST}
-      BROKER_HOST: broker
-      BROKER_PORT: 8765
-      BROKER_CTRL_HOST: broker
-      BROKER_CTRL_PORT: 8766
-      DISABLE_BOT_TCP: 1
-      BOT_START_DELAY: ${BOT_START_DELAY:-45}
-      NODES_FORCE_API_ONLY: 1
-      TASK_NOTIFY: 1
-      BOT_TASK_SCHEDULER: 0
-      BOT_DATA_DIR: /app/bot_data
-      APRS_CTRL_HOST: ${APRS_CTRL_HOST}
-      APRS_CTRL_PORT: ${APRS_CTRL_PORT}
+
     volumes:
       - ./bot_data:/app/bot_data:rw
+
+    stop_grace_period: 10s
+
 
   aprs:
     image: ghcr.io/jmmpcc/meshnet-bot-aprs:latest
-    container_name: meshnet-aprs
-    #depends_on: # comentar en caso de que el BROKER esté en otra dirección IP o en otra maquina
-    #  - broker  # idem
+    container_name: meshtastic-aprs
+
+    depends_on:
+      - broker
+
     restart: unless-stopped
+
     env_file:
       - .env
+
     entrypoint: ["/usr/local/bin/entrypoint_aprs.sh"]
-    #network_mode: "service:broker" # ← comparte la red con broker (deshabilitar cuando BROKER en otra IP o maquina)
-    environment:
 
-     # IMPORTANTE: apuntar al broker remoto (Raspberry)
-      - BROKER_HOST=192.168.1.187        # IP de la Raspberry
-      - BROKER_PORT=8765
-      - BROKER_CTRL_HOST=192.168.1.187   # si usas control/backlog
-      - BROKER_CTRL_PORT=8766
-      
-      # IMPORTANTE: escuchar UDP en todas las interfaces del contenedor
-      
-      # FIN CONFIGURACION RASPBERRRY
-     
-      #IMPORTANTE: apuntar al broker local (dockers mismo PC)
-      #- BROKER_HOST=127.0.0.1
-      #- BROKER_PORT=8765
-      #- BROKER_CTRL_HOST=127.0.0.1
-      #- BROKER_CTRL_PORT=8766
+    # Comparte red con el broker; APRS_CTRL_HOST=127.0.0.1 y BROKER_HOST=127.0.0.1 tienen sentido
+    network_mode: "service:broker"
 
-      
-      - APRS_CALL=${APRS_CALL}
-      - KISS_HOST=${KISS_HOST:-host.docker.internal}
-      - KISS_PORT=${KISS_PORT:-8100}
-      - TASK_NOTIFY=0
-
-      - APRSIS_USER=${APRSIS_USER:-}
-      - APRSIS_PASSCODE=${APRSIS_PASSCODE:-}
-      - APRSIS_HOST=${APRSIS_HOST:-rotate.aprs2.net}
-      - APRSIS_PORT=${APRSIS_PORT:-14580}
-      - APRSIS_FILTER=${APRSIS_FILTER:-}
     volumes:
       - ./bot_data:/app/bot_data:rw
+
+    stop_grace_period: 10s
 
