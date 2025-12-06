@@ -46,7 +46,6 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 ---
 
-
 ### 🌐 Guía APRS Gateway
 
 > 🔄 Documentación detallada del sistema de pasarela entre Meshtastic y APRS,
@@ -70,13 +69,11 @@ Ambas funciones analizan la información del backlog, nodos escuchados, métrica
 
 ---
 
-### 🌐 Guía APRS Gateway
+### 🌐 Guía Operación APRS + Mesh vía KISS Remoto
 
-> 🔄 Documentación detallada del sistema de pasarela entre Meshtastic y APRS,
-> se incluye nuevas funciones de comunicación de EMERGENCIAS: APRS -> MESH <- APRS  
-> incluyendo configuración, ejemplos, variables de entorno y modos de operación.
+> 🔄 Guía oficial de despliegue en emergencias MeshNet The Boss
 
-📘 **[Abrir guía completa → APRS_GATEWAY.md](./docs/APRS_GATEWAY.md)**
+📘 **[Abrir guía completa → APRS_Remote_KISS_Emergency_Deployment.md](./docs/APRS_Remote_KISS_Emergency_Deployment.md)**
 
 ---
 
