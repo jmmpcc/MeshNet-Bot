@@ -6,17 +6,17 @@
 
 En situaciones de emergencia (apagones, fallos de Internet, movilidad, inundaciones, incendios, rescates, etc.), esta guía permite levantar en pocos minutos una infraestructura de comunicaciones resiliente basada en:
 
-> Red Meshtastic (larga distancia, malla autónoma, sin Internet)
-> Pasarela APRS ↔ MESH
-> Direwolf / Soundmodem en un PC remoto
-> Broker + Bot + APRS Gateway en Raspberry u otro PC central
+    > Red Meshtastic (larga distancia, malla autónoma, sin Internet)
+    > Pasarela APRS ↔ MES
+    > Direwolf / Soundmodem en un PC remoto
+    > Broker + Bot + APRS Gateway en Raspberry u otro PC central
 
 El resultado es un sistema capaz de:
 
-> Recibir mensajes APRS RF y distribuirlos dentro de Mesh
-> Enviar mensajes Mesh hacia APRS
-> Mantener conectividad aun sin Internet
-> Permitir supervisión desde Telegram si existe conexión eventual
+    > Recibir mensajes APRS RF y distribuirlos dentro de Mesh
+    > Enviar mensajes Mesh hacia APRS
+    > Mantener conectividad aun sin Internet
+    > Permitir supervisión desde Telegram si existe conexión eventual
 
 # 2. Arquitectura recomendada para emergencias
              [PC Remoto / Puesto de radio]
