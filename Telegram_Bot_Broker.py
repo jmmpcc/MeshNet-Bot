@@ -539,6 +539,29 @@ def _snr_quality_label(snr) -> str:
     else:
         return "casi perdido ⚫"
 
+def _rssi_quality_label(rssi) -> str:
+    """
+    Clasifica RSSI en rangos prácticos para LoRa y devuelve texto + icono.
+      Excelente:  ≥ -60 dBm
+      Buena:      -60 a -80
+      Aceptable:  -80 a -100
+      Mala:       ≤ -100
+    """
+    if rssi is None:
+        return "desconocida ⚪"
+    try:
+        v = float(rssi)
+    except Exception:
+        return "desconocida ⚪"
+
+    if v >= -60:
+        return "excelente 🟢"
+    elif -80 <= v < -60:
+        return "buena 🟡"
+    elif -100 <= v < -80:
+        return "aceptable 🟠"
+    else:
+        return "mala 🔴"
 
 # ===================== Fin helpers ubicación =====================
 
@@ -7640,7 +7663,11 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
                 # NUEVO: calcular calidad de enlace a partir del SNR
                 quality = _snr_quality_label(snr)
+                quality_RSSI=_rssi_quality_label(rssi)
                 
+                # Calidad global con tu heurística
+                q_emoji, q_label = _link_quality(rssi, snr)
+
                 dist_txt = "?"
                 place_txt = "?"
 
@@ -7679,9 +7706,8 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     pass
 
                 parts = [
-                    f"{i}. {alias} ({nid}) - ",
-                    f"Visto hace {ago_t}\n",
-                    f" SNR: {_fmt_db(snr,'dB')} ({quality})\n",
+                    f"{i}. {alias} ({nid}) - Visto hace {ago_t}\n",                    
+                    f" SNR: {_fmt_db(snr,'dB')} ({quality}) RSSI: {_fmt_db(rssi,'dB')} ({quality_RSSI}) \n",
                     f" hops: {hops}\n",
                     f"📍 <b>{dist_txt}</b> km — <b>{place_txt}</b>",
                 ]
@@ -7844,13 +7870,19 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         alias = str(n.get("alias") or n.get("id") or "¿sin_alias?").strip()
         nid   = n.get("id") or "¿id?"
         snr   = n.get("snr")
+        rssi  = n.get("rssi")   
         ago   = fmt_ago(n.get("ago"))
         snr_txt = f"{snr:.2f} dB" if isinstance(snr, (int, float)) else "—"
-
+        rssi_txt = f"{rssi:.2f} dB" if isinstance(rssi, (int, float)) else "—"
+        
         # NUEVO: icono de calidad
         quality = _snr_quality_label(snr)
+        quality_RSSI=_rssi_quality_label(rssi)
 
-        lines.append(f"{i}. {alias} ({nid}) — SNR: {snr_txt} ({quality}) — visto hace {ago}")
+         # Aquí no tenemos RSSI, sólo SNR → rssi_dbm=None
+        q_emoji, q_label = _link_quality(rssi, snr)
+        
+        lines.append(f"{i}. {alias} ({nid}) —  {q_emoji} {q_label} - SNR: {snr_txt} ({quality}) — RSSI: {rssi_txt} ({quality_RSSI}) - visto hace {ago}")
 
     await update.effective_message.reply_text("📡 Últimos vecinos:\n\n" + "\n\n".join(lines))
     return ConversationHandler.END
@@ -12001,7 +12033,8 @@ async def _broker_listen_loop_OLD(chat_id: int, listen_chan: Optional[int], cont
                
                 # NUEVO: calcular calidad de enlace a partir del SNR
                 quality = _snr_quality_label(snr)
-
+                quality_RSSI=_rssi_quality_label(rssi)
+                
                 # Envío al chat (mismo formato que escuchar_cmd + canal visible)
                 try:
                     await context.bot.send_message(
@@ -12009,7 +12042,7 @@ async def _broker_listen_loop_OLD(chat_id: int, listen_chan: Optional[int], cont
                         text=(
                             f"📩 {origen_txt} (canal {canal_str}):\n"
                             f"{texto}\n"
-                            f"   • RX: RSSI {rssi_txt} | SNR {snr_txt} ({quality})\n"
+                            f"   • RX: RSSI {rssi_txt}  ({quality_RSSI}) | SNR {snr_txt} ({quality})\n"
                             f"   • Hops reales: {hops_real_txt}\n"
                             f"   • hop_limit: {hl_txt} | hop_start: {hs_txt} | relay_node: {rn_txt}"
                         )
@@ -12248,6 +12281,7 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
 
                  # NUEVO: calcular calidad de enlace a partir del SNR
                 quality = _snr_quality_label(snr)
+                quality_RSSI=_rssi_quality_label(rssi)
 
                 # Envío al chat (mismo formato que escuchar_cmd + canal visible)
                 try:
@@ -12256,7 +12290,7 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                         text=(
                             f"📩 {origen_txt} (canal {canal_str}):\n"
                             f"{texto}\n"
-                            f"   • RX: RSSI {rssi_txt} | SNR {snr_txt} ({quality})\n"
+                            f"   • RX: RSSI {rssi_txt} {(quality_RSSI)} | SNR {snr_txt} ({quality})\n"
                             f"   • Hops reales: {hops_real_txt}\n"
                             f"   • hop_limit: {hl_txt} | hop_start: {hs_txt} | relay_node: {rn_txt}"
                         )
