@@ -2128,6 +2128,11 @@ def with_broker_paused(max_wait_s: float = 4.0):
             # No hay nada que reanudar en este modo.
             pass
 
+        # IMPORTANTE: terminar aquí el generador para evitar
+        # que continúe hacia el segundo 'yield' y provoque
+        # RuntimeError("generator didn't stop").
+        return
+
     # Modo "always": usamos tu lógica existente de pausa exclusiva.
     ok = pause_broker_for_exclusive(max_wait_s=max_wait_s)
     try:
