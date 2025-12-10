@@ -2,5 +2,5 @@ python-telegram-bot==20.7
 httpx~=0.25.2
 folium>=0.16.0
 python-telegram-bot[job-queue]>=20.7,<21
-reverse_geocoder
+
 

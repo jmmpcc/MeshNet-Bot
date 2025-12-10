@@ -13,6 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Instala dependencias por capas (mejor caché)
+# Capa GEO independiente (solo se recompila si cambias este archivo)
+COPY requirements.geo.txt /app/
+RUN pip install --no-cache-dir -r /app/requirements.geo.txt
+
+# Capa de dependencias normales
 COPY requirements.base.txt /app/
 COPY requirements.bot.txt  /app/
 RUN pip install --no-cache-dir -r /app/requirements.base.txt -r /app/requirements.bot.txt
