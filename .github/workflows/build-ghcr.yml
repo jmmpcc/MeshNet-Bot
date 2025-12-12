@@ -42,6 +42,10 @@ jobs:
             dockerfile: Dockerfile.bridge
             context: .
             build-args: ""
+          - name: bridge-bc
+            dockerfile: Dockerfile.bridgehub
+            context: .
+            build-args: ""
 
     steps:
       - name: Checkout

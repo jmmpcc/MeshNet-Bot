@@ -1,0 +1,16 @@
+services:
+  meshnet-bridge-bc:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridgehub
+    container_name: meshnet-bridge-bc
+    restart: unless-stopped
+    env_file:
+      - .env-triple-bridge
+
+    # Opción 1 (recomendada en Raspberry): usar red del host
+    # network_mode: "host"
+
+    # Opción 2: red bridge (por defecto). En este caso:
+    # - si el broker está en el mismo compose: BROKER_CTRL_HOST=broker
+    # - si el broker está fuera: BROKER_CTRL_HOST=IP_real

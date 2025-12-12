@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Dependencias mínimas del bridge
+# PyPubSub -> provee "from pubsub import pub"
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir meshtastic PyPubSub
+
+# Copiamos el bridge "broker-hub" (sin TCP a A) y el TCP pool si existe
+COPY mesh_triple_bridge_brokerhub.py /app/mesh_triple_bridge_brokerhub.py
+COPY tcpinterface_persistent.py /app/tcpinterface_persistent.py
+
+ENTRYPOINT ["python", "/app/mesh_triple_bridge_brokerhub.py"]
