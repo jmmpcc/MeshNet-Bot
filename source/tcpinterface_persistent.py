@@ -1,12 +1,12 @@
-# tcpinterface_persistent.py 	   	 	 	    	   		 
-# Version v6.1.3 	  	   	 	 	     	 	
+# tcpinterface_persistent.py
+# Version v6.1.3
 
-import time 	  		 	 					 	  		 
-import threading	 		  	 	 			  		 		 
-import logging	    	   			 		    	 
-from typing import Dict, Tuple, Optional			 	   		  	 	 			 	
-# Guardamos el ctor original para usarlo dentro del pool sin recursión		 		    	 				  	 	 
-_TCP_ORIG_CTOR = None					 			 		   		 		 
+import time
+import threading
+import logging
+from typing import Dict, Tuple, Optional
+# Guardamos el ctor original para usarlo dentro del pool sin recursión
+_TCP_ORIG_CTOR = None
 
 # === [NUEVO] Señalador de reconexiones pasivas (visible para el adapter) ===
 import threading

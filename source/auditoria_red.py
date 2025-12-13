@@ -1,15 +1,15 @@
-# auditoria_red.py 	   	 	 	    	   		 
-import os, json, csv, math, time, hashlib, logging 	  	   	 	 	     	 	
-from datetime import datetime, timezone 	  		 	 					 	  		 
-from statistics import fmean	 		  	 	 			  		 		 
-from typing import Any, Dict, List, Optional, Set	    	   			 		    	 
+# auditoria_red.py
+import os, json, csv, math, time, hashlib, logging
+from datetime import datetime, timezone
+from statistics import fmean
+from typing import Any, Dict, List, Optional, Set
 
 
-from telegram import Update, InputFile			 	   		  	 	 			 	
-from telegram.ext import ContextTypes		 		    	 				  	 	 
+from telegram import Update, InputFile
+from telegram.ext import ContextTypes
 
 
-# ──────────────────────────────────────────────────────────────────────────────					 			 		   		 		 
+# ──────────────────────────────────────────────────────────────────────────────
 # Reutilización opcional de utilidades del proyecto; si no existen, fallback.
 # ──────────────────────────────────────────────────────────────────────────────
 try:

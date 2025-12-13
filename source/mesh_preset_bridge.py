@@ -1,12 +1,12 @@
-#!/usr/bin/env python3 	   	 	 	    	   		 
-# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
-""" 	  		 	 					 	  		 
-mesh_preset_bridge.py v6.1.3 — Pasarela entre dos nodos Meshtastic (IP↔IP) con presets distintos.	 		  	 	 			  		 		 
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+mesh_preset_bridge.py v6.1.3 — Pasarela entre dos nodos Meshtastic (IP↔IP) con presets distintos.
 
-- Conecta por TCP a Nodo A y Nodo B y reenvía mensajes entre ambos.	    	   			 		    	 
-- Anti-bucle y anti-duplicados.			 	   		  	 	 			 	
-- Mapeo de canales A→B y B→A.		 		    	 				  	 	 
-- Opcional: incluir POSITION_APP/TELEMETRY_APP.					 			 		   		 		 
+- Conecta por TCP a Nodo A y Nodo B y reenvía mensajes entre ambos.
+- Anti-bucle y anti-duplicados.
+- Mapeo de canales A→B y B→A.
+- Opcional: incluir POSITION_APP/TELEMETRY_APP.
 - No modifica tus scripts existentes.
 
 Dependencias:

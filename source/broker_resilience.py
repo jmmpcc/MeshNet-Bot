@@ -1,14 +1,14 @@
-# === broker_resilience.py === 	   	 	 	    	   		 
-# NUEVO fichero - utilidades de resiliencia para el broker 	  	   	 	 	     	 	
-# Version v6.1.3 	  		 	 					 	  		 
+# === broker_resilience.py ===
+# NUEVO fichero - utilidades de resiliencia para el broker
+# Version v6.1.3
 
-import time	 		  	 	 			  		 		 
-import threading	    	   			 		    	 
-import queue			 	   		  	 	 			 	
-from typing import Callable, Dict, Any, Optional		 		    	 				  	 	 
+import time
+import threading
+import queue
+from typing import Callable, Dict, Any, Optional
 
 
-class CircuitBreaker:					 			 		   		 		 
+class CircuitBreaker:
     """
     Abre el circuito si en una ventana móvil se exceden N errores,
     y lo cierra tras open_secs + umbral de éxitos en estado half-open.

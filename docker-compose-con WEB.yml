@@ -1,0 +1,143 @@
+services:
+  broker:
+    build:
+      context: .               # carpeta raíz del proyecto
+      dockerfile: Dockerfile   # Dockerfile del broker+bot
+    image: meshtastic-suite:latest
+    container_name: meshtastic-broker
+    restart: unless-stopped
+    env_file:
+      - .env
+    entrypoint: ["/usr/local/bin/entrypoint_broker.sh"]
+    environment:
+      - MESHTASTIC_HOST=${MESHTASTIC_HOST:-192.168.1.201}
+      - BROKER_PORT=8765
+      - BACKLOG_PORT=8766
+      - BROKER_CTRL_BIND=0.0.0.0
+      - DISABLE_BOT_TCP=1      # seguridad general
+      - TASK_NOTIFY=0
+      - BOT_TASK_SCHEDULER=1   # el scheduler lo lleva el broker
+    ports:                      # publica 8765 si quieres consumir desde fuera
+      - "8765:8765"
+      - "8766:8766"
+
+    volumes:
+      - ./bot_data:/app/bot_data:rw
+
+  bot:
+    image: meshtastic-suite:latest
+    container_name: meshtastic-bot
+    depends_on:
+      - broker
+    restart: on-failure
+    env_file:
+      - .env
+    entrypoint: ["/usr/local/bin/entrypoint_bot.sh"]
+    network_mode: "service:broker"   # ← comparte la red con broker
+    environment:
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
+      ADMIN_IDS: ${ADMIN_IDS}
+      MESHTASTIC_HOST: ${MESHTASTIC_HOST}
+       # --- NUEVO/MIN CAMBIO: decir al bot dónde está el broker (service name)
+      BROKER_HOST: broker
+      BROKER_PORT: 8765
+      BROKER_CTRL_HOST: broker
+      BROKER_CTRL_PORT: 8766
+      DISABLE_BOT_TCP: 1
+      BOT_START_DELAY: ${BOT_START_DELAY:-45}
+      NODES_FORCE_API_ONLY: 1
+      TASK_NOTIFY: 1
+      BOT_TASK_SCHEDULER: 0   # el scheduler lo lleva el broker
+      BOT_DATA_DIR: /app/bot_data   # ← opcional pero recomendable
+    volumes:
+      - ./bot_data:/app/bot_data:rw
+
+  aprs:
+    build:
+      context: .
+      dockerfile: Dockerfile.aprs
+    image: aprs-gateway:latest
+    container_name: meshtastic-aprs
+    depends_on:
+      - broker
+    restart: unless-stopped
+    env_file:
+      - .env
+    entrypoint: ["/usr/local/bin/entrypoint_aprs.sh"]
+    network_mode: "service:broker"   # ← comparte la red con broker
+    environment:
+      - BROKER_HOST=127.0.0.1
+      - BROKER_PORT=8765
+      - BROKER_CTRL_HOST=127.0.0.1
+      - BROKER_CTRL_PORT=8766
+      - APRS_CALL=${APRS_CALL}
+      - KISS_HOST=${KISS_HOST:-host.docker.internal}
+      - KISS_PORT=${KISS_PORT:-8100}
+      - TASK_NOTIFY=0 
+      - APRSIS_USER=${APRSIS_USER:-}
+      - APRSIS_PASSCODE=${APRSIS_PASSCODE:-}
+      - APRSIS_HOST=${APRSIS_HOST:-rotate.aprs2.net}
+      - APRSIS_PORT=${APRSIS_PORT:-14580}
+      - APRSIS_FILTER=${APRSIS_FILTER:-}
+    volumes:
+      - ./bot_data:/app/bot_data:rw
+
+  bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    container_name: meshtastic-bridge
+    environment:
+      - A_HOST=${A_HOST}
+      - A_PORT=${A_PORT:-4403}
+      - B_HOST=${B_HOST}
+      - B_PORT=${B_PORT:-4403}
+      - A2B_CH_MAP=${A2B_CH_MAP}
+      - B2A_CH_MAP=${B2A_CH_MAP}
+      - FORWARD_TEXT=${FORWARD_TEXT:-1}
+      - FORWARD_POSITION=${FORWARD_POSITION:-0}
+      - REQUIRE_ACK=${REQUIRE_ACK:-0}
+      - RATE_LIMIT_PER_SIDE=${RATE_LIMIT_PER_SIDE:-8}
+      - DEDUP_TTL=${DEDUP_TTL:-45}
+      - TAG_BRIDGE=${TAG_BRIDGE:-[BRIDGE]}
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: meshtastic-web:latest
+    container_name: meshtastic-web
+    depends_on:
+      - broker
+    environment:
+      # —— Web Admin ——
+      WEB_BIND: "0.0.0.0"
+      WEB_PORT: "8080"
+      # —— Dónde está el broker (mismo compose ⇒ usa nombre de servicio) ——
+      BROKER_HOST: "broker"
+      BROKER_PORT: "8765"
+      BROKER_CTRL_HOST: "broker"
+      BROKER_CTRL_PORT: "8766"   # suele ser broker_port+1
+
+      # —— (Opcional) Bridge UI ——
+      BRIDGE_ENABLED: "${BRIDGE_ENABLED:-0}"
+      TAG_BRIDGE: "${TAG_BRIDGE:-[BRIDGE]}"
+      TAG_BRIDGE_A2B: "${TAG_BRIDGE_A2B:-[BRIDGE] A2B}"
+      TAG_BRIDGE_B2A: "${TAG_BRIDGE_B2A:-[BRIDGE] B2A}"
+
+      # —— (Opcional) Mapa Live ——
+      HOME_LAT: "${HOME_LAT:-}"
+      HOME_LON: "${HOME_LON:-}"
+      MAP_TILE_URL: "${MAP_TILE_URL:-https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png}"
+      MAP_ATTRIBUTION: "${MAP_ATTRIBUTION:-&copy; OpenStreetMap contributors}"
+
+    volumes:
+      # Sirve y persiste mapas generados por /api/cobertura
+      - ./bot_data/maps:/app/bot_data/maps
+      # (Opcional) si coverage_backlog genera HTML/KML en otro directorio, mapea también ese directorio
+      # - ./bot_data:/app/bot_data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+

@@ -1,12 +1,12 @@
-#!/usr/bin/env python3 	   	 	 	    	   		 
-# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
-# Version v6.1.3 	  		 	 					 	  		 
-"""	 		  	 	 			  		 		 
-Meshtastic Relay Checker – versión portable y robusta.	    	   			 		    	 
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Version v6.1.3
+"""
+Meshtastic Relay Checker – versión portable y robusta.
 
-Funciones principales (resumen):			 	   		  	 	 			 	
-    sincronizar_nodos_y_guardar(path=FICHERO_SALIDA)		 		    	 				  	 	 
-        → Llama a `meshtastic --host HOST --nodes` y guarda la tabla textual.					 			 		   		 		 
+Funciones principales (resumen):
+    sincronizar_nodos_y_guardar(path=FICHERO_SALIDA)
+        → Llama a `meshtastic --host HOST --nodes` y guarda la tabla textual.
     get_visible_nodes_from_file_ordenados(path=FICHERO_SALIDA)
         → Lista [(id, alias, minutos)] ordenada por “último visto”.
     get_visible_nodes_with_hops(path=FICHERO_SALIDA)

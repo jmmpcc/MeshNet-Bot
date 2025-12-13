@@ -1,13 +1,13 @@
-# positions_store.py 	   	 	 	    	   		 
-# Version v6.1.3 	  	   	 	 	     	 	
+# positions_store.py
+# Version v6.1.3
 
-import os, json, time 	  		 	 					 	  		 
-from datetime import datetime, timezone, timedelta	 		  	 	 			  		 		 
-from threading import RLock	    	   			 		    	 
+import os, json, time
+from datetime import datetime, timezone, timedelta
+from threading import RLock
 
-_POS_LOG_LOCK = RLock()			 	   		  	 	 			 	
-POSITIONS_LOG_PATH = os.path.join("bot_data", "positions.jsonl")		 		    	 				  	 	 
-POSITIONS_KEEP_DAYS = 7					 			 		   		 		 
+_POS_LOG_LOCK = RLock()
+POSITIONS_LOG_PATH = os.path.join("bot_data", "positions.jsonl")
+POSITIONS_KEEP_DAYS = 7
 
 def _ts_now_utc() -> int:
     return int(datetime.now(tz=timezone.utc).timestamp())

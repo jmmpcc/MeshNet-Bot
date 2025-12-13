@@ -1,12 +1,12 @@
-#!/usr/bin/env python3 	   	 	 	    	   		 
-# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
-""" 	  		 	 					 	  		 
-mini_broker.py V6.1.1	 		  	 	 			  		 		 
---------------	    	   			 		    	 
-Listener JSONL ultraligero para Raspberry Pi 2B.			 	   		  	 	 			 	
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+mini_broker.py V6.1.1
+--------------
+Listener JSONL ultraligero para Raspberry Pi 2B.
 
-- Se conecta al nodo Meshtastic por TCP (típicamente 127.0.0.1:4403 cuando hay USB + socat).		 		    	 				  	 	 
-- Recibe eventos y los expone en un servidor TCP JSONL en :8765 para el bot y el APRS.					 			 		   		 		 
+- Se conecta al nodo Meshtastic por TCP (típicamente 127.0.0.1:4403 cuando hay USB + socat).
+- Recibe eventos y los expone en un servidor TCP JSONL en :8765 para el bot y el APRS.
 - No implementa backlog, control ni tareas; sólo "chorrea" eventos en tiempo real.
 
 Variables de entorno (con valores por defecto):

@@ -14,16 +14,15 @@ WORKDIR /app
 
 # Instala dependencias por capas (mejor caché)
 # Capa GEO independiente (solo se recompila si cambias este archivo)
-COPY requirements.geo.txt /app/
-RUN pip install --no-cache-dir -r /app/requirements.geo.txt
-
-# Capa de dependencias normales
-COPY requirements.base.txt /app/
-COPY requirements.bot.txt  /app/
-RUN pip install --no-cache-dir -r /app/requirements.base.txt -r /app/requirements.bot.txt
+COPY requirements/ /app/requirements/
+RUN python -m pip install --no-cache-dir \
+    -r /app/requirements/requirements.txt \
+    -r /app/requirements/requirements.geo.txt \
+    -r /app/requirements/requirements.base.txt \
+    -r /app/requirements/requirements.bot.txt
 
 # Código
-COPY *.py /app/
+COPY source/*.py /app/
 COPY docker/entrypoint_broker.sh /usr/local/bin/
 COPY docker/entrypoint_bot.sh    /usr/local/bin/
 RUN chmod +x /usr/local/bin/entrypoint_broker.sh /usr/local/bin/entrypoint_bot.sh

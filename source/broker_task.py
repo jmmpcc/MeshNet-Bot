@@ -1,11 +1,11 @@
-# broker_tasks_v6.1.3 py 	   	 	 	    	   		 
-# ───────────────────────────────────────────────────────────────────────────── 	  	   	 	 	     	 	
-# Gestor común de TAREAS programadas de envío para el ecosistema Meshtastic. 	  		 	 					 	  		 
-# - Reutilizable desde el broker y el bot (sin duplicar código).	 		  	 	 			  		 		 
-# - Persistencia en JSONL (sobrevive reinicios).	    	   			 		    	 
-# - Scheduler en hilo (thread) con backoff y reconexión opcional.			 	   		  	 	 			 	
-# - API pública sencilla:		 		    	 				  	 	 
-#     configure_sender(func)					 			 		   		 		 
+# broker_tasks_v6.1.3 py
+# ─────────────────────────────────────────────────────────────────────────────
+# Gestor común de TAREAS programadas de envío para el ecosistema Meshtastic.
+# - Reutilizable desde el broker y el bot (sin duplicar código).
+# - Persistencia en JSONL (sobrevive reinicios).
+# - Scheduler en hilo (thread) con backoff y reconexión opcional.
+# - API pública sencilla:
+#     configure_sender(func)
 #     configure_reconnect(func)
 #     init(...), start(), stop()
 #     schedule_message(...), cancel(task_id), list_tasks(status)

@@ -1,12 +1,12 @@
-#!/usr/bin/env python3 	   	 	 	    	   		 
-# -*- coding: utf-8 -*- 	  	   	 	 	     	 	
-""" 	  		 	 					 	  		 
-web_admin.py v6.1.3 — Panel web Meshtastic_Broker	 		  	 	 			  		 		 
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+web_admin.py v6.1.3 — Panel web Meshtastic_Broker
 
-Novedades v1.4:	    	   			 		    	 
-- Pestaña "🗺️ Mapa Live": mapa Leaflet que coloca/actualiza nodos en tiempo real (stream WebSocket)			 	   		  	 	 			 	
-  y seed inicial desde FETCH_BACKLOG (POSITION_APP). Dibuja línea desde HOME_LAT/LON (si están).		 		    	 				  	 	 
-- Mantiene las pestañas: Consola, Posiciones, Vecinos, Telemetría, Cobertura.					 			 		   		 		 
+Novedades v1.4:
+- Pestaña "🗺️ Mapa Live": mapa Leaflet que coloca/actualiza nodos en tiempo real (stream WebSocket)
+  y seed inicial desde FETCH_BACKLOG (POSITION_APP). Dibuja línea desde HOME_LAT/LON (si están).
+- Mantiene las pestañas: Consola, Posiciones, Vecinos, Telemetría, Cobertura.
 - Todas las pestañas de datos (Posiciones, Vecinos, Telemetría) tiran EXCLUSIVAMENTE de FETCH_BACKLOG.
 - Sin f-strings dentro del HTML/JS para evitar conflictos con llaves.
 

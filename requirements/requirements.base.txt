@@ -1,0 +1,5 @@
+meshtastic>=2.3.0
+protobuf>=4.25.3
+python-telegram-bot==20.7
+psutil>=5.9.8
+
