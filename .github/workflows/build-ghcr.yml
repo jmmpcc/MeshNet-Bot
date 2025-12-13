@@ -96,6 +96,8 @@ jobs:
           platforms: linux/amd64,linux/arm/v7,linux/arm64
           build-args: ${{ matrix.target.build-args }}
           tags: ${{ steps.meta.outputs.tags }}
+           # SOLO para bridge-bc: fuerza reconstrucción real del Dockerfile
+          no-cache: ${{ matrix.target.name == 'bridge-bc' }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
