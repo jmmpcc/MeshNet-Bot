@@ -15,14 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Requisitos APRS (solo los de la pasarela)
-COPY requirements/requirements.txt /app/requirements.txt
+COPY requirements/requirements.txt /app/requirements/requirements.txt
 
 # Asegura pip + wheel actualizados antes de instalar
 RUN python -m pip install --upgrade pip setuptools wheel \
  && python -m pip install --no-cache-dir -r /app/requirements/requirements.txt
 
 # Código de la pasarela
-COPY source/meshtastic_to_aprs.py /app/meshtastic_to_aprs.py
+COPY source/meshtastic_to_aprs.py /app/source/meshtastic_to_aprs.py
 COPY docker/entrypoint_aprs.sh        /usr/local/bin/entrypoint_aprs.sh
 
 # Normaliza finales de línea (CRLF) y BOM, y da permisos de ejecución
