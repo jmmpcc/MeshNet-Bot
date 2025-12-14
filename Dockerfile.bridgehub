@@ -1,15 +1,14 @@
-
 FROM python:3.11-slim
 WORKDIR /app
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
  && python -m pip install --no-cache-dir meshtastic PyPubSub
 
+COPY source/mesh_triple_bridge_brokerhub.py /app/mesh_triple_bridge_brokerhub.py
+COPY source/tcpinterface_persistent.py      /app/source/tcpinterface_persistent.py
 
-COPY bridge-bc/mesh_triple_bridge_brokerhub.py /app/bridge-bc/mesh_triple_bridge_brokerhub.py
-COPY source/tcpinterface_persistent.py /app/source/tcpinterface_persistent.py
-
-COPY bridge-bc/entrypoint_bridgehub.sh /usr/local/bin/entrypoint_bridgehub.sh
+COPY docker/entrypoint_bridgehub.sh /usr/local/bin/entrypoint_bridgehub.sh
 RUN chmod +x /usr/local/bin/entrypoint_bridgehub.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint_bridgehub.sh"]
+

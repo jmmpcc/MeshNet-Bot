@@ -135,11 +135,10 @@ jobs:
 
           # Bridge (preset)
           if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
-            rebuild_bridge=true
-          fi
+            rebuild_bridge=true          fi
 
           # Bridge BC (triple bridge)
-          if changed_match '^(source/)?(mesh_triple_bridge\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+          if changed_match '^(source/)?(mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
             rebuild_bridge_bc=true
           fi
 
