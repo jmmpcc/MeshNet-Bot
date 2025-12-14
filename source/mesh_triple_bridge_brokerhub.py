@@ -42,7 +42,6 @@ except Exception:
     except Exception as e:
         raise SystemExit(f"[FATAL] No se pudo importar TCPInterface: {e}")
 
-
 # ============================================================
 #  Helpers básicos (mapeos, texto, hash)
 # ============================================================
