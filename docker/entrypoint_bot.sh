@@ -33,4 +33,4 @@ mkdir -p /app/bot_data
 chmod 0777 /app/bot_data || true
 
 echo "[bot] ✅ Broker listo. Arrancando bot…"
-exec python -u /app/Telegram_Bot_Broker.py
+exec python -u /app/source/Telegram_Bot_Broker.py

@@ -4,7 +4,7 @@ WORKDIR /app
 RUN python -m pip install --no-cache-dir --upgrade pip \
  && python -m pip install --no-cache-dir meshtastic PyPubSub
 
-COPY source/mesh_triple_bridge_brokerhub.py /app/mesh_triple_bridge_brokerhub.py
+COPY source/mesh_triple_bridge_brokerhub.py /app/source/mesh_triple_bridge_brokerhub.py
 COPY source/tcpinterface_persistent.py      /app/source/tcpinterface_persistent.py
 
 COPY docker/entrypoint_bridgehub.sh /usr/local/bin/entrypoint_bridgehub.sh

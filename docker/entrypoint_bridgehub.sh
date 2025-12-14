@@ -40,4 +40,4 @@ ARGS=()
 # Ejecución REAL del proceso del contenedor
 # (PID 1, sin shell intermedio)
 # ─────────────────────────────────────────────
-exec python /app/mesh_triple_bridge_brokerhub.py "${ARGS[@]}"
+exec python /app/source/mesh_triple_bridge_brokerhub.py "${ARGS[@]}"

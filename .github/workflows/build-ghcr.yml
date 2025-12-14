@@ -35,7 +35,7 @@ jobs:
 
           echo "ref=${GITHUB_REF}  ref_name=${GITHUB_REF_NAME}  sha=${GITHUB_SHA}"
 
-          # 1) Decide diff range
+          # 1) Decide diff range ok
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             # Tag push: compare against previous tag (v*) by version order
             CURRENT_TAG="${GITHUB_REF_NAME}"
@@ -206,25 +206,25 @@ jobs:
               echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
               echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
-              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              echo "no_cache=true" >> "$GITHUB_OUTPUT"
               ;;
             bot)
               echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
               echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
-              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              echo "no_cache=true" >> "$GITHUB_OUTPUT"
               ;;
             aprs)
               echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
               echo "build_args=" >> "$GITHUB_OUTPUT"
-              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              echo "no_cache=true" >> "$GITHUB_OUTPUT"
               ;;
             bridge)
               echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
               echo "build_args=" >> "$GITHUB_OUTPUT"
-              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              echo "no_cache=true" >> "$GITHUB_OUTPUT"
               ;;
             bridge-bc)
               echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"

@@ -15,5 +15,5 @@ if [[ -n "${APRSIS_USER:-}" && -n "${APRSIS_PASSCODE:-}" ]]; then
 fi
 
 # Ejecuta el puente APRS
-exec python /app/meshtastic_to_aprs.py "${APRSCFG[@]}"
+exec python /app/source/meshtastic_to_aprs.py "${APRSCFG[@]}"
 
