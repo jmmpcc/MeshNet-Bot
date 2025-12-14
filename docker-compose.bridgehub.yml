@@ -1,16 +1,20 @@
 services:
-  meshnet-bridge-bc:
-    build:
-      context: .
-      dockerfile: Dockerfile.bridgehub
+  bridgehub-bc:
+    # Igual que el resto del stack: usar imagen GHCR (sin build local).
+    image: ghcr.io/jmmpcc/meshnet-bot-bridge-bc:latest
     container_name: meshnet-bridge-bc
     restart: unless-stopped
+
+    # Este servicio usa SU propio .env (no el global)
     env_file:
       - .env-triple-bridge
 
-    # Opción 1 (recomendada en Raspberry): usar red del host
-    # network_mode: "host"
+    # Clave: compartir el namespace de red del broker AUNQUE sea un compose separado.
+    # Así, BROKER_CTRL_HOST=127.0.0.1 funciona (igual que bot/aprs).
+    network_mode: "container:meshnet-broker"
 
-    # Opción 2: red bridge (por defecto). En este caso:
-    # - si el broker está en el mismo compose: BROKER_CTRL_HOST=broker
-    # - si el broker está fuera: BROKER_CTRL_HOST=IP_real
+    # Persistencia (si el bridge escribe logs/estado; no rompe nada si no lo usa)
+    volumes:
+      - ./bot_data:/app/bot_data:rw
+
+    stop_grace_period: 10s
