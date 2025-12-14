@@ -342,18 +342,31 @@ class TripleBridge:
 
 
     def _discover_local_id(self, iface, label: str) -> Optional[str]:
-        try:
-            info = getattr(iface, "myInfo", None) or {}
-            local_id = info.get("my_node_num") or info.get("num") or info.get("id") or info.get("nodeNum")
-            if isinstance(local_id, int):
-                local_id = f"!{local_id:08x}"
-            if local_id:
-                s = str(local_id)
-                print(f"[triple-bridge] local_id_{label}={s}")
-                return s
-        except Exception:
-            pass
+        """
+        Intenta obtener el id local de la interfaz.
+        En Meshtastic, myInfo puede tardar en llegar tras abrir TCP, así que reintentamos.
+        """
+        for _ in range(20):  # ~10s si sleep=0.5
+            try:
+                info = getattr(iface, "myInfo", None) or {}
+                local_id = (
+                    info.get("my_node_num") or info.get("myNodeNum") or
+                    info.get("num") or info.get("nodeNum") or
+                    info.get("id")
+                )
+                if isinstance(local_id, int):
+                    local_id = f"!{local_id:08x}"
+                if local_id:
+                    s = str(local_id)
+                    print(f"[triple-bridge] local_id_{label}={s}")
+                    return s
+            except Exception:
+                pass
+            time.sleep(0.5)
+        print(f"[triple-bridge] ⚠️ local_id_{label} no disponible (myInfo no llegó a tiempo)")
         return None
+
+
 
     def close(self):
         self._stop.set()
