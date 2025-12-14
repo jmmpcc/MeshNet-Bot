@@ -51,12 +51,31 @@ def _norm_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+import re
+import hashlib
+
+_RE_BRIDGE_TAG = re.compile(r"\s*\[BRIDGE[^\]]*\]\s*", re.IGNORECASE)
+
+def _norm_payload(payload: str) -> str:
+    """
+    Normaliza texto para deduplicación:
+      - recorta espacios
+      - colapsa espacios internos
+      - elimina etiquetas de bridge tipo [BRIDGE ...]
+    """
+    t = (payload or "").strip()
+    t = _RE_BRIDGE_TAG.sub(" ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
 def _hash_key(direction: str, from_id: str, ch: int, payload: str) -> str:
+    """
+    Deduplicación GLOBAL anti-eco.
+    No usa direction/from_id/ch, solo contenido normalizado.
+    Así, si el mismo texto vuelve desde el otro nodo, se descarta.
+    """
     h = hashlib.sha256()
-    h.update(direction.encode())
-    h.update(str(from_id or "?").encode())
-    h.update(str(int(ch)).encode())
-    h.update(payload.encode("utf-8"))
+    h.update(_norm_payload(payload).encode("utf-8"))
     return h.hexdigest()
 
 class _RateLimiter:
@@ -280,11 +299,16 @@ class BrokerEmbeddedBridge:
             if not (came_from_a or came_from_b):
                 return
 
-            # anti-eco por etiqueta (si ya viene marcado desde el otro lado, no reinyectar)
+            # anti-eco duro: si el texto ya viene marcado como puenteado, no reinyectar jamás
             if want_text:
-                other_tag = self.tag_bridge_b2a if came_from_a else self.tag_bridge_a2b
-                if other_tag and other_tag in (text or ""):
+                t = (text or "")
+                if (
+                    ("[BRIDGE" in t)
+                    or (self.tag_bridge_a2b and self.tag_bridge_a2b in t)
+                    or (self.tag_bridge_b2a and self.tag_bridge_b2a in t)
+                ):
                     return
+
 
             # anti-bucle por local_id del destino
             if came_from_a and self.local_id_b and frm == self.local_id_b:

@@ -47,7 +47,7 @@ services:
 
   aprs:
     image: ghcr.io/jmmpcc/meshnet-bot-aprs:latest
-    container_name: meshtastic-aprs
+    container_name: meshnet-aprs
 
     depends_on:
       - broker

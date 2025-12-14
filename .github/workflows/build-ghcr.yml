@@ -16,36 +16,174 @@ env:
   IMAGE_PREFIX: meshnet-bot
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      targets_json: ${{ steps.detect.outputs.targets_json }}
+    steps:
+      - name: Checkout (full history for tag diffs)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Detect changed targets
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "ref=${GITHUB_REF}  ref_name=${GITHUB_REF_NAME}  sha=${GITHUB_SHA}"
+
+          # 1) Decide diff range
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # Tag push: compare against previous tag (v*) by version order
+            CURRENT_TAG="${GITHUB_REF_NAME}"
+
+            mapfile -t TAGS < <(git tag -l 'v*' --sort=version:refname)
+            PREV_TAG=""
+            for i in "${!TAGS[@]}"; do
+              if [[ "${TAGS[$i]}" == "$CURRENT_TAG" ]]; then
+                if (( i > 0 )); then PREV_TAG="${TAGS[$((i-1))]}"; fi
+                break
+              fi
+            done
+
+            if [[ -n "$PREV_TAG" ]]; then
+              BASE_REF="$PREV_TAG"
+              echo "Tag diff: $BASE_REF..$CURRENT_TAG"
+              CHANGED_FILES="$(git diff --name-only "$BASE_REF" "$CURRENT_TAG" || true)"
+            else
+              # first tag: diff from root commit
+              BASE_REF="$(git rev-list --max-parents=0 HEAD | tail -n1)"
+              echo "First tag diff: $BASE_REF..$GITHUB_SHA"
+              CHANGED_FILES="$(git diff --name-only "$BASE_REF" "$GITHUB_SHA" || true)"
+            fi
+          else
+            # Branch push: use before..sha
+            BEFORE="${{ github.event.before }}"
+            if [[ -z "${BEFORE}" || "${BEFORE}" == "0000000000000000000000000000000000000000" ]]; then
+              BASE_REF="HEAD~1"
+              echo "No valid 'before' (initial push). Using $BASE_REF..$GITHUB_SHA"
+              CHANGED_FILES="$(git diff --name-only "$BASE_REF" "$GITHUB_SHA" || true)"
+            else
+              BASE_REF="$BEFORE"
+              echo "Branch diff: $BASE_REF..$GITHUB_SHA"
+              CHANGED_FILES="$(git diff --name-only "$BASE_REF" "$GITHUB_SHA" || true)"
+            fi
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES" | sed '/^$/d' || true
+
+          # 2) Helper: match file list against regex
+          changed_match() {
+            local re="$1"
+            echo "$CHANGED_FILES" | grep -E -q "$re"
+          }
+
+          # 3) Decide which images to rebuild.
+          #    Regla: si un fichero es compartido, lo incluimos en más de un bloque.
+          rebuild_broker=false
+          rebuild_bot=false
+          rebuild_aprs=false
+          rebuild_bridge=false
+          rebuild_bridge_bc=false
+
+          # Si cambia el workflow, asume que puede afectar a todos (seguro y simple).
+          if changed_match '^\.github/workflows/'; then
+            rebuild_broker=true
+            rebuild_bot=true
+            rebuild_aprs=true
+            rebuild_bridge=true
+            rebuild_bridge_bc=true
+          fi
+
+          # Dockerfiles
+          if changed_match '^Dockerfile$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+          if changed_match '^Dockerfile\.aprs$'; then rebuild_aprs=true; fi
+          if changed_match '^Dockerfile\.bridge$'; then rebuild_bridge=true; fi
+          if changed_match '^Dockerfile\.bridgehub$'; then rebuild_bridge_bc=true; fi
+
+          # Requirements (cualquier cambio en requirements afecta a lo que los instala)
+          if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+            rebuild_aprs=true
+            rebuild_bridge=true
+            rebuild_bridge_bc=true
+          fi
+
+          # Código está en source/
+          # Broker
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py)$'; then
+            rebuild_broker=true
+          fi
+
+          # Bot
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py)$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
   build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
-        target:
-          # Ajusta dockerfile/context según tu repo
-          - name: broker
-            dockerfile: Dockerfile
-            context: .
-            build-args: |
-              TARGET=broker
-          - name: bot
-            dockerfile: Dockerfile
-            context: .
-            build-args: |
-              TARGET=bot
-          - name: aprs
-            dockerfile: Dockerfile.aprs
-            context: .
-            build-args: ""
-          - name: bridge
-            dockerfile: Dockerfile.bridge
-            context: .
-            build-args: ""
-          - name: bridge-bc
-            dockerfile: Dockerfile.bridgehub
-            context: .
-            build-args: ""
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
 
     steps:
       - name: Checkout
@@ -57,25 +195,64 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target.name }}
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
           tags: |
-            # Tags semver si la referencia es un tag vX.Y.Z
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            # rama por defecto → edge + latest
             type=raw,value=edge,enable={{is_default_branch}}
             type=raw,value=latest,enable={{is_default_branch}}
-            # trazabilidad siempre
             type=sha,format=short
           labels: |
-            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target.name }}
-            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target.name }})
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
@@ -90,14 +267,13 @@ jobs:
       - name: Build & Push
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.target.context }}
-          file: ${{ matrix.target.dockerfile }}
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
           push: true
           platforms: linux/amd64,linux/arm/v7,linux/arm64
-          build-args: ${{ matrix.target.build-args }}
+          build-args: ${{ steps.params.outputs.build_args }}
           tags: ${{ steps.meta.outputs.tags }}
-           # SOLO para bridge-bc: fuerza reconstrucción real del Dockerfile
-          no-cache: ${{ matrix.target.name == 'bridge-bc' }}
           labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
