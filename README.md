@@ -81,6 +81,14 @@ Ambas funciones analizan la información del backlog, nodos escuchados, métrica
 
 ## 🧾 Historial de versiones
 
+### v6.1.4 — Estable (Diciembre 2025)
+
+Consolidación de anti-eco y deduplicación en bridges.
+Respeto estricto de cooldown en bot y envíos.
+Unificación del control del broker por TCP (BacklogServer).
+Mejora de saneo ASCII/APRS y control por canal KISS.
+Robustez en reconexión y manejo de errores de red.
+
 ### v6.1.3 — Estable (Diciembre 2025)
 
 ## 🧠 Broker
@@ -1336,4 +1344,5 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
 
 ---
+
 
