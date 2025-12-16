@@ -184,6 +184,12 @@ class BrokerEmbeddedBridge:
         self.peer_offline_until = 0.0         # epoch hasta el que suprimimos reenvíos A->B
         self._peer_down_notified = False      # evita logs repetidos
         self.peer_down_backoff_sec = int(os.getenv("BRIDGE_PEER_DOWN_BACKOFF", "60") or "60")
+        # --- Reintento de reconexión automática a B ---
+        # Si un envío a B falla, marcamos peer 'down' y programamos un intento de reconexión
+        # al terminar el backoff (similar al cooldown del broker).
+        self._need_reconnect_b = False
+        self._reconnect_thread_active = False
+        self._reconnect_lock = threading.RLock()
       
 
     def start(self):
@@ -610,6 +616,13 @@ class BrokerEmbeddedBridge:
         if not self._peer_down_notified:
             print(f"[bridge] B OFFLINE → suprime A2B {backoff}s ({reason})", flush=True)
             self._peer_down_notified = True
+        # Programar un intento de reconexión automática al finalizar el backoff
+        try:
+            with self._reconnect_lock:
+                self._need_reconnect_b = True
+            self._schedule_reconnect_b(backoff)
+        except Exception:
+            pass
 
     def _mark_peer_up(self) -> None:
         # (no necesita time)
@@ -617,6 +630,96 @@ class BrokerEmbeddedBridge:
             print("[bridge] B volvió ONLINE → reanudo A2B", flush=True)
         self.peer_offline_until = 0.0
         self._peer_down_notified = False
+
+    def _reconnect_b_once(self) -> bool:
+        """
+        Intenta recrear la conexión TCP hacia el nodo B de forma segura:
+        - cierra iface_b si existe
+        - abre una nueva SDKTCPIF(hostname, portNumber)
+        - recalcula local_id_b
+        Devuelve True si parece OK, False si falló.
+        """
+        with self._reconnect_lock:
+            try:
+                # 1) cerrar si existe
+                try:
+                    if self.iface_b and hasattr(self.iface_b, "close"):
+                        self.iface_b.close()
+                except Exception:
+                    pass
+                self.iface_b = None
+
+                # 2) abrir evitando tocar la interfaz global del SDK
+                import meshtastic as _m
+                _prev_set = getattr(_m, "setInterface", None)
+                try:
+                    if _prev_set:
+                        _m.setInterface = lambda *_a, **_kw: None
+                    self.iface_b = SDKTCPIF(hostname=self.b_host, portNumber=self.b_port)
+                    try:
+                        if hasattr(self.iface_b, "isDefault"):
+                            self.iface_b.isDefault = False
+                    except Exception:
+                        pass
+                finally:
+                    if _prev_set:
+                        _m.setInterface = _prev_set
+
+                # 3) local id
+                self.local_id_b = _resolve_local_id(self.iface_b, retries=12, delay=0.5)
+                return bool(self.local_id_b)
+            except Exception as e:
+                try:
+                    print(f"[bridge] reconnect_b FAILED: {type(e).__name__}: {e}", flush=True)
+                except Exception:
+                    pass
+                return False
+
+    def _schedule_reconnect_b(self, backoff: int) -> None:
+        """
+        Lanza (una sola vez) un hilo que espera 'backoff' y luego intenta reconectar B.
+        Si falla, vuelve a marcar peer down y reprograma.
+        """
+        with self._reconnect_lock:
+            if self._reconnect_thread_active:
+                return
+            self._reconnect_thread_active = True
+
+        def _worker():
+            try:
+                while True:
+                    try:
+                        time.sleep(max(3, int(backoff)))
+                    except Exception:
+                        time.sleep(3)
+
+                    with self._reconnect_lock:
+                        need = bool(self._need_reconnect_b)
+                    if not need:
+                        with self._reconnect_lock:
+                            self._reconnect_thread_active = False
+                        return
+
+                    ok = self._reconnect_b_once()
+                    if ok:
+                        self._mark_peer_up()
+                        with self._reconnect_lock:
+                            self._need_reconnect_b = False
+                            self._reconnect_thread_active = False
+                        print("[bridge] reconexión a B OK", flush=True)
+                        return
+
+                    # sigue caído: extiende ventana de supresión y reintenta
+                    self._mark_peer_down("reconnect_failed")
+                    # y continúa el bucle
+
+            finally:
+                with self._reconnect_lock:
+                    self._reconnect_thread_active = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+
 
 
 

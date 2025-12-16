@@ -13133,6 +13133,55 @@ async def estado_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+async def bridge_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Devuelve el estado del bridge embebido en el broker (A<->B) vía BROKER_CTRL.
+    Comando: /bridge_status (y alias /brige_status).
+    """
+    msg = update.effective_message
+    try:
+        data = _broker_ctrl("BRIDGE_STATUS", {})  # helper existente
+    except Exception as e:
+        await _safe_reply_html(msg, f"No se pudo consultar el bridge: <code>{type(e).__name__}: {e}</code>")
+        return ConversationHandler.END
+
+    if not isinstance(data, dict) or not data.get("ok"):
+        err = (data or {}).get("error") if isinstance(data, dict) else str(data)
+        await _safe_reply_html(msg, f"Bridge: error al consultar estado: <code>{err}</code>")
+        return ConversationHandler.END
+
+    st = data.get("bridge") or {}
+    running = bool(st.get("running"))
+    a = st.get("a") or {}
+    b = st.get("b") or {}
+    maps = st.get("maps") or {}
+    opts = st.get("opts") or {}
+    peer = st.get("peer_state") or {}
+
+    def _fmt_map(d):
+        if not isinstance(d, dict) or not d:
+            return "-"
+        parts = []
+        for k in sorted(d.keys(), key=lambda x: int(x) if str(x).isdigit() else str(x)):
+            parts.append(f"{k}:{d[k]}")
+        return ", ".join(parts)
+
+    lines = []
+    lines.append("Bridge embebido")
+    lines.append(f"- Activo: {'SI' if running else 'NO'}")
+    lines.append(f"- A local_id: {a.get('local_id') or '-'}")
+    lines.append(f"- B: {b.get('host') or '-'}:{b.get('port') or '-'}  local_id={b.get('local_id') or '-'}")
+    lines.append(f"- Mapas A2B: {_fmt_map(maps.get('A2B'))}")
+    lines.append(f"- Mapas B2A: {_fmt_map(maps.get('B2A'))}")
+    lines.append(f"- forward_text: {opts.get('forward_text')}")
+    lines.append(f"- forward_position: {opts.get('forward_position')}")
+    lines.append(f"- require_ack: {opts.get('require_ack')}")
+    lines.append(f"- peer_suppressed: {peer.get('is_peer_suppressed')}")
+    lines.append(f"- peer_offline_remaining: {peer.get('peer_offline_remaining')}s")
+
+    await _safe_reply_html(msg, "<pre>" + html.escape("\n".join(lines)) + "</pre>")
+    return ConversationHandler.END
+
 
 async def estadistica_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -13545,6 +13594,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("escuchar", escuchar_cmd))
     app.add_handler(CommandHandler("parar_escucha", parar_escucha_cmd))
     app.add_handler(CommandHandler("estado", estado_cmd))
+    app.add_handler(CommandHandler("bridge_status", bridge_status_cmd))
+    app.add_handler(CommandHandler("brige_status", bridge_status_cmd))
     app.add_handler(CommandHandler("estadistica", estadistica_cmd))
 
     app.add_handler(CommandHandler("programar", programar_cmd))

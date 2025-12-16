@@ -71,8 +71,10 @@ services:
     image: ghcr.io/jmmpcc/meshnet-bot-bridge-bc:latest
     container_name: meshnet-bridge-bc
     restart: unless-stopped
-    env_file: [ .env-triple-bridge ]
-    depends_on: [ broker ]
+    env_file:
+      - .env-triple-bridge
+    depends_on:
+      - broker 
     volumes:
       - ./bot_data:/app/bot_data:rw
     environment:

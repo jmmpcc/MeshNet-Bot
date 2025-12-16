@@ -1563,7 +1563,7 @@ class _BacklogServer(threading.Thread):
                 return
 
             # --- control del broker (pausa/reanuda/estado/desconexion) ---
-            elif cmd in {"BROKER_PAUSE", "BROKER_RESUME", "BROKER_STATUS", "BROKER_DISCONNECT", "FORCE_RECONNECT", "BROKER_QUIT"}:
+            elif cmd in {"BROKER_PAUSE", "BROKER_RESUME", "BROKER_STATUS", "BRIDGE_STATUS", "BROKER_DISCONNECT", "FORCE_RECONNECT", "BROKER_QUIT"}:
 
                 mgr = globals().get("BROKER_IFACE_MGR")
                 if not mgr:
@@ -1698,6 +1698,13 @@ class _BacklogServer(threading.Thread):
                                     resp = {"ok": False, "error": f"force_reconnect_failed: {type(e).__name__}: {e}"}
 
 
+
+                        elif cmd == "BRIDGE_STATUS":
+                            try:
+                                st = bridge_status_in_broker()
+                                resp = {"ok": True, "bridge": st}
+                            except Exception as e:
+                                resp = {"ok": False, "error": f"bridge_status_failed: {type(e).__name__}: {e}"}
 
                         else:  # BROKER_STATUS
                             # --- [FIJO] usar SIEMPRE el mismo singleton de cooldown desde globals() ---
