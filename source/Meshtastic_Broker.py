@@ -3952,7 +3952,7 @@ def main():
     # === NUEVO: iniciar scheduler de tareas ===
     init_broker_tasks()
 
-    print(f"🟢 Broker v6.1 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
+    print(f"🟢 Broker v6.1.4.1 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
     print("   Clientes pueden conectarse por TCP y leer líneas JSONL (una por evento).", flush=True)
 
     # Gestor de conexión (autoreconexión)

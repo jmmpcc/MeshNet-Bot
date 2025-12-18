@@ -134,8 +134,9 @@ except Exception as _e:
 _TRUTHY = {"1", "true", "t", "yes", "y", "on"}
 DISABLE_BOT_TCP = str(os.getenv("DISABLE_BOT_TCP", "0")).lower() in _TRUTHY  # por defecto ACTIVADO
 
-DATA_DIR = os.getenv("BOT_DATA_DIR", "/app/bot_data")
+DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "/app/bot_data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 
 
 LOG_FILE           = DATA_DIR / "bot.log"
