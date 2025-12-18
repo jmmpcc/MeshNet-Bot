@@ -13419,7 +13419,7 @@ try:
 except NameError:
     # Fallback por si DATA_DIR no existiera aún en este fichero
     import os
-    DATA_DIR = os.path.join(os.getenv("BOT_DATA_DIR", "/app/bot_data")
+    DATA_DIR = os.path.join(os.getenv("BOT_DATA_DIR", "/app/bot_data"))
 
 BLOQUEADOS_FILE = os.path.join(DATA_DIR, "bloqueados.ids")
 
@@ -13727,7 +13727,7 @@ async def post_startup(app: Application) -> None:
     try:
         broker_tasks.configure_sender(_tasks_send_adapter)
         broker_tasks.configure_reconnect(_tasks_reconnect_adapter)
-        DATA_DIR_BROKER = os.path.join(os.getenv("BOT_DATA_DIR", "/app/bot_data")
+        DATA_DIR_BROKER = os.path.join(os.getenv("BOT_DATA_DIR", "/app/bot_data"))
         os.makedirs(DATA_DIR_BROKER, exist_ok=True)
         broker_tasks.init(data_dir=DATA_DIR_BROKER, tz_name="Europe/Madrid", poll_interval_sec=2.0)
         # broker_tasks.start() # ← DESACTIVADO en el bot: evita duplicidades
