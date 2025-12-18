@@ -4056,58 +4056,84 @@ def main():
     pub.subscribe(receiver._on_rx, "meshtastic.receive")
     pub.subscribe(receiver._on_connection, "meshtastic.connection.established")
     pub.subscribe(receiver._on_disconnect, "meshtastic.connection.lost")
-    
-   # === [NUEVO] Arranque condicional de la pasarela embebida al establecer conexión ===
-def _start_bridge_on_first_connection(interface=None, **kwargs):
-    """
-    Hook al evento 'meshtastic.connection.established' para arrancar la pasarela embebida
-    solo cuando haya conexión real con el nodo A.
 
-    - Si BRIDGE_ENABLED=0: se desuscribe y no hace nada más.
-    - Si no hay interface aún: espera al siguiente evento.
-    - Si arranca: se desuscribe para no arrancar dos veces.
-    """
-    try:
-        import os
+    # === [NUEVO] Arranque condicional de la pasarela embebida al establecer conexión ===
+    def _start_bridge_on_first_connection(interface=None, **kwargs):
+        """
+        Hook al evento 'meshtastic.connection.established' para arrancar la pasarela embebida
+        solo cuando haya conexión real con el nodo A.
 
-        enabled = (os.getenv("BRIDGE_ENABLED", "0").strip().lower() in {"1", "true", "on", "si", "sí", "y", "yes"})
-        if not enabled:
-            print("[bridge] embebida desactivada (BRIDGE_ENABLED=0)", flush=True)
-            # Ya no necesitamos este hook si está desactivada
+        - Si BRIDGE_ENABLED=0: se desuscribe y no hace nada más.
+        - Si no hay interface aún: espera al siguiente evento.
+        - Si arranca: se desuscribe para no arrancar dos veces.
+        """
+        try:
+            import os
+
+            enabled = (os.getenv("BRIDGE_ENABLED", "0").strip().lower() in {"1","true","on","si","sí","y","yes"})
+            if not enabled:
+                print("[bridge] embebida desactivada (BRIDGE_ENABLED=0)", flush=True)
+                # Ya no necesitamos este hook si está desactivada
+                try:
+                    pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
+                except Exception:
+                    pass
+                return
+
+            # Usa la interface que entrega el evento; si no viene, pide la actual al gestor
+            iface_for_bridge = interface or iface_mgr.get_iface()
+            if not iface_for_bridge:
+                print("[bridge] ⚠️ sin interface todavía; espero al próximo established…", flush=True)
+                return
+
+            try:
+                # Permite a la pasarela pedir un FORCE_RECONNECT del nodo A a través del broker
+                bridge_start_in_broker(iface_for_bridge, on_force_reconnect_a=_bridge_force_reconnect_a)
+                print("[bridge] embebida arrancada OK", flush=True)
+            except NameError:
+                # Si no está importado/definido aún, no rompemos el broker
+                print("[bridge] ⚠️ bridge_start_in_broker no disponible; no se arranca (no es fatal).", flush=True)
+                return
+            except Exception as e:
+                print(f"[bridge] ❌ Error al arrancar embebida: {type(e).__name__}: {e}", flush=True)
+                return
+
+        except Exception as e:
+            # Nunca debe tirar el broker por un fallo en el hook
+            print(f"[bridge] ❌ Error en _start_bridge_on_first_connection: {type(e).__name__}: {e}", flush=True)
+        finally:
+            # Ejecutarlo solo una vez; si necesitas rearmarla en reconexiones, quita esta desuscripción
             try:
                 pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
             except Exception:
                 pass
-            return
 
-        # Usa la interface que entrega el evento; si no viene, pide la actual al gestor
-        iface_for_bridge = interface
-        if not iface_for_bridge:
-            print("[bridge] ⚠️ sin interface todavía; espero al próximo established…", flush=True)
-            return
+    # Suscribir el hook al evento de conexión establecida
+    pub.subscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
 
-        # Arrancar bridge embebida (best-effort). Debe existir bridge_start_in_broker()
-        try:
-            st = bridge_start_in_broker(iface_for_bridge, on_force_reconnect_a=_bridge_force_reconnect_a)
-            print("[bridge] embebida arrancada OK", flush=True)
-        except NameError:
-            # Si no está importado/definido aún, no rompemos el broker
-            print("[bridge] ⚠️ bridge_start_in_broker no disponible; no se arranca (no es fatal).", flush=True)
-            return
-        except Exception as e:
-            print(f"[bridge] ❌ Error al arrancar embebida: {type(e).__name__}: {e}", flush=True)
-            return
+    # Lanzar primera conexión (no bloquea; dispara el ciclo del manager)
+    try:
+        iface_mgr.signal_disconnect()
+    except Exception:
+        pass
 
-        # Si hemos llegado aquí, ya no necesitamos el hook (evita doble arranque)
-        try:
-            pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
-        except Exception:
-            pass
+    # Heartbeat (estadísticas internas del broker) → JSONL para clientes
+    hb = HeartbeatThread(hub, stats, every_s=args.heartbeat, target_host=args.host, verbose=args.verbose)
+    hb.start()
 
-    except Exception as e:
-        # Nunca debe tirar el broker por un fallo en el hook
-        print(f"[bridge] ❌ Error en _start_bridge_on_first_connection: {type(e).__name__}: {e}", flush=True)
-        return
+    # Mantener proceso vivo (los hilos son daemon)
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try: hb.stop()
+        except Exception: pass
+        try: srv.stop()
+        except Exception: pass
+        try: iface_mgr.stop()
+        except Exception: pass
 
 
 # === NUEVO: CLI para gestionar tareas programadas desde el broker ===
@@ -4160,11 +4186,7 @@ def _cli_tasks(argv: list[str]) -> int:
 
     # Inicializa solo la persistencia para escribir/leer (no hace falta correr el broker entero)
     #broker_tasks.configure_sender(_tasks_send_adapter)
-    
-    broker_tasks.configure_sender(lambda ch, msg, dst, ack:
-    SENDQ.offer({"channel": ch, "text": msg, "destination": (None if (not dst or dst=='broadcast') else dst), "require_ack": bool(ack), "type":"text"},
-                coalesce=True) or True
-)    
+    broker_tasks.configure_sender(_tasks_send_adapter)
     broker_tasks.configure_reconnect(_tasks_reconnect_adapter)
   
     DATA_DIR_BROKER = os.getenv("BOT_DATA_DIR", "/app/bot_data")

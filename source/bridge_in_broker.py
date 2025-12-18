@@ -9,6 +9,7 @@ bridge_in_broker.py V6.1.3 — Pasarela A<->B embebida en el broker usando el po
 - Filtro por canal mediante mapas A2B/B2A.
 """
 
+
 from __future__ import annotations
 import os, time, json, threading, re, hashlib
 from collections import deque
