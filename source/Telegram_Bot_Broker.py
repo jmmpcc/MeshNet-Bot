@@ -134,18 +134,7 @@ except Exception as _e:
 _TRUTHY = {"1", "true", "t", "yes", "y", "on"}
 DISABLE_BOT_TCP = str(os.getenv("DISABLE_BOT_TCP", "0")).lower() in _TRUTHY  # por defecto ACTIVADO
 
-# Ruta nodos.txt (SIEMPRE en el volumen compartido)
-try:
-    NODES_FILE  # noqa
-except NameError:
-    BOT_DATA_DIR = os.getenv("BOT_DATA_DIR", "/app/bot_data")
-    os.makedirs(BOT_DATA_DIR, exist_ok=True)
-    NODES_FILE = os.path.join(BOT_DATA_DIR, "nodos.txt")
-
-
-BLOQUEADOS_FILE = os.path.join(BOT_DATA_DIR, "bloqueados.ids")
-
-DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "/app/bot_data")).resolve()
+DATA_DIR = os.getenv("BOT_DATA_DIR", "/app/bot_data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -225,6 +214,13 @@ DEBUG_KM = (os.getenv("DEBUG_KM", "0").strip().lower() in {"1","true","t","yes",
 import os, json, time, signal, subprocess
 from typing import List, Tuple
 
+# Ruta nodos.txt (reutiliza si ya la tienes)
+try:
+    NODES_FILE  # noqa
+except NameError:
+    BOT_DATA_DIR = os.getenv("BOT_DATA_DIR", "/app/bot_data")
+    os.makedirs(BOT_DATA_DIR, exist_ok=True)
+    NODES_FILE = os.path.join(BOT_DATA_DIR, "nodos.txt")
 
 # === Helpers de pausa/reanudación del broker + pool + escucha ===
 import os, json, time, signal, subprocess, asyncio
@@ -918,8 +914,9 @@ def _print_broker_status(backlog_host="127.0.0.1", backlog_port=8766):
 
 import pathlib
 
-NOTIFIED_FILE = os.path.join(os.path.dirname(__file__), "bot_data", "notified_done.ids")
-TASKS_FILE    = os.path.join(os.path.dirname(__file__), "bot_data", "scheduled_tasks.jsonl")
+
+NOTIFIED_FILE = os.path.join(os.getenv("BOT_DATA_DIR", "/app/bot_data"), "notified_done.ids")
+TASKS_FILE    = os.path.join(os.getenv("BOT_DATA_DIR", "/app/bot_data"), "scheduled_tasks.jsonl")
 
 # === [AÑADIR] Estado runtime y persistente de notificaciones ===
 
@@ -13416,7 +13413,15 @@ def enrich_hops_from_nodes_file(node_map: dict) -> None:
     except Exception as e:
         log(f"⚠️ enrich_hops_from_nodes_file (retro) falló: {e}")
 
+# === NUEVO BLOQUE: Gestión de bloqueos de IDs ===
+try:
+    DATA_DIR
+except NameError:
+    # Fallback por si DATA_DIR no existiera aún en este fichero
+    import os
+    DATA_DIR = os.path.join(os.getenv("BOT_DATA_DIR", "/app/bot_data")
 
+BLOQUEADOS_FILE = os.path.join(DATA_DIR, "bloqueados.ids")
 
 def _load_bloqueados() -> set[str]:
     """Carga los IDs bloqueados desde el archivo (uno por línea)."""
@@ -13722,7 +13727,7 @@ async def post_startup(app: Application) -> None:
     try:
         broker_tasks.configure_sender(_tasks_send_adapter)
         broker_tasks.configure_reconnect(_tasks_reconnect_adapter)
-        DATA_DIR_BROKER = os.getenv("BOT_DATA_DIR", "/app/bot_data")
+        DATA_DIR_BROKER = os.path.join(os.getenv("BOT_DATA_DIR", "/app/bot_data")
         os.makedirs(DATA_DIR_BROKER, exist_ok=True)
         broker_tasks.init(data_dir=DATA_DIR_BROKER, tz_name="Europe/Madrid", poll_interval_sec=2.0)
         # broker_tasks.start() # ← DESACTIVADO en el bot: evita duplicidades
