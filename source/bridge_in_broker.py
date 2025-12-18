@@ -21,7 +21,6 @@ from pubsub import pub
 from tcpinterface_persistent import TCPInterface as PoolTCPIF  # solo A (pool persistente)
 from meshtastic.tcp_interface import TCPInterface as SDKTCPIF   # B usa SDK directo
 
-
 def _truthy(s: str | None, default: bool=False) -> bool:
     if s is None:
         return default
