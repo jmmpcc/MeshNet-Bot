@@ -18,6 +18,7 @@ services:
     # Datos persistentes de bot/broker (backlogs, mapas, auditorías, etc.)
     volumes:
       - ./bot_data:/app/bot_data:rw
+      
 
     stop_grace_period: 15s
 
@@ -41,6 +42,7 @@ services:
 
     volumes:
       - ./bot_data:/app/bot_data:rw
+     
 
     stop_grace_period: 10s
 

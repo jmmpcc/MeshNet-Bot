@@ -12,7 +12,7 @@ bridge_in_broker.py V6.1.3 — Pasarela A<->B embebida en el broker usando el po
 from __future__ import annotations
 import os, time, json, threading, re, hashlib
 from collections import deque
-from typing import Optional, Dict
+from typing import Optional, Dict, Callable
 import meshtastic  # ⬅️ necesario para parchear setInterface
 
 from pubsub import pub
@@ -155,6 +155,7 @@ class BrokerEmbeddedBridge:
         tag_bridge: str = "[BRIDGE]",
         tag_bridge_a2b: str | None = None,
         tag_bridge_b2a: str | None = None,
+        on_force_reconnect_a: Optional[Callable[[str], None]] = None,
     ):
         self.iface_a = iface_a
         self.b_host, self.b_port = b_host, int(b_port or 4403)
@@ -170,6 +171,13 @@ class BrokerEmbeddedBridge:
         self.tag_bridge_a2b = (tag_bridge_a2b.strip() if tag_bridge_a2b else base)
         self.tag_bridge_b2a = (tag_bridge_b2a.strip() if tag_bridge_b2a else base)
 
+        # Hook opcional: permite que el bridge pida al broker recuperar el lado A
+        # (equivalente a FORCE_RECONNECT), por ejemplo cuando un envío B2A falla hacia iface_a.
+        self.on_force_reconnect_a = on_force_reconnect_a
+        self._a_recover_last_ts = 0.0
+        self._a_recover_min_interval = float(os.getenv("BRIDGE_A_RECOVER_MIN_INTERVAL", "10") or "10")
+
+
         self.iface_b = None
         self.local_id_a = None
         self.local_id_b = None
@@ -184,6 +192,7 @@ class BrokerEmbeddedBridge:
         self.peer_offline_until = 0.0         # epoch hasta el que suprimimos reenvíos A->B
         self._peer_down_notified = False      # evita logs repetidos
         self.peer_down_backoff_sec = int(os.getenv("BRIDGE_PEER_DOWN_BACKOFF", "60") or "60")
+        
         # --- Reintento de reconexión automática a B ---
         # Si un envío a B falla, marcamos peer 'down' y programamos un intento de reconexión
         # al terminar el backoff (similar al cooldown del broker).
@@ -364,6 +373,8 @@ class BrokerEmbeddedBridge:
                     print(f"[bridge] {direction} ch {ch}->{out_ch} txt OK")
                 except Exception as e:
                     print(f"[bridge] {direction} sendText ERROR: {type(e).__name__}: {e}")
+                    if direction == \"B2A\":
+                        self._trigger_a_recovery(f\"{type(e).__name__}: {e}\")
             elif want_pos:
                 try:
                     summary = {
@@ -503,6 +514,8 @@ class BrokerEmbeddedBridge:
                     if direction == "A2B":
                         self._mark_peer_down(f"{type(e).__name__}: {e}")
                     print(f"[bridge] {direction} sendText ERROR: {type(e).__name__}: {e}", flush=True)
+                    if direction == \"B2A\":
+                        self._trigger_a_recovery(f\"{type(e).__name__}: {e}\")
 
             elif want_pos:
                 try:
@@ -602,6 +615,25 @@ class BrokerEmbeddedBridge:
             return False
 
     # --- [NUEVO] Métodos auxiliares para control de peer down ---
+
+    def _trigger_a_recovery(self, reason: str) -> None:
+        """Solicita al broker (lado A) una recuperación tipo FORCE_RECONNECT.
+        Rate-limited para evitar bucles.
+        """
+        cb = getattr(self, "on_force_reconnect_a", None)
+        if not cb:
+            return
+        now = time.time()
+        last = float(getattr(self, "_a_recover_last_ts", 0.0) or 0.0)
+        min_iv = float(getattr(self, "_a_recover_min_interval", 10.0) or 10.0)
+        if (now - last) < min_iv:
+            return
+        self._a_recover_last_ts = now
+        try:
+            cb(reason or "B2A sendText error")
+        except Exception:
+            pass
+
     def _is_peer_suppressed(self) -> bool:
         import time
         try:
@@ -727,7 +759,7 @@ class BrokerEmbeddedBridge:
 _BRIDGE: Optional[BrokerEmbeddedBridge] = None
 
 
-def bridge_start_in_broker(iface_a) -> dict:
+def bridge_start_in_broker(iface_a, on_force_reconnect_a: Optional[Callable[[str], None]] = None) -> dict:
     """
     Arranca la pasarela tomando la iface A del broker ya conectada.
     Lee configuración desde .env. Devuelve status dict.
@@ -766,6 +798,7 @@ def bridge_start_in_broker(iface_a) -> dict:
         tag_bridge=tag_base,
         tag_bridge_a2b=tag_a2b,
         tag_bridge_b2a=tag_b2a,
+        on_force_reconnect_a=on_force_reconnect_a,
     )
     _BRIDGE.start()
     return {"ok": True, "status": _BRIDGE.status()}

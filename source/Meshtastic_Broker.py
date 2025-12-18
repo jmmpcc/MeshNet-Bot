@@ -373,6 +373,85 @@ builtins.print = _print_with_ts
 
 
 
+# imports
+import os
+import time
+import json
+...
+from tcpinterface_persistent import TCPInterfacePool
+from bridge_in_broker import BrokerEmbeddedBridge
+
+# ─────────────────────────────────────────
+# AQUÍ VA _bridge_force_reconnect_a
+# ─────────────────────────────────────────
+
+def _bridge_force_reconnect_a(reason: str = "") -> None:
+    """
+    Callback para que el bridge embebido pueda forzar
+    una reconexión del lado A del broker.
+    NO lanza excepciones.
+    """
+    try:
+        import time as _t
+        try:
+            from tcpinterface_persistent import TCPInterfacePool
+        except Exception:
+            TCPInterfacePool = None
+
+        try:
+            with COOLDOWN_FORCE_LOCK:
+                globals()["COOLDOWN_FORCE_NEXT"] = 3
+        except Exception:
+            globals()["COOLDOWN_FORCE_NEXT"] = 3
+
+        try:
+            now = _t.time()
+            globals()["_SUPPRESS_EARLY_ESC_UNTIL"] = now + 45.0
+            globals()["_SUPPRESS_EARLY_ESC_REMAIN"] = int(
+                globals().get("_SUPPRESS_EARLY_ESC_DEFAULT_REMAIN", 2)
+            )
+        except Exception:
+            pass
+
+        try:
+            x = globals().get("TX_BLOCKED")
+            if x:
+                x.clear()
+        except Exception:
+            pass
+
+        try:
+            cd = globals().get("COOLDOWN")
+            if cd:
+                cd.clear()
+        except Exception:
+            pass
+
+        mesh_host = (globals().get("RUNTIME_MESH_HOST") or "").strip()
+        mesh_port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
+
+        if TCPInterfacePool and mesh_host:
+            try:
+                TCPInterfacePool.reset(mesh_host, mesh_port)
+                print(
+                    f"[bridge] force_reconnect_a → pool reset ({mesh_host}:{mesh_port}) reason={reason}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(
+                    f"[bridge] force_reconnect_a → reset falló: {type(e).__name__}: {e}",
+                    flush=True,
+                )
+
+        try:
+            mgr = globals().get("BROKER_IFACE_MGR")
+            if mgr and hasattr(mgr, "signal_disconnect"):
+                mgr.signal_disconnect()
+        except Exception:
+            pass
+
+    except Exception:
+        pass
 
 # === Throttle de logs de guards y barrera TX ===
 import threading, time
@@ -1076,11 +1155,14 @@ def init_broker_tasks():
         broker_tasks.configure_sender(_tasks_send_adapter)
         broker_tasks.configure_reconnect(_tasks_reconnect_adapter)
         # Guarda en ./broker_data/scheduled_tasks.jsonl (separado del bot)
-       
-         # Guarda en ./bot_data al lado del broker (no CWD):
-        _tasks_dir = os.path.join(os.path.dirname(__file__), "bot_data")
+               
+        # Guarda SIEMPRE en el volumen compartido (por defecto /app/bot_data)
+        _tasks_dir = os.getenv("BOT_DATA_DIR", "/app/bot_data")
+        os.makedirs(_tasks_dir, exist_ok=True)
+
         broker_tasks.init(data_dir=_tasks_dir, tz_name="Europe/Madrid", poll_interval_sec=2.0)
         broker_tasks.start()
+
         
         print("[Tasks@broker] Scheduler iniciado.")
     except Exception as e:
@@ -1625,77 +1707,69 @@ class _BacklogServer(threading.Thread):
                                 resp = {"ok": True, "scheduled": True, "seconds": int(secs)}
 
                         elif cmd == "FORCE_RECONNECT":
-                                # Reset limpio + preparar ventana de gracia anti-escalado
+                            # Fuerza un reset limpio del pool + señal al manager para reconectar.
+                            try:
+                                import time as _t
                                 try:
-                                    import time as _t
                                     from tcpinterface_persistent import TCPInterfacePool
+                                except Exception:
+                                    TCPInterfacePool = None
+
+                                # 0) Cooldown corto para el siguiente _on_disconnect (una sola vez)
+                                try:
+                                    with COOLDOWN_FORCE_LOCK:
+                                        globals()["COOLDOWN_FORCE_NEXT"] = 3
+                                except Exception:
+                                    globals()["COOLDOWN_FORCE_NEXT"] = 3
+
+                                # 1) Ventana de gracia anti-escalado tras el reset (45s, 2 caídas)
+                                try:
+                                    now = _t.time()
+                                    globals()["_SUPPRESS_EARLY_ESC_UNTIL"] = now + 45.0
+                                    globals()["_SUPPRESS_EARLY_ESC_REMAIN"] = int(globals().get("_SUPPRESS_EARLY_ESC_DEFAULT_REMAIN", 2))
                                 except Exception:
                                     pass
 
+                                # 2) Limpieza mínima de flags (sin romper nada)
                                 try:
-                                    # === 0) Cooldown corto para el siguiente _on_disconnect ===
-                                    # (se aplica una sola vez; NO tocar COOLDOWN_SECS base)
-                                    try:
-                                        with COOLDOWN_FORCE_LOCK:
-                                            globals()["COOLDOWN_FORCE_NEXT"] = 3   # 3s
-                                    except Exception:
-                                        globals()["COOLDOWN_FORCE_NEXT"] = 3
+                                    x = globals().get("TX_BLOCKED")
+                                    if x:
+                                        x.clear()
+                                except Exception:
+                                    pass
+                                try:
+                                    cd = globals().get("COOLDOWN")
+                                    if cd:
+                                        cd.clear()
+                                except Exception:
+                                    pass
 
-                                    # === 1) Ventana de gracia anti-escalado tras el reset ===
-                                    #   - Tiempo: 45s
-                                    #   - Contador: permitir suprimir hasta 2 "caídas tempranas"
-                                    try:
-                                        now = _t.time()
-                                        globals()["_SUPPRESS_EARLY_ESC_UNTIL"]  = now + 45.0
-                                        globals()["_SUPPRESS_EARLY_ESC_REMAIN"] = int(globals().get("_SUPPRESS_EARLY_ESC_DEFAULT_REMAIN", 2))
+                                # 3) Reset del pool TCP (cierra y reabrirá perezoso)
+                                mesh_host = (globals().get("RUNTIME_MESH_HOST") or "").strip()
+                                mesh_port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
 
-                                    except Exception:
-                                        pass
-
-                                    # === 2) Limpieza de estados globales mínimos (sin romper) ===
+                                if TCPInterfacePool and mesh_host:
                                     try:
-                                        x = globals().get("TX_BLOCKED")
-                                        if x:
-                                            x.clear()
-                                    except Exception:
-                                        pass
-                                    try:
-                                        cd = globals().get("COOLDOWN")
-                                        if cd:
-                                            cd.clear()
-                                    except Exception:
-                                        pass
-
-                                    # === 3) Reset de la sesión del pool TCP (cierra y reabrirá perezoso) ===
-                                    try:
-                                        TCPInterfacePool.reset(
-                                            globals().get("RUNTIME_MESH_HOST") or "",
-                                            int(globals().get("RUNTIME_MESH_PORT") or 4403)
-                                        )
+                                        TCPInterfacePool.reset(mesh_host, mesh_port)
                                         print("[ctrl] FORCE_RECONNECT → TCPInterfacePool.reset() aplicado.", flush=True)
                                     except Exception as e:
-                                        print(f"[ctrl] FORCE_RECONNECT → aviso: no se pudo resetear pool: {type(e).__name__}: {e}", flush=True)
+                                        print(f"[ctrl] FORCE_RECONNECT → aviso: reset pool falló: {type(e).__name__}: {e}", flush=True)
 
-                                    # === 4) Señal suave al manager: desconecta y reanuda (garantiza no-paused) ===
-                                    try:
-                                        mgr = globals().get("BROKER_IFACE_MGR") or self.iface_mgr
-                                    except Exception:
-                                        mgr = None
+                                # 4) Señal suave al manager: desconecta para forzar ciclo de reconexión
+                                try:
+                                    mgr = globals().get("BROKER_IFACE_MGR") or getattr(self, "iface_mgr", None)
+                                    if mgr and hasattr(mgr, "signal_disconnect"):
+                                        mgr.signal_disconnect()
+                                except Exception:
+                                    pass
 
-                                    try:
-                                        if mgr and hasattr(mgr, "signal_disconnect"):
-                                            mgr.signal_disconnect()
-                                    except Exception:
-                                        pass
-                                    try:
-                                        if mgr and hasattr(mgr, "resume"):
-                                            mgr.resume()   # estado no-pausado
-                                    except Exception:
-                                        pass
+                                resp = {"ok": True, "msg": "FORCE_RECONNECT applied"}
 
-                                    resp = {"ok": True, "status": "running", "action": "force_reconnect"}
-                                except Exception as e:
-                                    resp = {"ok": False, "error": f"force_reconnect_failed: {type(e).__name__}: {e}"}
+                            except Exception as e:
+                                resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+                            conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                            return
 
 
 
@@ -2007,10 +2081,16 @@ def _wrap_emitter_for_persistence():
         if callable(fn):
             def _make_wrapper(orig):
                 def _wrapped(packet, *args, **kwargs):
+                    append_ok=false
                     try:
                         append_offline_log(packet)
-                    finally:
-                        return orig(packet, *args, **kwargs)
+                        append_ok = True
+                    except Exception:
+                        # Persistencia best-effort: nunca debe romper el envío
+                        pass  
+                    
+                    return orig(packet, *args, **kwargs)
+                
                 _wrapped.__name__ = orig.__name__
                 _wrapped.__doc__  = orig.__doc__
                 return _wrapped
@@ -3977,55 +4057,57 @@ def main():
     pub.subscribe(receiver._on_connection, "meshtastic.connection.established")
     pub.subscribe(receiver._on_disconnect, "meshtastic.connection.lost")
     
-    # === [NUEVO] Arranque condicional de la pasarela embebida al establecer conexión ===
-    def _start_bridge_on_first_connection(interface=None, **kwargs):
-        try:
-            import os
-            enabled = (os.getenv("BRIDGE_ENABLED", "0").strip().lower() in {"1","true","on","si","sí","y","yes"})
-            if not enabled:
-                print("[bridge] embebida desactivada (BRIDGE_ENABLED=0)", flush=True)
-                # ya no necesitamos este hook si está desactivada
-                try: pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
-                except Exception: pass
-                return
+   # === [NUEVO] Arranque condicional de la pasarela embebida al establecer conexión ===
+def _start_bridge_on_first_connection(interface=None, **kwargs):
+    """
+    Hook al evento 'meshtastic.connection.established' para arrancar la pasarela embebida
+    solo cuando haya conexión real con el nodo A.
 
-            # Usa la interface que entrega el evento; si no viene, pide la actual al gestor
-            iface_for_bridge = interface or iface_mgr.get_iface()
-            if not iface_for_bridge:
-                print("[bridge] ⚠️ sin interface todavía; espero al próximo established…", flush=True)
-                return
-
-            st = bridge_start_in_broker(iface_for_bridge)
-            print("[bridge] embebida habilitada:", st, flush=True)
-
-        except Exception as e:
-            print(f"[bridge] ⚠️ no se pudo iniciar la pasarela embebida: {type(e).__name__}: {e}", flush=True)
-        finally:
-            # Ejecutarlo solo una vez; si necesitas rearmarla en reconexiones, quita esta desuscripción
-            try: pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
-            except Exception: pass
-
-    # Suscribir el hook al evento de conexión establecida
-    pub.subscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
-
-
-
-    # Lanzar primera conexión
-    iface_mgr.signal_disconnect()
-
-    # Heartbeat (estadísticas internas del broker)
-    hb = HeartbeatThread(hub, stats, every_s=args.heartbeat, target_host=args.host, verbose=args.verbose)
-    hb.start()
-
+    - Si BRIDGE_ENABLED=0: se desuscribe y no hace nada más.
+    - Si no hay interface aún: espera al siguiente evento.
+    - Si arranca: se desuscribe para no arrancar dos veces.
+    """
     try:
-        while True:
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        hb.stop()
-        srv.stop()
-        iface_mgr.stop()
+        import os
+
+        enabled = (os.getenv("BRIDGE_ENABLED", "0").strip().lower() in {"1", "true", "on", "si", "sí", "y", "yes"})
+        if not enabled:
+            print("[bridge] embebida desactivada (BRIDGE_ENABLED=0)", flush=True)
+            # Ya no necesitamos este hook si está desactivada
+            try:
+                pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
+            except Exception:
+                pass
+            return
+
+        # Usa la interface que entrega el evento; si no viene, pide la actual al gestor
+        iface_for_bridge = interface
+        if not iface_for_bridge:
+            print("[bridge] ⚠️ sin interface todavía; espero al próximo established…", flush=True)
+            return
+
+        # Arrancar bridge embebida (best-effort). Debe existir bridge_start_in_broker()
+        try:
+            st = bridge_start_in_broker(iface_for_bridge, on_force_reconnect_a=_bridge_force_reconnect_a)
+            print("[bridge] embebida arrancada OK", flush=True)
+        except NameError:
+            # Si no está importado/definido aún, no rompemos el broker
+            print("[bridge] ⚠️ bridge_start_in_broker no disponible; no se arranca (no es fatal).", flush=True)
+            return
+        except Exception as e:
+            print(f"[bridge] ❌ Error al arrancar embebida: {type(e).__name__}: {e}", flush=True)
+            return
+
+        # Si hemos llegado aquí, ya no necesitamos el hook (evita doble arranque)
+        try:
+            pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
+        except Exception:
+            pass
+
+    except Exception as e:
+        # Nunca debe tirar el broker por un fallo en el hook
+        print(f"[bridge] ❌ Error en _start_bridge_on_first_connection: {type(e).__name__}: {e}", flush=True)
+        return
 
 
 # === NUEVO: CLI para gestionar tareas programadas desde el broker ===
@@ -4085,7 +4167,7 @@ def _cli_tasks(argv: list[str]) -> int:
 )    
     broker_tasks.configure_reconnect(_tasks_reconnect_adapter)
   
-    DATA_DIR_BROKER = os.path.join(os.path.dirname(__file__), "bot_data")
+    DATA_DIR_BROKER = os.getenv("BOT_DATA_DIR", "/app/bot_data")
     os.makedirs(DATA_DIR_BROKER, exist_ok=True)
     broker_tasks.init(data_dir=DATA_DIR_BROKER, tz_name="Europe/Madrid", poll_interval_sec=2.0)
 
