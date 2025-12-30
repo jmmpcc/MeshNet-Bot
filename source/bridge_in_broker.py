@@ -1,35 +1,58 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-bridge_in_broker.py V6.1.3 — Pasarela A<->B embebida en el broker usando el pool persistente.
+bridge_in_broker.py V6.2 — Pasarela A<->B embebida en el broker usando lógica "peer-safe".
 
-- Reutiliza la interfaz del nodo A (la que YA usa el broker).
-- Abre (solo si se activa) la interfaz del nodo B con el mismo pool persistente.
-- Reenvía TEXT_MESSAGE_APP (y opcional POS/TELEMETRY como resumen) con anti-bucle, dedup y rate-limit.
-- Filtro por canal mediante mapas A2B/B2A.
+Problemas reales observados:
+- B2A: 'Timed out waiting for connection completion' cuando B embebido convive con A en el mismo proceso.
+- Mensajes A->B perdidos si B está en 'offline suppression' (se descartaban).
+
+Solución aplicada aquí (sin tocar el broker salvo el callback opcional):
+1) NUNCA llama a sendText() desde callbacks RX del pubsub.
+   - Todo envío pasa por una cola TX y un único hilo worker.
+2) Cuando B está offline (peer_offline_until), A->B NO se descarta:
+   - Se difiere y se envía cuando B vuelve online.
+3) Reintentos configurables por env vars con backoff.
+4) Hook opcional: on_force_reconnect_a(reason)
+   - Si B->A falla repetidamente, se pide al broker que recupere A (FORCE_RECONNECT interno).
+
+Se mantiene:
+- Anti-bucle (tag) y anti-eco (dedup global por contenido).
+- Rate-limit por lado.
+- Reconexión suave a B con un hilo aparte.
+
 """
 
 from __future__ import annotations
-import os, time, json, threading, re, hashlib
-from collections import deque
-from typing import Optional, Dict
-import meshtastic  # ⬅️ necesario para parchear setInterface
 
+import os
+import time
+import json
+import threading
+import re
+import hashlib
+import heapq
+import itertools
+from collections import deque
+from typing import Optional, Dict, Callable, Any, Tuple
+
+import meshtastic  # necesario para parchear setInterface en modo embebido
 from pubsub import pub
 
-# --- Compat shim para Meshtastic TCPInterface (host -> hostname) + pool único ---
-from tcpinterface_persistent import TCPInterface as PoolTCPIF  # solo A (pool persistente)
-from meshtastic.tcp_interface import TCPInterface as SDKTCPIF   # B usa SDK directo
+# B usa SDK directo (interfaz secundaria dentro del proceso)
+#from meshtastic.tcp_interface import TCPInterface as SDKTCPIF
+# B usa pool persistente (mismo endurecimiento que A: keepalive, reconexión, etc.)
+from tcpinterface_persistent import TCPInterface as PoolTCPIF
 
 
-
-def _truthy(s: str | None, default: bool=False) -> bool:
+def _truthy(s: str | None, default: bool = False) -> bool:
     if s is None:
         return default
-    return s.strip().lower() in {"1","true","t","yes","y","on","si","sí"}
+    return s.strip().lower() in {"1", "true", "t", "yes", "y", "on", "si", "sí"}
 
-def _parse_ch_map(s: str | None) -> dict[int,int]:
-    out: dict[int,int] = {}
+
+def _parse_ch_map(s: str | None) -> dict[int, int]:
+    out: dict[int, int] = {}
     if not s:
         return out
     for part in s.split(","):
@@ -43,42 +66,36 @@ def _parse_ch_map(s: str | None) -> dict[int,int]:
             continue
     return out
 
+
 def _norm_text(s: str) -> str:
     if not s:
         return ""
-    rep = {'“':'"', '”':'"', '’':"'", '‘':"'", '—':'-', '–':'-', '…':'...', '\u00A0':' '}
+    rep = {'“': '"', '”': '"', '’': "'", '‘': "'", '—': '-', '–': '-', '…': '...', "\u00A0": " "}
     s = s.translate(str.maketrans(rep))
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-import re
-import hashlib
 
 _RE_BRIDGE_TAG = re.compile(r"\s*\[BRIDGE[^\]]*\]\s*", re.IGNORECASE)
 
+
 def _norm_payload(payload: str) -> str:
-    """
-    Normaliza texto para deduplicación:
-      - recorta espacios
-      - colapsa espacios internos
-      - elimina etiquetas de bridge tipo [BRIDGE ...]
-    """
+    """Normaliza para deduplicación: quita tags [BRIDGE ...] y colapsa espacios."""
     t = (payload or "").strip()
     t = _RE_BRIDGE_TAG.sub(" ", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
-def _hash_key(direction: str, from_id: str, ch: int, payload: str) -> str:
-    """
-    Deduplicación GLOBAL anti-eco.
-    No usa direction/from_id/ch, solo contenido normalizado.
-    Así, si el mismo texto vuelve desde el otro nodo, se descarta.
-    """
+
+def _hash_key(payload: str) -> str:
+    """Dedup GLOBAL por contenido (no depende de ch/dirección)."""
     h = hashlib.sha256()
     h.update(_norm_payload(payload).encode("utf-8"))
     return h.hexdigest()
 
+
 class _RateLimiter:
+    """Rate-limit simple por lado: X envíos por minuto."""
     def __init__(self, max_per_min: int = 8):
         self.max = max(1, int(max_per_min))
         self.ts = deque()
@@ -92,7 +109,9 @@ class _RateLimiter:
             return True
         return False
 
+
 class _DedupWindow:
+    """Ventana TTL para dedup global."""
     def __init__(self, ttl_sec: int = 45):
         self.ttl = max(5, int(ttl_sec))
         self.store: Dict[str, float] = {}
@@ -107,580 +126,168 @@ class _DedupWindow:
         self.store[key] = now
         return False
 
-def _resolve_local_id(interface, retries: int = 12, delay: float = 0.5) -> str | None:
-    import time as _t
-    for _ in range(retries):
-        try:
-            mi = getattr(interface, "myInfo", None)
-            if not mi and hasattr(interface, "getMyInfo"):
-                try:
-                    mi = interface.getMyInfo()
-                except Exception:
-                    mi = None
-            if mi:
-                if isinstance(mi, dict):
-                    num = mi.get("my_node_num") or mi.get("num")
-                    if isinstance(num, int):
-                        return f"!{num:08x}"
-                    idv = mi.get("id")
-                    if idv:
-                        return str(idv)
-                else:
-                    num = getattr(mi, "my_node_num", None) or getattr(mi, "num", None)
-                    if isinstance(num, int):
-                        return f"!{num:08x}"
-                    idv = getattr(mi, "id", None)
-                    if idv:
-                        return str(idv)
-        except Exception:
-            pass
-        _t.sleep(delay)
-    return None
 
 class BrokerEmbeddedBridge:
     """
-    Pasarela embebida en el broker. Reutiliza iface A (existente) y abre iface B con el pool.
+    Pasarela A<->B embebida.
+    - iface_a: interfaz principal del broker (A), ya conectada.
+    - iface_b: interfaz secundaria creada aquí (B).
     """
+
     def __init__(
         self,
-        iface_a,                         # instancia existente del broker
-        b_host: str, b_port: int,
-        a2b_map: dict[int,int],
-        b2a_map: dict[int,int],
-        forward_text: bool = True,
-        forward_position: bool = False,
-        require_ack: bool = False,
-        rate_limit_per_side: int = 8,
-        dedup_ttl: int = 45,
+        iface_a: Any,
+        b_host: str,
+        b_port: int,
+        a2b_map: dict[int, int],
+        b2a_map: dict[int, int],
+        forward_text: bool,
+        forward_position: bool,
+        require_ack: bool,
+        rate_limit_per_side: int,
+        dedup_ttl: int,
         tag_bridge: str = "[BRIDGE]",
-        tag_bridge_a2b: str | None = None,
-        tag_bridge_b2a: str | None = None,
+        tag_bridge_a2b: Optional[str] = None,
+        tag_bridge_b2a: Optional[str] = None,
+        on_force_reconnect_a: Optional[Callable[[str], None]] = None,
     ):
         self.iface_a = iface_a
-        self.b_host, self.b_port = b_host, int(b_port or 4403)
+        self.iface_b = None
+        self.b_host = (b_host or "").strip()
+        self.b_port = int(b_port or 4403)
 
-        self.a2b_map = dict(a2b_map or {})
-        self.b2a_map = dict(b2a_map or {})
+        self.a2b_map = a2b_map or {}
+        self.b2a_map = b2a_map or {}
 
         self.forward_text = bool(forward_text)
         self.forward_position = bool(forward_position)
         self.require_ack = bool(require_ack)
 
-        base = str(tag_bridge or "").strip()
-        self.tag_bridge_a2b = (tag_bridge_a2b.strip() if tag_bridge_a2b else base)
-        self.tag_bridge_b2a = (tag_bridge_b2a.strip() if tag_bridge_b2a else base)
+        self.tag_bridge = tag_bridge or "[BRIDGE]"
+        self.tag_bridge_a2b = tag_bridge_a2b
+        self.tag_bridge_b2a = tag_bridge_b2a
 
-        self.iface_b = None
-        self.local_id_a = None
-        self.local_id_b = None
+        self._rl_a2b = _RateLimiter(rate_limit_per_side)
+        self._rl_b2a = _RateLimiter(rate_limit_per_side)
+        self._dedup = _DedupWindow(dedup_ttl)
 
-        self._running = False
-        self._lock = threading.RLock()
-        self.rl_a2b = _RateLimiter(rate_limit_per_side)
-        self.rl_b2a = _RateLimiter(rate_limit_per_side)
-        self.dedup = _DedupWindow(dedup_ttl)
+        # --- peer/offline suppression (solo A->B) ---
+        self.peer_offline_until: float = 0.0
+        self._peer_lock = threading.Lock()
 
-         # --- [NUEVO] Estado y backoff cuando el peer (B) está caído ---
-        self.peer_offline_until = 0.0         # epoch hasta el que suprimimos reenvíos A->B
-        self._peer_down_notified = False      # evita logs repetidos
-        self.peer_down_backoff_sec = int(os.getenv("BRIDGE_PEER_DOWN_BACKOFF", "60") or "60")
-        
-        # --- Reintento de reconexión automática a B ---
-        # Si un envío a B falla, marcamos peer 'down' y programamos un intento de reconexión
-        # al terminar el backoff (similar al cooldown del broker).
-        self._need_reconnect_b = False
+        # --- reconexión a B ---
+        self._reconnect_lock = threading.Lock()
         self._reconnect_thread_active = False
-        self._reconnect_lock = threading.RLock()
-      
 
-    def start(self):
-        with self._lock:
-            if self._running:
-                return
-            # iface_a ya viene inicializada por el broker
-            self.local_id_a = _resolve_local_id(self.iface_a, retries=12, delay=0.5)
+        # --- callback para recuperar A (broker) ---
+        self._on_force_reconnect_a = on_force_reconnect_a
+        self._a_recover_last_ts = 0.0
 
-            # Abrir iface_b mediante el pool (NO rompe nada del broker)
-            # Evitar que el SDK cambie el interfaz global del proceso (no queremos tocar el del broker)
-            _prev_set = getattr(meshtastic, "setInterface", None)
-            try:
-                if _prev_set:
-                    meshtastic.setInterface = lambda *_a, **_kw: None  # no-op temporal
-                self.iface_b = SDKTCPIF(hostname=self.b_host, portNumber=self.b_port)
-                # Asegurar que B no se convierta en default si más adelante alguien llama sin querer a setInterface
-                try:
-                    if hasattr(self.iface_b, "isDefault"):
-                        self.iface_b.isDefault = False  # por si el SDK lo consulta
-                except Exception:
-                    pass
+        # --- TX queue (priority by due) ---
+        self._pq: list[tuple[float, int, dict]] = []
+        self._pq_seq = itertools.count()
+        self._pq_cv = threading.Condition()
+        self._tx_thread = None
+        self._running = False
 
-            finally:
-                if _prev_set:
-                    meshtastic.setInterface = _prev_set  # restaurar
+        # Reintentos/backoff (env)
+        self._max_retries_a2b = int(os.getenv("BRIDGE_RETRIES_A2B", "3") or "3")
+        self._max_retries_b2a = int(os.getenv("BRIDGE_RETRIES_B2A", "2") or "2")
 
-            self.local_id_b = _resolve_local_id(self.iface_b, retries=12, delay=0.5)
+        # Watchdog opcional: si no entra RX desde B durante BRIDGE_B_STALE_SEC, forzamos peer-down
+        self._last_rx_b_ts = 0.0
+        self._wd_stop = threading.Event()
+        self._wd_thread = None
 
-            pub.subscribe(self._on_rx, "meshtastic.receive")
-            self._running = True
-            print(f"[bridge] ✅ embebida activa — local_id_a={self.local_id_a} local_id_b={self.local_id_b}")
-
-    def stop(self):
-        with self._lock:
-            if not self._running:
-                return
-            try:
-                pub.unsubscribe(self._on_rx, "meshtastic.receive")
-            except Exception:
-                pass
-            try:
-                if self.iface_b and hasattr(self.iface_b, "close"):
-                    self.iface_b.close()
-            except Exception:
-                pass
-            self._running = False
-            print("[bridge] 🛑 embebida detenida")
-
-    def is_running(self) -> bool:
-        return self._running
-
-    def status(self) -> dict:
-        """
-        Devuelve un resumen del estado actual del bridge embebido,
-        incluyendo si está corriendo, los mapas de canales y el estado de peer-down.
-        """
-        import time
-        now = time.time()
-        remaining = max(0, int((self.peer_offline_until or 0.0) - now))
-
-        return {
-            "running": self._running,
-            "a": {"local_id": self.local_id_a},
-            "b": {
-                "host": self.b_host,
-                "port": self.b_port,
-                "local_id": self.local_id_b,
-            },
-            "maps": {"A2B": self.a2b_map, "B2A": self.b2a_map},
-            "opts": {
-                "forward_text": self.forward_text,
-                "forward_position": self.forward_position,
-                "require_ack": self.require_ack,
-                "tag_a2b": self.tag_bridge_a2b,
-                "tag_b2a": self.tag_bridge_b2a,
-                "peer_down_backoff_sec": int(self.peer_down_backoff_sec or 0),
-            },
-            "peer_state": {
-                "peer_offline_until": int(self.peer_offline_until or 0),
-                "peer_offline_remaining": remaining,
-                "is_peer_suppressed": self._is_peer_suppressed(),
-            },
-        }
-
-    def _on_rx_old(self, interface=None, packet=None, **kwargs):
+        # schedule de reintentos: segundos
+        sched = (os.getenv("BRIDGE_RETRY_SCHEDULE", "2,6,15") or "2,6,15").strip()
         try:
-            pkt = packet or {}
-            decoded = pkt.get("decoded") or {}
-            port = decoded.get("portnum") or decoded.get("portnum_name") \
-                   or decoded.get("portnum_str") or decoded.get("portnumText")
-            port_str = str(port).upper() if port is not None else ""
-
-            want_text = self.forward_text and (("TEXT_MESSAGE_APP" in port_str) or (port_str == "TEXT"))
-            want_pos  = self.forward_position and (
-                ("POSITION_APP" in port_str) or (port_str == "POSITION") or
-                ("TELEMETRY_APP" in port_str) or (port_str == "TELEMETRY")
-            )
-            if not (want_text or want_pos):
-                return
-
-            ch = decoded.get("channel") if decoded.get("channel") is not None else pkt.get("channel")
-            try:
-                ch = int(ch) if ch is not None else 0
-            except Exception:
-                ch = 0
-
-            frm = str(pkt.get("fromId") or decoded.get("fromId") or pkt.get("from") or "")
-            text = str(decoded.get("text") or decoded.get("payload") or "")
-
-            came_from_a = (interface is self.iface_a)
-            came_from_b = (interface is self.iface_b)
-            if not (came_from_a or came_from_b):
-                return
-
-            # anti-eco duro: si el texto ya viene marcado como puenteado, no reinyectar jamás
-            if want_text:
-                t = (text or "")
-                if (
-                    ("[BRIDGE" in t)
-                    or (self.tag_bridge_a2b and self.tag_bridge_a2b in t)
-                    or (self.tag_bridge_b2a and self.tag_bridge_b2a in t)
-                ):
-                    return
-
-
-            # anti-bucle por local_id del destino
-            if came_from_a and self.local_id_b and frm == self.local_id_b:
-                return
-            if came_from_b and self.local_id_a and frm == self.local_id_a:
-                return
-
-            # mapeo + rate limit
-            if came_from_a:
-                if ch not in self.a2b_map:
-                    return
-                out_ch = self.a2b_map[ch]
-                direction = "A2B"
-                if not self.rl_a2b.allow():
-                    return
-                target = self.iface_b
-            else:
-                if ch not in self.b2a_map:
-                    return
-                out_ch = self.b2a_map[ch]
-                direction = "B2A"
-                if not self.rl_b2a.allow():
-                    return
-                target = self.iface_a
-
-            # dedup
-            payload_for_hash = _norm_text(text) if want_text else json.dumps(decoded, sort_keys=True)
-            key = _hash_key(direction, frm, ch, payload_for_hash)
-            if self.dedup.seen(key):
-                return
-
-            # envío
-            if want_text:
-                msg = _norm_text(text)
-                tag = self.tag_bridge_a2b if came_from_a else self.tag_bridge_b2a
-                if tag and tag not in msg:
-                    msg = f"{tag} {msg}"
-                try:
-                    target.sendText(
-                        msg,
-                        destinationId="^all",         # broadcast (el bridge no direcciona a un nodo)
-                        wantAck=bool(self.require_ack),
-                        wantResponse=False,
-                        channelIndex=int(out_ch),
-                    )
-
-                    print(f"[bridge] {direction} ch {ch}->{out_ch} txt OK")
-                except Exception as e:
-                    print(f"[bridge] {direction} sendText ERROR: {type(e).__name__}: {e}")
-            elif want_pos:
-                try:
-                    summary = {
-                        "via": "bridge",
-                        "from": frm[-8:] if frm else "?",
-                        "lat": decoded.get("position", {}).get("latitude"),
-                        "lon": decoded.get("position", {}).get("longitude"),
-                        "alt": decoded.get("position", {}).get("altitude"),
-                        "bat": decoded.get("deviceMetrics", {}).get("batteryLevel")
-                    }
-                    tag = self.tag_bridge_a2b if came_from_a else self.tag_bridge_b2a
-                    msg = (f"{tag} POS {summary}" if tag else f"POS {summary}")
-                    target.sendText(
-                        msg,
-                        destinationId="^all",
-                        wantAck=False,
-                        wantResponse=False,
-                        channelIndex=int(out_ch),
-                    )
-
-                    print(f"[bridge] {direction} ch {ch}->{out_ch} POS OK")
-                except Exception as e:
-                    print(f"[bridge] {direction} sendPOS ERROR: {type(e).__name__}: {e}")
-        except Exception as e:
-            print(f"[bridge] on_rx error: {type(e).__name__}: {e}")
-
-    def _on_rx(self, interface=None, packet=None, **kwargs):
-        """
-        Maneja paquetes recibidos por el pubsub del SDK.
-        - Filtra por puertos TEXT/POS/TELEMETRY si están habilitados.
-        - Aplica anti-eco por tag, anti-bucle por local_id, mapeo y rate-limit.
-        - Deduplica por (direction, fromId, channel, payload).
-        - A2B: si B está marcado como offline, suprime reenvío durante el backoff.
-            si un envío A2B falla, marca peer-down (backoff);
-            si un envío A2B tiene éxito, marca peer-up.
-        """
-        import json
-        import time as _t
-
-        try:
-            pkt = packet or {}
-            decoded = pkt.get("decoded") or {}
-
-            # --- puerto / portnum ---
-            port = (decoded.get("portnum") or decoded.get("portnum_name")
-                    or decoded.get("portnum_str") or decoded.get("portnumText"))
-            port_str = str(port).upper() if port is not None else ""
-
-            # --- qué tipos de mensaje queremos reenviar ---
-            want_text = self.forward_text and (("TEXT_MESSAGE_APP" in port_str) or (port_str == "TEXT"))
-            want_pos  = self.forward_position and (
-                ("POSITION_APP" in port_str) or (port_str == "POSITION")
-                or ("TELEMETRY_APP" in port_str) or (port_str == "TELEMETRY")
-            )
-            if not (want_text or want_pos):
-                return
-
-            # --- canal ---
-            ch = decoded.get("channel") if decoded.get("channel") is not None else pkt.get("channel")
-            try:
-                ch = int(ch) if ch is not None else 0
-            except Exception:
-                ch = 0
-
-            # --- origen / texto ---
-            frm = str(pkt.get("fromId") or decoded.get("fromId") or pkt.get("from") or "")
-            text = str(decoded.get("text") or decoded.get("payload") or "")
-
-            # --- desde qué interfaz llegó ---
-            came_from_a = (interface is self.iface_a)
-            came_from_b = (interface is self.iface_b)
-            if not (came_from_a or came_from_b):
-                return
-
-            # --- anti-eco por etiqueta direccional ---
-            if want_text:
-                other_tag = self.tag_bridge_b2a if came_from_a else self.tag_bridge_a2b
-                if other_tag and other_tag in (text or ""):
-                    return
-
-            # --- anti-bucle por local_id del destino ---
-            if came_from_a and self.local_id_b and frm == self.local_id_b:
-                return
-            if came_from_b and self.local_id_a and frm == self.local_id_a:
-                return
-
-            # --- mapeo y rate-limit + selección de destino ---
-            if came_from_a:
-                if ch not in self.a2b_map:
-                    return
-                out_ch = self.a2b_map[ch]
-                direction = "A2B"
-                if not self.rl_a2b.allow():
-                    return
-                target = self.iface_b
-            else:
-                if ch not in self.b2a_map:
-                    return
-                out_ch = self.b2a_map[ch]
-                direction = "B2A"
-                if not self.rl_b2a.allow():
-                    return
-                target = self.iface_a
-
-            # --- NUEVO: si B está caído, suprimir A->B durante el backoff ---
-            if direction == "A2B" and self._is_peer_suppressed():
-                remaining = max(0, int((self.peer_offline_until or 0.0) - _t.time()))
-                print(f"[bridge] A2B ch {ch}->{out_ch} SKIP (B offline, {remaining}s restantes)", flush=True)
-                return
-
-            # --- dedup ---
-            payload_for_hash = _norm_text(text) if want_text else json.dumps(decoded, sort_keys=True)
-            key = _hash_key(direction, frm, ch, payload_for_hash)
-            if self.dedup.seen(key):
-                return
-
-            # --- envío ---
-            if want_text:
-                msg = _norm_text(text)
-                tag = self.tag_bridge_a2b if came_from_a else self.tag_bridge_b2a
-                if tag and tag not in msg:
-                    msg = f"{tag} {msg}"
-                try:
-                    target.sendText(
-                        msg,
-                        destinationId="^all",          # broadcast (el bridge no direcciona a un nodo)
-                        wantAck=bool(self.require_ack),
-                        wantResponse=False,
-                        channelIndex=int(out_ch),
-                    )
-                    # Éxito: si era A2B, limpiamos estado de caída
-                    if direction == "A2B":
-                        self._mark_peer_up()
-                    print(f"[bridge] {direction} ch {ch}->{out_ch} txt OK")
-                except Exception as e:
-                    # Fallo: si era A2B, marcamos peer-down con backoff
-                    if direction == "A2B":
-                        self._mark_peer_down(f"{type(e).__name__}: {e}")
-                    print(f"[bridge] {direction} sendText ERROR: {type(e).__name__}: {e}", flush=True)
-
-            elif want_pos:
-                try:
-                    summary = {
-                        "via": "bridge",
-                        "from": frm[-8:] if frm else "?",
-                        "lat": decoded.get("position", {}).get("latitude"),
-                        "lon": decoded.get("position", {}).get("longitude"),
-                        "alt": decoded.get("position", {}).get("altitude"),
-                        "bat": decoded.get("deviceMetrics", {}).get("batteryLevel"),
-                    }
-                    tag = self.tag_bridge_a2b if came_from_a else self.tag_bridge_b2a
-                    msg = (f"{tag} POS {summary}" if tag else f"POS {summary}")
-                    target.sendText(
-                        msg,
-                        destinationId="^all",
-                        wantAck=False,
-                        wantResponse=False,
-                        channelIndex=int(out_ch),
-                    )
-                    if direction == "A2B":
-                        self._mark_peer_up()
-                    print(f"[bridge] {direction} ch {ch}->{out_ch} POS OK")
-                except Exception as e:
-                    if direction == "A2B":
-                        self._mark_peer_down(f"{type(e).__name__}: {e}")
-                    print(f"[bridge] {direction} sendPOS ERROR: {type(e).__name__}: {e}", flush=True)
-
-        except Exception as e:
-            print(f"[bridge] on_rx error: {type(e).__name__}: {e}", flush=True)
-
-
-    def mirror_from_a(self, channel: int, text: str) -> bool:
-        """
-        Espeja un envío originado por el broker (nodo A) hacia B aplicando:
-        - mapeo A2B
-        - supresión temporal si B está 'down' (backoff configurable)
-        - rate-limit A2B
-        - dedup por contenido
-        - etiquetado direccional
-        Devuelve True si se reenvió, False si se ignoró.
-        """
-        try:
-            ch = int(channel)
+            self._retry_schedule = [max(1.0, float(x.strip())) for x in sched.split(",") if x.strip()]
         except Exception:
-            ch = 0
+            self._retry_schedule = [2.0, 6.0, 15.0]
+        if not self._retry_schedule:
+            self._retry_schedule = [2.0, 6.0, 15.0]
 
-        # 0) ¿B suprimido por caída reciente?
-        if self._is_peer_suppressed():
-            import time as _t
-            remaining = max(0, int((self.peer_offline_until or 0.0) - _t.time()))
-            print(f"[bridge] A2B ch {ch} → suprimido (B offline, {remaining}s restantes)", flush=True)
-            return False
+        # offline suppression por defecto (cuando B falla)
+        self._peer_suppress_secs = int(os.getenv("BRIDGE_PEER_SUPPRESS_SECS", "75") or "75")
 
-        # 1) Mapeo de canal
-        if ch not in self.a2b_map:
-            print(f"[bridge] A2B TX ch {ch} → descartado (no mapeado)", flush=True)
-            return False
+        # tiempo mínimo entre requests de recover A
+        self._recover_a_min_gap = float(os.getenv("BRIDGE_RECOVER_A_MIN_GAP", "12") or "12")
 
-        out_ch = self.a2b_map[ch]
+        # Identificador de interfaz "secundaria" para evitar que meshtastic la trate como principal
+        self._iface_b_setinterface = _truthy(os.getenv("BRIDGE_B_SETINTERFACE", "0"), False)
 
-        # 2) Rate-limit
-        if not self.rl_a2b.allow():
-            print(f"[bridge] A2B ch {ch}->{out_ch} → descartado (rate-limit)", flush=True)
-            return False
+    # ----------------------------------------------------------------------------------
+    # Lifecycle
+    # ----------------------------------------------------------------------------------
 
-        # 3) Mensaje + tag
-        msg = _norm_text(text or "")
-        tag = self.tag_bridge_a2b
-        if tag and tag not in msg:
-            msg = f"{tag} {msg}"
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
 
-        # 4) Dedup (igual criterio que RX)
-        key = _hash_key("A2B", "LOCAL_TX", ch, msg)
-        if self.dedup.seen(key):
-            print(f"[bridge] A2B ch {ch}->{out_ch} → descartado (dupe)", flush=True)
-            return False
+        # 1) levantar B
+        self._connect_b()
 
-        # 5) Envío a B con control de caída
+        # 2) suscripción pubsub (un único handler para ambos)
+        pub.subscribe(self._on_rx, "meshtastic.receive")
+
+        # 3) hilo TX
+        self._tx_thread = threading.Thread(target=self._tx_worker, name="bridge-tx", daemon=True)
+        self._tx_thread.start()
+
+        self._start_watchdog()
+
+
+    def stop(self) -> None:
+        self._running = False
+        self._stop_watchdog()
+
         try:
-            self.iface_b.sendText(
-                msg,
-                destinationId="^all",
-                wantAck=bool(self.require_ack),
-                wantResponse=False,
-                channelIndex=int(out_ch),
-            )
-            # Éxito → marcar peer 'up' si veníamos de caída
-            self._mark_peer_up()
-            print(f"[bridge] A2B ch {ch}->{out_ch} txt OK", flush=True)
-            return True
-
-        except Exception as e:
-            # Cualquier fallo de socket/API → marcar peer 'down' con backoff
-            self._mark_peer_down(f"{type(e).__name__}: {e}")
-            print(f"[bridge] A2B sendText ERROR: {type(e).__name__}: {e}", flush=True)
-            return False
-
-    # --- [NUEVO] Métodos auxiliares para control de peer down ---
-    def _is_peer_suppressed(self) -> bool:
-        import time
-        try:
-            return time.time() < float(self.peer_offline_until or 0.0)
+            pub.unsubscribe(self._on_rx, "meshtastic.receive")
         except Exception:
-            return False
-
-    def _mark_peer_down(self, reason: str = "") -> None:
-        import time
-        backoff = max(10, int(self.peer_down_backoff_sec or 60))
-        self.peer_offline_until = time.time() + backoff
-        if not self._peer_down_notified:
-            print(f"[bridge] B OFFLINE → suprime A2B {backoff}s ({reason})", flush=True)
-            self._peer_down_notified = True
-        # Programar un intento de reconexión automática al finalizar el backoff
+            pass
+        with self._pq_cv:
+            self._pq_cv.notify_all()
         try:
-            with self._reconnect_lock:
-                self._need_reconnect_b = True
-            self._schedule_reconnect_b(backoff)
+            if self.iface_b and hasattr(self.iface_b, "close"):
+                self.iface_b.close()
         except Exception:
             pass
 
+    def is_running(self) -> bool:
+        return bool(self._running)
+
+    def status(self) -> dict:
+        return {
+            "running": self._running,
+            "b_host": self.b_host,
+            "b_port": self.b_port,
+            "peer_offline_for": max(0, int(self.peer_offline_until - time.time())),
+            "iface_b": bool(self.iface_b),
+            "queue_len": len(self._pq),
+        }
+
+    # ----------------------------------------------------------------------------------
+    # Helpers peer/offline + reconnect
+    # ----------------------------------------------------------------------------------
+
+    def _is_peer_suppressed(self) -> bool:
+        with self._peer_lock:
+            return time.time() < float(self.peer_offline_until or 0.0)
+
+    def _mark_peer_down(self, why: str) -> None:
+        with self._peer_lock:
+            self.peer_offline_until = time.time() + float(self._peer_suppress_secs)
+        print(f"[bridge] B OFFLINE → suprime A2B {self._peer_suppress_secs}s ({why})", flush=True)
+        self._schedule_reconnect_b()
+
     def _mark_peer_up(self) -> None:
-        # (no necesita time)
-        if self._peer_down_notified:
-            print("[bridge] B volvió ONLINE → reanudo A2B", flush=True)
-        self.peer_offline_until = 0.0
-        self._peer_down_notified = False
+        with self._peer_lock:
+            self.peer_offline_until = 0.0
+        print("[bridge] B volvió ONLINE → reanudo A2B", flush=True)
 
-    def _reconnect_b_once(self) -> bool:
-        """
-        Intenta recrear la conexión TCP hacia el nodo B de forma segura:
-        - cierra iface_b si existe
-        - abre una nueva SDKTCPIF(hostname, portNumber)
-        - recalcula local_id_b
-        Devuelve True si parece OK, False si falló.
-        """
-        with self._reconnect_lock:
-            try:
-                # 1) cerrar si existe
-                try:
-                    if self.iface_b and hasattr(self.iface_b, "close"):
-                        self.iface_b.close()
-                except Exception:
-                    pass
-                self.iface_b = None
-
-                # 2) abrir evitando tocar la interfaz global del SDK
-                import meshtastic as _m
-                _prev_set = getattr(_m, "setInterface", None)
-                try:
-                    if _prev_set:
-                        _m.setInterface = lambda *_a, **_kw: None
-                    self.iface_b = SDKTCPIF(hostname=self.b_host, portNumber=self.b_port)
-                    try:
-                        if hasattr(self.iface_b, "isDefault"):
-                            self.iface_b.isDefault = False
-                    except Exception:
-                        pass
-                finally:
-                    if _prev_set:
-                        _m.setInterface = _prev_set
-
-                # 3) local id
-                self.local_id_b = _resolve_local_id(self.iface_b, retries=12, delay=0.5)
-                return bool(self.local_id_b)
-            except Exception as e:
-                try:
-                    print(f"[bridge] reconnect_b FAILED: {type(e).__name__}: {e}", flush=True)
-                except Exception:
-                    pass
-                return False
-
-    def _schedule_reconnect_b(self, backoff: int) -> None:
-        """
-        Lanza (una sola vez) un hilo que espera 'backoff' y luego intenta reconectar B.
-        Si falla, vuelve a marcar peer down y reprograma.
-        """
+    def _schedule_reconnect_b(self) -> None:
         with self._reconnect_lock:
             if self._reconnect_thread_active:
                 return
@@ -688,47 +295,453 @@ class BrokerEmbeddedBridge:
 
         def _worker():
             try:
-                while True:
-                    try:
-                        time.sleep(max(3, int(backoff)))
-                    except Exception:
-                        time.sleep(3)
-
-                    with self._reconnect_lock:
-                        need = bool(self._need_reconnect_b)
-                    if not need:
-                        with self._reconnect_lock:
-                            self._reconnect_thread_active = False
-                        return
-
-                    ok = self._reconnect_b_once()
+                # Pequeño backoff fijo para que el SDK se asiente
+                time.sleep(1.0)
+                while self._running:
+                    ok = self._connect_b()
                     if ok:
                         self._mark_peer_up()
-                        with self._reconnect_lock:
-                            self._need_reconnect_b = False
-                            self._reconnect_thread_active = False
                         print("[bridge] reconexión a B OK", flush=True)
                         return
-
-                    # sigue caído: extiende ventana de supresión y reintenta
-                    self._mark_peer_down("reconnect_failed")
-                    # y continúa el bucle
-
+                    time.sleep(3.0)
             finally:
                 with self._reconnect_lock:
                     self._reconnect_thread_active = False
 
-        threading.Thread(target=_worker, daemon=True).start()
+        threading.Thread(target=_worker, name="bridge-reconnect-b", daemon=True).start()
+
+    def _connect_b(self) -> bool:
+        if not self.b_host:
+            return False
+
+        # Modo embebido: NO queremos que B "pise" la interfaz principal del proceso.
+        # La librería meshtastic usa setInterface global; lo evitamos por defecto.
+        if not self._iface_b_setinterface:
+            try:
+                # Anulamos setInterface durante la construcción de B
+                orig = getattr(meshtastic, "setInterface", None)
+                if callable(orig):
+                    meshtastic.setInterface = lambda *a, **k: None
+                try:
+                    self.iface_b = PoolTCPIF(hostname=self.b_host, port=self.b_port)
+
+                finally:
+                    if callable(orig):
+                        meshtastic.setInterface = orig
+            except Exception as e:
+                self.iface_b = None
+                return False
+        else:
+            try:
+                self.iface_b = PoolTCPIF(hostname=self.b_host, port=self.b_port)
+
+            except Exception:
+                self.iface_b = None
+                return False
+
+        return True
+
+    def _request_a_recover(self, reason: str) -> None:
+        cb = self._on_force_reconnect_a
+        if not cb:
+            return
+        now = time.time()
+        if (now - self._a_recover_last_ts) < float(self._recover_a_min_gap):
+            return
+        self._a_recover_last_ts = now
+        try:
+            cb(reason)
+        except Exception:
+            pass
+
+    def _start_watchdog(self) -> None:
+        try:
+            stale = float(os.getenv("BRIDGE_B_STALE_SEC", "0") or "0")
+        except Exception:
+            stale = 0.0
+        if stale <= 0:
+            return  # desactivado
+
+        if self._wd_thread and self._wd_thread.is_alive():
+            return
+
+        self._wd_stop.clear()
+
+        def _run():
+            while not self._wd_stop.is_set():
+                try:
+                    try:
+                        stale_sec = float(os.getenv("BRIDGE_B_STALE_SEC", "0") or "0")
+                    except Exception:
+                        stale_sec = 0.0
+                    if stale_sec <= 0:
+                        time.sleep(2.0)
+                        continue
+
+                    try:
+                        tick = float(os.getenv("BRIDGE_WATCHDOG_TICK", "5") or "5")
+                    except Exception:
+                        tick = 5.0
+
+                    now = time.time()
+                    last = float(self._last_rx_b_ts or 0.0)
+                    if last > 0.0 and (now - last) > stale_sec:
+                        if not self._is_peer_suppressed():
+                            self._mark_peer_down(f"stale_rx>{int(stale_sec)}s")
+                    time.sleep(max(1.0, tick))
+                except Exception:
+                    time.sleep(2.0)
+
+        self._wd_thread = threading.Thread(target=_run, name="bridge_b_watchdog", daemon=True)
+        self._wd_thread.start()
+
+    def _stop_watchdog(self) -> None:
+        try:
+            self._wd_stop.set()
+        except Exception:
+            pass
+        try:
+            th = self._wd_thread
+            if th and th.is_alive():
+                th.join(timeout=2.0)
+        except Exception:
+            pass
 
 
 
+    # ----------------------------------------------------------------------------------
+    # TX Queue
+    # ----------------------------------------------------------------------------------
+
+    def _enqueue(self, *, direction: str, ch: int, msg: str, want_ack: bool, due: Optional[float] = None) -> None:
+        """
+        Encola un envío. No guarda iface y no descarta por iface None.
+        La resolución de iface y la tolerancia a reconexión ocurre en _send_item().
+        """
+        if not self._running:
+            return
+
+        item = {
+            "direction": direction,
+            "ch": int(ch),
+            "msg": msg,
+            "want_ack": bool(want_ack),
+            "attempt": 0,
+            "max_retries": int(self._max_retries_a2b if direction == "A2B" else self._max_retries_b2a),
+        }
+
+        if due is None:
+            due = time.time()
+
+        with self._pq_cv:
+            heapq.heappush(self._pq, (float(due), next(self._pq_seq), item))
+            self._pq_cv.notify()
+
+
+
+    def _reschedule(self, item: dict, delay: float) -> None:
+        item["attempt"] = int(item.get("attempt", 0)) + 1
+        due = time.time() + float(delay)
+        with self._pq_cv:
+            heapq.heappush(self._pq, (due, next(self._pq_seq), item))
+            self._pq_cv.notify()
+
+    def _tx_worker(self) -> None:
+        while self._running:
+            with self._pq_cv:
+                while self._running and not self._pq:
+                    self._pq_cv.wait(timeout=1.0)
+                if not self._running:
+                    break
+
+                due, _, item = self._pq[0]
+                now = time.time()
+                if due > now:
+                    self._pq_cv.wait(timeout=min(1.0, due - now))
+                    continue
+                heapq.heappop(self._pq)
+
+            # A->B: si sigue offline, difiere hasta peer_offline_until
+            if item["direction"] == "A2B" and self._is_peer_suppressed():
+                remaining = max(0, float(self.peer_offline_until - time.time()))
+                self._reschedule(item, max(0.5, remaining))
+                continue
+
+            self._send_item(item)
+
+    def _send_item(self, item: dict) -> None:
+        """
+        Envía un item de la cola TX.
+
+        Cambio estratégico 24/7:
+        - NO usa item["iface"] (puede quedar obsoleta tras reconexión).
+        - Resuelve iface justo antes de enviar (self.iface_b / self.iface_a).
+        - Si iface es None durante reconexión, reprograma con backoff sin reventar.
+
+        Mantiene:
+        - rate-limit A2B/B2A
+        - lógica de reintentos con _retry_schedule
+        - _mark_peer_down en fallos A2B
+        - _request_a_recover en fallos B2A
+        """
+
+        direction = item["direction"]
+        ch = int(item["ch"])
+        msg = item["msg"]
+        want_ack = bool(item["want_ack"])
+
+        # Rate-limit (antes de intentar)
+        if direction == "A2B" and not self._rl_a2b.allow():
+            self._reschedule(item, 2.0)
+            return
+        if direction == "B2A" and not self._rl_b2a.allow():
+            self._reschedule(item, 2.0)
+            return
+
+        # === CAMBIO CLAVE: resolver iface en este instante ===
+        iface = self.iface_b if direction == "A2B" else self.iface_a
+
+        # Si iface aún no está lista (reconexión en curso), reintenta con backoff
+        if iface is None or not hasattr(iface, "sendText"):
+            attempt = int(item.get("attempt", 0))
+            max_r = int(item.get("max_retries", 0))
+
+            if direction == "A2B":
+                # B no está listo → trátalo como caída/transición
+                self._mark_peer_down("iface_b None (reconexión en curso)")
+            else:
+                # A no está listo → recovery suave
+                self._request_a_recover("iface_a None (reconexión en curso)")
+
+            if attempt < max_r:
+                delay = self._retry_schedule[min(attempt, len(self._retry_schedule) - 1)]
+                self._reschedule(item, delay)
+            else:
+                if direction == "A2B":
+                    print("[bridge] A2B sendText ERROR (agotado): iface None", flush=True)
+                else:
+                    print("[bridge] B2A sendText ERROR (agotado): iface None", flush=True)
+            return
+
+        try:
+            # Firmas compatibles: sendText(text, channelIndex=?, wantAck=?)
+            fn = getattr(iface, "sendText", None)
+            if not callable(fn):
+                raise RuntimeError("iface.sendText no disponible")
+
+            try:
+                fn(msg, channelIndex=ch, wantAck=want_ack)
+            except TypeError:
+                # SDKs viejos
+                try:
+                    fn(msg, channelIndex=ch)
+                except TypeError:
+                    fn(msg, ch)
+
+            if direction == "A2B":
+                print(f"[bridge] A2B ch {ch}->{ch} txt OK", flush=True)
+            else:
+                print(f"[bridge] B2A ch {ch}->{ch} txt OK", flush=True)
+            return
+
+        except Exception as e:
+            # decide reintento / marca offline / pide recover A
+            attempt = int(item.get("attempt", 0))
+            max_r = int(item.get("max_retries", 0))
+
+            if direction == "A2B":
+                # Si falla A->B, marcamos B offline y reintentamos más tarde
+                self._mark_peer_down(f"{type(e).__name__}: {e}")
+                if attempt < max_r:
+                    delay = self._retry_schedule[min(attempt, len(self._retry_schedule) - 1)]
+                    self._reschedule(item, delay)
+                else:
+                    print(f"[bridge] A2B sendText ERROR (agotado): {type(e).__name__}: {e}", flush=True)
+                return
+
+            # direction == B2A
+            if attempt < max_r:
+                delay = self._retry_schedule[min(attempt, len(self._retry_schedule) - 1)]
+                print(f"[bridge] B2A sendText ERROR: {type(e).__name__}: {e} (retry {attempt+1}/{max_r})", flush=True)
+                self._reschedule(item, delay)
+                # Si el error es de conexión, pedimos recover de A (suave)
+                self._request_a_recover(f"B2A sendText error: {type(e).__name__}: {e}")
+            else:
+                print(f"[bridge] B2A sendText ERROR (agotado): {type(e).__name__}: {e}", flush=True)
+                self._request_a_recover(f"B2A sendText exhausted: {type(e).__name__}: {e}")
+
+    # ----------------------------------------------------------------------------------
+    # RX handler
+    # ----------------------------------------------------------------------------------
+
+    def _on_rx(self, interface=None, packet=None, **kwargs):
+        """
+        Handler único: recibe tráfico de A y B y decide si reenviar.
+        IMPORTANTÍSIMO: aquí NO se envía nada; solo se encola.
+        """
+        try:
+                if not self._running or not packet:
+                    return
+
+                iface = interface
+                # Identificar origen: iface_a o iface_b
+                is_from_a = (iface is self.iface_a)
+                is_from_b = (iface is self.iface_b)
+
+                if is_from_b:
+                    try:
+                        self._last_rx_b_ts = time.time()
+                    except Exception:
+                        pass
+
+                # Si no podemos distinguir, salimos sin tocar nada
+                if not is_from_a and not is_from_b:
+                    return
+
+                # Decodificar payload
+                decoded = packet.get("decoded") or {}
+                portnum = decoded.get("portnum")
+                payload = decoded.get("payload")
+                ch = int(packet.get("channel") or packet.get("channelIndex") or 0)
+
+                # --- TEXT ---
+                if portnum == "TEXT_MESSAGE_APP" and self.forward_text:
+                    text = ""
+                    try:
+                        if isinstance(payload, (bytes, bytearray)):
+                            text = payload.decode("utf-8", "ignore")
+                        elif isinstance(payload, str):
+                            text = payload
+                        else:
+                            text = str(payload or "")
+                    except Exception:
+                        text = str(payload or "")
+
+                    text = _norm_text(text)
+                    if not text:
+                        return
+
+                    # anti-bucle por tag
+                    if self.tag_bridge and self.tag_bridge in text:
+                        return
+
+                    direction = "A2B" if is_from_a else "B2A"
+                    out_map = self.a2b_map if direction == "A2B" else self.b2a_map
+                    out_ch = out_map.get(ch, ch)
+
+                    # dedup global
+                    key = _hash_key(text)
+                    if self._dedup.seen(key):
+                        return
+
+                    # tag opcional por dirección
+                    tag = None
+                    if direction == "A2B":
+                        tag = self.tag_bridge_a2b
+                    else:
+                        tag = self.tag_bridge_b2a
+
+                    if tag:
+                        text = f"{text} {tag}"
+                    elif self.tag_bridge:
+                        # si no hay tag específico, añade genérico
+                        text = f"{text} {self.tag_bridge}"
+
+                    # A->B: si está offline, lo diferimos hasta peer_offline_until (no se pierde)
+                    due = None
+                    if direction == "A2B" and self._is_peer_suppressed():
+                        remaining = max(0, int(self.peer_offline_until - time.time()))
+                        print(f"[bridge] A2B ch {ch}->{out_ch} DEFER (B offline, {remaining}s restantes)", flush=True)
+                        due = float(self.peer_offline_until)
+
+                    #target = self.iface_b if direction == "A2B" else self.iface_a
+                    self._enqueue(direction=direction, ch=out_ch, msg=text, want_ack=self.require_ack, due=due)
+
+                    return
+
+                # --- POSITION (opcional) ---
+                if portnum == "POSITION_APP" and self.forward_position:
+                    # reenviamos como texto corto (para no lidiar con protobuf aquí)
+                    try:
+                        pos = decoded.get("position") or {}
+                        lat = pos.get("latitudeI")
+                        lon = pos.get("longitudeI")
+                        if lat is None or lon is None:
+                            return
+                        # lat/lon en 1e-7 (habitual)
+                        lat_f = float(lat) / 1e7
+                        lon_f = float(lon) / 1e7
+                        msg = f"POS {lat_f:.6f},{lon_f:.6f} {self.tag_bridge}"
+                    except Exception:
+                        return
+
+                    direction = "A2B" if is_from_a else "B2A"
+                    out_map = self.a2b_map if direction == "A2B" else self.b2a_map
+                    out_ch = out_map.get(ch, ch)
+
+                    key = _hash_key(msg)
+                    if self._dedup.seen(key):
+                        return
+
+                    due = None
+                    if direction == "A2B" and self._is_peer_suppressed():
+                        due = float(self.peer_offline_until)
+
+                    #target = self.iface_b if direction == "A2B" else self.iface_a
+                    self._enqueue(direction=direction, ch=out_ch, msg=msg, want_ack=self.require_ack, due=due)
+
+                    return
+
+        except Exception:
+            # no romper el broker por un bug de bridge
+            return
+
+        # ----------------------------------------------------------------------------------
+        # API usada por el broker para espejar envíos locales (A -> B)
+        # ----------------------------------------------------------------------------------
+
+    def mirror_from_a(self, ch: int, text: str) -> bool:
+        """Encola un envío A->B originado por el broker/bot."""
+        try:
+                if not self._running:
+                    return False
+                if not self.forward_text:
+                    return False
+
+                text = _norm_text(text or "")
+                if not text:
+                    return False
+                if self.tag_bridge and self.tag_bridge in text:
+                    return False
+
+                out_ch = self.a2b_map.get(int(ch), int(ch))
+
+                key = _hash_key(text)
+                if self._dedup.seen(key):
+                    return False
+
+                tag = self.tag_bridge_a2b or self.tag_bridge
+                msg = f"{text} {tag}".strip()
+
+                due = None
+                if self._is_peer_suppressed():
+                    remaining = max(0, int(self.peer_offline_until - time.time()))
+                    print(f"[bridge] A2B ch {ch}->{out_ch} DEFER (B offline, {remaining}s restantes)", flush=True)
+                    due = float(self.peer_offline_until)
+
+                self._enqueue(direction="A2B", ch=out_ch, msg=msg, want_ack=self.require_ack, due=due)
+
+                
+                return True
+        except Exception:
+            return False
 
 
 # API mínima para el broker
 _BRIDGE: Optional[BrokerEmbeddedBridge] = None
 
 
-def bridge_start_in_broker(iface_a) -> dict:
+def bridge_start_in_broker(iface_a, on_force_reconnect_a: Optional[Callable[[str], None]] = None) -> dict:
     """
     Arranca la pasarela tomando la iface A del broker ya conectada.
     Lee configuración desde .env. Devuelve status dict.
@@ -745,11 +758,11 @@ def bridge_start_in_broker(iface_a) -> dict:
     a2b = _parse_ch_map(os.getenv("BRIDGE_A2B_CH_MAP", os.getenv("A2B_CH_MAP", "0:0")))
     b2a = _parse_ch_map(os.getenv("BRIDGE_B2A_CH_MAP", os.getenv("B2A_CH_MAP", "0:0")))
 
-    forward_text = _truthy(os.getenv("BRIDGE_FORWARD_TEXT", os.getenv("FORWARD_TEXT","1")), True)
-    forward_position = _truthy(os.getenv("BRIDGE_FORWARD_POSITION", os.getenv("FORWARD_POSITION","0")), False)
-    require_ack = _truthy(os.getenv("BRIDGE_REQUIRE_ACK", os.getenv("REQUIRE_ACK","0")), False)
-    rate = int(os.getenv("BRIDGE_RATE_LIMIT_PER_SIDE", os.getenv("RATE_LIMIT_PER_SIDE","8")) or "8")
-    dedup = int(os.getenv("BRIDGE_DEDUP_TTL", os.getenv("DEDUP_TTL","45")) or "45")
+    forward_text = _truthy(os.getenv("BRIDGE_FORWARD_TEXT", os.getenv("FORWARD_TEXT", "1")), True)
+    forward_position = _truthy(os.getenv("BRIDGE_FORWARD_POSITION", os.getenv("FORWARD_POSITION", "0")), False)
+    require_ack = _truthy(os.getenv("BRIDGE_REQUIRE_ACK", os.getenv("REQUIRE_ACK", "0")), False)
+    rate = int(os.getenv("BRIDGE_RATE_LIMIT_PER_SIDE", os.getenv("RATE_LIMIT_PER_SIDE", "8")) or "8")
+    dedup = int(os.getenv("BRIDGE_DEDUP_TTL", os.getenv("DEDUP_TTL", "45")) or "45")
 
     tag_base = os.getenv("TAG_BRIDGE", "[BRIDGE]")
     tag_a2b = os.getenv("TAG_BRIDGE_A2B", "").strip() or None
@@ -767,9 +780,11 @@ def bridge_start_in_broker(iface_a) -> dict:
         tag_bridge=tag_base,
         tag_bridge_a2b=tag_a2b,
         tag_bridge_b2a=tag_b2a,
+        on_force_reconnect_a=on_force_reconnect_a,
     )
     _BRIDGE.start()
     return {"ok": True, "status": _BRIDGE.status()}
+
 
 def bridge_stop_in_broker() -> dict:
     global _BRIDGE
@@ -778,15 +793,15 @@ def bridge_stop_in_broker() -> dict:
         return {"ok": True}
     return {"ok": True, "already_stopped": True}
 
+
 def bridge_status_in_broker() -> dict:
     if _BRIDGE:
         return _BRIDGE.status()
     return {"running": False}
 
+
 def bridge_mirror_outgoing_from_broker(channel: int, text: str) -> bool:
-    """
-    Espeja un envío local del broker (A) hacia B, si el bridge está activo.
-    """
+    """Espeja un envío local del broker (A) hacia B, si el bridge está activo."""
     global _BRIDGE
     if _BRIDGE and _BRIDGE.is_running():
         try:
@@ -794,4 +809,3 @@ def bridge_mirror_outgoing_from_broker(channel: int, text: str) -> bool:
         except Exception as e:
             print(f"[bridge] mirror_from_a ERROR: {type(e).__name__}: {e}", flush=True)
     return False
-
