@@ -39,9 +39,9 @@ services:
       ADMIN_IDS: ${ADMIN_IDS}
       MESHTASTIC_HOST: ${MESHTASTIC_HOST}
        # --- NUEVO/MIN CAMBIO: decir al bot dónde está el broker (service name)
-      BROKER_HOST: broker
+      BROKER_HOST: 127.0.0.1
       BROKER_PORT: 8765
-      BROKER_CTRL_HOST: broker
+      BROKER_CTRL_HOST: 127.0.0.1
       BROKER_CTRL_PORT: 8766
       DISABLE_BOT_TCP: 1
       BOT_START_DELAY: ${BOT_START_DELAY:-45}
@@ -66,68 +66,42 @@ services:
     entrypoint: ["/usr/local/bin/entrypoint_aprs.sh"]
     network_mode: "service:broker"   # ← comparte la red con broker (deshabilitar cuando BROKER en otra IP)
     environment:
-      # BLOQUE REMOTO: apuntar al broker remoto (Raspberry)
-      #- BROKER_HOST=192.168.1.187        # IP de la Raspberry
-      #- BROKER_PORT=8765
-      #- BROKER_CTRL_HOST=192.168.1.187   # si usas control/backlog
-      #- BROKER_CTRL_PORT=8766
-      
-      # IMPORTANTE: escuchar UDP en todas las interfaces del contenedor
       - APRS_CTRL_HOST=0.0.0.0
       - APRS_CTRL_PORT=9464
-
-     # FIN BLOQUE REMOTO CONFIGURACION RASPBERRRY
-     
-      #BLOQUE LOCAL: apuntar al broker local (dockers mismo PC)
-     
       - BROKER_HOST=127.0.0.1
       - BROKER_PORT=8765
       - BROKER_CTRL_HOST=127.0.0.1
       - BROKER_CTRL_PORT=8766
-      - APRS_CTRL_HOST=${APRS_CTRL_HOST}
-      - APRS_CTRL_PORT=${APRS_CTRL_PORT}
-     
-     # FIN BLOQUE BROKER LOCAL
-
-
       - APRS_CALL=${APRS_CALL}
-
-      # KISS local en el PC (soundmodem/direwolf)
       - KISS_HOST=${KISS_HOST:-host.docker.internal}
       - KISS_PORT=${KISS_PORT:-8100}
-
-      - TASK_NOTIFY=0 
+      - TASK_NOTIFY=0
       - APRSIS_USER=${APRSIS_USER:-}
       - APRSIS_PASSCODE=${APRSIS_PASSCODE:-}
       - APRSIS_HOST=${APRSIS_HOST:-rotate.aprs2.net}
       - APRSIS_PORT=${APRSIS_PORT:-14580}
       - APRSIS_FILTER=${APRSIS_FILTER:-}
-    
     volumes:
       - ./bot_data:/app/bot_data:rw
-    # Comentar MODO LOCAL  
-    #ports:
-    #  - "9464:9464/udp"
-
-
-  bridge:
-    build:
-      context: .
-      dockerfile: Dockerfile.bridge
-    container_name: meshtastic-bridge
-    environment:
-      - A_HOST=${A_HOST}
-      - A_PORT=${A_PORT:-4403}
-      - B_HOST=${B_HOST}
-      - B_PORT=${B_PORT:-4403}
-      - A2B_CH_MAP=${A2B_CH_MAP}
-      - B2A_CH_MAP=${B2A_CH_MAP}
-      - FORWARD_TEXT=${FORWARD_TEXT:-1}
-      - FORWARD_POSITION=${FORWARD_POSITION:-0}
-      - REQUIRE_ACK=${REQUIRE_ACK:-0}
-      - RATE_LIMIT_PER_SIDE=${RATE_LIMIT_PER_SIDE:-8}
-      - DEDUP_TTL=${DEDUP_TTL:-45}
-      - TAG_BRIDGE=${TAG_BRIDGE:-[BRIDGE]}
+    
+  bridgehub-bc:
+    # Igual que el resto del stack: usar imagen GHCR (sin build local).
+    image: ghcr.io/jmmpcc/meshnet-bot-bridge-bc:latest
+    container_name: meshnet-bridge-bc
     restart: unless-stopped
+
+    # Este servicio usa SU propio .env (no el global)
+    env_file:
+      - .env-triple-bridge
+
+    # Clave: compartir el namespace de red del broker AUNQUE sea un compose separado.
+    # Así, BROKER_CTRL_HOST=127.0.0.1 funciona (igual que bot/aprs).
+    network_mode: "container:meshnet-broker"
+
+    # Persistencia (si el bridge escribe logs/estado; no rompe nada si no lo usa)
+    volumes:
+      - ./bot_data:/app/bot_data:rw
+
+    stop_grace_period: 10s
 
  

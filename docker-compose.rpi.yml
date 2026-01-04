@@ -3,7 +3,16 @@ services:
     image: ghcr.io/jmmpcc/meshnet-bot-broker:latest
     container_name: meshnet-broker
     restart: unless-stopped
-
+    sysctls:
+      net.ipv4.tcp_keepalive_time: 30
+      net.ipv4.tcp_keepalive_intvl: 10
+      net.ipv4.tcp_keepalive_probes: 3
+    environment:
+      - BROKER_CTRL_BIND=0.0.0.0
+    devices:
+      - "/dev/ttyACM0:/dev/ttyACM0"
+    privileged: true
+ 
     env_file:
       - .env
 
@@ -18,8 +27,7 @@ services:
     # Datos persistentes de bot/broker (backlogs, mapas, auditorías, etc.)
     volumes:
       - ./bot_data:/app/bot_data:rw
-      
-
+     
     stop_grace_period: 15s
 
 
@@ -42,8 +50,7 @@ services:
 
     volumes:
       - ./bot_data:/app/bot_data:rw
-     
-
+      
     stop_grace_period: 10s
 
 

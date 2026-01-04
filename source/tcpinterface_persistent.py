@@ -1,57 +1,74 @@
 # tcpinterface_persistent.py
-# Version v6.1.3
+# Pool persistente para meshtastic.tcp_interface.TCPInterface
+# V6.3
+# Objetivo en este proyecto:
+# - Mantener UNA única conexión TCP por (host,port) dentro del proceso.
+# - Evitar tormentas de reconexión y carreras cuando conviven varios componentes.
+# - Ofrecer reset() y shutdown() seguros (usados por el broker).
+#
+# NOTA:
+# - Este módulo NO debe pausar el broker (eso se gestiona en Meshtastic_Broker.py).
+# - Debe ser 100% importable (sin placeholders) porque el broker lo importa en caliente.
 
-import time
-import threading
+from __future__ import annotations
+
 import logging
-from typing import Dict, Tuple, Optional
-# Guardamos el ctor original para usarlo dentro del pool sin recursión
-_TCP_ORIG_CTOR = None
-
-# === [NUEVO] Señalador de reconexiones pasivas (visible para el adapter) ===
+import socket
+import struct
 import threading
+import time
 from collections import deque
-from time import time as _now
 from contextlib import contextmanager
+from typing import Dict, Tuple, Optional, Any
 
-import time, socket, struct  # <-- asegura estos imports arriba del fichero
+# --------------------------------------------------------------------------------------
+# Eventos "visibles" para otros módulos: marca reconexiones del pool (para el adapter/bot)
+# --------------------------------------------------------------------------------------
 
-# --- [NUEVO] Estado/locks de clase para conexión única por host:port
-import threading
-
-_CONN_POOL = {}           # {(host, port): TCPInterfacePersistent}
-_CONN_LOCKS = {}          # {(host, port): threading.Lock()}
-_CONNECTING = set()       # {(host, port)} para evitar carreras
-
-
-
-@contextmanager
-def with_broker_paused(max_wait_s: float = 4.0):
-    ...
-
-# Cola en memoria para marcar eventos de reconexión del pool (lado reader)
 _POOL_RECONNECT_EVENTS = deque(maxlen=64)
 _POOL_RECONNECT_LOCK = threading.Lock()
 
-def _mark_pool_reconnected():
-    """Registrar un evento de reconexión del pool (reader).
-    El adapter podrá leer y 'vaciar' este flag para informar al usuario."""
+def _mark_pool_reconnected() -> None:
     with _POOL_RECONNECT_LOCK:
-        _POOL_RECONNECT_EVENTS.append(_now())
+        _POOL_RECONNECT_EVENTS.append(time.time())
 
 def pop_pool_reconnect_flag() -> bool:
-    """Devuelve True si hubo una reconexión reciente del pool y limpia la marca."""
+    """True si hubo una reconexión reciente del pool. Limpia la marca."""
     with _POOL_RECONNECT_LOCK:
         return bool(_POOL_RECONNECT_EVENTS and _POOL_RECONNECT_EVENTS.pop())
 
+# --------------------------------------------------------------------------------------
+# Parche defensivo: sendHeartbeat puede disparar 10054/10053 y matar el hilo RX.
+# Lo suprimimos y dejamos que el pool detecte el socket roto.
+# --------------------------------------------------------------------------------------
 
-# --- Parche anti-traza para sendHeartbeat (Windows 10054) ---
 try:
     import meshtastic.mesh_interface as _mesh_mod
     _orig_sendHeartbeat = getattr(_mesh_mod.MeshInterface, "sendHeartbeat", None)
 
     if callable(_orig_sendHeartbeat):
         def _safe_sendHeartbeat(self, *args, **kwargs):
+            # Rate-limit para evitar floods y para mantener viva la sesión sin “silencio total”.
+            try:
+                import os
+                min_interval = float(os.getenv("MESH_HEARTBEAT_MIN_INTERVAL", "30") or "30")
+            except Exception:
+                min_interval = 30.0
+
+            try:
+                last = float(getattr(self, "_hb_guard_ts", 0.0) or 0.0)
+            except Exception:
+                last = 0.0
+
+            now = time.time()
+            if (now - last) < max(1.0, min_interval):
+                return None
+
+            try:
+                setattr(self, "_hb_guard_ts", now)
+            except Exception:
+                pass
+
             try:
                 return _orig_sendHeartbeat(self, *args, **kwargs)
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
@@ -59,181 +76,156 @@ try:
                 try:
                     s = getattr(self, "socket", None)
                     if s:
-                        try: s.close()
-                        except Exception: pass
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
-                # No relanzamos: el pool detectará socket cerrado y se reconectará
                 return None
+
 
         _mesh_mod.MeshInterface.sendHeartbeat = _safe_sendHeartbeat
 except Exception as _e:
     logging.debug("No se pudo parchear sendHeartbeat: %s", _e)
 
+# --------------------------------------------------------------------------------------
+# Import y captura del ctor real de TCPInterface (para poder crear conexiones sin recursión)
+# --------------------------------------------------------------------------------------
+
+_TCP_ORIG_CTOR = None
+TCPInterface = None
 
 try:
-    from meshtastic.tcp_interface import TCPInterface
-    # Shim opcional: mapear host->hostname y retirar port si la firma no lo permite
-    try:
-        import meshtastic.tcp_interface as _tcp_mod
-        _TCP_orig = getattr(_tcp_mod, "TCPInterface", None)
-
-        if _TCP_orig:
-            # Guardamos el ctor original para uso interno del pool
-            globals()["_TCP_ORIG_CTOR"] = _TCP_orig
-
-            def _TCPInterface_Compat(*args, **kwargs):
-                """
-                Wrapper global del ctor que fuerza el uso del pool.
-                Cualquier código externo que haga TCPInterface(...) acabará
-                reutilizando la interfaz única del pool por (host, port).
-                """
-                # Normalizamos parámetros
-                host = kwargs.get("hostname") or kwargs.get("host")
-                port = int(kwargs.get("port", 4403))
-
-                # Si vino por args posicionales (libs antiguas)
-                if not host and args:
-                    host = args[0]
-                if not host:
-                    host = "127.0.0.1"
-
-                # Devolver SIEMPRE la interfaz única del pool
-                return TCPInterfacePool.get(host, port)
-
-            # Inyectamos el wrapper en el módulo y en el alias local
-            _tcp_mod.TCPInterface = _TCPInterface_Compat
-            TCPInterface = _TCPInterface_Compat
-
-
-
-    except Exception as _e:
-     logging.debug("Shim TCPInterface pool no aplicado: %s", _e)
-
+    import meshtastic.tcp_interface as _tcp_mod
+    _TCP_ORIG_CTOR = getattr(_tcp_mod, "TCPInterface", None)
+    if _TCP_ORIG_CTOR is None:
+        raise RuntimeError("meshtastic.tcp_interface.TCPInterface no encontrado")
 except Exception as e:
-    TCPInterface = None
     logging.error("No se pudo importar meshtastic.tcp_interface.TCPInterface: %s", e)
+    _TCP_ORIG_CTOR = None
 
-try:
-    from threading import Event
-except ImportError:
-    Event = None
-
-DISCONNECTED_FLAG = Event() if Event else None
+# --------------------------------------------------------------------------------------
+# Pool
+# --------------------------------------------------------------------------------------
 
 class _SafeCloser:
     """Cierra una interfaz Meshtastic con tolerancia a errores."""
     @staticmethod
-    def close_iface(iface):
+    def close_iface(iface: Any) -> None:
         try:
-            if iface:
-                # Algunos TCPInterface exponen .close(), otros ._socket etc.
-                if hasattr(iface, "close"):
+            if iface is None:
+                return
+            if hasattr(iface, "close"):
+                try:
                     iface.close()
-                if hasattr(iface, "_socket") and getattr(iface, "_socket", None):
+                except Exception:
+                    pass
+            # Algunas versiones guardan socket en 'socket', 'sock', '_sock'
+            for attr in ("socket", "sock", "_sock", "_socket"):
+                s = getattr(iface, attr, None)
+                if s:
                     try:
-                        iface._socket.close()
+                        s.close()
                     except Exception:
                         pass
         except Exception:
             pass
 
+
 class TCPInterfacePool:
     """
     Pool persistente de TCPInterface por (host, port).
-    - Reutiliza la misma conexión.
-    - Reconecta si detecta socket roto.
-    - Incluye warm-up post-conexión (waitForConnected / waitForConfigComplete / heartbeat).
-    - Cierra todo en shutdown().
+
+    API usada por el broker:
+      - get(host, port) -> TCPInterface
+      - reset(host, port) -> fuerza cierre duro y recreación perezosa
+      - shutdown() -> cierra todo
+
+    Interno:
+      - warmup post conexión (waitForConnected/waitForConfigComplete/heartbeat)
+      - keepalive TCP (SO_KEEPALIVE)
     """
+
     _lock = threading.Lock()
-    _pool: Dict[Tuple[str, int], Dict[str, object]] = {}
+    _pool: Dict[Tuple[str, int], Dict[str, Any]] = {}
 
     @classmethod
     def get(cls, host: str, port: int = 4403, **kwargs):
-        if TCPInterface is None:
-            raise RuntimeError("Meshtastic TCPInterface no disponible")
+        if _TCP_ORIG_CTOR is None:
+            raise RuntimeError("Meshtastic TCPInterface no disponible (import falló)")
 
+        host = (host or "127.0.0.1").strip()
+        port = int(port or 4403)
         key = (host, port)
+
         with cls._lock:
             entry = cls._pool.get(key)
             if entry is None:
                 entry = {"if": None, "ts": 0.0, "lock": threading.Lock()}
                 cls._pool[key] = entry
 
-        # lock por conexión
         with entry["lock"]:
             iface = entry["if"]
             if not cls._is_alive(iface):
                 iface = cls._connect_fresh(host, port, **kwargs)
                 entry["if"] = iface
+                _mark_pool_reconnected()
             entry["ts"] = time.time()
             return iface
 
     @staticmethod
-    def _is_alive(iface) -> bool:
-        """
-        Comprueba si la interfaz sigue utilizable:
-        1) Si existe bool iface.isConnected → úsalo.
-        2) Si no, valida socket abierto y (si existe) hilo RX vivo.
-        """
+    def _is_alive(iface: Any) -> bool:
         try:
             if iface is None:
                 return False
 
-            # 0) Algunas versiones exponen isConnected (bool)
+            # 1) Algunas versiones exponen isConnected bool
             is_conn = getattr(iface, "isConnected", None)
             if isinstance(is_conn, bool):
                 return is_conn
 
-            # 1) Socket abierto
-            s = getattr(iface, "socket", None)
-            if not s or getattr(s, "_closed", False):
+            # 2) Socket abierto (si existe)
+            s = getattr(iface, "socket", None) or getattr(iface, "sock", None) or getattr(iface, "_sock", None)
+            if not s:
+                return True  # no hay socket accesible; asumimos vivo
+            if getattr(s, "_closed", False):
                 return False
 
-            # 2) Hilo RX (si existe)
+            # 3) Hilo RX vivo (si existe)
             rx = getattr(iface, "_rxThread", None)
             return (rx is None) or rx.is_alive()
         except Exception:
             return False
 
     @staticmethod
-    def _post_connect_warmup(iface) -> None:
-        """
-        Warm-up compatible tras construir la TCPInterface:
-        - waitForConnected(timeout=10) si existe (no propaga timeouts)
-        - waitForConfigComplete(timeout=15) si existe (no propaga timeouts)
-        - sendHeartbeat() opcional para "despertar"
-        """
-        import time as _t
-        import logging as _lg
-
-        # 1) Conexión de enlace
+    def _post_connect_warmup(iface: Any) -> None:
+        # 1) waitForConnected
         try:
             wfc = getattr(iface, "waitForConnected", None)
             if callable(wfc):
                 try:
                     wfc(timeout=10)
                 except Exception as e:
-                    _lg.debug("waitForConnected timeout/err: %s", e)
-        except Exception as e:
-            _lg.debug("waitForConnected fallo/omitido: %s", e)
+                    logging.debug("waitForConnected timeout/err: %s", e)
+        except Exception:
+            pass
 
-        # 2) Configuración completa
+        # 2) waitForConfigComplete
         try:
             wcc = getattr(iface, "waitForConfigComplete", None)
             if callable(wcc):
                 try:
                     wcc(timeout=15)
                 except Exception as e:
-                    _lg.debug("waitForConfigComplete timeout/err: %s", e)
-                    _t.sleep(1.0)
+                    logging.debug("waitForConfigComplete timeout/err: %s", e)
+                    time.sleep(1.0)
             else:
-                _t.sleep(0.7)
-        except Exception as e:
-            _lg.debug("waitForConfigComplete fallo/omitido: %s", e)
+                time.sleep(0.7)
+        except Exception:
+            pass
 
-        # 3) Heartbeat opcional
+        # 3) heartbeat opcional
         try:
             hb = getattr(iface, "sendHeartbeat", None)
             if callable(hb):
@@ -246,128 +238,114 @@ class TCPInterfacePool:
 
     @staticmethod
     def _connect_fresh(host: str, port: int, **kwargs):
-        """
-        Crea una nueva TCPInterface probando varias firmas según versión de la lib,
-        y realiza warm-up sin propagar timeouts.
-        """
-        import time as _t
-        import logging as _lg
-
-        _t.sleep(0.2)
-
-        # Normaliza si nos pasan "host:port" en host
+        # Normaliza si llega "host:port"
         try:
             if isinstance(host, str) and ":" in host:
                 h, p = host.rsplit(":", 1)
                 if p.isdigit():
-                    if not port or int(port) == 4403:
-                        port = int(p)
                     host = h
+                    port = int(p)
         except Exception:
             pass
 
-
-        # Variantes de firma aceptadas por distintas versiones
         variants = [
-           {"hostname": host},                   # 1) la más compatible
-           {"hostname": host, "port": port},     # 2) con port
-           # ↓ solo si todo lo anterior falla, se probará 'host' (por si hay libs viejas que lo piden)
-           {"host": host},
-           {"host": host, "port": port},
+            {"hostname": host},
+            {"hostname": host, "port": int(port)},
+            {"host": host},
+            {"host": host, "port": int(port)},
         ]
 
-        last_type_err = None       # TypeError por firma (p.ej. 'host' no aceptado)
-        last_conn_err = None       # errores reales de conexión (timeout, refused, etc.)
+        last_type_err = None
+        last_conn_err = None
         iface = None
 
-
-               # Reintentos suaves de conexión (evita estrellarse por timeouts cortos)
-               # Reintentos suaves de conexión (evita estrellarse por timeouts cortos)
+        # Reintentos suaves
         for attempt in range(1, 4):
             for kw in variants:
                 try:
                     iface = _TCP_ORIG_CTOR(**kw)
                     break
                 except TypeError as e:
-                    # firma incompatible (p.ej. 'host' no válido en libs recientes)
                     last_type_err = e
                     continue
                 except Exception as e:
-                    # error real de conexión (timeout, refused, etc.)
                     last_conn_err = e
                     continue
             if iface is not None:
                 break
-            _t.sleep(min(0.5 * attempt, 2.0))
-
-
+            time.sleep(min(0.5 * attempt, 2.0))
 
         if iface is None:
-            # último intento mínimo viable
             try:
                 iface = _TCP_ORIG_CTOR(hostname=host)
             except Exception as e:
-                # Prioriza el último error REAL de conexión si existe
                 if last_conn_err is not None:
                     raise last_conn_err
-                # Si no hubo errores de conexión, pero sí de firma, muestra ese
                 if last_type_err is not None:
                     raise last_type_err
-                # En última instancia, eleva el del último intento
                 raise e
 
-
-        # === [NUEVO] Keepalive TCP en el socket (opcional pero recomendado) ===
+        # Keepalive TCP (afinable por entorno)
         try:
-            s = getattr(iface, "socket", None)
+            s = getattr(iface, "socket", None) or getattr(iface, "sock", None) or getattr(iface, "_sock", None)
             if s:
-                import socket
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                # Nota: en Windows, los intervalos finos de keepalive requieren ioctl/ctypes (opcional).
-                # Esto activa el keepalive con valores por defecto del sistema.
+
+                # Afinado en Linux si está disponible
+                try:
+                    import os
+                    idle = int(os.getenv("TCP_KEEPIDLE", "30") or "30")
+                    intvl = int(os.getenv("TCP_KEEPINTVL", "10") or "10")
+                    cnt = int(os.getenv("TCP_KEEPCNT", "3") or "3")
+                except Exception:
+                    idle, intvl, cnt = 30, 10, 3
+
+                if hasattr(socket, "TCP_KEEPIDLE"):
+                    try:
+                        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, max(1, idle))
+                    except Exception:
+                        pass
+                if hasattr(socket, "TCP_KEEPINTVL"):
+                    try:
+                        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, max(1, intvl))
+                    except Exception:
+                        pass
+                if hasattr(socket, "TCP_KEEPCNT"):
+                    try:
+                        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, max(1, cnt))
+                    except Exception:
+                        pass
         except Exception:
             pass
 
-        # Warm-up post conexión (no rompe si falta algo)
+
+        # Warm-up
         try:
             TCPInterfacePool._post_connect_warmup(iface)
         except Exception as e:
-            _lg.debug("post_connect_warmup: %s", e)
+            logging.debug("post_connect_warmup: %s", e)
 
         return iface
-   
-    # imports arriba del fichero si no están:
-    # import threading, time, socket, struct
 
     @classmethod
-    def reset(cls, host: str, port: int = 4403):
-        """
-        Invalida la conexión (si existe) para forzar reconstrucción limpia
-        en la próxima llamada a get(). Hace cierre 'duro' del socket (RST).
-        """
-        key = (host, int(port))
+    def reset(cls, host: str, port: int = 4403) -> None:
+        """Cierre duro (RST) y deja la entrada a None para recreación perezosa."""
+        host = (host or "127.0.0.1").strip()
+        port = int(port or 4403)
+        key = (host, port)
+
         with cls._lock:
             entry = cls._pool.get(key)
-
-        if not entry:
-            # si no existía, garantiza que la próxima get() cree una entrada limpia
-            with cls._lock:
+            if entry is None:
                 cls._pool[key] = {"if": None, "ts": 0.0, "lock": threading.Lock()}
-            return
+                return
 
         with entry["lock"]:
             iface = entry.get("if")
             try:
-                # intenta llegar al socket crudo dentro de la interfaz
-                s = None
-                try:
-                    s = getattr(iface, "sock", None) or getattr(iface, "_sock", None) or getattr(iface, "socket", None)
-                except Exception:
-                    s = None
-
+                s = getattr(iface, "sock", None) or getattr(iface, "_sock", None) or getattr(iface, "socket", None)
                 if s:
                     try:
-                        # SO_LINGER(1,0) → RST inmediato al cerrar
                         s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
                     except Exception:
                         pass
@@ -379,73 +357,59 @@ class TCPInterfacePool:
                         s.close()
                     except Exception:
                         pass
-
-                if iface and hasattr(iface, "close"):
-                    try:
-                        iface.close()
-                    except Exception:
-                        pass
-                try:
-                    if iface and hasattr(iface, "signal_disconnect"):
-                        iface.signal_disconnect()
-                except Exception:
-                    pass
+                _SafeCloser.close_iface(iface)
             finally:
                 entry["if"] = None
                 entry["ts"] = 0.0
-                with cls._lock:
-                    cls._pool[key] = entry
 
-        # pequeña espera para que el peer libere recursos
         try:
             time.sleep(0.2)
         except Exception:
             pass
 
-   
-# imports necesarios arriba del fichero (si no están ya):
-# import threading, time, socket, struct
-
     @classmethod
-    def shutdown(cls):
-        """
-        Cierra y limpia TODAS las entradas del pool de forma segura.
-        Pensado para llamarse en atexit.
-        """
-        try:
-            # Tomamos snapshot de claves para no mutar el dict mientras iteramos
-            with cls._lock:
-                keys = list(getattr(cls, "_pool", {}).keys())
-        except Exception:
-            keys = []
-
-        for key in keys:
+    def shutdown(cls) -> None:
+        """Cierra y limpia TODAS las entradas del pool."""
+        with cls._lock:
+            keys = list(cls._pool.keys())
+        for host, port in keys:
             try:
-                host, port = key
-            except Exception:
-                continue
-            try:
-                # Reutilizamos el cierre 'duro' de reset por cada entrada
                 cls.reset(host, int(port))
             except Exception:
                 pass
+        with cls._lock:
+            cls._pool.clear()
 
-        # Como extra: vaciar el pool
-        try:
-            with cls._lock:
-                cls._pool.clear()
-        except Exception:
-            pass
+# --------------------------------------------------------------------------------------
+# Inyección: cualquier import de meshtastic.tcp_interface.TCPInterface pasa por el pool.
+# Esto protege a todo el proceso sin tocar el resto del código.
+# --------------------------------------------------------------------------------------
 
+def _TCPInterface_Compat(*args, **kwargs):
+    host = kwargs.get("hostname") or kwargs.get("host")
+    port = int(kwargs.get("port", 4403) or 4403)
 
-# === NUEVO: helper de compatibilidad con el bot ===
+    if not host and args:
+        host = args[0]
+    if not host:
+        host = "127.0.0.1"
+
+    return TCPInterfacePool.get(host, port)
+
+try:
+    if _TCP_ORIG_CTOR is not None:
+        import meshtastic.tcp_interface as _tcp_mod2
+        _tcp_mod2.TCPInterface = _TCPInterface_Compat
+        TCPInterface = _TCPInterface_Compat
+except Exception as _e:
+    logging.debug("Shim TCPInterface pool no aplicado: %s", _e)
+
+# --------------------------------------------------------------------------------------
+# Compat: helper para el bot (si lo usa)
+# --------------------------------------------------------------------------------------
+
 def get_tcp_pool(host: str, port: int = 4403):
-    """
-    Devuelve un objeto ligero con:
-      - iface: la TCPInterface activa (el pool la crea/reusa)
-      - get_adapter(): idem (compatibilidad)
-      - client: alias a iface
-    """
+    """Wrapper ligero compatible con código que espera .client o .get_adapter()."""
     iface = TCPInterfacePool.get(host, port)
 
     class _PoolWrapper:

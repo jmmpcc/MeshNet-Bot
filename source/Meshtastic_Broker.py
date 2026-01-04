@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Version v6.1.3
+# Version v6.1.4.3
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.1.3.py
+Meshtastic_Broker_v6.2.py
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 
@@ -20,7 +20,6 @@ Uso rápido:
   python Meshtastic_Broker_v5.9.py --host 192.168.1.201 --bind 127.0.0.1 --port 8765 --verbose --no-heartbeat
   python Meshtastic_Broker_v5.9.py --host 192.168.1.201 --verbose --debug-packets
 """
-
 import argparse
 import base64
 import binascii
@@ -49,30 +48,37 @@ RUNTIME_MESH_PORT = 4403   # puerto TCP del nodo Meshtastic
 
 # --- Compat shim para Meshtastic TCPInterface (host -> hostname) + pool único ---
 try:
-    from tcpinterface_persistent import TCPInterfacePool  # reutiliza una sola conexión por (host,port)
+    import os
 
-    import meshtastic.tcp_interface as _tcp_mod
-    _TCP_orig = _tcp_mod.TCPInterface
+    _transport = (os.getenv("MESH_TRANSPORT", "tcp") or "tcp").strip().lower()
 
-    def _TCPInterface_Compat(*args, **kwargs):
-        """
-        Wrapper global del ctor que fuerza el uso del pool.
-        Acepta tanto host= como hostname= y normaliza port.
-        """
-        host = kwargs.get("hostname") or kwargs.get("host")
-        port = int(kwargs.get("port", RUNTIME_MESH_PORT))
+    # SOLO tiene sentido en TCP. En bluetooth/usb NO parcheamos TCPInterface.
+    if _transport == "tcp":
+        from tcpinterface_persistent import TCPInterfacePool  # reutiliza una sola conexión por (host,port)
 
-        # args posicionales (libs antiguas)
-        if not host and args:
-            host = args[0]
-        if not host:
-            host = "127.0.0.1"
+        import meshtastic.tcp_interface as _tcp_mod
+        _TCP_orig = _tcp_mod.TCPInterface
 
-        return TCPInterfacePool.get(host, port)
+        def _TCPInterface_Compat(*args, **kwargs):
+            """
+            Wrapper global del ctor que fuerza el uso del pool.
+            Acepta tanto host= como hostname= y normaliza port.
+            """
+            host = kwargs.get("hostname") or kwargs.get("host")
+            port = int(kwargs.get("port", RUNTIME_MESH_PORT))
 
-    # Reemplaza en el módulo y en el símbolo local importado antes
-    _tcp_mod.TCPInterface = _TCPInterface_Compat
-    TCPInterface = _TCPInterface_Compat
+            # args posicionales (libs antiguas)
+            if not host and args:
+                host = args[0]
+            if not host:
+                host = "127.0.0.1"
+
+            return TCPInterfacePool.get(host, port)
+
+        # Reemplaza en el módulo y en el símbolo local importado antes
+        _tcp_mod.TCPInterface = _TCPInterface_Compat
+        TCPInterface = _TCPInterface_Compat
+
 except Exception as _e:
     print(f"[shim TCPInterface@broker] Aviso: {_e}")
 
@@ -711,34 +717,52 @@ def install_heartbeat_log_filter() -> None:
 # === [NUEVO] Modo sin heartbeat: anula el envío del SDK de meshtastic ===
 def install_no_heartbeat_mode(verbose: bool = False) -> bool:
     """
-    Desactiva los envíos de heartbeat del SDK:
-      - Reemplaza MeshInterface.sendHeartbeat() por un NO-OP.
-    No rompe la recepción ni el resto de envíos.
-    Devuelve True si se activó correctamente.
+    Modo sin-heartbeat (seguro):
+
+    Antes: reemplazaba MeshInterface.sendHeartbeat() por NO-OP → TCP queda mudo → el enlace cae.
+    Ahora: NO toca el SDK; solo activa una bandera global para que el guard de sendHeartbeat
+          (install_meshtastic_send_guards) estrangule (rate-limit) el heartbeat, pero NO lo elimina.
+
+    Si alguien quiere el comportamiento antiguo (bloqueo total), puede activar:
+      NO_HEARTBEAT_STRICT=1
+
+    Variables:
+      - MESH_HEARTBEAT_MIN_INTERVAL: segundos mínimos entre heartbeats (default 30)
+      - NO_HEARTBEAT_STRICT: 1 para volver al NO-OP antiguo (no recomendado)
     """
     try:
+        import os
         import logging
         from meshtastic import mesh_interface as _mi
 
-        if not hasattr(_mi, "MeshInterface"):
+        # Configurar intervalo mínimo de heartbeat para el guard (por defecto 30s)
+        try:
+            min_int = float(os.getenv("MESH_HEARTBEAT_MIN_INTERVAL", "30") or "30")
+        except Exception:
+            min_int = 30.0
+
+        # Guard usa estas globals (ya existen en el fichero)
+        globals()["_HEARTBEAT_MIN_SECS"] = max(5.0, min_int)
+
+        strict = (os.getenv("NO_HEARTBEAT_STRICT", "0").strip().lower() in {"1", "true", "on", "si", "sí", "y", "yes"})
+        if strict:
+            # --- MODO ANTIGUO (NO recomendado): NO-OP total ---
+            if not hasattr(_mi, "MeshInterface"):
+                if verbose:
+                    logging.warning("[no-heartbeat] No se encontró MeshInterface en meshtastic.mesh_interface")
+                return False
+
+            def _noop(self, *args, **kwargs):
+                return None
+
+            _mi.MeshInterface.sendHeartbeat = _noop
             if verbose:
-                logging.warning("[no-heartbeat] No se encontró MeshInterface en meshtastic.mesh_interface")
-            return False
+                logging.warning("[no-heartbeat] STRICT activo: sendHeartbeat=NO-OP")
+            return True
 
-        if not hasattr(_mi.MeshInterface, "sendHeartbeat"):
-            if verbose:
-                logging.warning("[no-heartbeat] MeshInterface no tiene sendHeartbeat()")
-            return False
-
-        _orig = _mi.MeshInterface.sendHeartbeat
-
-        def _noop(self, *a, **kw):
-            if verbose:
-                logging.info("[no-heartbeat] sendHeartbeat() suprimido")
-            # No hacemos nada: se pierde este heartbeat y se continúa
-            return None
-
-        _mi.MeshInterface.sendHeartbeat = _noop  # <- parche activado
+        # --- MODO SEGURO: no parcheamos el SDK; lo gestiona el guard ---
+        if verbose:
+            logging.info("[no-heartbeat] Modo seguro activo (rate-limit %.0fs)", max(5.0, min_int))
         return True
 
     except Exception as e:
@@ -2007,13 +2031,17 @@ def _wrap_emitter_for_persistence():
         if callable(fn):
             def _make_wrapper(orig):
                 def _wrapped(packet, *args, **kwargs):
+                    # Persistencia best-effort: nunca debe romper el envío real
                     try:
                         append_offline_log(packet)
-                    finally:
-                        return orig(packet, *args, **kwargs)
+                    except Exception:
+                        pass
+                    return orig(packet, *args, **kwargs)
+
                 _wrapped.__name__ = orig.__name__
                 _wrapped.__doc__  = orig.__doc__
                 return _wrapped
+                  
             globals()[name] = _make_wrapper(fn)
             print(f"ℹ️ Persistencia activada en '{name}'", flush=True)
             wrapped = True
@@ -2374,6 +2402,86 @@ class JsonLineHub:
 
 # ===================== Autoreconexión al nodo =====================
 
+# === [NUEVO] Selector de transporte (tcp/bluetooth/usb) para el nodo del broker ===
+import os
+
+def _mesh_transport() -> str:
+    """
+    Lee el transporte desde .env.
+      - tcp        : WiFi/TCP (modo actual)
+      - bluetooth  : BLE (emergencia local)
+      - usb        : Serial por USB (emergencia más robusta)
+    """
+    return (os.getenv("MESH_TRANSPORT", "tcp") or "tcp").strip().lower()
+
+def _mesh_transport_id(host: str, port: int) -> str:
+    """
+    Identificador estable para el candado de instancia única según transporte.
+    Evita que el lock sea host:port cuando estamos en BLE/USB.
+    """
+    t = _mesh_transport()
+    if t == "bluetooth":
+        return f"ble:{(os.getenv('MESH_BT_ADDR','') or '').strip()}"
+    if t == "usb":
+        return f"usb:{(os.getenv('MESH_USB_PORT','') or '').strip()}"
+    return f"tcp:{host}:{port}"
+
+def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
+    """
+    Fábrica única de interface Meshtastic para el broker.
+    Mantiene TCP como está (pool/shim si aplica) y añade BLE/USB sin romper nada.
+
+    Devuelve:
+      - TCPInterface(...) para tcp
+      - BLEInterface(...) para bluetooth
+      - SerialInterface(...) para usb
+    """
+    t = _mesh_transport()
+
+    if t == "bluetooth":
+        bt = (os.getenv("MESH_BT_ADDR", "") or "").strip()
+        if not bt:
+            raise RuntimeError("MESH_TRANSPORT=bluetooth pero falta MESH_BT_ADDR (MAC BLE).")
+        try:
+            from meshtastic.ble_interface import BLEInterface
+        except Exception as e:
+            raise RuntimeError(f"No se pudo importar BLEInterface: {e}")
+        if verbose:
+            print(f"[receiver] Transporte BLE → {bt}", flush=True)
+        return BLEInterface(bt)
+
+    if t == "usb":
+        dev = (os.getenv("MESH_USB_PORT", "") or "").strip()
+        if not dev:
+            raise RuntimeError("MESH_TRANSPORT=usb pero falta MESH_USB_PORT (ej. /dev/ttyACM0).")
+        try:
+            baud = int((os.getenv("MESH_USB_BAUD", "115200") or "115200").strip())
+        except Exception:
+            baud = 115200
+
+        try:
+            from meshtastic.serial_interface import SerialInterface
+        except Exception as e:
+            raise RuntimeError(f"No se pudo importar SerialInterface: {e}")
+
+        if verbose:
+            print(f"[receiver] Transporte USB/Serial → {dev} @ {baud}", flush=True)
+
+        # SerialInterface acepta device y (según versión) baudrate/timeout.
+        # Se pasa baudrate de forma compatible vía kwargs; si tu versión no lo soporta, ignora.
+        try:
+            return SerialInterface(dev, baudrate=baud)
+        except TypeError:
+            return SerialInterface(dev)
+
+    # Default: tcp (modo actual)
+    host_for_iface = f"{host}:{port}" if port and port != 4403 else host
+    if verbose:
+        print(f"[receiver] Transporte TCP → {host}:{port}", flush=True)
+    return TCPInterface(hostname=host_for_iface)
+
+
+
 class InterfaceManager:
     """
     Mantiene la conexión TCPInterface al nodo con reintentos/backoff.
@@ -2613,7 +2721,8 @@ class InterfaceManager:
             port = 4403
 
         # Lock interproceso por host:port
-        lock_name = f"{host}:{port}"
+        #lock_name = f"{host}:{port}"
+        lock_name = _mesh_transport_id(host, port)
         if not hasattr(self, "_ip_lock"):
             self._ip_lock = SingleInstanceLock(lock_name)
 
@@ -2665,7 +2774,8 @@ class InterfaceManager:
                     if getattr(self, "verbose", False):
                         print(f"[receiver] Conectando a Meshtastic en {host}:{port}…", flush=True)
                         host_for_iface = f"{host}:{port}" if port and port != 4403 else host
-                        new_iface = TCPInterface(hostname=host_for_iface)
+                        #new_iface = TCPInterface(hostname=host_for_iface)
+                        new_iface = _create_meshtastic_interface(host=host, port=port, verbose=getattr(self, "verbose", False))
 
                 except Exception as e:
                     # liberar lock y backoff
@@ -3952,7 +4062,7 @@ def main():
     # === NUEVO: iniciar scheduler de tareas ===
     init_broker_tasks()
 
-    print(f"🟢 Broker v6.1.4.1 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
+    print(f"🟢 Broker v6.2 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
     print("   Clientes pueden conectarse por TCP y leer líneas JSONL (una por evento).", flush=True)
 
     # Gestor de conexión (autoreconexión)

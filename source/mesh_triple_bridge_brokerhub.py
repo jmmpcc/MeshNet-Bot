@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-mesh_triple_bridge.py  — Pasarela externa A↔B y A↔C usando TCP Meshtastic.
+mesh_triple_bridge.py  v6.2— Pasarela externa A↔B y A↔C usando TCP Meshtastic.
 
 Modo tcp:
 - Abre TCP directo a A, B y C.
@@ -185,6 +185,19 @@ class BrokerBacklogClient:
 # ============================================================
 
 class TripleBridge:
+    """
+    Triple bridge "24/7":
+      - HUB_MODE=tcp    : conecta A, B y C por TCP y reenvía A<->B, A<->C.
+      - HUB_MODE=broker : NO conecta A por TCP. Lee eventos desde el backlog del broker y:
+            * A -> (B/C) por TCP (sendText hacia B/C)
+            * (B/C) -> A por broker (SEND_TEXT)
+
+    Resiliencia:
+      - TX spool con reintentos y "DEFER" cuando un peer está offline.
+      - Reconexión automática de B/C cuando cae el TCP.
+      - Watchdog opcional por "stale RX" (TRIPLE_B_STALE_SEC / TRIPLE_C_STALE_SEC).
+    """
+
     def __init__(
         self,
         a_host: str,
@@ -213,13 +226,22 @@ class TripleBridge:
         tag_bridge_b2a: str | None = None,
         tag_bridge_a2c: str | None = None,
         tag_bridge_c2a: str | None = None,
+        enable_b: bool = True,
+        enable_c: bool = True,
     ):
+        # --- Peers habilitados por BRIDGE_PEERS ---
+        self.enable_b = bool(enable_b)
+        self.enable_c = bool(enable_c)
+
+        # --- Hosts ---
         self.a_host, self.a_port = a_host, int(a_port or 4403)
         self.b_host, self.b_port = b_host, int(b_port or 4403)
         self.c_host, self.c_port = c_host, int(c_port or 4403)
 
+        # --- Modo HUB ---
         self.hub_mode = (hub_mode or "tcp").strip().lower()
 
+        # --- Broker backlog (solo en HUB_MODE=broker) ---
         self.broker_ctrl_host = (broker_ctrl_host or os.getenv("BROKER_CTRL_HOST") or "").strip() or None
         try:
             self.broker_ctrl_port = int(broker_ctrl_port or os.getenv("BROKER_CTRL_PORT") or 8766)
@@ -241,110 +263,97 @@ class TripleBridge:
         except Exception:
             self.broker_timeout_s = 8.0
 
+        # --- Mapas de canal ---
         self.a2b_map = dict(a2b_map or {})
         self.b2a_map = dict(b2a_map or {})
         self.a2c_map = dict(a2c_map or {})
         self.c2a_map = dict(c2a_map or {})
 
+        # --- Qué se reenvía ---
         self.forward_text = bool(forward_text)
         self.forward_position = bool(forward_position)
         self.require_ack = bool(require_ack)
 
+        # --- Etiquetas ---
         base = str(tag_bridge or "").strip()
         self.tag_a2b = (tag_bridge_a2b.strip() if tag_bridge_a2b else base)
         self.tag_b2a = (tag_bridge_b2a.strip() if tag_bridge_b2a else base)
         self.tag_a2c = (tag_bridge_a2c.strip() if tag_bridge_a2c else base)
         self.tag_c2a = (tag_bridge_c2a.strip() if tag_bridge_c2a else base)
 
+        # --- Interfaces TCP (cuando aplique) ---
         self.iface_a = None
         self.iface_b = None
         self.iface_c = None
 
+        # --- IDs locales (para evitar eco) ---
         self.local_id_a: Optional[str] = None
         self.local_id_b: Optional[str] = None
         self.local_id_c: Optional[str] = None
 
+        # --- Control ---
         self._lock = threading.RLock()
         self._stop = threading.Event()
 
+        # --- Dedupe y rate-limit ---
         self.dedup = DedupWindow(dedup_ttl)
         self.rl_a2b = RateLimiter(rate_limit_per_side)
         self.rl_b2a = RateLimiter(rate_limit_per_side)
         self.rl_a2c = RateLimiter(rate_limit_per_side)
         self.rl_c2a = RateLimiter(rate_limit_per_side)
 
+        # --- Broker client (solo broker-mode) ---
         self._broker: BrokerBacklogClient | None = None
         self._poll_thread: threading.Thread | None = None
         self._hub_last_ts: int | None = None
 
+        # --- Estados de peers ---
+        self._b_offline_until = 0.0
+        self._c_offline_until = 0.0
+        self._last_rx_b_ts = 0.0
+        self._last_rx_c_ts = 0.0
 
-    def connect(self):
-        """
-        Conecta interfaces:
-        - HUB_MODE=broker: NO abre TCP a A. Usa BacklogServer del broker.
-        - HUB_MODE=tcp: abre TCP a A, B y C.
+        # --- TX spool (cola prioritaria por "due") ---
+        self._pq: list[tuple[float, int, dict]] = []
+        self._pq_seq = 0
+        self._pq_cv = threading.Condition(self._lock)
+        self._tx_thread: threading.Thread | None = None
 
-        Mejora: timeout TCP configurable (TCP_TIMEOUT_S) y modo degradado si C falla.
-        """
-        # Timeout TCP para handshakes lentos (WiFi justo, CPU baja, etc.)
-        try:
-            tcp_timeout_s = float(os.getenv("TCP_TIMEOUT_S") or 25)
-        except Exception:
-            tcp_timeout_s = 25.0
+        # --- Watchdog ---
+        self._wd_stop = threading.Event()
+        self._wd_thread: threading.Thread | None = None
 
-        if self.hub_mode == "broker":
-            print("[triple-bridge] HUB_MODE=broker: NO se abre TCP a A (se usa broker backlog).")
-            if not self.broker_ctrl_host:
-                raise SystemExit("Falta BROKER_CTRL_HOST en HUB_MODE=broker")
-            self._broker = BrokerBacklogClient(
-                host=self.broker_ctrl_host,
-                port=int(self.broker_ctrl_port or 8766),
-                timeout_s=float(self.broker_timeout_s or 8.0),
-            )
-        else:
-            print(f"[triple-bridge] Conectando A: {self.a_host}:{self.a_port}")
-            self.iface_a = _TCPI(hostname=self.a_host, portNumber=self.a_port, timeout=tcp_timeout_s)
-            self.local_id_a = self._discover_local_id(self.iface_a, "A")
+        # --- Backoff reintentos ---
+        self._retry_schedule = [2.0, 5.0, 10.0, 20.0, 40.0, 75.0]
 
-        # B (obligatorio)
-        print(f"[triple-bridge] Conectando B: {self.b_host}:{self.b_port}")
-        try:
-            self.iface_b = _TCPI(hostname=self.b_host, portNumber=self.b_port, timeout=tcp_timeout_s)
-            self.local_id_b = self._discover_local_id(self.iface_b, "B")
-        except Exception as e:
-            self.iface_b = None
-            self.local_id_b = None
-            raise SystemExit(f"No se pudo conectar B ({self.b_host}:{self.b_port}): {type(e).__name__}: {e}")
+    # ---------------------- Helpers (peers online/offline) ----------------------
 
-        # C (degradado si falla)
-        print(f"[triple-bridge] Conectando C: {self.c_host}:{self.c_port}")
-        try:
-            self.iface_c = _TCPI(hostname=self.c_host, portNumber=self.c_port, timeout=tcp_timeout_s)
-            self.local_id_c = self._discover_local_id(self.iface_c, "C")
-        except Exception as e:
-            self.iface_c = None
-            self.local_id_c = None
-            print(f"[triple-bridge] ⚠️ No se pudo conectar C ({self.c_host}:{self.c_port}): {type(e).__name__}: {e}")
+    def _is_b_suppressed(self) -> bool:
+        return time.time() < float(self._b_offline_until or 0.0)
 
-        pub.subscribe(self._on_rx, "meshtastic.receive")
+    def _is_c_suppressed(self) -> bool:
+        return time.time() < float(self._c_offline_until or 0.0)
 
-        if self.hub_mode == "broker":
-            self._poll_thread = threading.Thread(target=self._hub_poll_loop, name="hub-poll", daemon=True)
-            self._poll_thread.start()
+    def _mark_b_down(self, reason: str) -> None:
+        self.iface_b = None
+        self.local_id_b = None
+        self._b_offline_until = max(float(self._b_offline_until), time.time() + 75.0)
+        print(f"[triple-bridge] B OFFLINE → {reason}", flush=True)
 
-        print(
-            f"[triple-bridge] Conectado. hub_mode={self.hub_mode} "
-            f"local_id_a={self.local_id_a} local_id_b={self.local_id_b} local_id_c={self.local_id_c}"
-        )
+    def _mark_c_down(self, reason: str) -> None:
+        self.iface_c = None
+        self.local_id_c = None
+        self._c_offline_until = max(float(self._c_offline_until), time.time() + 75.0)
+        print(f"[triple-bridge] C OFFLINE → {reason}", flush=True)
 
-
+    # ---------------------- Local IDs ----------------------
 
     def _discover_local_id(self, iface, label: str) -> Optional[str]:
         """
-        Intenta obtener el id local de la interfaz.
-        En Meshtastic, myInfo puede tardar en llegar tras abrir TCP, así que reintentamos.
+        Intenta obtener el id local (myInfo). Se usa para evitar eco:
+        si un mensaje llega "desde" el propio destino, no se reinyecta.
         """
-        for _ in range(20):  # ~10s si sleep=0.5
+        for _ in range(20):  # ~10s
             try:
                 info = getattr(iface, "myInfo", None) or {}
                 local_id = (
@@ -356,30 +365,290 @@ class TripleBridge:
                     local_id = f"!{local_id:08x}"
                 if local_id:
                     s = str(local_id)
-                    print(f"[triple-bridge] local_id_{label}={s}")
+                    print(f"[triple-bridge] local_id_{label}={s}", flush=True)
                     return s
             except Exception:
                 pass
             time.sleep(0.5)
-        print(f"[triple-bridge] ⚠️ local_id_{label} no disponible (myInfo no llegó a tiempo)")
+        print(f"[triple-bridge] ⚠️ local_id_{label} no disponible (myInfo no llegó a tiempo)", flush=True)
         return None
 
+    # ---------------------- Peer connect/reconnect ----------------------
 
+    def _connect_b(self, tcp_timeout_s: float) -> None:
+        print(f"[triple-bridge] Conectando B: {self.b_host}:{self.b_port}", flush=True)
+        try:
+            self.iface_b = _TCPI(hostname=self.b_host, portNumber=self.b_port, timeout=tcp_timeout_s)
+            self.local_id_b = self._discover_local_id(self.iface_b, "B")
+            self._b_offline_until = 0.0
+            print("[triple-bridge] reconexión a B OK", flush=True)
+        except Exception as e:
+            self.iface_b = None
+            self.local_id_b = None
+            self._b_offline_until = time.time() + 75.0
+            print(f"[triple-bridge] B OFFLINE: {type(e).__name__}: {e}", flush=True)
+
+    def _connect_c(self, tcp_timeout_s: float) -> None:
+        print(f"[triple-bridge] Conectando C: {self.c_host}:{self.c_port}", flush=True)
+        try:
+            self.iface_c = _TCPI(hostname=self.c_host, portNumber=self.c_port, timeout=tcp_timeout_s)
+            self.local_id_c = self._discover_local_id(self.iface_c, "C")
+            self._c_offline_until = 0.0
+            print("[triple-bridge] reconexión a C OK", flush=True)
+        except Exception as e:
+            self.iface_c = None
+            self.local_id_c = None
+            self._c_offline_until = time.time() + 75.0
+            print(f"[triple-bridge] C OFFLINE: {type(e).__name__}: {e}", flush=True)
+
+    # ---------------------- TX spool ----------------------
+
+    def _enqueue(self, item: dict, due: float | None = None) -> None:
+        """
+        Encola un envío con 'due' (epoch seconds). Si due=None, sale ya.
+        Item debe incluir:
+          - peer: "B" o "C"
+          - ch, msg, want_ack, direction
+          - attempt, max_retries (opcionales)
+        """
+        with self._pq_cv:
+            self._pq_seq += 1
+            t = float(due if due is not None else time.time())
+            heapq.heappush(self._pq, (t, self._pq_seq, item))
+            self._pq_cv.notify()
+
+    def _reschedule(self, item: dict, delay_s: float) -> None:
+        item["attempt"] = int(item.get("attempt", 0)) + 1
+        self._enqueue(item, due=time.time() + max(0.5, float(delay_s or 1.0)))
+
+    def _tx_worker(self) -> None:
+        while not self._stop.is_set():
+            with self._pq_cv:
+                while not self._stop.is_set() and not self._pq:
+                    self._pq_cv.wait(timeout=1.0)
+                if self._stop.is_set():
+                    return
+                due, _, item = heapq.heappop(self._pq)
+                now = time.time()
+                if due > now:
+                    # aún no toca
+                    heapq.heappush(self._pq, (due, self._pq_seq, item))
+                    self._pq_cv.wait(timeout=min(1.0, due - now))
+                    continue
+
+            self._send_item(item)
+
+    def _send_item(self, item: dict) -> None:
+        """
+        Envío real hacia B/C por TCP, con manejo de offline/reintentos.
+        """
+        peer = str(item.get("peer") or "").upper()
+        ch = int(item.get("ch") or 0)
+        msg = str(item.get("msg") or "")
+        want_ack = bool(item.get("want_ack", False))
+        direction = str(item.get("direction") or "?")
+
+        # Rate-limit por dirección
+        if direction == "A2B" and not self.rl_a2b.allow():
+            self._reschedule(item, 2.0); return
+        if direction == "A2C" and not self.rl_a2c.allow():
+            self._reschedule(item, 2.0); return
+
+        # Peer suprimido
+        if peer == "B":
+            if self._is_b_suppressed():
+                remaining = max(0, int(self._b_offline_until - time.time()))
+                print(f"[triple-bridge] {direction} ch {ch} DEFER (B offline, {remaining}s restantes)", flush=True)
+                self._enqueue(item, due=float(self._b_offline_until))
+                return
+            iface = self.iface_b
+        elif peer == "C":
+            if self._is_c_suppressed():
+                remaining = max(0, int(self._c_offline_until - time.time()))
+                print(f"[triple-bridge] {direction} ch {ch} DEFER (C offline, {remaining}s restantes)", flush=True)
+                self._enqueue(item, due=float(self._c_offline_until))
+                return
+            iface = self.iface_c
+        else:
+            return
+
+        attempt = int(item.get("attempt", 0))
+        max_r = int(item.get("max_retries", 8))
+
+        if iface is None:
+            # Aún no reconectó (watchdog lo hará). Reprograma suave.
+            self._reschedule(item, 5.0)
+            return
+
+        try:
+            fn = getattr(iface, "sendText", None)
+            if not callable(fn):
+                raise RuntimeError("iface.sendText no disponible")
+
+            try:
+                fn(msg, destinationId="^all", wantAck=want_ack, wantResponse=False, channelIndex=int(ch))
+            except TypeError:
+                # compatibilidad con SDKs distintos
+                try:
+                    fn(msg, channelIndex=int(ch), wantAck=want_ack)
+                except TypeError:
+                    fn(msg, channelIndex=int(ch))
+
+            print(f"[triple-bridge] {direction} → {peer} ch {ch} txt OK", flush=True)
+            return
+
+        except Exception as e:
+            # Marca peer down y reintenta con backoff
+            if peer == "B":
+                self._mark_b_down(f"{type(e).__name__}: {e}")
+            else:
+                self._mark_c_down(f"{type(e).__name__}: {e}")
+
+            if attempt < max_r:
+                delay = self._retry_schedule[min(attempt, len(self._retry_schedule) - 1)]
+                self._reschedule(item, delay)
+            else:
+                print(f"[triple-bridge] {direction} → {peer} ERROR (agotado): {type(e).__name__}: {e}", flush=True)
+
+    # ---------------------- Watchdog ----------------------
+
+    def _start_watchdog(self) -> None:
+        """
+        Watchdog:
+          - Reintenta reconexión cuando expire offline_until.
+          - Opcional: marca offline si no llega RX en TRIPLE_*_STALE_SEC.
+        """
+        tick = float(os.getenv("TRIPLE_WATCHDOG_TICK", "5") or "5")
+        tcp_timeout_s = float(os.getenv("TCP_TIMEOUT_S", "25") or "25")
+
+        def _run():
+            while not self._stop.is_set() and not self._wd_stop.is_set():
+                now = time.time()
+
+                # Reconexiones por timer
+                if self.enable_b and self.b_host and self.iface_b is None and not self._is_b_suppressed():
+                    self._connect_b(tcp_timeout_s)
+
+                if self.enable_c and self.c_host and self.iface_c is None and not self._is_c_suppressed():
+                    self._connect_c(tcp_timeout_s)
+
+                # Stale RX (si está configurado)
+                if self.enable_b:
+                    try:
+                        stale_b = float(os.getenv("TRIPLE_B_STALE_SEC", "0") or "0")
+                    except Exception:
+                        stale_b = 0.0
+                    if stale_b > 0 and self.iface_b is not None and self._last_rx_b_ts > 0 and (now - self._last_rx_b_ts) > stale_b:
+                        self._mark_b_down(f"stale_rx>{int(stale_b)}s")
+
+                if self.enable_c:
+                    try:
+                        stale_c = float(os.getenv("TRIPLE_C_STALE_SEC", "0") or "0")
+                    except Exception:
+                        stale_c = 0.0
+                    if stale_c > 0 and self.iface_c is not None and self._last_rx_c_ts > 0 and (now - self._last_rx_c_ts) > stale_c:
+                        self._mark_c_down(f"stale_rx>{int(stale_c)}s")
+
+                time.sleep(max(1.0, tick))
+
+        self._wd_thread = threading.Thread(target=_run, name="triple-watchdog", daemon=True)
+        self._wd_thread.start()
+
+    def _stop_watchdog(self) -> None:
+        try:
+            self._wd_stop.set()
+        except Exception:
+            pass
+        try:
+            th = self._wd_thread
+            if th and th.is_alive():
+                th.join(timeout=2.0)
+        except Exception:
+            pass
+
+    # ---------------------- Connect / Close ----------------------
+
+    def connect(self):
+        """
+        Conecta interfaces:
+          - HUB_MODE=broker: NO abre TCP a A. Usa BacklogServer del broker.
+          - HUB_MODE=tcp   : abre TCP a A, y además B/C.
+
+        NOTA: B/C se conectan aunque HUB_MODE=broker, porque son los peers TCP.
+        """
+        # Timeout TCP para handshakes lentos (WiFi justo, CPU baja, etc.)
+        try:
+            tcp_timeout_s = float(os.getenv("TCP_TIMEOUT_S") or 25)
+        except Exception:
+            tcp_timeout_s = 25.0
+
+        if self.hub_mode == "broker":
+            print("[triple-bridge] HUB_MODE=broker: NO se abre TCP a A (se usa broker backlog).", flush=True)
+            if not self.broker_ctrl_host:
+                raise SystemExit("Falta BROKER_CTRL_HOST en HUB_MODE=broker")
+            self._broker = BrokerBacklogClient(
+                host=self.broker_ctrl_host,
+                port=int(self.broker_ctrl_port or 8766),
+                timeout_s=float(self.broker_timeout_s or 8.0),
+            )
+        else:
+            print(f"[triple-bridge] Conectando A: {self.a_host}:{self.a_port}", flush=True)
+            self.iface_a = _TCPI(hostname=self.a_host, portNumber=self.a_port, timeout=tcp_timeout_s)
+            self.local_id_a = self._discover_local_id(self.iface_a, "A")
+
+        # B / C
+        if self.enable_b and self.b_host:
+            self._connect_b(tcp_timeout_s)
+        else:
+            print("[triple-bridge] B deshabilitado por BRIDGE_PEERS", flush=True)
+
+        if self.enable_c and self.c_host:
+            self._connect_c(tcp_timeout_s)
+        else:
+            print("[triple-bridge] C deshabilitado por BRIDGE_PEERS", flush=True)
+
+        if self.iface_b is None and self.iface_c is None:
+            raise SystemExit("No hay peers activos tras connect() (BRIDGE_PEERS)")
+
+        # Subscripción RX (solo B/C y A en tcp-mode)
+        pub.subscribe(self._on_rx, "meshtastic.receive")
+
+        # Poll del backlog (solo broker-mode)
+        if self.hub_mode == "broker":
+            self._poll_thread = threading.Thread(target=self._hub_poll_loop, name="hub-poll", daemon=True)
+            self._poll_thread.start()
+
+        # TX spool
+        self._tx_thread = threading.Thread(target=self._tx_worker, name="tx-spool", daemon=True)
+        self._tx_thread.start()
+
+        # Watchdog de reconexión/stale
+        self._start_watchdog()
+
+        print(
+            f"[triple-bridge] Conectado. hub_mode={self.hub_mode} "
+            f"local_id_a={self.local_id_a} local_id_b={self.local_id_b} local_id_c={self.local_id_c}",
+            flush=True,
+        )
 
     def close(self):
         self._stop.set()
+        self._stop_watchdog()
         try:
             pub.unsubscribe(self._on_rx, "meshtastic.receive")
         except Exception:
             pass
 
+        with self._pq_cv:
+            self._pq_cv.notify_all()
+
         for name, iface in (("A", self.iface_a), ("B", self.iface_b), ("C", self.iface_c)):
             try:
                 if iface and hasattr(iface, "close"):
                     iface.close()
-                    print(f"[triple-bridge] Cerrada interfaz {name}")
+                    print(f"[triple-bridge] Cerrada interfaz {name}", flush=True)
             except Exception as e:
-                print(f"[triple-bridge] Error cerrando interfaz {name}: {type(e).__name__}: {e}")
+                print(f"[triple-bridge] Error cerrando interfaz {name}: {type(e).__name__}: {e}", flush=True)
 
     def run_forever(self):
         try:
@@ -390,7 +659,7 @@ class TripleBridge:
         finally:
             self.close()
 
-    # ---------------------- HUB (broker backlog) ----------------------
+    # ---------------------- HUB poll (A events en broker-mode) ----------------------
 
     def _hub_poll_loop(self) -> None:
         if self._hub_last_ts is None:
@@ -414,11 +683,15 @@ class TripleBridge:
                 for obj in items:
                     self._process_hub_event(obj)
             except Exception as e:
-                print(f"[triple-bridge] HUB poll error: {type(e).__name__}: {e}")
+                print(f"[triple-bridge] HUB poll error: {type(e).__name__}: {e}", flush=True)
 
             time.sleep(float(self.broker_poll_sec or 1.5))
 
     def _process_hub_event(self, obj: dict) -> None:
+        """
+        Evento del backlog del broker (normalmente generado por A).
+        En HUB_MODE=broker, esto es la fuente de mensajes "desde A".
+        """
         try:
             rx_time = int(obj.get("rx_time") or 0)
             if rx_time <= 0:
@@ -447,21 +720,29 @@ class TripleBridge:
                 if "telemetry" in obj:
                     decoded["telemetry"] = obj.get("telemetry") or {}
 
+            # A -> (B/C)
             self._bridge_from_a(ch, frm, text, decoded, want_text, want_pos)
 
         except Exception as e:
-            print(f"[triple-bridge] HUB event error: {type(e).__name__}: {e}")
+            print(f"[triple-bridge] HUB event error: {type(e).__name__}: {e}", flush=True)
+
+    # ---------------------- Envío hacia A (hub) ----------------------
 
     def _send_text_to_hub(self, text: str, ch: int) -> bool:
         msg = _norm_text(text or "")
         if not msg:
             return False
 
+        # broker-mode: siempre por SEND_TEXT al broker (no TCP a A)
         if self.hub_mode == "broker":
             if not self._broker:
                 return False
-            return self._broker.send_text(msg, ch=int(ch or 0), dest=None, ack=False)
+            try:
+                return bool(self._broker.send_text(msg, ch=int(ch or 0), dest=None, ack=False))
+            except Exception:
+                return False
 
+        # tcp-mode: sendText a iface_a
         if not self.iface_a:
             return False
         try:
@@ -476,7 +757,7 @@ class TripleBridge:
         except Exception:
             return False
 
-    # ---------------------- RX handler (B/C y A en modo tcp) ----------------------
+    # ---------------------- RX handler (B/C y A en tcp-mode) ----------------------
 
     def _on_rx(self, interface=None, packet=None, **kwargs):
         try:
@@ -503,8 +784,13 @@ class TripleBridge:
             text = str(decoded.get("text") or decoded.get("payload") or "")
 
             came_from_a = (self.iface_a is not None) and (interface is self.iface_a)
-            came_from_b = (interface is self.iface_b)
-            came_from_c = (interface is self.iface_c)
+            came_from_b = (self.iface_b is not None) and (interface is self.iface_b)
+            came_from_c = (self.iface_c is not None) and (interface is self.iface_c)
+
+            if came_from_b:
+                self._last_rx_b_ts = time.time()
+            if came_from_c:
+                self._last_rx_c_ts = time.time()
 
             if came_from_a:
                 self._bridge_from_a(ch, frm, text, decoded, want_text, want_pos)
@@ -514,55 +800,47 @@ class TripleBridge:
                 self._bridge_from_c(ch, frm, text, decoded, want_text, want_pos)
 
         except Exception as e:
-            print(f"[triple-bridge] on_rx error: {type(e).__name__}: {e}")
+            print(f"[triple-bridge] on_rx error: {type(e).__name__}: {e}", flush=True)
 
     # ---------------------- Bridging por origen ----------------------
 
     def _bridge_from_a(self, ch: int, frm: str, text: str, decoded: dict, want_text: bool, want_pos: bool):
-        if ch in self.a2b_map and self.iface_b is not None:
-            self._bridge_one(
-                direction="A2B",
-                src_label="A",
-                dst_label="B",
-                dst_iface=self.iface_b,
-                ch=ch,
-                out_ch=self.a2b_map[ch],
-                frm=frm,
-                text=text,
-                decoded=decoded,
-                want_text=want_text,
-                want_pos=want_pos,
-                rl=self.rl_a2b,
-                tag=self.tag_a2b,
-                dst_local_id=self.local_id_b,
-            )
+        # A -> B
+        if self.enable_b and ch in self.a2b_map:
+            out_ch = self.a2b_map[ch]
+            if self.local_id_b and frm == self.local_id_b:
+                return
+            if want_text:
+                msg = _norm_text(text)
+                if self.tag_a2b and self.tag_a2b not in msg:
+                    msg = f"{self.tag_a2b} {msg}"
+                self._enqueue(
+                    {"peer": "B", "direction": "A2B", "ch": int(out_ch), "msg": msg, "want_ack": bool(self.require_ack), "attempt": 0, "max_retries": 8},
+                    due=float(self._b_offline_until) if self._is_b_suppressed() else None,
+                )
 
-        if ch in self.a2c_map and self.iface_c is not None:
-            self._bridge_one(
-                direction="A2C",
-                src_label="A",
-                dst_label="C",
-                dst_iface=self.iface_c,
-                ch=ch,
-                out_ch=self.a2c_map[ch],
-                frm=frm,
-                text=text,
-                decoded=decoded,
-                want_text=want_text,
-                want_pos=want_pos,
-                rl=self.rl_a2c,
-                tag=self.tag_a2c,
-                dst_local_id=self.local_id_c,
-            )
+        # A -> C
+        if self.enable_c and ch in self.a2c_map:
+            out_ch = self.a2c_map[ch]
+            if self.local_id_c and frm == self.local_id_c:
+                return
+            if want_text:
+                msg = _norm_text(text)
+                if self.tag_a2c and self.tag_a2c not in msg:
+                    msg = f"{self.tag_a2c} {msg}"
+                self._enqueue(
+                    {"peer": "C", "direction": "A2C", "ch": int(out_ch), "msg": msg, "want_ack": bool(self.require_ack), "attempt": 0, "max_retries": 8},
+                    due=float(self._c_offline_until) if self._is_c_suppressed() else None,
+                )
 
     def _bridge_from_b(self, ch: int, frm: str, text: str, decoded: dict, want_text: bool, want_pos: bool):
+        # B -> A
         if ch not in self.b2a_map:
             return
         out_ch = self.b2a_map[ch]
 
         if self.local_id_a and frm == self.local_id_a:
             return
-
         if not self.rl_b2a.allow():
             return
 
@@ -574,27 +852,17 @@ class TripleBridge:
             msg = _norm_text(text)
             if self.tag_b2a and self.tag_b2a not in msg:
                 msg = f"{self.tag_b2a} {msg}"
-            ok = self._send_text_to_hub(msg, out_ch)
-            print(f"[triple-bridge] B2A B->A ch {ch}->{out_ch} txt OK" if ok else "[triple-bridge] B2A B->A sendText ERROR")
-
-        elif want_pos:
-            # resumen opcional
-            summary = {"via": "triple-bridge", "from": frm[-8:] if frm else "?"}
-            msg = f"POS {summary}"
-            if self.tag_b2a:
-                msg = f"{self.tag_b2a} {msg}"
-            ok = self._send_text_to_hub(msg, out_ch)
-            if ok:
-                print(f"[triple-bridge] B2A B->A POS OK")
+            ok = self._send_text_to_hub(msg, int(out_ch))
+            print(f"[triple-bridge] B2A B->A ch {ch}->{out_ch} txt OK" if ok else "[triple-bridge] B2A B->A sendText ERROR", flush=True)
 
     def _bridge_from_c(self, ch: int, frm: str, text: str, decoded: dict, want_text: bool, want_pos: bool):
+        # C -> A
         if ch not in self.c2a_map:
             return
         out_ch = self.c2a_map[ch]
 
         if self.local_id_a and frm == self.local_id_a:
             return
-
         if not self.rl_c2a.allow():
             return
 
@@ -606,73 +874,8 @@ class TripleBridge:
             msg = _norm_text(text)
             if self.tag_c2a and self.tag_c2a not in msg:
                 msg = f"{self.tag_c2a} {msg}"
-            ok = self._send_text_to_hub(msg, out_ch)
-            print(f"[triple-bridge] C2A C->A ch {ch}->{out_ch} txt OK" if ok else "[triple-bridge] C2A C->A sendText ERROR")
-
-        elif want_pos:
-            summary = {"via": "triple-bridge", "from": frm[-8:] if frm else "?"}
-            msg = f"POS {summary}"
-            if self.tag_c2a:
-                msg = f"{self.tag_c2a} {msg}"
-            ok = self._send_text_to_hub(msg, out_ch)
-            if ok:
-                print(f"[triple-bridge] C2A C->A POS OK")
-
-    def _bridge_one(
-        self,
-        direction: str,
-        src_label: str,
-        dst_label: str,
-        dst_iface,
-        ch: int,
-        out_ch: int,
-        frm: str,
-        text: str,
-        decoded: dict,
-        want_text: bool,
-        want_pos: bool,
-        rl: RateLimiter,
-        tag: Optional[str],
-        dst_local_id: Optional[str],
-    ):
-        try:
-            if dst_local_id and frm == dst_local_id:
-                return
-            if not rl.allow():
-                return
-
-            payload_for_hash = _norm_text(text) if want_text else json.dumps(decoded, sort_keys=True, ensure_ascii=False)
-            if self.dedup.seen(_hash_key(direction, frm, ch, payload_for_hash)):
-                return
-
-            if want_text:
-                msg = _norm_text(text)
-                if tag and tag not in msg:
-                    msg = f"{tag} {msg}"
-                dst_iface.sendText(
-                    msg,
-                    destinationId="^all",
-                    wantAck=bool(self.require_ack),
-                    wantResponse=False,
-                    channelIndex=int(out_ch),
-                )
-                print(f"[triple-bridge] {direction} {src_label}->{dst_label} ch {ch}->{out_ch} txt OK")
-
-            elif want_pos:
-                msg = f"POS via {src_label}"
-                if tag:
-                    msg = f"{tag} {msg}"
-                dst_iface.sendText(
-                    msg,
-                    destinationId="^all",
-                    wantAck=False,
-                    wantResponse=False,
-                    channelIndex=int(out_ch),
-                )
-                print(f"[triple-bridge] {direction} {src_label}->{dst_label} POS OK")
-
-        except Exception as e:
-            print(f"[triple-bridge] {direction} {src_label}->{dst_label} ERROR: {type(e).__name__}: {e}")
+            ok = self._send_text_to_hub(msg, int(out_ch))
+            print(f"[triple-bridge] C2A C->A ch {ch}->{out_ch} txt OK" if ok else "[triple-bridge] C2A C->A sendText ERROR", flush=True)
 
 
 # ============================================================
@@ -714,44 +917,67 @@ def main():
     tag_a2c = (os.getenv("TAG_BRIDGE_A2C", "") or "").strip() or None
     tag_c2a = (os.getenv("TAG_BRIDGE_C2A", "") or "").strip() or None
 
+    # ------------------------------------------------------------
+    # NUEVO: selección de peers (B/C) con BRIDGE_PEERS
+    #   BRIDGE_PEERS=B,C (default)
+    #   BRIDGE_PEERS=C   (solo C)
+    #   BRIDGE_PEERS=B   (solo B)
+    # ------------------------------------------------------------
+    peers_spec = (os.getenv("BRIDGE_PEERS", "B,C") or "B,C").strip().upper()
+    peers = {p.strip() for p in peers_spec.split(",") if p.strip()}
+
+    enable_b = ("B" in peers) and bool(b_host)
+    enable_c = ("C" in peers) and bool(c_host)
+
     # Validaciones mínimas
-    if not b_host or not c_host:
-        raise SystemExit("Faltan B_HOST y/o C_HOST")
+    if not (enable_b or enable_c):
+        raise SystemExit("BRIDGE_PEERS no habilita ningún peer válido (revisa BRIDGE_PEERS y B_HOST/C_HOST).")
 
     if hub_mode != "broker":
         if not a_host:
             raise SystemExit("Falta A_HOST en HUB_MODE=tcp")
     else:
         # En broker, A_HOST puede estar vacío (no abrimos TCP a A).
-        # Se recomienda dejarlo por claridad en logs, pero no es obligatorio.
         pass
 
     print(f"[triple-bridge] hub_mode={hub_mode}")
     if hub_mode == "broker":
         print("[triple-bridge] HUB_MODE=broker: NO se abre TCP a A (se usa broker backlog).")
 
+    # Logs de estado peers
+    print(f"[triple-bridge] BRIDGE_PEERS={peers_spec}  B={'ON' if enable_b else 'OFF'}  C={'ON' if enable_c else 'OFF'}")
+
     bridge = TripleBridge(
         a_host=a_host,
         a_port=a_port,
+
         b_host=b_host,
         b_port=b_port,
         c_host=c_host,
         c_port=c_port,
+
+        # NUEVO: pásalo al constructor (tienes que añadirlo a __init__)
+        enable_b=enable_b,
+        enable_c=enable_c,
+
         a2b_map=a2b,
         b2a_map=b2a,
         a2c_map=a2c,
         c2a_map=c2a,
+
         hub_mode=hub_mode,
         broker_ctrl_host=(os.getenv("BROKER_CTRL_HOST") or "").strip() or None,
         broker_ctrl_port=_get_int("BROKER_CTRL_PORT", 8766),
         broker_poll_sec=float(os.getenv("BROKER_POLL_SEC") or 1.5),
         broker_fetch_limit=_get_int("BROKER_FETCH_LIMIT", 2000),
         broker_timeout_s=float(os.getenv("BROKER_TIMEOUT_S") or 8.0),
+
         forward_text=forward_text,
         forward_position=forward_position,
         require_ack=require_ack,
         rate_limit_per_side=rate,
         dedup_ttl=dedup,
+
         tag_bridge=tag_base,
         tag_bridge_a2b=tag_a2b,
         tag_bridge_b2a=tag_b2a,
@@ -761,7 +987,6 @@ def main():
 
     bridge.connect()
     bridge.run_forever()
-
 
 if __name__ == "__main__":
     main()
