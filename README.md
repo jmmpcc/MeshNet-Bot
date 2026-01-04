@@ -77,17 +77,49 @@ Ambas funciones analizan la información del backlog, nodos escuchados, métrica
 
 ---
 
-👉 No se expone el código fuente. Todo se distribuye mediante **imágenes Docker** publicadas en **GitHub Container Registry (GHCR)**.
-
 ## 🧾 Historial de versiones
+## [6.2.0] - 2026-01-04 Enero 
 
-### v6.1.4 — Estable (Diciembre 2025)
+### Añadido
+- **Pasarela externa “Triple Bridge” reforzada para operación 24/7**:
+  - Cola de transmisión (TX spool) con reintentos y planificación por “due time” (evita pérdida de mensajes cuando un peer cae y vuelve).
+  - Reconexión automática de peers TCP (B/C) con ventana de supresión/offline y reintentos progresivos.
+  - Watchdog opcional por *stale RX* (`TRIPLE_B_STALE_SEC`, `TRIPLE_C_STALE_SEC`) para detectar conexiones “zombis” y forzar reconexión.
+  - Soporte de selección de peers mediante `BRIDGE_PEERS` (`B`, `C` o `B,C`) para operar con 1 o 2 nodos sin duplicar despliegues.
+  - Modo `HUB_MODE=broker` consolidado: A se alimenta por backlog del broker (sin TCP a A) y se inyecta hacia A vía `SEND_TEXT`. fileciteturn32file0
 
-Consolidación de anti-eco y deduplicación en bridges.
-Respeto estricto de cooldown en bot y envíos.
-Unificación del control del broker por TCP (BacklogServer).
-Mejora de saneo ASCII/APRS y control por canal KISS.
-Robustez en reconexión y manejo de errores de red.
+- **Parámetros de resiliencia configurables por entorno** (sin tocar lógica base):
+  - `TCP_TIMEOUT_S`, `TRIPLE_WATCHDOG_TICK`, `BROKER_POLL_SEC`, `BROKER_FETCH_LIMIT`, `BROKER_TIMEOUT_S`.
+  - Etiquetas de origen por dirección (`TAG_BRIDGE_A2B`, `TAG_BRIDGE_B2A`, `TAG_BRIDGE_A2C`, `TAG_BRIDGE_C2A`) y tag base (`TAG_BRIDGE`).
+
+- **Mejora de observabilidad**:
+  - Logs explícitos de estado de peers (ONLINE/OFFLINE/DEFER/OK) para diagnosticar caídas intermitentes de WiFi/CPU sin “silencios” en consola.
+
+### Cambiado
+- **Estrategia de entrega en presencia de caída de peer**:
+  - A→(B/C): en lugar de fallar y perder el envío si el peer está `None`/offline, se difiere y reintenta automáticamente hasta reconectar, manteniendo el rate-limit por lado.
+- **Control de eco**:
+  - Detección y uso de `local_id_*` (myInfo) para evitar reinyectar mensajes que provienen del propio nodo destino cuando hay caminos de retorno.
+
+### Corregido
+- **Cortes de conexión persistente a nodos TCP**:
+  - Mitigación del patrón `NoneType has no attribute sendText` en reenvíos, al garantizar que nunca se intente enviar cuando la interfaz no está lista: se reprograma en cola.
+- **Convivencia broker ↔ pasarela**:
+  - En `HUB_MODE=broker`, la pasarela ya no necesita ni intenta abrir TCP a A (evita colisiones/competiciones por el mismo interfaz).
+- **Estabilidad en entornos 24/7**:
+  - Reconexión “suave” y reintentos escalonados, reduciendo bloqueos por timeouts prolongados.
+
+### Operación / Despliegue
+- **Keepalive TCP por contenedor (recomendado)**:
+  - Para minimizar sesiones TCP colgadas en redes WiFi, aplicar `sysctls` en `docker-compose.yml` del servicio que mantiene conexiones a nodos:
+    - `net.ipv4.tcp_keepalive_time`
+    - `net.ipv4.tcp_keepalive_intvl`
+    - `net.ipv4.tcp_keepalive_probes`
+  - Verificación: `docker inspect <container> --format '{{json .HostConfig.Sysctls}}'`.
+
+### Notas de compatibilidad
+- No se rompen comandos existentes: se mantiene el comportamiento por defecto (`BRIDGE_PEERS=B,C`, `HUB_MODE=tcp`).
+- En `BRIDGE_PEERS=C` o `BRIDGE_PEERS=B`, evitar dejar el host del peer no usado como cadena vacía; el script valida peers activos y aborta si no hay ninguno.
 
 ### v6.1.3 — Estable (Diciembre 2025)
 
@@ -1344,5 +1376,4 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
 
 ---
-
 
