@@ -12,7 +12,6 @@ Sin verificacion APRS-IS
     python meshtastic_to_aprs_v5.4.py
 
 """
-
 from __future__ import annotations
 import asyncio, json, os, re, socket
 from typing import Optional, List, Tuple

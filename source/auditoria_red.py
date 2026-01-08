@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional, Set
 from telegram import Update, InputFile
 from telegram.ext import ContextTypes
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Reutilización opcional de utilidades del proyecto; si no existen, fallback.
 # ──────────────────────────────────────────────────────────────────────────────

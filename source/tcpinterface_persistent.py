@@ -25,6 +25,7 @@ from typing import Dict, Tuple, Optional, Any
 # Eventos "visibles" para otros módulos: marca reconexiones del pool (para el adapter/bot)
 # --------------------------------------------------------------------------------------
 
+
 _POOL_RECONNECT_EVENTS = deque(maxlen=64)
 _POOL_RECONNECT_LOCK = threading.Lock()
 

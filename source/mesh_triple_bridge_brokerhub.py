@@ -13,6 +13,7 @@ Modo broker (HUB_MODE=broker):
 - Envía hacia A vía BacklogServer (SEND_TEXT).
 - Abre TCP solo a B y C.
 """
+
 from __future__ import annotations
 
 import os

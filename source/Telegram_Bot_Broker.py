@@ -4812,7 +4812,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("canales", "Ver canales configurados en el nodo"),
         BotCommand("aprs", "/aprs [en] [min1,min2,..] | [canal N] texto | /aprs N texto | /aprs CALL: texto"),
         BotCommand("aprs_on", "Activa el gate APRS→Mesh (tráfico recibido en APRS SE reenviará a la malla)"),
-        BotCommand("aprsis_push on [Ch/all] ó aprsis_push off ]", "Activa/Descativa tráfico Mesh->APRS-IS)"),
+        BotCommand("aprsis_push","Activar/Desactivar Mesh→APRS-IS: /aprsis_push on|off [ch|all]"),
         BotCommand("aprs_off", "Desactiva el gate APRS→Mesh (tráfico recibido en APRS No se reenviará a la malla)"),
         BotCommand("reconectar", "Forzar reconexión del broker [/reconectar [seg]]"),
         BotCommand("notificaciones", "Activar/Desactivar avisos de tareas"),
