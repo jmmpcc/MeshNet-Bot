@@ -102,6 +102,81 @@ APRSIS_PORT     = int(os.getenv("APRSIS_PORT", "14580"))
 APRSIS_FILTER   = os.getenv("APRSIS_FILTER", "").strip()   # opcional, p.ej. "m/50"
 HOME_NODE_ID = os.getenv("HOME_NODE_ID", "").strip()
 
+# --- NUEVO: Mirror Mesh -> APRS-IS (para ver canales en APRSDroid) ---
+APRSIS_PUSH_ENABLED = int(os.getenv("APRSIS_PUSH_ENABLED", "0") or "0")
+APRSIS_PUSH_TO = (os.getenv("APRSIS_PUSH_TO", "") or "").strip().upper()
+APRSIS_PUSH_CHANNELS_RAW = (os.getenv("APRSIS_PUSH_CHANNELS", "all") or "all").strip().lower()
+APRSIS_PUSH_PREFIX = int(os.getenv("APRSIS_PUSH_PREFIX", "1") or "1")
+APRSIS_PUSH_MIN_GAP_S = float(os.getenv("APRSIS_PUSH_MIN_GAP_S", "1.0") or "1.0")
+
+_APRSIS_PUSH_LAST_TS = 0.0
+
+def _parse_push_channels(raw: str) -> Optional[set[int]]:
+    """
+    raw:
+      - "all" => None (significa todos)
+      - "0,1,2" => {0,1,2}
+    """
+    r = (raw or "").strip().lower()
+    if not r or r == "all":
+        return None
+    out = set()
+    for part in r.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.isdigit():
+            ch = max(0, min(15, int(part)))
+            out.add(ch)
+    return out if out else None
+
+def _aprsis_push_is_enabled() -> bool:
+    return bool(APRSIS_PUSH_ENABLED) and bool(APRSIS_PUSH_TO) and _aprsis_ready()
+
+def _aprsis_tnc2_message_line(dst_call: str, text: str) -> str:
+    """
+    Construye una línea APRS-IS tipo mensaje:
+      SRC>APRS,TCPIP*: :DEST     :texto
+    DEST debe ir a 9 chars (APRS spec). Se rellena con espacios.
+    """
+    src = (APRSIS_USER or MY_CALL or "").strip().upper()
+    dst = (dst_call or "").strip().upper()
+    if not src or not dst:
+        return ""
+    # saneo ASCII como ya haces para APRS :contentReference[oaicite:5]{index=5}
+    msg = _aprs_ascii(text)
+    if not msg:
+        return ""
+    dst9 = (dst[:9]).ljust(9, " ")
+    return f"{src}>APRS,TCPIP*: :{dst9}:{msg}"
+
+async def _aprsis_send_line_safe(line: str) -> bool:
+    """
+    Envía una línea a APRS-IS si hay cliente conectado.
+    Reutiliza el cliente que ya tienes en este script.
+    """
+    try:
+        if not line:
+            return False
+        # En tu script ya existe un cliente APRS-IS (aprslib) para uplink/downlink.
+        # Normalmente se usa .sendall() o .send() según cómo lo implementaste.
+        # Aquí asumimos que guardas el cliente en una global tipo APRSIS_CLIENT.
+        global APRSIS_CLIENT
+        c = globals().get("APRSIS_CLIENT", None)
+        if c is None:
+            return False
+        # aprslib.IS tiene sendall(str) en muchas implementaciones
+        if hasattr(c, "sendall"):
+            c.sendall(line)
+        elif hasattr(c, "send"):
+            c.send(line)
+        else:
+            return False
+        return True
+    except Exception as e:
+        print(f"[aprs→IS push] ❌ {type(e).__name__}: {e}")
+        return False
+
 
 def _aprsis_ready() -> bool:
     return bool(APRSIS_USER and APRSIS_PASSCODE)
@@ -502,6 +577,47 @@ class _AprsISClient:
                 raise
 
 _aprsis_client: _AprsISClient | None = None
+
+def _mesh_add_src_prefix(src: str, msg: str) -> str:
+    """
+    Asegura que en Mesh se vea el indicativo de origen APRS.
+
+    Caso clave:
+      - Si el mensaje APRS es de tipo "message" (formato ':DEST: texto{nn}'),
+        lo prefija como: 'SRC: :DEST: ...'
+
+    Robustez:
+      - Tolera espacios iniciales antes de ':' (caso real observado en logs).
+      - Evita doble prefijo si ya empieza por 'SRC:'.
+      - No toca emergencias ya formateadas (llevan 'src=...').
+    """
+    s = (src or "").strip().upper()
+    m = (msg or "")
+    if not s or not m:
+        return (msg or "").strip()
+
+    # Conserva el texto "limpio" para decisiones
+    m_strip = m.strip()
+    m_upper = m_strip.upper()
+
+    # No tocar emergencias ya formateadas (llevan src=...)
+    if "SRC=" in m_upper:
+        return m_strip
+
+    # Evita doble prefijo tipo "EB2EAS-7: ..."
+    if m_upper.startswith(s + ":"):
+        return m_strip
+
+    # Detecta "APRS message" aunque haya espacios antes del ':'
+    # Ejemplos válidos:
+    #   ":DEST: Hola{12}"
+    #   " :DEST: Hola{12}"
+    if m_strip.startswith(":"):
+        return f"{s}: {m_strip}"
+
+    # Para otros textos (comentarios/status) no añadimos prefijo para no ensuciar canales
+    return m_strip
+
 
 def _should_not_gate(info_text: str) -> bool:
     """
@@ -956,6 +1072,9 @@ def _kiss_init(sock: socket.socket, port: int = KISS_CHANNEL) -> None:
 # =========================
 # === Broker control =======
 # =========================
+
+
+
 def _broker_send_text(ch: int, text: str, dest: str | None = None, ack: bool = False, timeout: float = 6.0) -> dict:
     """
     Cliente ligero del BacklogServer del broker: cmd SEND_TEXT.
@@ -1007,7 +1126,6 @@ def _parse_ch_and_delay_from_pkt(pkt: dict, default_ch: int = MESHTASTIC_CHANNEL
     ch, delay_min, msg = extract_channel_and_delay(info)
     return (ch, delay_min, msg) if (ch is not None and msg) else (None, None, "")
 
-
 def _schedule_aprs_to_mesh(ch: int, msg: str, delay_min: int, src: str) -> None:
     """
     Programación local en este proceso (no en el broker):
@@ -1019,24 +1137,28 @@ def _schedule_aprs_to_mesh(ch: int, msg: str, delay_min: int, src: str) -> None:
     async def _job():
         try:
             await asyncio.sleep(delay_sec)
+
+            msg_mesh = _mesh_add_src_prefix(src, msg)
+
             if not _aprs_gate_is_enabled():
-                print(f"[aprs→mesh sched] GATE OFF al ejecutar CH{ch} (+{delay_min}m) ← {src}: {msg[:120]}")
+                print(f"[aprs→mesh sched] GATE OFF al ejecutar CH{ch} (+{delay_min}m) ← {src}: {msg_mesh[:120]}")
                 return
-            res = _broker_send_text(ch, msg, dest=None, ack=False)
+
+            res = _broker_send_text(ch, msg_mesh, dest=None, ack=False)
             ok = bool(res.get("ok"))
-            print(f"[aprs→mesh sched] CH{ch} (+{delay_min}m) ← {src}: {msg[:120]} -> {'OK' if ok else 'KO'}")
-           
+            print(f"[aprs→mesh sched] CH{ch} (+{delay_min}m) ← {src}: {msg_mesh[:120]} -> {'OK' if ok else 'KO'}")
+
             # === ECO OPCIONAL AL NODO HOME ===
             if HOME_NODE_ID:
                 try:
-                    eco_txt = f"[APRS eco de {src}] {msg}"
+                    eco_txt = f"[APRS eco de {src}] {msg_mesh}"
                     res_eco = _broker_send_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
                     ok_eco = bool(res_eco.get("ok"))
                     print(f"[aprs→mesh ECO] CH{ch} → {HOME_NODE_ID}: {eco_txt[:120]} -> {'OK' if ok_eco else 'KO'}")
                 except Exception as _e:
                     print(f"[aprs→mesh ECO] ❌ {type(_e).__name__}: {_e}")
             # === FIN ECO OPCIONAL ===
-        
+
         except Exception as e:
             print(f"[aprs→mesh sched] ❌ {type(e).__name__}: {e}")
 
@@ -1046,13 +1168,20 @@ def _schedule_aprs_to_mesh(ch: int, msg: str, delay_min: int, src: str) -> None:
     except RuntimeError:
         # Si no hay loop (caso raro), ejecuta inmediato
         try:
-            res = _broker_send_text(ch, msg, dest=None, ack=False)
+            msg_mesh = _mesh_add_src_prefix(src, msg)
+
+            if not _aprs_gate_is_enabled():
+                print(f"[aprs→mesh sched/now] GATE OFF CH{ch} (+{delay_min}m≡0) ← {src}: {msg_mesh[:120]}")
+                return
+
+            res = _broker_send_text(ch, msg_mesh, dest=None, ack=False)
             ok = bool(res.get("ok"))
-            print(f"[aprs→mesh sched/now] CH{ch} (+{delay_min}m≡0) ← {src}: {msg[:120]} -> {'OK' if ok else 'KO'}")
+            print(f"[aprs→mesh sched/now] CH{ch} (+{delay_min}m≡0) ← {src}: {msg_mesh[:120]} -> {'OK' if ok else 'KO'}")
+
             # === ECO OPCIONAL AL NODO HOME ===
             if HOME_NODE_ID:
                 try:
-                    eco_txt = f"[APRS eco de {src}] {msg}"
+                    eco_txt = f"[APRS eco de {src}] {msg_mesh}"
                     res_eco = _broker_send_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
                     ok_eco = bool(res_eco.get("ok"))
                     print(f"[aprs→mesh ECO] CH{ch} → {HOME_NODE_ID}: {eco_txt[:120]} -> {'OK' if ok_eco else 'KO'}")
@@ -1060,7 +1189,6 @@ def _schedule_aprs_to_mesh(ch: int, msg: str, delay_min: int, src: str) -> None:
                     print(f"[aprs→mesh ECO] ❌ {type(_e).__name__}: {_e}")
             # === FIN ECO OPCIONAL ===
 
-        
         except Exception as e:
             print(f"[aprs→mesh sched/now] ❌ {type(e).__name__}: {e}")
 
@@ -1182,7 +1310,7 @@ async def task_aprs_to_meshtastic():
 
                     # --- Si es posición APRS, convertir a enlace de mapa ---
                    
-                   # --- Procesado de posición APRS (RF) ---
+                    # --- Procesado de posición APRS (RF) ---
                     # Convertimos la trama RF ya parseada a formato TNC2 estándar
                     ap = None
                     try:
@@ -1205,7 +1333,7 @@ async def task_aprs_to_meshtastic():
 
 
                     # --- Comandos de control en CH0 (no reinyectar a Mesh) ---
-                                       # --- Detección de mensaje de EMERGENCIA APRS (antes de aplicar filtros de CH0/GATE) ---
+                    # --- Detección de mensaje de EMERGENCIA APRS (antes de aplicar filtros de CH0/GATE) ---
                     try:
                         emerg_info = _classify_aprs_emergency(pkt, ap, msg)
                     except Exception as _e:
@@ -1258,8 +1386,9 @@ async def task_aprs_to_meshtastic():
                         )
                         gate_txt = "ON" if _aprs_gate_is_enabled() else "OFF"
                         prefix = f"[EMERG APRS][{scope_txt}] src={src} gate={gate_txt}"
-
-                        mesh_text = f"{prefix}\n{msg}"
+                        
+                        msg_mesh = _mesh_add_src_prefix(src, msg)
+                        mesh_text = f"{prefix}\n{msg_mesh}"
 
                         for ch_target in channels:
                             try:
@@ -1267,13 +1396,13 @@ async def task_aprs_to_meshtastic():
                                 res = _broker_send_text(ch_target, mesh_text, dest=None, ack=False)
                                 ok = bool(res.get("ok"))
                                 print(
-                                    f"[aprs→mesh EMERG] CH{ch_target} ← {src}: {msg[:120]} -> {'OK' if ok else 'KO'}"
+                                    f"[aprs→mesh EMERG] CH{ch_target} ← {src}: {mesh_text[:120]} -> {'OK' if ok else 'KO'}"
                                 )
 
                                 # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE ---
                                 if HOME_NODE_ID:
                                     try:
-                                        eco_txt = f"[APRS eco de {src}] {msg}"
+                                        eco_txt = f"[APRS eco de {src}] {msg_mesh}"
                                         res_eco = _broker_send_text(
                                             ch_target, eco_txt, dest=HOME_NODE_ID, ack=False
                                         )
@@ -1285,11 +1414,6 @@ async def task_aprs_to_meshtastic():
                                     except Exception as _e:
                                         print(f"[aprs→mesh ECO] ❌ {type(_e).__name__}: {_e}")
                                 # --- FIN ECO ---
-                            except Exception as _e:
-                                print(f"[aprs→mesh EMERG] ❌ {type(_e).__name__}: {_e}")
-
-
-                            
                             except Exception as _e:
                                 print(f"[aprs→mesh EMERG] ❌ {type(_e).__name__}: {_e}")
 
@@ -1309,13 +1433,16 @@ async def task_aprs_to_meshtastic():
                         _schedule_aprs_to_mesh(ch, msg, delay_min, src)
                     else:
                         # Envío inmediato al broker (como antes)
-                        res = _broker_send_text(ch, msg, dest=None, ack=False)
+                        #res = _broker_send_text(ch, msg, dest=None, ack=False)
+                        msg_mesh = _mesh_add_src_prefix(src, msg)
+                        res = _broker_send_text(ch, msg_mesh, dest=None, ack=False)
+                        
                         ok = bool(res.get("ok"))
-                        print(f"[aprs→mesh] CH{ch} ← {src}: {msg[:120]}  -> {'OK' if ok else 'KO'}")
-                            # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE ---
+                        print(f"[aprs→mesh] CH{ch} ← {src}: {msg_mesh[:120]}  -> {'OK' if ok else 'KO'}")
+                        # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE ---
                         if HOME_NODE_ID:
                             try:
-                                eco_txt = f"[APRS eco de {src}] {msg}"
+                                eco_txt = f"[APRS eco de {src}] {msg_mesh}"
                                 res_eco = _broker_send_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
                                 ok_eco = bool(res_eco.get("ok"))
                                 print(f"[aprs→mesh ECO] CH{ch} → {HOME_NODE_ID}: {eco_txt[:120]} -> {'OK' if ok_eco else 'KO'}")
@@ -1514,7 +1641,11 @@ async def task_aprsis_to_meshtastic():
                     )
                     _schedule_aprs_to_mesh(ch, msg, delay_min, src)
                 else:
-                    res = _broker_send_text(ch, msg, dest=None, ack=False)
+                    #res = _broker_send_text(ch, msg, dest=None, ack=False)
+                    msg_mesh = _mesh_add_src_prefix(src, msg)
+                    res = _broker_send_text(ch, msg_mesh, dest=None, ack=False)
+
+                    
                     ok = bool(res.get("ok"))
                     print(
                         f"[aprs←IS→mesh] CH{ch} ← {src}: {msg[:120]}  -> {'OK' if ok else 'KO'}"
@@ -1522,7 +1653,9 @@ async def task_aprsis_to_meshtastic():
                     # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE (APRS-IS) ---
                     if HOME_NODE_ID:
                         try:
-                            eco_txt = f"[APRS-IS eco de {src}] {msg}"
+                            #eco_txt = f"[APRS-IS eco de {src}] {msg}"
+                            eco_txt = f"[APRS-IS eco de {src}] {msg_mesh}"
+
                             res_eco = _broker_send_text(
                                 ch, eco_txt, dest=HOME_NODE_ID, ack=False
                             )
@@ -1622,6 +1755,38 @@ async def task_control_udp():
             except Exception: pass
             print(f"[ctrl] gate → {'ON' if APRS_GATE_ENABLED else 'OFF'} (petición UDP)")
             continue
+      
+        # --- NUEVO: control del mirror Mesh -> APRS-IS ---
+        if mode == "aprsis_push":
+            global APRSIS_PUSH_ENABLED, APRSIS_PUSH_TO, APRSIS_PUSH_CHANNELS_RAW, APRSIS_PUSH_PREFIX, APRSIS_PUSH_MIN_GAP_S
+
+            en = obj.get("enabled", None)
+            if en is not None:
+                try: APRSIS_PUSH_ENABLED = 1 if int(en) else 0
+                except Exception: APRSIS_PUSH_ENABLED = 0
+
+            to = obj.get("to", None)
+            if to is not None:
+                APRSIS_PUSH_TO = (str(to) or "").strip().upper()
+
+            chs = obj.get("channels", None)
+            if chs is not None:
+                APRSIS_PUSH_CHANNELS_RAW = (str(chs) or "all").strip().lower()
+
+            pref = obj.get("prefix", None)
+            if pref is not None:
+                try: APRSIS_PUSH_PREFIX = 1 if int(pref) else 0
+                except Exception: pass
+
+            gap = obj.get("min_gap_s", None)
+            if gap is not None:
+                try: APRSIS_PUSH_MIN_GAP_S = max(0.0, float(gap))
+                except Exception: pass
+
+            print(f"[ctrl] aprsis_push -> enabled={APRSIS_PUSH_ENABLED} to={APRSIS_PUSH_TO} channels={APRSIS_PUSH_CHANNELS_RAW} prefix={APRSIS_PUSH_PREFIX} gap={APRSIS_PUSH_MIN_GAP_S}")
+            continue
+
+
 
         # --- TX APRS normal ---
         if mode != "aprs":
@@ -1784,6 +1949,87 @@ def _apply_cli_overrides():
     if args.broker_port is not None:     BROKER_PORT = int(args.broker_port)
     if args.mesh_channel is not None:    MESHTASTIC_CHANNEL = int(args.mesh_channel)
 
+async def task_mesh_channels_to_aprsis():
+    """
+    NUEVO:
+      - Lee el JSONL del broker (igual que task_broker_to_aprs()) :contentReference[oaicite:6]{index=6}
+      - Para cada TEXT_MESSAGE_APP normal (no /aprs), si el canal coincide,
+        lo envía a APRS-IS como mensaje dirigido a APRSIS_PUSH_TO (p.ej. EB2EAS-7)
+    """
+    global _APRSIS_PUSH_LAST_TS
+
+    backoff = 2.0
+    push_ch_set = _parse_push_channels(APRSIS_PUSH_CHANNELS_RAW)
+
+    while True:
+        try:
+            print(f"[mesh→IS push] Conectando JSONL {BROKER_HOST}:{BROKER_PORT} …")
+            reader, writer = await asyncio.open_connection(BROKER_HOST, BROKER_PORT)
+            print("[mesh→IS push] Conectado.")
+            backoff = 2.0
+
+            while True:
+                line = await reader.readline()
+                if not line:
+                    raise ConnectionError("broker closed")
+
+                if not _aprsis_push_is_enabled():
+                    continue
+
+                try:
+                    obj = json.loads(line.decode("utf-8", "ignore"))
+                except Exception:
+                    continue
+
+                if (obj.get("portnum") or "").upper() != "TEXT_MESSAGE_APP":
+                    continue
+
+                txt = obj.get("text")
+                if not isinstance(txt, str):
+                    continue
+
+                # Evita reenviar comandos /aprs (eso ya lo hace task_broker_to_aprs) :contentReference[oaicite:7]{index=7}
+                if txt.lstrip().lower().startswith("/aprs"):
+                    continue
+
+                # Filtro anti-eco: no reenviar “ecos” y marcas típicas de entrada APRS
+                # (tu propio script crea ecos con "[APRS eco de ...]" :contentReference[oaicite:8]{index=8})
+                tnorm = txt.strip()
+                if tnorm.startswith("[APRS eco de") or tnorm.startswith("[APRS-IS eco de"):
+                    continue
+
+                ch = obj.get("channel")
+                try:
+                    ch = int(ch) if ch is not None else None
+                except Exception:
+                    ch = None
+
+                if ch is None:
+                    # si el broker no incluye channel, no publicamos (mejor silencioso que inventar)
+                    continue
+
+                if push_ch_set is not None and ch not in push_ch_set:
+                    continue
+
+                # Rate limit sencillo
+                now = asyncio.get_running_loop().time()
+                if (now - float(_APRSIS_PUSH_LAST_TS or 0.0)) < float(APRSIS_PUSH_MIN_GAP_S):
+                    continue
+
+                prefix = f"[CH{ch}] " if APRSIS_PUSH_PREFIX else ""
+                line2 = _aprsis_tnc2_message_line(APRSIS_PUSH_TO, prefix + tnorm)
+                ok = await _aprsis_send_line_safe(line2)
+                if ok:
+                    _APRSIS_PUSH_LAST_TS = now
+                    print(f"[mesh→IS push] → {APRSIS_PUSH_TO} {prefix}{tnorm[:80]}")
+        except Exception as e:
+            print(f"[mesh→IS push] ❌ {type(e).__name__}: {e}")
+            await asyncio.sleep(backoff)
+            backoff = min(30.0, backoff * 1.6)
+
+
+
+
 # =========================
 # === main =================
 # =========================
@@ -1793,7 +2039,7 @@ async def main():
     t2 = asyncio.create_task(task_aprs_to_meshtastic())    # APRS RF → Mesh
     t3 = asyncio.create_task(task_control_udp())           # Bot(/aprs) → APRS
     t4 = asyncio.create_task(task_aprsis_connect_on_startup())  # Conexión inicial APRS-IS (uplink)
-
+   
     tasks = [t1, t2, t3, t4]
 
     # NUEVO: activar la recepción APRS-IS → Mesh si hay credenciales
@@ -1803,6 +2049,10 @@ async def main():
         tasks.append(t5)
     else:
         print("[aprs←IS] Downlink deshabilitado (faltan credenciales APRSIS_USER/PASSCODE).")
+
+    # NUEVO: mirror Mesh -> APRS-IS (para ver canales en APRSDroid)
+    t6 = asyncio.create_task(task_mesh_channels_to_aprsis())
+    tasks.append(t6)
 
     # Ejecutar todas las tareas de forma concurrente
     await asyncio.gather(*tasks)

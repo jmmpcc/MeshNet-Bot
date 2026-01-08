@@ -78,6 +78,181 @@ Ambas funciones analizan la información del backlog, nodos escuchados, métrica
 ---
 
 ## 🧾 Historial de versiones
+
+## [v6.2.1] - 2026-01-08 Enero 2026
+
+### Changed
+- Reescritura completa de la lógica de auditoría para adaptarse al comportamiento actual de Meshtastic.
+- Eliminada cualquier referencia funcional al rol **REPEATER**, ya inexistente en Meshtastic.
+- Sustitución del concepto de *rol sugerido* por **perfil de nodo basado en comportamiento real**.
+
+### Added
+- Nuevos perfiles de nodo:
+  - `aislado`
+  - `borde`
+  - `transito_util`
+  - `backbone_candidato`
+- Evaluación basada en:
+  - aparición como `via` en rutas,
+  - estabilidad temporal de vecinos,
+  - hops reales (`hop_start` / `hop_limit`),
+  - tráfico reenviado efectivo.
+- Recomendaciones de intervalos de **posición** y **telemetría** basadas en evidencia de red.
+- Sección de impacto real en la malla dentro de la auditoría integral.
+
+### Removed
+- Lógica de recomendación basada únicamente en:
+  - número de vecinos,
+  - SNR aislado,
+  - roles clásicos CLIENT / ROUTER / REPEATER.
+- Eliminado cualquier intento de sugerir cambios de rol automáticos.
+
+### Fixed
+- Evitados falsos positivos de "router necesario" en mallas ya consolidadas.
+- Mejor interpretación de nodos con SNR alto pero sin tránsito real.
+
+### Compatibility
+- No se rompe ningún comando existente (`/auditoria_red`, `/auditoria_integral`).
+- Compatible con firmwares Meshtastic actuales y futuros.
+- Mantiene salida de `device.role` solo a nivel informativo.
+
+---
+
+Este cambio alinea el proyecto con la filosofía actual de Meshtastic:
+menos configuración manual, más adaptación automática basada en el comportamiento observado.
+
+## 🔧 Broker (Meshtastic_Broker.py)
+
+### ✅ Corrección crítica del estado `connected`
+- **Antes**: `BROKER_STATUS.connected` dependía únicamente de `_IS_CONNECTED`, que podía quedar desincronizado.
+- **Ahora**:
+  - `connected` se calcula como:
+    - *Existe una interfaz viva en el InterfaceManager* **OR**
+    - `_IS_CONNECTED == True`
+- El broker deja de reportar falsos negativos (`connected=false` cuando el sistema funciona).
+
+**Impacto**
+- El bot puede tomar decisiones correctas tras `/traceroute`.
+- Se elimina la ambigüedad entre “funciona pero dice que no”.
+
+---
+
+### 🔁 `BROKER_RESUME` reforzado
+- Tras `BROKER_RESUME`, el broker:
+  - limpia cooldown
+  - reanuda el manager
+  - **fuerza `mgr.signal_disconnect()`**
+- Esto obliga a reconstruir el socket TCP si quedó en estado inconsistente tras usar CLI.
+
+**Impacto**
+- El broker no queda en estado “running pero muerto”.
+- Se evita la pérdida silenciosa del stream RX tras `/traceroute`.
+
+---
+
+### 🔄 Nuevo comando `FORCE_RECONNECT`
+- Implementado en el broker:
+  - limpia pool
+  - fuerza `signal_disconnect()`
+  - reanuda el manager
+- Usado por el bot como recuperación automática.
+
+**Impacto**
+- Eliminada la necesidad de reiniciar contenedores Docker.
+- Recuperación automática del enlace Meshtastic.
+
+---
+
+## 🤖 Bot de Telegram (Telegram_Bot_Broker.py)
+
+### ⏸️ / ▶️ Sistema robusto PAUSE / RESUME
+- Se introduce un **contador de pausas anidadas** (`broker_io_pause_count`).
+- Evita:
+  - desajustes entre `BROKER_PAUSE` / `BROKER_RESUME`
+  - brokers que quedaban bloqueados en `paused`.
+
+---
+
+### 🔧 `_resume_broker_io_after_cli()` (rehecho)
+Nueva lógica completa al salir de CLI (`/traceroute`, etc.):
+
+- Reanuda solo cuando el contador llega a cero.
+- Verifica `BROKER_STATUS`.
+- Si sigue `paused` → reintenta `BROKER_RESUME`.
+- Si queda `running` pero `connected=false` → ejecuta `FORCE_RECONNECT`.
+- Espera activamente a estado sano:
+  - `running`
+  - `mgr_paused=false`
+  - `connected=true`
+
+**Impacto**
+- El bot deja el sistema siempre en estado funcional tras CLI.
+- Se elimina el “estado zombi” post-traceroute.
+
+---
+
+### 🧭 `/traceroute` seguro
+- El bot pausa correctamente el broker antes de ejecutar CLI.
+- Al finalizar:
+  - se garantiza restauración completa del broker
+  - no se pierde la conexión Meshtastic
+- Timeouts de traceroute ya no rompen el sistema.
+
+---
+
+### 📡 `/ver_nodos` – Fallback inteligente
+- Si `LIST_NODES` responde `ok=true` pero con `data=[]`:
+  - **se activa automáticamente el fallback a `nodos.txt`**
+- Se evita mostrar “(sin datos)” cuando existen nodos conocidos.
+
+**Impacto**
+- El usuario nunca queda “ciego” aunque el broker esté recuperándose.
+- Mejora radical de la experiencia operativa.
+
+---
+
+## 🧠 Estado del sistema (observabilidad)
+
+### `BROKER_STATUS`
+Ahora refleja correctamente:
+- `status`: running / paused
+- `mgr_paused`
+- `connected` real
+- `cooldown_remaining`
+- `tx_blocked`
+
+El estado reportado coincide con el comportamiento real del sistema.
+
+---
+
+## 🛡️ Estabilidad 24/7
+
+### Problemas eliminados
+- ❌ Necesidad de reiniciar Docker tras `/traceroute`
+- ❌ Broker “running pero sin datos”
+- ❌ Estados `paused` persistentes
+- ❌ Falsos `connected=false`
+- ❌ `/ver_nodos` vacío con red activa
+
+### Estado final
+- ✔ Recuperación automática
+- ✔ Broker siempre saneado tras CLI
+- ✔ Bot resistente a fallos de red
+- ✔ Operación continua sin intervención manual
+
+---
+
+## 🏷️ Resumen de la versión
+
+**v6.2.1 es una versión de estabilidad mayor**, aunque no cambie APIs visibles:
+- Refuerza el núcleo del sistema.
+- Hace el broker y el bot verdaderamente autónomos.
+- Prepara el proyecto para operación prolongada en escenarios reales y de emergencia.
+
+---
+
+📌 *Versión recomendada para producción continua (24/7).*
+
 ## [6.2.0] - 2026-01-04 Enero 
 
 ### Añadido

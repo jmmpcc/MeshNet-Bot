@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-mesh_triple_bridge.py  v6.2— Pasarela externa A↔B y A↔C usando TCP Meshtastic.
+mesh_triple_bridge.py  v6.2.1 — Pasarela externa A↔B y A↔C usando TCP Meshtastic.
 
 Modo tcp:
 - Abre TCP directo a A, B y C.
@@ -24,6 +24,7 @@ import hashlib
 import socket
 from collections import deque
 from typing import Optional, Dict
+import heapq
 
 from pubsub import pub
 
@@ -346,6 +347,60 @@ class TripleBridge:
         self._c_offline_until = max(float(self._c_offline_until), time.time() + 75.0)
         print(f"[triple-bridge] C OFFLINE → {reason}", flush=True)
 
+    def _is_false_offline_error(self, e: BaseException) -> bool:
+        """
+        Detecta el patrón de error del SDK que no implica caída real del peer,
+        sino handshake/estado interno incompleto.
+
+        Caso típico:
+        MeshInterfaceError: Timed out waiting for connection completion
+
+        Si se trata como OFFLINE 75s se provoca flapping y se pierde capacidad de envío.
+        """
+        try:
+            msg = str(e) or ""
+        except Exception:
+            msg = ""
+        msg_l = msg.lower()
+        needles = (
+            "timed out waiting for connection completion",
+            "connection completion",
+            "waiting for connection completion",
+            "connection not completed",
+        )
+        return any(n in msg_l for n in needles)
+
+
+    def _soft_reset_peer(self, peer: str, why: str) -> None:
+        """
+        Reset suave del peer (B o C) SIN entrar en supresión larga (75s).
+        Acción:
+        - close() de la iface si existe
+        - iface=None, local_id=None
+        - supresión corta (2s) para evitar bucle apretado
+        """
+        now = time.time()
+        try:
+            if peer == "B":
+                if self.iface_b and hasattr(self.iface_b, "close"):
+                    self.iface_b.close()
+                self.iface_b = None
+                self.local_id_b = None
+                self._b_offline_until = max(float(self._b_offline_until), now + 2.0)
+            else:
+                if self.iface_c and hasattr(self.iface_c, "close"):
+                    self.iface_c.close()
+                self.iface_c = None
+                self.local_id_c = None
+                self._c_offline_until = max(float(self._c_offline_until), now + 2.0)
+        except Exception:
+            pass
+        print(f"[triple-bridge] {peer} SOFT-RESET (sin OFFLINE 75s): {why}", flush=True)
+
+
+
+
+
     # ---------------------- Local IDs ----------------------
 
     def _discover_local_id(self, iface, label: str) -> Optional[str]:
@@ -499,10 +554,15 @@ class TripleBridge:
 
         except Exception as e:
             # Marca peer down y reintenta con backoff
-            if peer == "B":
-                self._mark_b_down(f"{type(e).__name__}: {e}")
+            # Caso especial: error "falso OFFLINE" del SDK (handshake incompleto)
+            if self._is_false_offline_error(e):
+                self._soft_reset_peer(peer, f"{type(e).__name__}: {e}")
             else:
-                self._mark_c_down(f"{type(e).__name__}: {e}")
+                if peer == "B":
+                    self._mark_b_down(f"{type(e).__name__}: {e}")
+                else:
+                    self._mark_c_down(f"{type(e).__name__}: {e}")
+
 
             if attempt < max_r:
                 delay = self._retry_schedule[min(attempt, len(self._retry_schedule) - 1)]

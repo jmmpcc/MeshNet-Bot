@@ -1926,8 +1926,7 @@ class _BacklogServer(threading.Thread):
                                 is_paused = bool(mgr.is_paused()) if mgr and hasattr(mgr, "is_paused") else False
                             except Exception:
                                 is_paused = False
-
-                            # connected “real”: iface viva en el manager O flag de conexión estable
+                            # connected “real”: basta con que exista una iface viva en el manager
                             iface_obj = None
                             try:
                                 iface_obj = mgr.get_iface() if (mgr and hasattr(mgr, "get_iface")) else None
@@ -1938,7 +1937,8 @@ class _BacklogServer(threading.Thread):
                                 "ok": True,
                                 "status": ("paused" if (is_paused or is_cd) else "running"),
                                 "cooldown_remaining": (rem if is_cd else 0),
-                                "connected": (iface_obj is not None) or bool(globals().get("_IS_CONNECTED", False)),
+                                # connected “real”: si hay iface viva en el manager, estamos conectados
+                                "connected": (iface_obj is not None) if mgr else bool(globals().get("_IS_CONNECTED", False)),
                                 "node_host": str(globals().get("RUNTIME_MESH_HOST") or ""),
                                 "node_port": int(globals().get("RUNTIME_MESH_PORT") or 4403),
                                 "mgr_paused": bool(is_paused),
@@ -2634,6 +2634,14 @@ class InterfaceManager:
                             self._attach_handlers_locked()
                         except Exception:
                             pass
+                        
+                    # Sellar estado conectado (no depender de eventos pubsub)
+                    try:
+                        globals()["_IS_CONNECTED"] = True
+                        globals()["_LAST_CONNECT_TS"] = time.time()
+                    except Exception:
+                        pass
+    
                 except Exception:
                     # si falló, cerramos iface y liberamos lock
                     try: new_iface.close()
@@ -2667,6 +2675,13 @@ class InterfaceManager:
                         try: self.iface.close()
                         except Exception: pass
                         self.iface = None
+                        # Sellar estado desconectado
+                        try:
+                            globals()["_IS_CONNECTED"] = False
+                        except Exception:
+                            pass
+
+
             except Exception:
                 pass
             try:
@@ -4076,3 +4091,4 @@ if __name__ == "__main__":
 
     # Ejecución normal del broker
     main()
+

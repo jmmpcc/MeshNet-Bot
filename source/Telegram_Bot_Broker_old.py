@@ -2426,23 +2426,29 @@ def _pause_broker_io_for_cli(context, max_wait_s: float = 4.0) -> str:
 
 def _resume_broker_io_after_cli(context, token: str) -> bool:
     """
-    Reanuda IO del broker después de ejecutar CLI (traceroute/refrescos), sin dejarlo
-    en un estado inconsistente.
+    Decrementa el contador de pausa; si llega a 0, ordena reanudar al broker.
 
-    Objetivos:
-      - Evitar quedarnos en paused por desajuste de pausas (pausas anidadas).
-      - Evitar "running pero connected=false" tras ceder el TCP a la CLI.
-      - Si queda inconsistente: intentar RESUME y, si hace falta, FORCE_RECONNECT.
+    Problema que soluciona:
+      - Tras /traceroute vía CLI, el broker puede quedar en:
+          a) status=running pero connected=false
+          b) status=paused (mgr_paused=true) por desajuste de pausas
+      - En esos casos /ver_nodos se queda sin datos hasta reiniciar contenedores.
+
+    Estrategia:
+      1) Si hay pausas anidadas: solo decrementa contador y no toca el broker.
+      2) Si es la última pausa:
+          - Envía BROKER_RESUME
+          - Verifica BROKER_STATUS (running + mgr_paused=false)
+          - Si sigue paused: reintenta RESUME
+          - Si queda running pero connected=false: lanza FORCE_RECONNECT
+          - Espera a estado “sano” un tiempo corto
     """
-    import time
-
-    # Contador local de pausas (permite pausas anidadas: traceroute dentro de otra operación)
     try:
         cnt = int(context.bot_data.get("broker_io_pause_count", 0))
     except Exception:
         cnt = 0
 
-    # Si hay pausas anidadas, solo decrementa y no toques al broker todavía
+    # Si hay pausas anidadas, no tocar el broker todavía
     if cnt > 1:
         context.bot_data["broker_io_pause_count"] = cnt - 1
         return True
@@ -2450,33 +2456,34 @@ def _resume_broker_io_after_cli(context, token: str) -> bool:
     # Última pausa: reanudar de verdad
     context.bot_data["broker_io_pause_count"] = 0
 
-    # 1) RESUME lógico
+    # 1) RESUME “lógico”
     r = _broker_ctrl("BROKER_RESUME")
     if not bool(r.get("ok")):
         return False
 
-    # 2) Verificar salida real de paused
+    # 2) Verificar que realmente salió de paused
     t0 = time.time()
     last = None
     while time.time() - t0 < 6.0:
         st = _broker_ctrl("BROKER_STATUS", timeout=2.0)
         last = st
-        if st.get("ok") and st.get("status") == "running" and not bool(st.get("mgr_paused", False)):
-            break
+        if st.get("ok"):
+            if st.get("status") == "running" and not bool(st.get("mgr_paused", False)):
+                break
         time.sleep(0.25)
 
-    # Si sigue en paused, reintentar RESUME una vez
+    # Si siguiera en paused, reintentar RESUME una vez más
     if last and last.get("ok") and last.get("status") == "paused":
         _broker_ctrl("BROKER_RESUME")
         t1 = time.time()
         while time.time() - t1 < 4.0:
             st = _broker_ctrl("BROKER_STATUS", timeout=2.0)
-            last = st
             if st.get("ok") and st.get("status") == "running" and not bool(st.get("mgr_paused", False)):
+                last = st
                 break
             time.sleep(0.25)
 
-    # 3) Si está running pero sigue reportando connected=false, forzar reconexión dura
+    # 3) Si está “running” pero no conectado, forzar reconexión dura
     if last and last.get("ok"):
         if last.get("status") == "running" and not bool(last.get("connected", False)):
             _broker_ctrl("FORCE_RECONNECT", timeout=3.0)
@@ -2484,18 +2491,36 @@ def _resume_broker_io_after_cli(context, token: str) -> bool:
             t2 = time.time()
             while time.time() - t2 < 12.0:
                 st = _broker_ctrl("BROKER_STATUS", timeout=2.0)
-                if st.get("ok") and st.get("status") == "running" and not bool(st.get("mgr_paused", False)) and bool(st.get("connected", False)):
-                    return True
+                if st.get("ok"):
+                    if st.get("status") == "running" and bool(st.get("connected", False)) and not bool(st.get("mgr_paused", False)):
+                        return True
                 time.sleep(0.35)
 
+            # Si no logró reconectar, al menos deja al broker en running (pero reporta fallo)
             return False
 
-    # Estado final: al menos no pausado
+    # Si llega aquí y no hay datos fiables, consideramos “ok” solo si no está pausado
     st = _broker_ctrl("BROKER_STATUS", timeout=2.0)
     if st.get("ok"):
         return st.get("status") == "running" and not bool(st.get("mgr_paused", False))
 
     return True
+
+
+# === Homogeneización de nombres (aliases) para helpers de pausa CLI ===
+# === Homogeneización de nombres (aliases) para helpers de pausa CLI ===
+try:
+    if 'pause_broker_from_exclusive' not in globals() and 'pause_broker_for_exclusive' in globals():
+        pause_broker_from_exclusive = pause_broker_for_exclusive
+
+    if 'resume_broker_from_exclusive' not in globals() and 'resume_broker_after_exclusive' in globals():
+        resume_broker_from_exclusive = resume_broker_after_exclusive
+except Exception:
+    pass
+
+
+
+# ===================== MODIFICADA – helper CLI robusto y cross-platform =====================
 def _run_cli_nodes_with_retry(
     host: str,
     attempts: int = 2,
@@ -7694,6 +7719,12 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         if r and r.get("ok"):
             data = r.get("data") or []
 
+            # Si el broker responde ok pero no trae nodos, no tiene sentido pintar "(sin datos)".
+            # En ese caso forzamos el fallback a nodos.txt (que suele estar poblado).
+            if not data:
+                raise RuntimeError("LIST_NODES vacío → fallback nodos.txt")
+
+
             norm = []
             for n in data:
                 nid   = _norm_id(n.get("nodeId") or n.get("id") or n.get("fromId"))
@@ -8707,49 +8738,43 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return out
 
     # 5.1) helpers de pausa/reanudación para CLI (idéntico espíritu a /vecinos)
-    async def _pause_broker_for_cli(reason: str, secs: int) -> None:
+   
+    async def _pause_broker_for_cli(reason="cli", secs=15):
         """
-        Intenta pausar el broker (y/o el pool local) para liberar el socket 4403
-        antes de llamar al CLI. Best-effort, no falla si no existe.
+        Pausa broker de forma compatible, pero usando contador + control robusto.
         """
-        # a) pedir al broker que pause
         try:
-            r = await _broker_cmd("BROKER_PAUSE", {"reason": reason, "secs": int(secs)})
-            if not (isinstance(r, dict) and (r.get("ok") or r.get("status") == "ok")):
-                await _broker_cmd("CTRL", {"action": "pause", "reason": reason, "secs": int(secs)})
+            # Guarda token en context para emparejar con resume
+            token = _pause_broker_io_for_cli(context, max_wait_s=8.0)
+            context.bot_data["traceroute_cli_pause_token"] = token
+            return True
         except Exception:
-            pass
-        # b) pausar pool local si expone API
-        try:
-            if hasattr(pool, "pause_mgr"):
-                pool.pause_mgr()
-            elif hasattr(pool, "pause"):
-                pool.pause()
-            if hasattr(pool, "drop_iface"):
-                try:
-                    pool.drop_iface(host, port)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        await asyncio.sleep(1.5)
+            return False
 
     async def _resume_broker_after_cli() -> None:
-        """Intenta reanudar broker/pool tras el CLI."""
+        """
+        Reanuda broker y deja el sistema en estado sano:
+        running + mgr_paused=false + connected=true (si es posible).
+        """
         try:
-            r = await _broker_cmd("BROKER_RESUME", {})
-            if not (isinstance(r, dict) and (r.get("ok") or r.get("status") == "ok")):
-                await _broker_cmd("CTRL", {"action": "resume"})
+            token = context.bot_data.pop("traceroute_cli_pause_token", "")
         except Exception:
-            pass
+            token = ""
+
         try:
-            if hasattr(pool, "resume_mgr"):
-                pool.resume_mgr()
-            elif hasattr(pool, "resume"):
-                pool.resume()
+            # Usa tu helper robusto (incluye FORCE_RECONNECT si hace falta)
+            ok = _resume_broker_io_after_cli(context, token)
+            if not ok:
+                # Último intento defensivo: fuerza reconexión (no rompe nada)
+                _broker_ctrl("FORCE_RECONNECT", timeout=3.0)
         except Exception:
-            pass
+            try:
+                _broker_ctrl("BROKER_RESUME", timeout=2.0)
+            except Exception:
+                pass
+
         await asyncio.sleep(0.4)
+
 
     # 6) === Lanzado ===
     since_ts = int(time.time())

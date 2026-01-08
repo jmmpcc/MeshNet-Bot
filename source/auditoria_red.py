@@ -1,4 +1,4 @@
-# auditoria_red.py
+# v6.2.1 uditoria_red.py
 import os, json, csv, math, time, hashlib, logging
 from datetime import datetime, timezone
 from statistics import fmean
@@ -437,49 +437,181 @@ def _summarize_neighbors(T: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
 # Heurísticas de recomendación
 # ──────────────────────────────────────────────────────────────────────────────
 def _recommend_local(nei: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Recomendación LOCAL adaptada a Meshtastic moderno.
+
+    Antes existía el rol "REPEATER". En firmwares/CLI actuales el rol útil a nivel usuario
+    es básicamente CLIENT / CLIENT_MUTE / ROUTER, y el comportamiento de "repetir"
+    es adaptativo (depende de calidad de enlace, hops, carga, etc.).
+
+    Esta función:
+      - Clasifica el *perfil* del nodo local respecto al vecindario observado.
+      - Sugiere parámetros (telemetría/posición/baliza/hops/tx) orientados a:
+          * ayudar sin saturar (si ya hay routers)
+          * evitar ruido si la red es débil/escasa
+    Devuelve un dict estable (se mantiene la clave 'role' para compatibilidad) y añade:
+      - profile, position_s, scores
+    """
     n_total = len(nei)
-    n_good  = sum(1 for n in nei if (n["snr_p50"] is not None and n["snr_p50"] >= SNR_OK))
-    hops_ok = sum(1 for n in nei if (n["hops_avg"] is not None and n["hops_avg"] <= HOPS_TARGET_MAX))
 
+    # Vecinos "buenos" por SNR mediana
+    n_good_snr = sum(
+        1 for n in nei
+        if (n.get("snr_p50") is not None and float(n["snr_p50"]) >= SNR_OK)
+    )
+
+    # Vecinos directos típicos (hops 0-1 en media)
+    n_direct = sum(
+        1 for n in nei
+        if (n.get("hops_avg") is not None and float(n["hops_avg"]) <= 1.0)
+    )
+
+    # Vecinos con rutas cortas (<= objetivo)
+    n_hops_ok = sum(
+        1 for n in nei
+        if (n.get("hops_avg") is not None and float(n["hops_avg"]) <= HOPS_TARGET_MAX)
+    )
+
+    # Routers visibles (si venía enriquecido con nodos.txt)
+    n_routers_visible = sum(
+        1 for n in nei
+        if str(n.get("role") or "").upper() == "ROUTER"
+    )
+
+    # Fortaleza por p90 (si hay p90) para sugerencia de potencia
+    p90s = [float(n["snr_p90"]) for n in nei if n.get("snr_p90") is not None]
+    strong_ratio = (sum(1 for v in p90s if v >= P90_SNR_STRONG) / len(p90s)) if p90s else 0.0
+
+    # Perfil del nodo local (no confundir con rol Meshtastic)
     if n_total == 0:
-        role, why = "CLIENT_MUTE", ["Sin vecinos válidos recientes."]
-    elif n_good >= ROUTER_MIN_NEI and hops_ok >= ROUTER_MIN_NEI:
-        role, why = "REPEATER/ROUTER", [f"{n_good} vecinos con SNR≥{SNR_OK} y hops medios ≤{HOPS_TARGET_MAX}."]
-    elif n_good >= 3 and hops_ok >= 3:
-        role, why = "CLIENT", ["Vecindario moderado y rutas aceptables."]
+        profile = "aislado"
+        why_profile = ["Sin vecinos válidos recientes en la ventana."]
     else:
-        role, why = "CLIENT_MUTE", ["Pocos vecinos o enlaces pobres."]
+        # Heurística simple y estable: muchos vecinos buenos + muchos directos => nodo con potencial de tránsito
+        if n_good_snr >= max(6, ROUTER_MIN_NEI) and n_direct >= max(4, ROUTER_MIN_NEI - 2):
+            profile = "backbone_candidato"
+            why_profile = [
+                f"{n_good_snr} vecinos con SNR p50≥{SNR_OK} y {n_direct} directos (hops≤1).",
+                "Ubicación RF probablemente útil como punto de tránsito."
+            ]
+        elif n_good_snr >= 3 and n_hops_ok >= 3:
+            profile = "transito_util"
+            why_profile = [
+                f"Vecindario moderado: {n_good_snr} con SNR p50≥{SNR_OK} y {n_hops_ok} con hops medios ≤{HOPS_TARGET_MAX}.",
+            ]
+        else:
+            profile = "borde"
+            why_profile = ["Pocos vecinos o enlaces pobres/intermitentes."]
 
-    p90s = [n["snr_p90"] for n in nei if n["snr_p90"] is not None]
-    strong = (sum(1 for v in p90s if v >= P90_SNR_STRONG)/len(p90s)) if p90s else 0.0
-    if strong >= 0.6: txp, why2 = "BAJA-MEDIA", "Enlaces mayoritariamente fuertes; reducir potencia."
-    elif strong >= 0.3: txp, why2 = "MEDIA", "Enlaces mixtos; potencia media."
-    else: txp, why2 = "MEDIA-ALTA", "Enlaces débiles o escasos."
+    # Rol sugerido (compatibilidad): hoy solo tiene sentido sugerir ROUTER si faltan routers visibles
+    # y el nodo parece backbone. Si ya hay routers o no hay evidencia fuerte, CLIENT.
+    if profile == "aislado":
+        role = "CLIENT_MUTE"
+        why_role = ["Sin vecindario estable: priorizar silencio y ahorro de canal."]
+    elif profile == "backbone_candidato":
+        # Umbral de routers "suficientes": proporcional a tamaño del vecindario observado
+        routers_obj_local = max(1, min(CITY_BACKBONE_MAX, math.ceil(n_total / 20)))
+        if n_routers_visible < routers_obj_local:
+            role = "ROUTER"
+            why_role = [f"Routers visibles: {n_routers_visible} (< objetivo local {routers_obj_local})."]
+        else:
+            role = "CLIENT"
+            why_role = [f"Routers visibles: {n_routers_visible} (≥ objetivo local). Evitar competir en routing."]
+    else:
+        role = "CLIENT"
+        why_role = ["No hay evidencia suficiente para forzar ROUTER; mantener comportamiento adaptativo de CLIENT."]
 
-    hop_limit = DEFAULT_HOP_LIMIT if role != "REPEATER/ROUTER" else max(3, HOPS_TARGET_MAX)
-    if role == "REPEATER/ROUTER": beacon, telem = BEACON_ROUTER_S, TEL_ROUTER_S
-    else:                          beacon, telem = BEACON_CLIENT_S, TEL_CLIENT_S
+    # Potencia TX sugerida (no es un set automático; es una guía)
+    if strong_ratio >= 0.6:
+        txp, why_tx = "BAJA-MEDIA", "Enlaces mayoritariamente fuertes; bajar potencia reduce colisiones."
+    elif strong_ratio >= 0.3:
+        txp, why_tx = "MEDIA", "Enlaces mixtos; potencia media suele ser el punto dulce."
+    else:
+        txp, why_tx = "MEDIA-ALTA", "Enlaces débiles/escasos; subir potencia puede ayudar, con cuidado."
 
-    return {"role": role, "tx_power": txp, "hop_limit": hop_limit,
-            "beacon_s": beacon, "telemetry_s": telem, "rationale": why+[why2]}
+    # Parámetros sugeridos (baliza/telemetría/posición) — conservadores por defecto
+    # Nota: en Meshtastic moderno, la malla agradece menos ruido en nodos fijos.
+    if role == "ROUTER":
+        hop_limit = max(3, HOPS_TARGET_MAX)
+        beacon_s = BEACON_ROUTER_S
+        telemetry_s = TEL_ROUTER_S
+        position_s = 900  # 15 min, razonable para backbone
+    elif role == "CLIENT_MUTE":
+        hop_limit = DEFAULT_HOP_LIMIT
+        beacon_s = max(BEACON_CLIENT_S, 1800)
+        telemetry_s = max(TEL_CLIENT_S, 3600)
+        position_s = 3600
+    else:
+        hop_limit = DEFAULT_HOP_LIMIT
+        beacon_s = BEACON_CLIENT_S
+        telemetry_s = TEL_CLIENT_S
+        position_s = 1800  # 30 min para nodo fijo / de apoyo
+
+    rationale = why_profile + why_role + [why_tx]
+
+    return {
+        "role": role,                 # compatibilidad con versiones previas
+        "profile": profile,           # nuevo
+        "tx_power": txp,
+        "hop_limit": hop_limit,
+        "beacon_s": beacon_s,
+        "telemetry_s": telemetry_s,
+        "position_s": position_s,     # nuevo
+        "rationale": rationale,
+        "scores": {                   # nuevo: útiles para depurar la heurística
+            "neighbors_total": n_total,
+            "neighbors_good_snr": n_good_snr,
+            "neighbors_direct": n_direct,
+            "neighbors_hops_ok": n_hops_ok,
+            "routers_visible": n_routers_visible,
+            "strong_ratio": round(strong_ratio, 3),
+        },
+    }
 
 def _recommend_per_neighbor(n: Dict[str, Any]) -> Dict[str, Any]:
-    action = []
-    snr_p50   = n.get("snr_p50")
-    snr_p90   = n.get("snr_p90")
-    hops_avg  = n.get("hops_avg")
-    dup_ratio = float(n.get("dup_ratio", 0.0))
+    """
+    Recomendación por vecino (para auditoría integral).
 
-    if snr_p50 is not None and snr_p50 >= SNR_OK and (hops_avg if hops_avg is not None else 99) <= HOPS_TARGET_MAX:
-        action.append("Candidato a ROUTER si ubicación elevada y 24/7")
-    if snr_p90 is not None and snr_p90 >= P90_SNR_STRONG:
-        action.append("Bajar potencia TX para reducir interferencia local")
+    Ajustada a Meshtastic moderno:
+      - Evita lenguaje "repetidor".
+      - Se centra en calidad de enlace, estabilidad y (si se conoce) rol del vecino.
+    """
+    action: List[str] = []
+
+    snr_p50 = n.get("snr_p50")
+    snr_p90 = n.get("snr_p90")
+    hops_avg = n.get("hops_avg")
+    dup_ratio = float(n.get("dup_ratio", 0.0))
+    role = str(n.get("role") or "").upper()
+
+    hops_v = (float(hops_avg) if hops_avg is not None else 99.0)
+
+    # Candidato a backbone (si está 24/7 y bien ubicado)
+    if snr_p50 is not None:
+        try:
+            if float(snr_p50) >= SNR_OK and hops_v <= HOPS_TARGET_MAX:
+                action.append("Enlace sólido: buen candidato a nodo fijo (24/7) si está bien ubicado.")
+        except Exception:
+            pass
+
+    # Si ya es ROUTER y además fuerte, sugerir reducir TX / cadencias
+    if role == "ROUTER" and snr_p90 is not None:
+        try:
+            if float(snr_p90) >= P90_SNR_STRONG:
+                action.append("Router fuerte: considerar bajar TX/cadencias para reducir colisiones locales.")
+        except Exception:
+            pass
+
+    # Duplicados altos suelen ser síntoma de demasiado tráfico o reenvíos redundantes
     if dup_ratio >= 0.3:
-        action.append("Revisar cadencia de balizas/telemetría; probable redundancia")
-    if (hops_avg if hops_avg is not None else 99) > HOPS_TARGET_MAX:
-        action.append("No usar como repetidor; priorizar enlace hacia backbone o reubicar")
+        action.append("Duplicados altos: revisar intervalos de posición/telemetría y canales activos.")
+
+    # Enlaces de demasiados saltos no son buenos como base
+    if hops_v > HOPS_TARGET_MAX:
+        action.append("Rutas largas: no es buen apoyo de backbone; priorizar reubicación o enlace directo a routers.")
+
     if not action:
-        action.append("Mantener como CLIENT_MUTE")
+        action.append("Sin acción: mantener configuración actual.")
 
     return {
         "nid": n.get("nid"),
@@ -1011,9 +1143,9 @@ async def auditoria_red_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     msg = (
         f"Auditoría de red ({hours} h)\n"
         f"Vecinos válidos: {len(nei)} — Objetivo routers ciudad: {routers_obj}\n\n"
-        f"Rol sugerido: {local_rec['role']}\n"
+        f"Perfil: {local_rec.get('profile','?')} | Rol sugerido: {local_rec['role']}\n"
         f"TX: {local_rec['tx_power']} | hop_limit: {local_rec['hop_limit']}\n"
-        f"Baliza: {local_rec['beacon_s']} s | Telemetría: {local_rec['telemetry_s']} s\n"
+        f"Baliza: {local_rec['beacon_s']} s | Telemetría: {local_rec['telemetry_s']} s | Posición: {local_rec.get('position_s','?')} s\n"
         f"Motivos: {'; '.join(local_rec['rationale'])}\n\n"
         f"Vecinos principales:\n" + "\n".join(lines)
     )
@@ -1203,8 +1335,9 @@ async def auditoria_integral_cmd(update: Update, context: ContextTypes.DEFAULT_T
         f"Vecinos válidos: {len(nei)} — Objetivo routers ciudad: {routers_obj}\n"
         f"Carga estimada de canal: {duty_pct}  •  Duplicados: {dup_pct}\n"
         f"Configuración sugerida para este nodo:\n"
-        f"Rol: {local_rec['role']} | TX: {local_rec['tx_power']} | hop_limit: {local_rec['hop_limit']}\n"
-        f"Baliza: {local_rec['beacon_s']} s | Telemetría: {local_rec['telemetry_s']} s\n"
+        f"Perfil: {local_rec.get('profile','?')} | Rol sugerido: {local_rec['role']}\n"
+        f"TX: {local_rec['tx_power']} | hop_limit: {local_rec['hop_limit']}\n"
+        f"Baliza: {local_rec['beacon_s']} s | Telemetría: {local_rec['telemetry_s']} s | Posición: {local_rec.get('position_s','?')} s\n"
         f"Motivos: {'; '.join(local_rec['rationale'])}\n"
     )
 

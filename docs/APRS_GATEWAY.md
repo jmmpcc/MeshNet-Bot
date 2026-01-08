@@ -24,11 +24,188 @@
         el gateway lo reenvía automáticamente al **canal correspondiente** de Meshtastic.
       - El reenvío se realiza hacia el **broker JSONL** (`BROKER_HOST:8765`).
 
-📤 **Ejemplo de flujo:**
+### 🔁 Mirror Mesh → APRS-IS (monitorización remota)
+Se incorpora un nuevo modo de funcionamiento que permite **reenviar mensajes de la malla Meshtastic a APRS-IS**, con el objetivo de **recibirlos en clientes APRS como APRSDroid cuando el usuario está fuera de la red Mesh**.
+
+- Los mensajes se envían como **mensajes APRS dirigidos** a un indicativo concreto (por ejemplo, `EB2EAS-7`).
+- Compatible con **recepción móvil vía APRSDroid / APRS-IS**.
+- No interfiere con el uso normal de APRS ni con el tráfico RF local.
+
+---
+
+### 🎛️ Nuevo comando de control: `/aprsis_push`
+Se añade un nuevo comando al bot de Telegram para controlar dinámicamente el mirror Mesh → APRS-IS.
+
+### Comandos disponibles:
 ```
+/aprsis_push on <canal|all>
+/aprsis_push off
+```
+
+### ⚙️ NUEVAS VARIABLES DE ENTORNO (.env)
+Se añaden variables para control estático (arranque) del mirror Mesh → APRS-IS
+```
+
+  --- Mirror Mesh -> APRS-IS (recepción en APRSDroid) ---
+  APRSIS_PUSH_ENABLED=0
+  APRSIS_PUSH_TO=EB2EAS-7
+  APRSIS_PUSH_CHANNELS=all
+  APRSIS_PUSH_PREFIX=1
+  APRSIS_PUSH_MIN_GAP_S=1.0
+
+Descripción:
+
+  APRSIS_PUSH_ENABLED
+  Activa/desactiva el mirror al arrancar el sistema.
+
+  APRSIS_PUSH_TO
+  Indicativo APRS destino (usuario móvil).
+
+  APRSIS_PUSH_CHANNELS
+  Canales Mesh a reenviar (all o lista 0,1,2).
+
+  APRSIS_PUSH_PREFIX
+  Añade [CHx] al texto enviado a APRS-IS.
+
+  APRSIS_PUSH_MIN_GAP_S
+  Rate limit para evitar saturar APRS-IS.
+
+```
+
+### 🔄 NUEVA TAREA ASÍNCRONA
+  task_mesh_channels_to_aprsis()
+
+```
+Nueva tarea que:
+
+    . Escucha el stream JSONL del broker.
+
+    Detecta mensajes TEXT_MESSAGE_APP normales (no /aprs).
+
+    . Filtra por canal configurado.
+
+    Evita ecos y bucles APRS↔Mesh.
+
+    . Publica mensajes a APRS-IS como mensajes dirigidos.
+
+    Incluye:
+
+      Reconexión automática.
+      Backoff progresivo.
+      Rate limit configurable.
+      Totalmente independiente del gate APRS→Mesh.
+```
+### 🧭 ARQUITECTURA DE FLUJOS (ACTUALIZADA)
+    
+    APRS RF
+
+    RF → APRS-IS
+    iGate RX clásico (si APRS-IS está configurado).
+
+    RF → Mesh
+    Solo si el gate APRS→Mesh está activo (/aprs_on).
+
+    Mesh
+
+    Mesh → APRS (manual)
+    Mediante /aprs.
+
+    Mesh → APRS-IS (automático, nuevo)
+    Mediante /aprsis_push.
+
+    Todos los flujos son independientes y combinables.
+
+### 🔐 SEGURIDAD Y CONTROL
+
+    El mirror Mesh → APRS-IS está desactivado por defecto.
+
+    Requiere activación explícita por:
+
+    .env (modo permanente), o
+
+    comando /aprsis_push (modo recomendado).
+
+    No afecta a emergencias APRS.
+
+    No modifica el comportamiento RF estándar.
+
+### 🧩 COMPATIBILIDAD
+
+Compatible con:
+
+    APRSDroid
+
+    aprs.fi
+
+    Cualquier cliente APRS-IS
+
+    No rompe:
+
+    /aprs_on
+
+    /aprs
+
+    Gate APRS RF
+
+    Emergencias
+
+    Broker
+
+    Bridges Mesh
+
+### Ejemplos:
+
+  Recibir solo el canal 1 en APRSDroid:
+
+    /aprsis_push on 1
+
+Recibir todos los canales:
+
+    /aprsis_push on all
+
+Desactivar el envío a APRS-IS:
+
+    /aprsis_push off
+
+
+### 📤 **Ejemplo de flujo:**
+
        Telegram → Bot → UDP 9464 → meshtastic_to_aprs.py → Soundmodem/Direwolf → RF (APRS)
                                                         ↳ opcional: APRS-IS (aprs.fi)
-```
+
+      1.- APRS RF → APRS-IS
+           Cualquier trama recibida por RF se sube a APRS-IS si el iGate está activo.
+
+      2.- APRS RF → Mesh (Broker)
+           La misma trama, en paralelo, se reinyecta a Mesh si la pasarela está habilitada.
+
+      3.- Mesh → APRS-IS
+            Mensajes originados en Mesh (bot, nodos) también se publican en APRS-IS según reglas.
+
+          En términos prácticos:
+
+            Una transmisión desde un walkie:
+
+                Aparece en APRSDroid / aprs.fi
+
+                Aparece en la red Mesh (canal correspondiente o emergencia)
+
+          Esto convierte el sistema en un doble gateway simultáneo:
+
+                iGate APRS clásico (RF ↔ Internet)
+
+      4.-Pasarela APRS ↔ Mesh
+
+          No hay exclusión automática entre ambos caminos.
+          Mientras la pasarela esté activa, una trama APRS vive en los dos mundos a la vez.
+
+    Usuario de viaje, fuera de cobertura Mesh, solo con APRSDroid.
+
+        Envía mensajes a la malla mediante APRS.
+        Recibe en tiempo real los mensajes de uno o varios canales Mesh en el móvil.
+        Control total desde Telegram.
+        Sin exponer innecesariamente toda la red a APRS-IS.
+    
 
 ## Extensiones del Gateway APRS en MeshNet “The Boss”
 
