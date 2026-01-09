@@ -576,6 +576,47 @@ def _rssi_quality_label(rssi) -> str:
 
 # ===================== Fin helpers ubicación =====================
 
+def _send_via_broker_wait(text: str, ch: int, dest: str | None = None, ack: bool = False, timeout: float = 20.0) -> dict:
+    """
+    Envío síncrono al broker (sin cola) para obtener resultado real y, si aplica, ACK.
+    Usa cmd=SEND_TEXT_WAIT y devuelve:
+      {"ok": True, "result": {"ok": bool, "packet_id": int|None, "ack": bool, "ack_mode": "unicast"|"any"|None, "error": str|None}}
+    """
+    payload = {
+        "cmd": "SEND_TEXT_WAIT",
+        "params": {
+            "text": str(text),
+            "ch": int(ch),
+            "dest": (None if not dest or str(dest).lower() == "broadcast" else str(dest)),
+            "ack": bool(ack),
+        }
+    }
+    data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+
+    try:
+        host = (os.getenv("BROKER_CTRL_HOST", "").strip() or "127.0.0.1")
+        port = int(os.getenv("BROKER_CTRL_PORT", os.getenv("BACKLOG_PORT", "8766")))
+    except Exception:
+        host, port = "127.0.0.1", 8766
+
+    try:
+        with socket.create_connection((host, port), timeout=float(timeout)) as s:
+            s.sendall(data)
+            s.settimeout(float(timeout))
+            buf = b""
+            while True:
+                b = s.recv(65536)
+                if not b:
+                    break
+                buf += b
+                if b"\n" in b:
+                    break
+        raw = buf.decode("utf-8", "ignore").strip()
+        if not raw:
+            return {"ok": False, "error": "empty response"}
+        return json.loads(raw)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
 def _send_via_broker_queue(text: str, ch: int, dest: str | None = None, ack: bool = False, timeout: float = 3.0) -> dict:
@@ -1234,9 +1275,19 @@ def _broker_send_text(ch: int, text: str, dest: str | None, ack: bool) -> dict:
     }
     r = _broker_rpc("SEND_TEXT", params)
     ok = bool(r.get("ok"))
-    out = {"ok": ok, "packet_id": (r.get("packet_id") if ok else None)}
+    out = {
+        "ok": ok,
+        "packet_id": (r.get("packet_id") if ok else None),
+        # Si el broker devuelve campos de ACK, propagarlos (útil en broadcast best-effort)
+        "ack": r.get("ack"),
+        "ack_mode": r.get("ack_mode"),
+    }
+    # Nota: el broker puede devolver ok=True y error="NO_ANY_ACK" (broadcast sin confirmación)
+    err = r.get("error")
     if not ok:
-        out["error"] = r.get("error") or "send_failed"
+        out["error"] = err or "send_failed"
+    elif err:
+        out["error"] = err
     return out
 
 # === [NUEVO] Helper para consultar estado profundo del broker por el puerto de control UDP ===
@@ -4721,6 +4772,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("canales", "Ver canales configurados en el nodo"),
         BotCommand("aprs", "/aprs [en] [min1,min2,..] | [canal N] texto | /aprs N texto | /aprs CALL: texto"),
         BotCommand("aprs_on", "Activa el gate APRS→Mesh (tráfico recibido en APRS SE reenviará a la malla)"),
+        BotCommand("aprsis_push","[Ch/all] ó aprsis_push off ] Activa/Descativa tráfico Mesh->APRS-IS)"),
         BotCommand("aprs_off", "Desactiva el gate APRS→Mesh (tráfico recibido en APRS No se reenviará a la malla)"),
         BotCommand("reconectar", "Forzar reconexión del broker [/reconectar [seg]]"),
         BotCommand("notificaciones", "Activar/Desactivar avisos de tareas"),
@@ -6307,6 +6359,60 @@ except NameError:
     APRS_CTRL_PORT = 9464
 
 
+# ===================== EMERG desde /enviar → APRS (opcional) =====================
+import os as _os
+
+_TELEGRAM_EMERG_TO_APRS = str(_os.getenv("TELEGRAM_EMERG_TO_APRS", "0")).strip().lower() in ("1","true","yes","on")
+_TELEGRAM_EMERG_PREFIXES = [
+    p.strip().upper()
+    for p in (_os.getenv("APRS_EMERGENCY_KEYWORDS", "EMERG:,EMERGENCIA:,SOS:,PANPAN:,MAYDAY:") or "").split(",")
+    if p.strip()
+]
+
+def _extract_plain_text_for_emerg(raw: str) -> str:
+    """
+    Normaliza textos tipo:
+      - "EMERG: hola"
+      - "/msg broadcast: EMERG: hola"
+      - "/msg !abcd1234: EMERG: hola"
+    Devuelve solo el cuerpo para evaluar prefijo.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    low = s.lower()
+    if low.startswith("/msg "):
+        # intenta quedarte con lo que va tras el primer ':'
+        if ":" in s:
+            return s.split(":", 1)[1].strip()
+        return s
+    return s
+
+def _is_emerg_prefix(text: str) -> bool:
+    up = (text or "").strip().upper()
+    return any(up.startswith(p) for p in _TELEGRAM_EMERG_PREFIXES)
+
+def _udp_send_aprs_emerg(text: str, dest: str = "broadcast") -> bool:
+    if not _TELEGRAM_EMERG_TO_APRS:
+        return False
+    body = _extract_plain_text_for_emerg(text)
+    if not _is_emerg_prefix(body):
+        return False
+    try:
+        ctrl = {"mode": "aprs", "dest": dest, "text": body, "src": "telegram_enviar_emerg"}
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.sendto(json.dumps(ctrl).encode("utf-8"), (APRS_CTRL_HOST, APRS_CTRL_PORT))
+        finally:
+            try: s.close()
+            except Exception: pass
+        return True
+    except Exception:
+        return False
+# ===================== [FIN] EMERG /enviar → APRS =====================
+
+
+
 from typing import List
 
 def _parse_minutes_list(spec: str) -> List[int]:
@@ -6670,6 +6776,80 @@ async def aprs_off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         try: s.close()
         except Exception: pass
 
+async def aprsis_push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Activa o desactiva el envío de mensajes Mesh → APRS-IS
+    para poder recibirlos en APRSDroid (via APRS-IS).
+
+    Uso:
+      /aprsis_push on <canal|all>
+      /aprsis_push off
+    """
+    bump_stat(update.effective_user.id, update.effective_user.username or "", "aprsis_push")
+
+    args = context.args or []
+
+    if not args:
+        await update.effective_message.reply_text(
+            "Uso:\n"
+            "/aprsis_push on <canal|all>\n"
+            "/aprsis_push off"
+        )
+        return
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(1.0)
+
+    try:
+        sub = args[0].lower()
+
+        if sub == "off":
+            msg = {
+                "mode": "aprsis_push",
+                "enabled": 0
+            }
+            s.sendto(json.dumps(msg).encode("utf-8"), (APRS_CTRL_HOST, APRS_CTRL_PORT))
+            await update.effective_message.reply_text(
+                "📡 APRS-IS push: <b>OFF</b>",
+                parse_mode="HTML"
+            )
+            return
+
+        if sub == "on":
+            channels = args[1] if len(args) > 1 else "all"
+            msg = {
+                "mode": "aprsis_push",
+                "enabled": 1,
+                "channels": channels
+            }
+            s.sendto(json.dumps(msg).encode("utf-8"), (APRS_CTRL_HOST, APRS_CTRL_PORT))
+
+            try:
+                data, _ = s.recvfrom(4096)
+                ack = json.loads(data.decode("utf-8", "ignore"))
+                st = "ON" if ack.get("enabled") else "OFF"
+                ch = ack.get("channels", channels)
+                await update.effective_message.reply_text(
+                    f"📡 APRS-IS push: <b>{st}</b>\nCanales: <b>{ch}</b>",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                await update.effective_message.reply_text(
+                    f"📡 APRS-IS push: <b>ON</b>\nCanales: <b>{channels}</b>",
+                    parse_mode="HTML"
+                )
+            return
+
+        await update.effective_message.reply_text("Parámetro no válido. Usa on/off.")
+
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+
 # (Opcional) estado rápido
 async def aprs_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bump_stat(update.effective_user.id, update.effective_user.username or "", "aprs_status")
@@ -6756,6 +6936,13 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             parse_mode="HTML"
         )
         return ConversationHandler.END
+
+    # === (Opcional) Si empieza por EMERG:, también lo mando a APRS ===
+    try:
+        _udp_send_aprs_emerg(texto, dest="broadcast")
+    except Exception:
+        pass
+
 
     is_broadcast = node_id is None
 
@@ -6969,8 +7156,12 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     /enviar_ack [reintentos=N espera=S backoff=X] <dest|broadcast[:canal] | canal N> <texto…>
-      - Unicast (!id/alias/índice): intenta usar broker-queue con ACK; si no está disponible, usa pool con waitForAck y fallback de reintentos.
-      - Broadcast (explícito o 'canal N'): no existe ACK de aplicación → broker-queue primero para disparar bridge A→B.
+
+    Cambios:
+      - Usa SEND_TEXT_WAIT para poder devolver ACK/estado real al usuario.
+      - Unicast: exige ACK (si no llega → reintentos según parámetros).
+      - Broadcast/canal: si BROKER_ALLOW_BROADCAST_ACK=1 en el broker, permite "any-ack" (marca tipo app).
+        Si no está habilitado, el broker ignorará ack_flag en broadcast y el bot mostrará "sin confirmación".
     """
     # === [NUEVO] bloquear si el broker está en cooldown ===
     if await _abort_if_cooldown(update, context):
@@ -6984,23 +7175,22 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Mapa alias/índice → !id
     nodes_map = context.user_data.get("nodes_map")
     if not nodes_map:
-        nodes_map = build_nodes_mapping(80)
+        nodes_map = _load_nodes_map_fallback()
         context.user_data["nodes_map"] = nodes_map
 
-    # ❗ Resolver sin tocar 'args'. Si tras 'canal N' no hay destino, será broadcast implícito
-    node_id, canal, texto, _forced = parse_dest_channel_and_text(rest, nodes_map)
-
-    if not texto:
+    if not rest or len(rest) < 2:
         await update.effective_message.reply_text(
             "Uso: /enviar_ack [reintentos=N espera=S backoff=X] "
             "<número|!id|alias|broadcast[:canal] | canal N> <texto…>"
         )
         return ConversationHandler.END
 
-    # ===== BROADCAST (no hay ACK de aplicación) =====
-    if node_id is None:
-        out = None
-        pid = None
+    # Parse target
+    target = str(rest[0]).strip()
+    text = " ".join(str(x) for x in rest[1:]).strip()
+    if not text:
+        await update.effective_message.reply_text("Texto vacío.")
+        return ConversationHandler.END
 
         # PRIORIDAD 1: broker-queue (dispara bridge A→B)
         used_path = "broker-queue"
@@ -12635,14 +12825,26 @@ async def _broker_listen_loop_jsonl(chat_id: int, listen_chan: Optional[int], co
                     src  = (evt.get("from") or evt.get("src") or evt.get("id") or "?")
                     txt  = (evt.get("text") or evt.get("payload") or "").strip()
 
+                    # ---- NUEVO: detectar marca de ruta añadida por el bridge y presentarla en Telegram
+                    route_line = ""
+                    if txt:
+                        # Acepta tanto flecha unicode como ascii
+                        if "[BRIDGE B→A]" in txt or "[BRIDGE B->A]" in txt:
+                            route_line = "[BRIDGE B→A]\n"
+                            txt = txt.replace("[BRIDGE B→A]", "").replace("[BRIDGE B->A]", "").strip()
+                        elif "[BRIDGE C→A]" in txt or "[BRIDGE C->A]" in txt:
+                            route_line = "[BRIDGE C→A]\n"
+                            txt = txt.replace("[BRIDGE C→A]", "").replace("[BRIDGE C->A]", "").strip()
+
                     ts   = time.strftime("%H:%M:%S")
                     header = f"📡 [{ts}] ch{ch if ch is not None else '?'}"
                     if rf is not None:
                         header += f"/rf{rf}"
                     header += f" | {app} | {src}\n"
-                    body = f"📝 {txt}" if txt else ""
+                    #body = f"📝 {txt}" if txt else ""
+                    body = (route_line + f"📝 {txt}") if txt else route_line.strip()
 
-                    msg = header + body
+                    msg = header + (body if body else "")
                     # troceo para evitar límite de Telegram
                     for chunk in (msg[i:i+3800] for i in range(0, len(msg), 3800)):
                         if chunk:
@@ -13399,6 +13601,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("aprs", aprs_cmd))
     app.add_handler(CommandHandler("aprs_on", aprs_on_cmd))
     app.add_handler(CommandHandler("aprs_off", aprs_off_cmd))
+    app.add_handler(CommandHandler("aprsis_push", aprsis_push_cmd))
+
     # opcional:
     app.add_handler(CommandHandler("aprs_status", aprs_status_cmd))
 
