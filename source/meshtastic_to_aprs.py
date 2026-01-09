@@ -12,6 +12,7 @@ Sin verificacion APRS-IS
     python meshtastic_to_aprs_v5.4.py
 
 """
+
 from __future__ import annotations
 import asyncio, json, os, re, socket
 from typing import Optional, List, Tuple
@@ -576,6 +577,34 @@ class _AprsISClient:
                 raise
 
 _aprsis_client: _AprsISClient | None = None
+
+def _aprs_extract_message_body(info: str) -> str:
+    """
+    Si 'info' es un APRS message (':ADDRESSEE:texto'), devuelve solo 'texto'.
+    Si no lo es, devuelve 'info' tal cual.
+
+    Ejemplos:
+      ':EB2EAS-11 :[CH1] hola' -> '[CH1] hola'
+      ':DEST     :hola{12}'   -> 'hola{12}'
+    """
+    if not info:
+        return ""
+    s = str(info).strip()
+
+    # Formato APRS message: :ADDRESSEE:texto
+    # ADDRESSEE suele ser 9 chars (relleno con espacios), pero aceptamos 1..15 por robustez.
+    if s.startswith(":"):
+        try:
+            # Quitar el primer ':' y separar en dos ':'
+            rest = s[1:]
+            if ":" in rest:
+                _addr, body = rest.split(":", 1)
+                return (body or "").strip()
+        except Exception:
+            pass
+
+    return s
+
 
 def _mesh_add_src_prefix(src: str, msg: str) -> str:
     """
@@ -1578,13 +1607,16 @@ async def task_aprsis_to_meshtastic():
                     continue
 
                 # Paquete sintético para reutilizar el parser de canal/delay
+                body_text = _aprs_extract_message_body(inner_info)
+
                 pkt = {
                     "type": "message",
                     "src": src,
                     "dest": None,
-                    "info": inner_info,
-                    "text": inner_info,
+                    "info": inner_info,   # mantenemos original para debug/trazas
+                    "text": body_text,    # aquí debe estar el texto “real” donde vive [CHx]
                 }
+
 
                 ch, delay_min, msg = _parse_ch_and_delay_from_pkt(
                     pkt, default_ch=MESHTASTIC_CHANNEL
