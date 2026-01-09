@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.1.py
+Meshtastic_Broker_v6.2.py
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 
@@ -20,7 +20,6 @@ Uso rápido:
   python Meshtastic_Broker_v5.9.py --host 192.168.1.201 --bind 127.0.0.1 --port 8765 --verbose --no-heartbeat
   python Meshtastic_Broker_v5.9.py --host 192.168.1.201 --verbose --debug-packets
 """
-
 import argparse
 import base64
 import binascii
@@ -97,140 +96,11 @@ else:
     import fcntl
 
 
-# APRS UTILIZDADES
-
+# APRS UTILIZDADES 
 # [Meshtastic_Broker_v5.4.py] — cerca del código del servidor JSONL
 CLIENTS = {}  # {sock: {"buf": bytearray(), "last_ok": time.time()}}
 MAX_CLIENT_BUF = 256 * 1024  # 256 KB por cliente antes de cortar
 SLOW_CLIENT_GRACE = 6.0      # segundos de gracia de lentitud
-
-# ===================== APRS emergencia (Mesh → APRS) =====================
-# Si llega un TEXT_MESSAGE_APP que empiece por un prefijo (EMERG:, SOS:, ...),
-# se inyecta a la pasarela APRS vía UDP.
-#
-# Seguridad: DESACTIVADO por defecto.
-# Actívalo con: BROKER_APRS_EMERG=1
-#
-# Opcional: restringe por IDs origen:
-#   APRS_EMERG_ALLOWED_FROM="!abcd1234,!11223344"
-#
-# Config:
-#   APRS_CTRL_HOST=127.0.0.1
-#   APRS_CTRL_PORT=9464
-#   APRS_EMERG_PREFIXES="EMERG:,EMERGENCIA:,SOS:,PANPAN:,MAYDAY:"
-#   APRS_EMERG_DEST=broadcast
-#   APRS_EMERG_MIN_INTERVAL=5
-#
-import os as _os
-import json as _json
-import socket as _socket
-
-_BROKER_APRS_EMERG = str(_os.getenv("BROKER_APRS_EMERG", "0")).strip().lower() in ("1", "true", "yes", "on")
-_APRS_CTRL_HOST = (_os.getenv("APRS_CTRL_HOST", "127.0.0.1") or "127.0.0.1").strip()
-_APRS_CTRL_PORT = int((_os.getenv("APRS_CTRL_PORT", "9464") or "9464").strip())
-
-_APRS_EMERG_DEST = (_os.getenv("APRS_EMERG_DEST", "broadcast") or "broadcast").strip()
-_APRS_EMERG_KEYWORDS = [
-    k.strip().upper()
-    for k in os.getenv("APRS_EMERGENCY_KEYWORDS", "").split(",")
-    if k.strip()
-]
-
-
-_APRS_EMERG_ALLOWED_FROM = {
-    x.strip()
-    for x in (_os.getenv("APRS_EMERG_ALLOWED_FROM", "") or "").split(",")
-    if x.strip()
-}
-_APRS_EMERG_MIN_INTERVAL = float((_os.getenv("APRS_EMERG_MIN_INTERVAL", "5") or "5").strip())
-
-# Dedup por packet_id + rate-limit global para no inundar APRS
-_APRS_EMERG_SEEN: dict[int, float] = {}   # packet_id -> ts
-_APRS_EMERG_LAST_TS = 0.0
-
-def _is_emergency_text(text: str) -> bool:
-    """True si el texto empieza por alguno de los prefijos configurados."""
-    if not text:
-        return False
-    up = text.strip().upper()
-    return any(up.startswith(p) for p in _APRS_EMERG_KEYWORDS)
-
-def _aprs_udp_send(dest: str, text: str) -> bool:
-    """Inyecta en la pasarela APRS vía UDP. No lanza: devuelve True/False."""
-    try:
-        ctrl = {"mode": "aprs", "dest": dest, "text": text, "src": "broker_emerg"}
-        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-        try:
-            s.sendto(_json.dumps(ctrl).encode("utf-8"), (_APRS_CTRL_HOST, _APRS_CTRL_PORT))
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-        return True
-    except Exception:
-        return False
-
-def _maybe_forward_emergency_to_aprs(pkt: dict, text: str, canal: int | None, who_from: str | None) -> None:
-    """Reenvía a APRS si el texto es emergencia y está permitido."""
-    global _APRS_EMERG_LAST_TS
-
-    if not _BROKER_APRS_EMERG:
-        return
-    if not text or not _is_emergency_text(text):
-        return
-
-    # Restricción opcional por IDs origen (si se define lista)
-    if _APRS_EMERG_ALLOWED_FROM:
-        if not who_from:
-            return
-        if who_from not in _APRS_EMERG_ALLOWED_FROM and who_from.lstrip("!") not in _APRS_EMERG_ALLOWED_FROM:
-            return
-
-    # packet_id para dedup (según versión: id / packetId / packet_id)
-    pid = pkt.get("id") or pkt.get("packetId") or pkt.get("packet_id")
-    try:
-        pid_i = int(pid) if pid is not None else None
-    except Exception:
-        pid_i = None
-
-    now = time.time()
-
-    # Rate-limit global
-    if _APRS_EMERG_MIN_INTERVAL > 0 and (now - _APRS_EMERG_LAST_TS) < _APRS_EMERG_MIN_INTERVAL:
-        return
-
-    # Dedup por packet_id (TTL 10 min)
-    if pid_i is not None:
-        for k, ts in list(_APRS_EMERG_SEEN.items()):
-            if (now - ts) > 600:
-                _APRS_EMERG_SEEN.pop(k, None)
-        if pid_i in _APRS_EMERG_SEEN:
-            return
-
-    ok = _aprs_udp_send(_APRS_EMERG_DEST, text.strip())
-
-    if ok:
-        _APRS_EMERG_LAST_TS = now
-        if pid_i is not None:
-            _APRS_EMERG_SEEN[pid_i] = now
-        try:
-            print(f"[aprs] EMERG reenviado a APRS dest={_APRS_EMERG_DEST} ch={canal} from={who_from or '?'}", flush=True)
-        except Exception:
-            pass
-    else:
-        try:
-            print(f"[aprs] ⚠️ EMERG NO reenviado (UDP fallo) dest={_APRS_EMERG_DEST}", flush=True)
-        except Exception:
-            pass
-
-# ===================== [FIN] APRS emergencia =====================
-
-
-
-
-
-
 
 # --- Throttle de logs de espera TX ---
 _TX_WAIT_LOG_TS = 0.0
@@ -412,9 +282,6 @@ TRACEROUTE_LOG_PATH = os.path.join(OFFLINE_DIR, "broker_traceroute_log.jsonl")
 _TRACEROUTE_LOCK = threading.Lock()
 
 
-# --- Cache de NEIGHBORS para sobrevivir a reconexiones/ventanas de warm-up ---
-LAST_NEIGHBORS_CACHE: list[dict] = []
-LAST_NEIGHBORS_TS: float = 0.0
 
 # === NUEVO: referencia global al gestor de interfaz del broker ===
 BROKER_IFACE_MGR = None  # se rellena en main()
@@ -1098,28 +965,6 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
     """
     dest_id = None if (not destination or destination.lower() == "broadcast") else destination
 
-    # === NUEVO: ACK en broadcast/canal (confirmación "llegó a algún nodo") ===
-    #
-    # En Meshtastic, el ACK de aplicación (wantAck/waitForAck) está pensado para unicast.
-    # Aun así, el cliente oficial a veces muestra marca de confirmación cuando un mensaje
-    # difundido ha sido recibido por *algún* nodo (dependiendo de firmware/red).
-    #
-    # Para no romper el comportamiento actual:
-    #   - Por defecto SOLO se espera ACK en unicast.
-    #   - Si BROKER_ALLOW_BROADCAST_ACK=1 y require_ack=True, entonces también se
-    #     espera un "ACK cualquiera" en broadcast con un timeout corto.
-    #
-    # Riesgo conocido: si el firmware decide responder ACK en broadcast de forma masiva,
-    # puede generar ruido. Por eso está tras una variable de entorno.
-    _truthy = {"1", "true", "t", "yes", "y", "on", "si", "sí"}
-    ALLOW_BROADCAST_ACK = str(os.getenv("BROKER_ALLOW_BROADCAST_ACK", "0")).strip().lower() in _truthy
-    ACK_TIMEOUT_S = float(os.getenv("BROKER_ACK_WAIT_SEC", "15"))
-
-    # Regla final: solo esperamos ACK si:
-    #   - require_ack=True
-    #   - y (dest_id existe) o (broadcast permitido por env)
-    wait_ack = bool(require_ack) and (bool(dest_id) or ALLOW_BROADCAST_ACK)
-
     # 1) Preferente: usar la interfaz activa del broker
     try:
         mgr = globals().get("BROKER_IFACE_MGR")
@@ -1138,7 +983,7 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
             pkt = iface.sendText(
                 message,
                 destinationId=(dest_id if dest_id else "^all"),  # ← broadcast explícito
-                wantAck=bool(wait_ack),             # unicast por defecto; broadcast solo si se habilita
+                wantAck=bool(require_ack),          # ACK solo tiene sentido en unicast
                 wantResponse=False,
                 channelIndex=int(channel),
             )
@@ -1163,27 +1008,16 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
             except Exception:
                 pid = None
 
-            # === ACK ===
-            # Unicast: confirmación de entrega al destinatario.
-            # Broadcast (si se habilitó): confirmación "algún nodo lo recibió" (best-effort).
-            if wait_ack and pid is not None and hasattr(iface, "waitForAck"):
+            # Si se pide ACK (solo unicast) e iface lo soporta, esperar
+            if require_ack and dest_id and pid is not None and hasattr(iface, "waitForAck"):
                 try:
-                    ok_ack = bool(iface.waitForAck(pid, timeout=float(ACK_TIMEOUT_S)))
+                    ok_ack = bool(iface.waitForAck(pid, timeout=15.0))
                 except Exception:
                     ok_ack = False
-                if ok_ack:
-                    return {"ok": True, "packet_id": pid, "error": None, "ack": True, "ack_mode": ("unicast" if dest_id else "any")}
-
-                # Unicast: si no hay ACK, lo tratamos como fallo (para reintentos).
-                if dest_id:
-                    return {"ok": False, "packet_id": pid, "error": "NO_APP_ACK", "ack": False, "ack_mode": "unicast"}
-
-                # Broadcast/canal: el envío puede haber ocurrido igualmente; solo informamos que
-                # no hubo confirmación "algún nodo lo recibió" dentro del timeout.
-                return {"ok": True, "packet_id": pid, "error": "NO_ANY_ACK", "ack": False, "ack_mode": "any"}
+                return {"ok": ok_ack, "packet_id": pid, "error": (None if ok_ack else "NO_APP_ACK")}
 
             # Broadcast o sin ACK → OK con el envío
-            return {"ok": True, "packet_id": pid, "error": None, "ack": False, "ack_mode": None}
+            return {"ok": True, "packet_id": pid, "error": None}
     except Exception:
         # seguimos al fallback
         pass
@@ -1204,11 +1038,11 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
             text=message,
             dest_id=dest_id,
             channel_index=int(channel),
-            want_ack=bool(wait_ack),
+            want_ack=bool(require_ack),
         )
         ok = bool(res.get("ok"))
         pid = res.get("packet_id")
-        return {"ok": ok, "packet_id": pid, "error": (None if ok else res.get("error")), "ack": bool(res.get("ack")) if isinstance(res, dict) else False, "ack_mode": ("unicast" if dest_id else ("any" if wait_ack else None))}
+        return {"ok": ok, "packet_id": pid, "error": (None if ok else res.get("error"))}
     except Exception as e:
         return {"ok": False, "packet_id": None, "error": f"{type(e).__name__}: {e}"}
 
@@ -1631,9 +1465,9 @@ class _BacklogServer(threading.Thread):
                 resp = {"ok": True, "data": out}
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                 return
-
+            
             elif cmd == "FETCH_TELEMETRY":
-                # params: {"since": <segundos o epoch>, "node": "!id" (opcional), "limit": 200}
+                 # params: {"since": <segundos o epoch>, "node": "!id" (opcional), "limit": 200}
                 try:
                     since_raw = params.get("since", 0)
                     since = float(since_raw)
@@ -1648,13 +1482,12 @@ class _BacklogServer(threading.Thread):
                 except Exception as e:
                     resp = {"ok": False, "error": f"telemetry_error: {e}"}
 
+
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                 return
-
-            # ---------------------------------------------------------------------
-            # NUEVO: SEND_TEXT_WAIT (sin cola) para poder devolver ACK al bot
-            # ---------------------------------------------------------------------
-            elif cmd in {"SEND_TEXT", "SEND_TEXT_WAIT"}:
+        
+            # --- NUEVO: envío de texto vía la iface persistente del broker ---
+            elif cmd == "SEND_TEXT":
 
                 # === Veto por pausa/cooldown/barrera TX ===
                 try:
@@ -1670,77 +1503,55 @@ class _BacklogServer(threading.Thread):
                     resp = {"ok": False, "error": "cooldown_active", "cooldown_remaining": rem}
                     conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                     return
+        
 
                 text = params.get("text") or ""
                 if not isinstance(text, str) or not text:
                     resp = {"ok": False, "error": "missing text"}
-                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                    return
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); return
 
                 try:
                     ch = int(params.get("ch") if params.get("ch") is not None else 0)
                 except Exception:
                     resp = {"ok": False, "error": "invalid channel"}
-                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                    return
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); return
 
                 raw_dest = params.get("dest")
                 dest = None
                 if isinstance(raw_dest, str) and raw_dest.strip() and raw_dest.strip().lower() != "broadcast":
                     dest = raw_dest.strip()
 
-                # ACK: por defecto solo unicast.
-                # Para "broadcast any-ack" exige env BROKER_ALLOW_BROADCAST_ACK=1
-                _truthy = {"1", "true", "t", "yes", "y", "on", "si", "sí"}
-                allow_bcast_ack = str(os.getenv("BROKER_ALLOW_BROADCAST_ACK", "0")).strip().lower() in _truthy
-                ack_flag = bool(params.get("ack")) and (bool(dest) or allow_bcast_ack)
+                ack_flag = bool(params.get("ack")) and bool(dest)
 
-                # LOG
+                 # === [LOG] controlar recepción (antes de encolar)
                 try:
-                    print(f"[ctrl] {cmd} recv ch={int(ch)} dest={dest or 'broadcast'} len={len(text.encode('utf-8'))}", flush=True)
+                    print(f"[ctrl] SEND_TEXT recv ch={int(ch)} dest={dest or 'broadcast'} len={len(text.encode('utf-8'))}", flush=True)
                 except Exception as _e:
-                    print(f"[ctrl] {cmd} recv log error: {type(_e).__name__}: {_e}", flush=True)
+                    print(f"[ctrl] SEND_TEXT recv log error: {type(_e).__name__}: {_e}", flush=True)
 
-                if cmd == "SEND_TEXT":
-                    # === Cola (comportamiento actual, intacto) ===
-                    try:
-                        SENDQ.offer(
-                            {"channel": ch, "text": text, "destination": dest, "require_ack": ack_flag, "type": "text"},
-                            coalesce=False
-                        )
-                        resp = {"ok": True, "queued": True, "path": "broker-queue"}
-                    except Exception as e:
-                        resp = {"ok": False, "error": f"queue_error: {e}"}
-
-                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                    return
-
-                # === SEND_TEXT_WAIT: envío directo + espera ACK (si aplica) ===
+                # === [NUEVO] Encolar (no coalesce para textos de usuario)
                 try:
-                    r = _tasks_send_adapter(
-                        int(ch),
-                        str(text),
-                        (dest or "broadcast"),
-                        bool(ack_flag)
-                    )
-                    # r ya trae: ok, packet_id, error, ack, ack_mode
-                    resp = {"ok": True, "queued": False, "path": "broker-wait", "result": (r or {})}
-                except Exception as e:
-                    resp = {"ok": False, "error": f"send_wait_failed: {type(e).__name__}: {e}"}
 
-                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                return
+                    
+                    SENDQ.offer({"channel": ch, "text": text, "destination": dest, "require_ack": ack_flag, "type": "text"},
+                                coalesce=False)
+                    resp = {"ok": True, "queued": True, "path": "broker-queue"}
+                except Exception as e:
+                    resp = {"ok": False, "error": f"queue_error: {e}"}
+
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); return
 
             # --- NUEVO: estado del bridge embebido ---
             elif cmd == "BRIDGE_STATUS":
                 try:
                     st = bridge_status_in_broker()  # dict con info del bridge
+                    # Normalizamos por si el helper devuelve None
                     if not isinstance(st, dict):
                         st = {"enabled": False}
                     resp = {"ok": True, **st}
                 except Exception as e:
                     resp = {"ok": False, "error": f"bridge_status_failed: {type(e).__name__}: {e}"}
-                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); 
                 return
 
             # --- NUEVO: envío de texto vía lado B del bridge ---
@@ -1755,68 +1566,57 @@ class _BacklogServer(threading.Thread):
 
                 if side != "B":
                     resp = {"ok": False, "error": "only_side_B_supported"}
-                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); 
                     return
                 if not text:
                     resp = {"ok": False, "error": "missing text"}
-                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); 
                     return
 
                 try:
+                    # Este helper se encarga de reflejar el paquete hacia el lado B
                     bridge_mirror_outgoing_from_broker(
                         payload={"type": "text", "text": text, "channel": ch},
-                        direction="A2B"
+                        direction="A2B"  # semántica: enviamos desde A hacia B
                     )
                     resp = {"ok": True, "mirrored": True, "via": "B"}
                 except Exception as e:
                     resp = {"ok": False, "error": f"bridge_send_failed: {type(e).__name__}: {e}"}
 
-                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); 
                 return
 
-            # --- control del broker (lo que ya tenías) ---
+            # --- control del broker (pausa/reanuda/estado/desconexion) ---
             elif cmd in {"BROKER_PAUSE", "BROKER_RESUME", "BROKER_STATUS", "BRIDGE_STATUS", "BROKER_DISCONNECT", "FORCE_RECONNECT", "BROKER_QUIT"}:
+
                 mgr = globals().get("BROKER_IFACE_MGR")
                 if not mgr:
                     resp = {"ok": False, "error": "iface manager not ready"}
                 else:
                     try:
                         if cmd == "BROKER_PAUSE":
+                            # Cierra iface y bloquea reconexión hasta resume()
                             mgr.pause()
                             resp = {"ok": True, "status": "paused"}
                         elif cmd == "BROKER_RESUME":
-                            # Reanuda y obliga a reconexión real si el socket quedó en estado inconsistente
-                            try:
-                                COOLDOWN.clear()
-                            except Exception:
-                                pass
-
-                            try:
-                                mgr.resume()
-                            except Exception:
-                                pass
-
-                            # Muy importante: forzar al manager a soltar/rehacer la conexión
-                            # (evita “running pero connected=false” tras haber cedido el TCP a la CLI).
-                            try:
-                                if hasattr(mgr, "signal_disconnect"):
-                                    mgr.signal_disconnect()
-                            except Exception:
-                                pass
-
+                            COOLDOWN.clear()
+                            mgr.resume()
                             resp = {"ok": True, "status": "running"}
 
+                        # --- [NUEVO] Forzar desconexión con cooldown programado ---
                         elif cmd == "BROKER_DISCONNECT":
                             secs = int(params.get("seconds") or 3)
                             strict = bool(params.get("strict")) if "strict" in params else False
 
                             def _async_disconnect_and_resume(mgr, secs, strict):
+                                # 1) Forzar que el siguiente _on_disconnect use 'secs' en vez de 90
                                 try:
                                     with COOLDOWN_FORCE_LOCK:
                                         globals()["COOLDOWN_FORCE_NEXT"] = int(secs)
                                 except Exception:
                                     globals()["COOLDOWN_FORCE_NEXT"] = int(secs)
 
+                                # 2) Pausa + señal de desconexión suave (como ya hacías)
                                 try:
                                     if hasattr(mgr, "pause"):
                                         mgr.pause()
@@ -1828,6 +1628,7 @@ class _BacklogServer(threading.Thread):
                                 except Exception:
                                     pass
 
+                                # 3) Espera 'secs' y reanuda
                                 try:
                                     time.sleep(max(1, int(secs)))
                                 except Exception:
@@ -1844,70 +1645,83 @@ class _BacklogServer(threading.Thread):
                                 resp = {"ok": False, "error": "iface manager not ready"}
                             else:
                                 threading.Thread(target=_async_disconnect_and_resume, args=(mgr, secs, strict), daemon=True).start()
+                                # 💡 respuesta inmediata: el bot NO se queda esperando
                                 resp = {"ok": True, "scheduled": True, "seconds": int(secs)}
 
                         elif cmd == "FORCE_RECONNECT":
-                            try:
-                                import time as _t
-                                from tcpinterface_persistent import TCPInterfacePool
-                            except Exception:
-                                pass
-
-                            try:
+                                # Reset limpio + preparar ventana de gracia anti-escalado
                                 try:
-                                    with COOLDOWN_FORCE_LOCK:
+                                    import time as _t
+                                    from tcpinterface_persistent import TCPInterfacePool
+                                except Exception:
+                                    pass
+
+                                try:
+                                    # === 0) Cooldown corto para el siguiente _on_disconnect ===
+                                    # (se aplica una sola vez; NO tocar COOLDOWN_SECS base)
+                                    try:
+                                        with COOLDOWN_FORCE_LOCK:
+                                            globals()["COOLDOWN_FORCE_NEXT"] = 3   # 3s
+                                    except Exception:
                                         globals()["COOLDOWN_FORCE_NEXT"] = 3
-                                except Exception:
-                                    globals()["COOLDOWN_FORCE_NEXT"] = 3
 
-                                try:
-                                    now = _t.time()
-                                    globals()["_SUPPRESS_EARLY_ESC_UNTIL"]  = now + 45.0
-                                    globals()["_SUPPRESS_EARLY_ESC_REMAIN"] = int(globals().get("_SUPPRESS_EARLY_ESC_DEFAULT_REMAIN", 2))
-                                except Exception:
-                                    pass
+                                    # === 1) Ventana de gracia anti-escalado tras el reset ===
+                                    #   - Tiempo: 45s
+                                    #   - Contador: permitir suprimir hasta 2 "caídas tempranas"
+                                    try:
+                                        now = _t.time()
+                                        globals()["_SUPPRESS_EARLY_ESC_UNTIL"]  = now + 45.0
+                                        globals()["_SUPPRESS_EARLY_ESC_REMAIN"] = int(globals().get("_SUPPRESS_EARLY_ESC_DEFAULT_REMAIN", 2))
 
-                                try:
-                                    x = globals().get("TX_BLOCKED")
-                                    if x:
-                                        x.clear()
-                                except Exception:
-                                    pass
-                                try:
-                                    cd = globals().get("COOLDOWN")
-                                    if cd:
-                                        cd.clear()
-                                except Exception:
-                                    pass
+                                    except Exception:
+                                        pass
 
-                                try:
-                                    TCPInterfacePool.reset(
-                                        globals().get("RUNTIME_MESH_HOST") or "",
-                                        int(globals().get("RUNTIME_MESH_PORT") or 4403)
-                                    )
-                                    print("[ctrl] FORCE_RECONNECT → TCPInterfacePool.reset() aplicado.", flush=True)
+                                    # === 2) Limpieza de estados globales mínimos (sin romper) ===
+                                    try:
+                                        x = globals().get("TX_BLOCKED")
+                                        if x:
+                                            x.clear()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        cd = globals().get("COOLDOWN")
+                                        if cd:
+                                            cd.clear()
+                                    except Exception:
+                                        pass
+
+                                    # === 3) Reset de la sesión del pool TCP (cierra y reabrirá perezoso) ===
+                                    try:
+                                        TCPInterfacePool.reset(
+                                            globals().get("RUNTIME_MESH_HOST") or "",
+                                            int(globals().get("RUNTIME_MESH_PORT") or 4403)
+                                        )
+                                        print("[ctrl] FORCE_RECONNECT → TCPInterfacePool.reset() aplicado.", flush=True)
+                                    except Exception as e:
+                                        print(f"[ctrl] FORCE_RECONNECT → aviso: no se pudo resetear pool: {type(e).__name__}: {e}", flush=True)
+
+                                    # === 4) Señal suave al manager: desconecta y reanuda (garantiza no-paused) ===
+                                    try:
+                                        mgr = globals().get("BROKER_IFACE_MGR") or self.iface_mgr
+                                    except Exception:
+                                        mgr = None
+
+                                    try:
+                                        if mgr and hasattr(mgr, "signal_disconnect"):
+                                            mgr.signal_disconnect()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if mgr and hasattr(mgr, "resume"):
+                                            mgr.resume()   # estado no-pausado
+                                    except Exception:
+                                        pass
+
+                                    resp = {"ok": True, "status": "running", "action": "force_reconnect"}
                                 except Exception as e:
-                                    print(f"[ctrl] FORCE_RECONNECT → aviso: no se pudo resetear pool: {type(e).__name__}: {e}", flush=True)
+                                    resp = {"ok": False, "error": f"force_reconnect_failed: {type(e).__name__}: {e}"}
 
-                                try:
-                                    mgr = globals().get("BROKER_IFACE_MGR") or self.iface_mgr
-                                except Exception:
-                                    mgr = None
 
-                                try:
-                                    if mgr and hasattr(mgr, "signal_disconnect"):
-                                        mgr.signal_disconnect()
-                                except Exception:
-                                    pass
-                                try:
-                                    if mgr and hasattr(mgr, "resume"):
-                                        mgr.resume()
-                                except Exception:
-                                    pass
-
-                                resp = {"ok": True, "status": "running", "action": "force_reconnect"}
-                            except Exception as e:
-                                resp = {"ok": False, "error": f"force_reconnect_failed: {type(e).__name__}: {e}"}
 
                         elif cmd == "BRIDGE_STATUS":
                             try:
@@ -1917,6 +1731,7 @@ class _BacklogServer(threading.Thread):
                                 resp = {"ok": False, "error": f"bridge_status_failed: {type(e).__name__}: {e}"}
 
                         else:  # BROKER_STATUS
+                            # --- [FIJO] usar SIEMPRE el mismo singleton de cooldown desde globals() ---
                             c = globals().get("COOLDOWN", None)
                             mgr = globals().get("BROKER_IFACE_MGR", None)
 
@@ -1928,32 +1743,258 @@ class _BacklogServer(threading.Thread):
                             except Exception:
                                 is_paused = False
 
-                            # connected “real”: iface viva en el manager O flag de conexión estable
-                            iface_obj = None
-                            try:
-                                iface_obj = mgr.get_iface() if (mgr and hasattr(mgr, "get_iface")) else None
-                            except Exception:
-                                iface_obj = None
-
                             resp = {
                                 "ok": True,
                                 "status": ("paused" if (is_paused or is_cd) else "running"),
                                 "cooldown_remaining": (rem if is_cd else 0),
-                                "connected": (iface_obj is not None) or bool(globals().get("_IS_CONNECTED", False)),
+                                # --- [NUEVO]
+                                "connected": bool(globals().get("_IS_CONNECTED", False)),
+                                # --- [NUEVO] contexto útil para el bot/UI ---
                                 "node_host": str(globals().get("RUNTIME_MESH_HOST") or ""),
                                 "node_port": int(globals().get("RUNTIME_MESH_PORT") or 4403),
+                                # opcionales de diagnóstico (si los tienes a mano):
                                 "mgr_paused": bool(is_paused),
                                 "tx_blocked": bool(TX_BLOCKED.is_set()) if 'TX_BLOCKED' in globals() else False,
                             }
 
-                        conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                        return
+                            # [TRAZA extra (debug de referencia)]:
+                            try:
+                                print(f"[ctrl] BROKER_STATUS → status={resp['status']} rem={resp['cooldown_remaining']}  "
+                                    f"(id(COOLDOWN)={id(c) if c else None})", flush=True)
+                            except Exception:
+                                pass
 
                     except Exception as e:
-                        resp = {"ok": False, "error": f"control_failed: {type(e).__name__}: {e}"}
+                        resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                return
+
+            # --- NUEVO: lista de nodos actuales desde la iface persistente ---
+            elif cmd == "LIST_NODES":
+                try:
+                    limit = int(params.get("limit") or 0)
+                except Exception:
+                    limit = 0
+
+                mgr = globals().get("BROKER_IFACE_MGR") or globals().get("IFACE_POOL") or globals().get("POOL")
+                iface = None
+                try:
+                    if mgr is not None:
+                        if hasattr(mgr, "get_iface"):
+                            iface = mgr.get_iface()
+                        elif hasattr(mgr, "get_interface"):
+                            iface = mgr.get_interface()
+                        else:
+                            iface = getattr(mgr, "iface", None)
+                except Exception:
+                    iface = None
+
+                if iface is None:
+                    resp = {"ok": False, "error": "iface_unavailable"}
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                    return
+
+                import time as _t
+                now = int(_t.time())
+
+                def _iter_nodes(_iface):
+                    raw_nodes = getattr(_iface, "nodes", None)
+                    if raw_nodes and isinstance(raw_nodes, dict):
+                        it = raw_nodes.values()
+                    elif isinstance(raw_nodes, list):
+                        it = raw_nodes
+                    else:
+                        getnodes = getattr(_iface, "getNodes", None)
+                        it = getnodes() if callable(getnodes) else []
+
+                    out = []
+                    for n in (it or []):
+                        usr = (n.get("user") or {}) if isinstance(n, dict) else {}
+                        uid = (usr.get("id")
+                               or (n.get("id") if isinstance(n, dict) else None)
+                               or (n.get("num") if isinstance(n, dict) else None)
+                               or (n.get("nodeId") if isinstance(n, dict) else None)
+                               or "")
+                        alias = (usr.get("longName") or usr.get("shortName")
+                                 or (n.get("name") if isinstance(n, dict) else None)
+                                 or uid or "")
+                        metrics = (n.get("deviceMetrics") or n.get("metrics") or {}) if isinstance(n, dict) else {}
+                        snr = metrics.get("snr", (n.get("snr") if isinstance(n, dict) else None))
+                        last_heard = None
+                        try:
+                            last_heard = int(n.get("lastHeard") or n.get("last_heard") or n.get("heard") or 0)
+                        except Exception:
+                            last_heard = 0
+                        hops = n.get("hops") if isinstance(n, dict) else None
+                        if hops is None:
+                            hops = 0
+                        out.append({
+                            "id": uid, "alias": alias, "snr": snr,
+                            "lastHeard": last_heard, "ago": (now - last_heard) if last_heard else None,
+                            "hops": int(hops) if isinstance(hops, int) else 0
+                        })
+                    # ordenar por recencia (ago None al final)
+                    out.sort(key=lambda x: (x["ago"] if x["ago"] is not None else 10**9))
+                    return out
+
+                try:
+                    data = _iter_nodes(iface)
+                    if limit and limit > 0:
+                        data = data[:limit]
+                    resp = {"ok": True, "data": data}
+                except Exception as e:
+                    resp = {"ok": False, "error": f"nodes_error: {e}"}
+
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                return
+
+            # --- NUEVO: tabla de vecinos (neighbor info) desde la iface persistente ---
+            elif cmd == "NEIGHBORS":
+                mgr = globals().get("BROKER_IFACE_MGR") or globals().get("IFACE_POOL") or globals().get("POOL")
+                iface = None
+                try:
+                    if mgr is not None:
+                        if hasattr(mgr, "get_iface"):
+                            iface = mgr.get_iface()
+                        elif hasattr(mgr, "get_interface"):
+                            iface = mgr.get_interface()
+                        else:
+                            iface = getattr(mgr, "iface", None)
+                except Exception:
+                    iface = None
+
+                if iface is None:
+                    resp = {"ok": False, "error": "iface_unavailable"}
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                    return
+
+                neighbors = None
+                err = None
+                try:
+                    if hasattr(iface, "getNeighbors") and callable(getattr(iface, "getNeighbors")):
+                        neighbors = iface.getNeighbors()
+                    elif hasattr(getattr(iface, "radio", None), "getNeighborInfo"):
+                        neighbors = iface.radio.getNeighborInfo()
+                    elif hasattr(iface, "neighbors"):
+                        neighbors = getattr(iface, "neighbors")
+                except Exception as e:
+                    err = f"neighbors_call: {e}"
+
+                if neighbors is None:
+                    resp = {"ok": False, "error": err or "neighbors_unavailable"}
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                    return
+
+                # Normaliza a lista de dicts {id, rssi, snr, hops, via, lastHeard}
+                out = []
+                try:
+                    if isinstance(neighbors, dict):
+                        it = neighbors.values()
+                    else:
+                        it = neighbors
+                    for n in (it or []):
+                        if not isinstance(n, dict):
+                            continue
+                        nid = (n.get("id") or n.get("num") or n.get("nodeId") or n.get("fromId") or "")
+                        rssi = n.get("rssi")
+                        snr = n.get("snr")
+                        hops = n.get("hops")
+                        via = n.get("via") or n.get("next_hop")
+                        try:
+                            last_heard = int(n.get("lastHeard") or n.get("heard") or 0)
+                        except Exception:
+                            last_heard = 0
+                        out.append({
+                            "id": nid, "rssi": rssi, "snr": snr,
+                            "hops": int(hops) if isinstance(hops, int) else None,
+                            "via": via, "lastHeard": last_heard
+                        })
+                    resp = {"ok": True, "data": out}
+                except Exception as e:
+                    resp = {"ok": False, "error": f"neighbors_parse: {e}"}
+
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                return
+
+            # --- [NUEVO] comando: RUN_TRACEROUTE -----------------------------------------
+                        # --- [NUEVO] comando: RUN_TRACEROUTE -----------------------------------------
+            elif cmd == "RUN_TRACEROUTE":
+                    node = str(params.get("target") or params.get("node") or "").strip()
+                    if not node:
+                        resp = {"ok": False, "error": "missing target"}
                         conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                         return
 
+                    if not node.startswith("!"):
+                        node = "!" + node
+
+                    ok = False
+                    try:
+                        # Host/port REALES del nodo (los fijaste en main())
+                        mesh_host = globals().get("RUNTIME_MESH_HOST")
+                        mesh_port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
+
+                        # Gestor global de la interfaz persistente del broker
+                        mgr = globals().get("BROKER_IFACE_MGR")
+                        if mgr and hasattr(mgr, "acquire") and callable(mgr.acquire):
+                            iface = None
+                            try:
+                                try:
+                                    iface = mgr.acquire(mesh_host, mesh_port, timeout=4.0, reuse_only=True)
+                                except TypeError:
+                                    iface = mgr.acquire(mesh_host, mesh_port, timeout=4.0)
+
+                                if iface:
+                                    # Probar varias firmas según SDK
+                                    candidates = [
+                                        ("traceroute",     {"node_id": node}),
+                                        ("traceroute",     {"dest_id": node}),
+                                        ("traceroute",     {"id": node}),
+                                        ("sendTraceroute", {"dest_id": node}),
+                                        ("tracerouteNode", {"dest_id": node}),
+                                        ("requestTraceroute", {"dest_id": node}),
+                                        ("routeDiscovery", {"dest_id": node}),
+                                    ]
+                                    for name, kwargs in candidates:
+                                        fn = getattr(iface, name, None)
+                                        if not callable(fn):
+                                            continue
+                                        try:
+                                            import inspect
+                                            sig = inspect.signature(fn)
+                                            accepted = set(sig.parameters.keys())
+                                            safe_kwargs = {k: v for k, v in kwargs.items() if k in accepted}
+                                        except Exception:
+                                            safe_kwargs = kwargs
+                                        try:
+                                            fn(**safe_kwargs)  # no bloqueante
+                                            ok = True
+                                            break
+                                        except Exception:
+                                            continue
+                            finally:
+                                try:
+                                    if iface and hasattr(iface, "release"):
+                                        iface.release()
+                                except Exception:
+                                    pass
+                        # alternativa si defines self.run_traceroute(...)
+                        if (not ok) and hasattr(self, "run_traceroute"):
+                            try:
+                                self.run_traceroute(node)
+                                ok = True
+                            except Exception:
+                                ok = False
+
+                    except Exception:
+                        ok = False
+
+                    resp = {"ok": bool(ok)}
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                    return
+
+          
             else:
                 resp = {"ok": False, "error": "unknown cmd"}
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -1961,7 +2002,7 @@ class _BacklogServer(threading.Thread):
 
         except Exception as e:
             try:
-                resp = {"ok": False, "error": f"handler_error: {type(e).__name__}: {e}"}
+                resp = {"ok": False, "error": str(e)}
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
             except Exception:
                 pass
@@ -1970,7 +2011,6 @@ class _BacklogServer(threading.Thread):
                 conn.close()
             except Exception:
                 pass
-
 
 # Enganche automático para persistir sin tocar tus funciones:
 def _wrap_emitter_for_persistence():
@@ -2500,45 +2540,168 @@ class InterfaceManager:
         with self._lock:
             return self.iface
 
-    def _on_connect_ok(self):
-        """
-        Warm-up tras conectar:
-        - Dispara request/getNodes para poblar iface.nodes
-        - Intenta obtener neighbors una vez para activar tabla interna
-        Esto reduce la ventana en la que /NEIGHBORS y /NODES devuelven vacío tras un reconnect.
-        """
-        try:
-            iface = self.get_iface()
-            if not iface:
-                return
+    def _loop_OLD(self):
+        backoff = [2, 4, 8, 12, 20, 30, 45, 60]
+        idx = 0
 
-            # Poblar nodos (no bloquear si no existe)
+        while self._want_run:
+
+            self._reconnect_event.wait(timeout=5.0)
+            if not self._reconnect_event.is_set():
+                continue
+            
+            self._reconnect_event.clear()
+            # === [NUEVO] si está en pausa, no conectar
+            # === [TRAZA] si está en pausa, mostrar remaining (si hay cooldown)
+            if self._paused.is_set():
+                try:
+                    if COOLDOWN.is_active():
+                        rem = COOLDOWN.remaining()
+                        # imprime cada ~1s (ajustable); evita spam si quieres subiendo el paso
+                        print(f"[cooldown] ⏳ Pausado. Reintento cuando expire: quedan {rem}s", flush=True)
+                        time.sleep(5.0)
+                    else:
+                        time.sleep(0.2)
+                except Exception:
+                    time.sleep(0.2)
+                continue
+
+            
+            if not self.enable_reconnect and self.iface is not None:
+                continue
+
             try:
-                if hasattr(iface, "getNodes") and callable(getattr(iface, "getNodes")):
-                    iface.getNodes()
-                elif hasattr(iface, "requestNodes") and callable(getattr(iface, "requestNodes")):
-                    iface.requestNodes()
+                with self._lock:
+                    if self.iface:
+                        try: self.iface.close()
+                        except Exception: pass
+                        self.iface = None
             except Exception:
                 pass
 
-            # Intentar obtener vecinos (según SDK)
-            try:
-                if hasattr(iface, "getNeighbors") and callable(getattr(iface, "getNeighbors")):
-                    iface.getNeighbors()
-                elif hasattr(getattr(iface, "radio", None), "getNeighborInfo"):
-                    iface.radio.getNeighborInfo()
-                elif hasattr(iface, "neighbors"):
-                    _ = getattr(iface, "neighbors")
-            except Exception:
-                pass
+            while self._want_run:
+                
+                # === [NUEVO] Si ya tenemos conexión activa, no abras otra ===
+              
+                try:
 
-            # Marca “conectado en”
-            try:
-                globals()["_BROKER_CONNECTED_AT"] = time.time()
-            except Exception:
-                pass
-        except Exception:
-            pass
+                    try:
+                        if bool(globals().get("_IS_CONNECTED", False)) and (self.iface is not None):
+                            # ya estamos conectados; no crear una nueva interfaz
+                            idx = 0
+                            time.sleep(0.2)
+                            break
+                    except Exception:
+                        pass
+
+                    # === [NUEVO] Gate del Circuit Breaker ANTES de abrir socket
+                    if not CIRCUIT_BREAKER.can_attempt():
+                        time.sleep(1.0)
+                        continue
+
+                     # === [SUSTITUIR] Gate COOLDOWN/pausa por el snippet propuesto ===
+                    # respeta cooldown/pausa antes de intentar conectar
+                    try:
+                        c = globals().get("COOLDOWN")
+                        paused = bool(globals().get("MGR_PAUSED") and globals()["MGR_PAUSED"].is_set())
+                        if (c and hasattr(c, "is_active") and c.is_active()) or paused:
+                            # (opcional) log si quieres
+                            if self.verbose and c and hasattr(c, "remaining"):
+                                print(f"[cooldown] ⏳ Pausado. Reintento cuando expire: quedan {c.remaining()}s", flush=True)
+                            time.sleep(0.5)
+                            continue
+                    except Exception:
+                        pass
+                    
+                    # --- REEMPLAZA SOLO ESTA PARTE donde hoy tienes: new_iface = TCPInterface(hostname=self.host) ---
+                    try:
+                        # Si tu CLI permite puerto runtime, úsalo (ya lo guardas en globals en main)
+                        port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
+                    except Exception:
+                        port = 4403
+
+                    # === [NUEVO] Serializar la construcción de la interfaz para evitar dobles sockets ===
+                    with globals()["_CONNECT_LOCK"]:
+                        if globals().get("_CONNECTING"):
+                            # ya hay otro hilo intentando conectar; espera y reintenta el loop exterior
+                            time.sleep(0.3)
+                            continue
+                        globals()["_CONNECTING"] = True
+                        try:
+                            # (opcional) reset duro del pool antes de abrir, si vienes de un error/timeout
+                            try:
+                                from tcpinterface_persistent import TCPInterfacePool
+                                TCPInterfacePool.reset(globals().get("RUNTIME_MESH_HOST") or "", int(globals().get("RUNTIME_MESH_PORT") or 4403))
+                                time.sleep(0.1)
+                            except Exception:
+                                pass
+
+                            new_iface = TCPInterface(hostname=self.host)
+                            with self._lock:
+                                self.iface = new_iface
+                            idx = 0
+                        finally:
+                            globals()["_CONNECTING"] = False
+
+               
+                    CIRCUIT_BREAKER.record_success()
+
+                    # [NUEVO] Gracia post-conexión: deja respirar 1.5–2s antes de tráfico y de limpiar cooldown
+                    time.sleep(2)      
+                                   
+
+                    # ✅ conexión OK → limpiar cooldown si seguía armado
+                    try:
+                        if COOLDOWN.is_active():
+                            COOLDOWN.clear()
+                            if self.verbose:
+                                # NUEVO (mínimo): tras conectar, vuelve a cooldown base
+                                globals()["COOLDOWN_SECS"] = 90
+
+                                print("[cooldown] Limpio tras reconexión exitosa.", flush=True)
+                    except Exception:
+                        pass
+
+                    break
+
+                # === [NUEVO] Captura específica de errores de socket (WinError 10054, etc.) ===
+                except OSError as e:
+                    # Diferenciamos 10054 para un log más claro (peer cerró la conexión)
+
+                    try:
+                        CIRCUIT_BREAKER.record_error()
+                    except Exception:
+                        pass
+
+                    winerr = getattr(e, "winerror", None)
+                    is_10054 = (winerr == 10054) or ("10054" in str(e))
+                    delay = backoff[min(idx, len(backoff) - 1)]
+                    if self.verbose:
+                        if is_10054:
+                            print(f"[receiver] ⚠️ OSError 10054 conectando a {self.host}: "
+                                f"el host remoto cerró la conexión (reintento en {delay}s)",
+                                flush=True)
+                        else:
+                            print(f"[receiver] ⚠️ OSError conectando a {self.host}: {e} "
+                                f"(reintento en {delay}s)",
+                                flush=True)
+                    time.sleep(delay)
+                    idx += 1
+                    continue
+
+                # === EXISTENTE (no lo quites): captura genérica de cualquier otra excepción ===
+                except Exception as e:
+
+                    try:
+                        CIRCUIT_BREAKER.record_error()
+                    except Exception:
+                        pass
+
+                    delay = backoff[min(idx, len(backoff) - 1)]
+                    if self.verbose:
+                        print(f"[receiver] Fallo conectando a {self.host}: {e} (reintento en {delay}s)", flush=True)
+                    time.sleep(delay)
+                    idx += 1
 
 # === MODIFICADA: bucle del pool con anti-reentradas + lock interproceso (sin depender de self.port) ===
     def _loop(self):
@@ -2853,13 +3016,6 @@ class MeshReceiver:
 
             # === Persistencia para replay cuando sea texto de usuario ===
             if str(portnum) == "TEXT_MESSAGE_APP":
-
-                # === Reenvío EMERG Mesh → APRS (NUEVO) ===
-                try:
-                    _maybe_forward_emergency_to_aprs(pkt, text, canal, who_from)
-                except Exception:
-                    pass
-    
                 try:
                     append_offline_log({
                         "ts": int(_now_s()),
@@ -4077,3 +4233,4 @@ if __name__ == "__main__":
 
     # Ejecución normal del broker
     main()
+

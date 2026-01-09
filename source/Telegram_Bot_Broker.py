@@ -576,47 +576,6 @@ def _rssi_quality_label(rssi) -> str:
 
 # ===================== Fin helpers ubicación =====================
 
-def _send_via_broker_wait(text: str, ch: int, dest: str | None = None, ack: bool = False, timeout: float = 20.0) -> dict:
-    """
-    Envío síncrono al broker (sin cola) para obtener resultado real y, si aplica, ACK.
-    Usa cmd=SEND_TEXT_WAIT y devuelve:
-      {"ok": True, "result": {"ok": bool, "packet_id": int|None, "ack": bool, "ack_mode": "unicast"|"any"|None, "error": str|None}}
-    """
-    payload = {
-        "cmd": "SEND_TEXT_WAIT",
-        "params": {
-            "text": str(text),
-            "ch": int(ch),
-            "dest": (None if not dest or str(dest).lower() == "broadcast" else str(dest)),
-            "ack": bool(ack),
-        }
-    }
-    data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
-
-    try:
-        host = (os.getenv("BROKER_CTRL_HOST", "").strip() or "127.0.0.1")
-        port = int(os.getenv("BROKER_CTRL_PORT", os.getenv("BACKLOG_PORT", "8766")))
-    except Exception:
-        host, port = "127.0.0.1", 8766
-
-    try:
-        with socket.create_connection((host, port), timeout=float(timeout)) as s:
-            s.sendall(data)
-            s.settimeout(float(timeout))
-            buf = b""
-            while True:
-                b = s.recv(65536)
-                if not b:
-                    break
-                buf += b
-                if b"\n" in b:
-                    break
-        raw = buf.decode("utf-8", "ignore").strip()
-        if not raw:
-            return {"ok": False, "error": "empty response"}
-        return json.loads(raw)
-    except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
 def _send_via_broker_queue(text: str, ch: int, dest: str | None = None, ack: bool = False, timeout: float = 3.0) -> dict:
@@ -1275,19 +1234,9 @@ def _broker_send_text(ch: int, text: str, dest: str | None, ack: bool) -> dict:
     }
     r = _broker_rpc("SEND_TEXT", params)
     ok = bool(r.get("ok"))
-    out = {
-        "ok": ok,
-        "packet_id": (r.get("packet_id") if ok else None),
-        # Si el broker devuelve campos de ACK, propagarlos (útil en broadcast best-effort)
-        "ack": r.get("ack"),
-        "ack_mode": r.get("ack_mode"),
-    }
-    # Nota: el broker puede devolver ok=True y error="NO_ANY_ACK" (broadcast sin confirmación)
-    err = r.get("error")
+    out = {"ok": ok, "packet_id": (r.get("packet_id") if ok else None)}
     if not ok:
-        out["error"] = err or "send_failed"
-    elif err:
-        out["error"] = err
+        out["error"] = r.get("error") or "send_failed"
     return out
 
 # === [NUEVO] Helper para consultar estado profundo del broker por el puerto de control UDP ===
@@ -2426,76 +2375,36 @@ def _pause_broker_io_for_cli(context, max_wait_s: float = 4.0) -> str:
 
 def _resume_broker_io_after_cli(context, token: str) -> bool:
     """
-    Reanuda IO del broker después de ejecutar CLI (traceroute/refrescos), sin dejarlo
-    en un estado inconsistente.
-
-    Objetivos:
-      - Evitar quedarnos en paused por desajuste de pausas (pausas anidadas).
-      - Evitar "running pero connected=false" tras ceder el TCP a la CLI.
-      - Si queda inconsistente: intentar RESUME y, si hace falta, FORCE_RECONNECT.
+    Decrementa el contador de pausa; si llega a 0, ordena reanudar al broker.
     """
-    import time
-
-    # Contador local de pausas (permite pausas anidadas: traceroute dentro de otra operación)
     try:
         cnt = int(context.bot_data.get("broker_io_pause_count", 0))
     except Exception:
         cnt = 0
 
-    # Si hay pausas anidadas, solo decrementa y no toques al broker todavía
-    if cnt > 1:
+    if cnt <= 1:
+        context.bot_data["broker_io_pause_count"] = 0
+        r = _broker_ctrl("BROKER_RESUME")
+        return bool(r.get("ok"))
+    else:
         context.bot_data["broker_io_pause_count"] = cnt - 1
         return True
 
-    # Última pausa: reanudar de verdad
-    context.bot_data["broker_io_pause_count"] = 0
 
-    # 1) RESUME lógico
-    r = _broker_ctrl("BROKER_RESUME")
-    if not bool(r.get("ok")):
-        return False
+# === Homogeneización de nombres (aliases) para helpers de pausa CLI ===
+# === Homogeneización de nombres (aliases) para helpers de pausa CLI ===
+try:
+    if 'pause_broker_from_exclusive' not in globals() and 'pause_broker_for_exclusive' in globals():
+        pause_broker_from_exclusive = pause_broker_for_exclusive
 
-    # 2) Verificar salida real de paused
-    t0 = time.time()
-    last = None
-    while time.time() - t0 < 6.0:
-        st = _broker_ctrl("BROKER_STATUS", timeout=2.0)
-        last = st
-        if st.get("ok") and st.get("status") == "running" and not bool(st.get("mgr_paused", False)):
-            break
-        time.sleep(0.25)
+    if 'resume_broker_from_exclusive' not in globals() and 'resume_broker_after_exclusive' in globals():
+        resume_broker_from_exclusive = resume_broker_after_exclusive
+except Exception:
+    pass
 
-    # Si sigue en paused, reintentar RESUME una vez
-    if last and last.get("ok") and last.get("status") == "paused":
-        _broker_ctrl("BROKER_RESUME")
-        t1 = time.time()
-        while time.time() - t1 < 4.0:
-            st = _broker_ctrl("BROKER_STATUS", timeout=2.0)
-            last = st
-            if st.get("ok") and st.get("status") == "running" and not bool(st.get("mgr_paused", False)):
-                break
-            time.sleep(0.25)
 
-    # 3) Si está running pero sigue reportando connected=false, forzar reconexión dura
-    if last and last.get("ok"):
-        if last.get("status") == "running" and not bool(last.get("connected", False)):
-            _broker_ctrl("FORCE_RECONNECT", timeout=3.0)
 
-            t2 = time.time()
-            while time.time() - t2 < 12.0:
-                st = _broker_ctrl("BROKER_STATUS", timeout=2.0)
-                if st.get("ok") and st.get("status") == "running" and not bool(st.get("mgr_paused", False)) and bool(st.get("connected", False)):
-                    return True
-                time.sleep(0.35)
-
-            return False
-
-    # Estado final: al menos no pausado
-    st = _broker_ctrl("BROKER_STATUS", timeout=2.0)
-    if st.get("ok"):
-        return st.get("status") == "running" and not bool(st.get("mgr_paused", False))
-
-    return True
+# ===================== MODIFICADA – helper CLI robusto y cross-platform =====================
 def _run_cli_nodes_with_retry(
     host: str,
     attempts: int = 2,
@@ -4812,7 +4721,6 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("canales", "Ver canales configurados en el nodo"),
         BotCommand("aprs", "/aprs [en] [min1,min2,..] | [canal N] texto | /aprs N texto | /aprs CALL: texto"),
         BotCommand("aprs_on", "Activa el gate APRS→Mesh (tráfico recibido en APRS SE reenviará a la malla)"),
-        BotCommand("aprsis_push","Activar/Desactivar Mesh→APRS-IS: /aprsis_push on|off [ch|all]"),
         BotCommand("aprs_off", "Desactiva el gate APRS→Mesh (tráfico recibido en APRS No se reenviará a la malla)"),
         BotCommand("reconectar", "Forzar reconexión del broker [/reconectar [seg]]"),
         BotCommand("notificaciones", "Activar/Desactivar avisos de tareas"),
@@ -5593,7 +5501,7 @@ async def ver_nodos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     # Preparamos args para vecinos_cmd:
     #   /vecinos [max_n] [timeout] [hops_mode]
     # Aquí NO queremos filtrar hops, así que usamos hops_mode="all"
-    context.args = [str(max_n), "all", str(timeout)]
+    context.args = [str(max_n), str(timeout), "all"]
 
     # Reutilizamos la lógica probada de vecinos_cmd
     return await vecinos_cmd(update, context)
@@ -6399,60 +6307,6 @@ except NameError:
     APRS_CTRL_PORT = 9464
 
 
-# ===================== EMERG desde /enviar → APRS (opcional) =====================
-import os as _os
-
-_TELEGRAM_EMERG_TO_APRS = str(_os.getenv("TELEGRAM_EMERG_TO_APRS", "0")).strip().lower() in ("1","true","yes","on")
-_TELEGRAM_EMERG_PREFIXES = [
-    p.strip().upper()
-    for p in (_os.getenv("APRS_EMERGENCY_KEYWORDS", "EMERG:,EMERGENCIA:,SOS:,PANPAN:,MAYDAY:") or "").split(",")
-    if p.strip()
-]
-
-def _extract_plain_text_for_emerg(raw: str) -> str:
-    """
-    Normaliza textos tipo:
-      - "EMERG: hola"
-      - "/msg broadcast: EMERG: hola"
-      - "/msg !abcd1234: EMERG: hola"
-    Devuelve solo el cuerpo para evaluar prefijo.
-    """
-    s = (raw or "").strip()
-    if not s:
-        return ""
-    low = s.lower()
-    if low.startswith("/msg "):
-        # intenta quedarte con lo que va tras el primer ':'
-        if ":" in s:
-            return s.split(":", 1)[1].strip()
-        return s
-    return s
-
-def _is_emerg_prefix(text: str) -> bool:
-    up = (text or "").strip().upper()
-    return any(up.startswith(p) for p in _TELEGRAM_EMERG_PREFIXES)
-
-def _udp_send_aprs_emerg(text: str, dest: str = "broadcast") -> bool:
-    if not _TELEGRAM_EMERG_TO_APRS:
-        return False
-    body = _extract_plain_text_for_emerg(text)
-    if not _is_emerg_prefix(body):
-        return False
-    try:
-        ctrl = {"mode": "aprs", "dest": dest, "text": body, "src": "telegram_enviar_emerg"}
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.sendto(json.dumps(ctrl).encode("utf-8"), (APRS_CTRL_HOST, APRS_CTRL_PORT))
-        finally:
-            try: s.close()
-            except Exception: pass
-        return True
-    except Exception:
-        return False
-# ===================== [FIN] EMERG /enviar → APRS =====================
-
-
-
 from typing import List
 
 def _parse_minutes_list(spec: str) -> List[int]:
@@ -6816,80 +6670,6 @@ async def aprs_off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         try: s.close()
         except Exception: pass
 
-async def aprsis_push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Activa o desactiva el envío de mensajes Mesh → APRS-IS
-    para poder recibirlos en APRSDroid (via APRS-IS).
-
-    Uso:
-      /aprsis_push on <canal|all>
-      /aprsis_push off
-    """
-    bump_stat(update.effective_user.id, update.effective_user.username or "", "aprsis_push")
-
-    args = context.args or []
-
-    if not args:
-        await update.effective_message.reply_text(
-            "Uso:\n"
-            "/aprsis_push on <canal|all>\n"
-            "/aprsis_push off"
-        )
-        return
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.settimeout(1.0)
-
-    try:
-        sub = args[0].lower()
-
-        if sub == "off":
-            msg = {
-                "mode": "aprsis_push",
-                "enabled": 0
-            }
-            s.sendto(json.dumps(msg).encode("utf-8"), (APRS_CTRL_HOST, APRS_CTRL_PORT))
-            await update.effective_message.reply_text(
-                "📡 APRS-IS push: <b>OFF</b>",
-                parse_mode="HTML"
-            )
-            return
-
-        if sub == "on":
-            channels = args[1] if len(args) > 1 else "all"
-            msg = {
-                "mode": "aprsis_push",
-                "enabled": 1,
-                "channels": channels
-            }
-            s.sendto(json.dumps(msg).encode("utf-8"), (APRS_CTRL_HOST, APRS_CTRL_PORT))
-
-            try:
-                data, _ = s.recvfrom(4096)
-                ack = json.loads(data.decode("utf-8", "ignore"))
-                st = "ON" if ack.get("enabled") else "OFF"
-                ch = ack.get("channels", channels)
-                await update.effective_message.reply_text(
-                    f"📡 APRS-IS push: <b>{st}</b>\nCanales: <b>{ch}</b>",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                await update.effective_message.reply_text(
-                    f"📡 APRS-IS push: <b>ON</b>\nCanales: <b>{channels}</b>",
-                    parse_mode="HTML"
-                )
-            return
-
-        await update.effective_message.reply_text("Parámetro no válido. Usa on/off.")
-
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
-
-
-
 # (Opcional) estado rápido
 async def aprs_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bump_stat(update.effective_user.id, update.effective_user.username or "", "aprs_status")
@@ -6976,13 +6756,6 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             parse_mode="HTML"
         )
         return ConversationHandler.END
-
-    # === (Opcional) Si empieza por EMERG:, también lo mando a APRS ===
-    try:
-        _udp_send_aprs_emerg(texto, dest="broadcast")
-    except Exception:
-        pass
-
 
     is_broadcast = node_id is None
 
@@ -7193,18 +6966,13 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     return ConversationHandler.END
 
-
 async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     /enviar_ack [reintentos=N espera=S backoff=X] <dest|broadcast[:canal] | canal N> <texto…>
-
-    Cambios:
-      - Usa SEND_TEXT_WAIT para poder devolver ACK/estado real al usuario.
-      - Unicast: exige ACK (si no llega → reintentos según parámetros).
-      - Broadcast/canal: si BROKER_ALLOW_BROADCAST_ACK=1 en el broker, permite "any-ack" (marca tipo app).
-        Si no está habilitado, el broker ignorará ack_flag en broadcast y el bot mostrará "sin confirmación".
+      - Unicast (!id/alias/índice): intenta usar broker-queue con ACK; si no está disponible, usa pool con waitForAck y fallback de reintentos.
+      - Broadcast (explícito o 'canal N'): no existe ACK de aplicación → broker-queue primero para disparar bridge A→B.
     """
-    # bloquear si el broker está en cooldown
+    # === [NUEVO] bloquear si el broker está en cooldown ===
     if await _abort_if_cooldown(update, context):
         return ConversationHandler.END
 
@@ -7216,128 +6984,251 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Mapa alias/índice → !id
     nodes_map = context.user_data.get("nodes_map")
     if not nodes_map:
-        nodes_map = _load_nodes_map_fallback()
+        nodes_map = build_nodes_mapping(80)
         context.user_data["nodes_map"] = nodes_map
 
-    if not rest or len(rest) < 2:
+    # ❗ Resolver sin tocar 'args'. Si tras 'canal N' no hay destino, será broadcast implícito
+    node_id, canal, texto, _forced = parse_dest_channel_and_text(rest, nodes_map)
+
+    if not texto:
         await update.effective_message.reply_text(
-            "Uso: /enviar_ack [reintentos=N espera=S backoff=X] <dest|broadcast[:canal] | canal N> <texto…>"
+            "Uso: /enviar_ack [reintentos=N espera=S backoff=X] "
+            "<número|!id|alias|broadcast[:canal] | canal N> <texto…>"
         )
         return ConversationHandler.END
 
-    # Parse target
-    target = str(rest[0]).strip()
-    text = " ".join(str(x) for x in rest[1:]).strip()
-    if not text:
-        await update.effective_message.reply_text("Texto vacío.")
-        return ConversationHandler.END
+    # ===== BROADCAST (no hay ACK de aplicación) =====
+    if node_id is None:
+        out = None
+        pid = None
 
-    # Determinar canal/destino
-    dest_id = None
-    ch = 0
-
-    # Formatos:
-    #  - "!id" | alias | índice
-    #  - "broadcast[:canal]"
-    #  - "canal N"
-    if target.lower().startswith("broadcast"):
-        # broadcast[:canal]
-        parts = target.split(":", 1)
-        dest_id = None
-        if len(parts) == 2:
-            try:
-                ch = int(parts[1].strip())
-            except Exception:
-                ch = 0
-
-    elif target.lower() == "canal":
-        # "canal N"
+        # PRIORIDAD 1: broker-queue (dispara bridge A→B)
+        used_path = "broker-queue"
         try:
-            ch = int(rest[1])
-            text = " ".join(str(x) for x in rest[2:]).strip()
-        except Exception:
-            ch = 0
-
-        dest_id = None
-        if not text:
-            await update.effective_message.reply_text("Uso: /enviar_ack canal <N> <texto…>")
-            return ConversationHandler.END
-
-    else:
-        # unicast por id/alias/índice
-        try:
-            dest_id = _resolve_dest_to_node_id(target, nodes_map)
-        except Exception:
-            dest_id = None
-
-        if not dest_id:
-            await update.effective_message.reply_text("Destino no válido (usa !id, alias o índice).")
-            return ConversationHandler.END
-
-    # Timeout ACK (broker)
-    try:
-        broker_ack_timeout = float(os.getenv("BROKER_ACK_WAIT_SEC", "15"))
-    except Exception:
-        broker_ack_timeout = 15.0
-
-    # Reintentos
-    last_err = None
-    for i in range(max(1, int(attempts))):
-        # En unicast: queremos ACK real
-        # En broadcast/canal: "any ack" solo si broker lo permite (si no, devolverá ack=False y/o NO_ANY_ACK)
-        want_ack = True
-
-        resp = _send_via_broker_wait(
-            text=text,
-            ch=int(ch),
-            dest=(dest_id or None),
-            ack=bool(want_ack),
-            timeout=float(max(10.0, broker_ack_timeout + 5.0))
-        )
-
-        if not resp.get("ok"):
-            last_err = resp.get("error") or "broker_error"
-        else:
-            r = (resp.get("result") or {})
-            tx_ok = bool(r.get("ok"))
-            ack_ok = bool(r.get("ack"))
-            ack_mode = r.get("ack_mode")
-            err = r.get("error")
-
-            # Unicast: si no hay ACK → fallo para reintentar
-            if dest_id:
-                if tx_ok and ack_ok:
-                    await update.effective_message.reply_text(
-                        f"✅ Enviado a {dest_id} (ch {int(ch)}) — ACK recibido."
-                    )
-                    return ConversationHandler.END
-
-                last_err = (err or "NO_APP_ACK")
+            res = await asyncio.to_thread(
+                _send_via_broker_queue,
+                texto,                 # text
+                int(canal),            # ch
+                None,                  # broadcast
+                False                  # ack=False, no hay ACK de app en broadcast
+            )
+            if bool(res.get("ok", False)):
+                out = "OK (broker-queue)"
+                pid = None  # el broker-queue no devuelve packet_id
             else:
-                # Broadcast/canal: tx_ok manda; ACK es best-effort
-                if tx_ok and ack_ok:
-                    await update.effective_message.reply_text(
-                        f"✅ Enviado en canal {int(ch)} — confirmación recibida (algún nodo lo recibió)."
-                    )
-                    return ConversationHandler.END
-
-                if tx_ok and not ack_ok:
-                    # Envío correcto, sin confirmación
-                    await update.effective_message.reply_text(
-                        f"✅ Enviado en canal {int(ch)} — sin confirmación."
-                    )
-                    return ConversationHandler.END
-
-                last_err = (err or "tx_failed")
-
-        # backoff
-        try:
-            await asyncio.sleep(float(wait_s) * (float(backoff) ** i))
+                out = None
         except Exception:
-            pass
+            out = None
 
-    # Agotado
-    await update.effective_message.reply_text(f"❌ No se pudo confirmar el envío. Último error: {last_err}")
+        # PRIORIDAD 2: pool persistente (como antes) si broker-queue no está
+        if out is None:
+            used_path = "pool-persistente"
+            try:
+                pool_cls = context.application.bot_data.get("tcp_pool")
+                iface = None
+                if pool_cls is not None:
+                    if hasattr(pool_cls, "get_iface_wait"):
+                        iface = pool_cls.get_iface_wait(timeout=3.0, interval=0.3)
+                    else:
+                        import time as _t
+                        for _ in range(10):
+                            if hasattr(pool_cls, "get_iface"):
+                                iface = pool_cls.get_iface()
+                            elif hasattr(pool_cls, "get_interface"):
+                                iface = pool_cls.get_interface()
+                            else:
+                                iface = getattr(pool_cls, "iface", None)
+                            if iface is not None:
+                                break
+                            _t.sleep(0.3)
+                if iface is not None:
+                    # 🛠️ Broadcast correcto: destinationId=None (NO '^all')
+                    pkt = iface.sendText(
+                        texto,
+                        destinationId=None,
+                        wantAck=False,
+                        wantResponse=False,
+                        channelIndex=int(canal),
+                    )
+                    if isinstance(pkt, dict):
+                        pid = pkt.get("id") or ((pkt.get("_packet") or {}).get("id"))
+                    else:
+                        pid = getattr(pkt, "id", None)
+                    try:
+                        pid = int(pid) if pid is not None else None
+                    except Exception:
+                        pid = None
+                    out = "OK (pool persistente)"
+            except Exception:
+                out = None
+                pid = None
+
+        # PRIORIDAD 3: adapter resiliente si tampoco hubo pool
+        if out is None:
+            used_path = "api-pool+retry"
+            out, pid = send_text_message(None, texto, canal=canal)
+            if out:
+                out = f"{out} (api-pool+retry)"
+
+        # “Confirmación de red” opcional vía broker (no es ACK de app)
+        ack_cloud = ""
+        ack_ok = False
+        reason = "BROADCAST_NO_ACK"
+        if pid is not None:
+            ok_ack, reason_b, ack_from = await _wait_ack_from_broker(int(pid), int(ACK_WAIT_SEC))
+            if ok_ack:
+                alias_map = _build_alias_fallback_from_nodes_file()
+                ali = alias_map.get(ack_from or "", "")
+                who = f"{ali} ({ack_from})" if ali else (ack_from or "¿?")
+                ack_cloud = f"\nConfirmación de red: ✅ {who}"
+                ack_ok = True
+                reason = "CLOUD_OK"
+            else:
+                ack_cloud = "\nConfirmación de red: ⚠️ (sin confirmación en tiempo)"
+                reason = reason_b or "TIMEOUT"
+
+        respuestas = await quick_broker_listen(None, canal, SEND_LISTEN_SEC)
+
+        resumen = (
+            f"✉️ Envío a broadcast (canal {canal})\n"
+            f"Resultado: {out or 'KO'} • vía {used_path}{ack_cloud}\n"
+            f"Respuestas en {SEND_LISTEN_SEC}s: {respuestas}"
+        )
+        for ch in chunk_text(resumen):
+            await send_pre(update.effective_message, ch)
+
+        _append_send_ack_log_row([
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            "broadcast", canal,
+            (texto[:200] + "…") if len(texto) > 200 else texto,
+            1,
+            "1" if ack_ok else "0",
+            reason,
+            pid or "",
+        ])
+        return ConversationHandler.END
+
+    # ===== UNICAST con ACK y reintentos =====
+    traceroute_ok = None
+    hops = 0
+    if TRACEROUTE_CHECK:
+        try:
+            res = traceroute_node(node_id, timeout=min(TRACEROUTE_TIMEOUT, 25))
+            traceroute_ok = bool(res.ok)
+            hops = int(res.hops or 0)
+        except Exception:
+            traceroute_ok = None
+            hops = 0
+
+    # PRIORIDAD 1: broker-queue con ack=True (dispara bridge A→B)
+    #   Nota: el broker-queue no devuelve packet_id; por tanto aquí reportamos "queued".
+    used_path = "broker-queue"
+    result = None
+    try:
+        res = await asyncio.to_thread(
+            _send_via_broker_queue,
+            texto,
+            int(canal),
+            node_id,     # unicast
+            True         # wantAck=True (el broker pedirá ACK al nodo destino)
+        )
+        if bool(res.get("ok", False)):
+            result = {
+                "ok": True,              # marcado OK por encolado y solicitud con ACK
+                "attempts": 1,
+                "reason": "BROKER_QUEUED",  # no hay packet_id aquí
+                "packet_id": None,
+            }
+    except Exception:
+        result = None
+
+    # PRIORIDAD 2: pool persistente con waitForAck si broker-queue no está
+    if result is None:
+        used_path = "pool-persistente"
+        try:
+            pool_cls = context.application.bot_data.get("tcp_pool")
+            iface = None
+            if pool_cls is not None:
+                if hasattr(pool_cls, "get_iface_wait"):
+                    iface = pool_cls.get_iface_wait(timeout=3.0, interval=0.3)
+                else:
+                    import time as _t
+                    for _ in range(10):
+                        if hasattr(pool_cls, "get_iface"):
+                            iface = pool_cls.get_iface()
+                        elif hasattr(pool_cls, "get_interface"):
+                            iface = pool_cls.get_interface()
+                        else:
+                            iface = getattr(pool_cls, "iface", None)
+                        if iface is not None:
+                            break
+                        _t.sleep(0.3)
+            if iface is not None:
+                pkt = iface.sendText(
+                    texto,
+                    destinationId=node_id,   # unicast
+                    wantAck=True,
+                    wantResponse=False,
+                    channelIndex=int(canal),
+                )
+                pid = None
+                if isinstance(pkt, dict):
+                    pid = pkt.get("id") or ((pkt.get("_packet") or {}).get("id"))
+                else:
+                    pid = getattr(pkt, "id", None)
+                try:
+                    pid = int(pid) if pid is not None else None
+                except Exception:
+                    pid = None
+
+                ok_ack = False
+                if pid is not None and hasattr(iface, "waitForAck"):
+                    try:
+                        ok_ack = bool(iface.waitForAck(pid, timeout=15.0))
+                    except Exception:
+                        ok_ack = False
+
+                result = {
+                    "ok": bool(ok_ack),
+                    "attempts": 1,
+                    "reason": ("POOL_OK" if ok_ack else "NO_APP_ACK"),
+                    "packet_id": pid,
+                }
+        except Exception:
+            result = None
+
+    # PRIORIDAD 3: reintentos/backoff por adapter resiliente
+    if result is None:
+        used_path = "api-pool+retry"
+        result = await send_with_ack_retry(node_id, texto, canal, attempts, wait_s, backoff)
+
+    dest_txt = node_id
+    if result.get("ok"):
+        resumen = (
+            f"✅ ACK enviado/recibido para {dest_txt} (canal {canal})\n"
+            f"Intentos: {result['attempts']}  •  packet_id: {result.get('packet_id')}\n"
+            f"Vía: {used_path}"
+        )
+    else:
+        resumen = (
+            f"⚠️ Sin ACK para {dest_txt} (canal {canal})\n"
+            f"Intentos: {result.get('attempts', '?')}  •  Motivo: {result.get('reason','')}\n"
+            f"packet_id: {result.get('packet_id')}  •  Vía: {used_path}"
+        )
+
+    for ch in chunk_text(resumen):
+        await send_pre(update.effective_message, ch)
+
+    _append_send_ack_log_row([
+        time.strftime("%Y-%m-%d %H:%M:%S"),
+        dest_txt,
+        canal,
+        (texto[:200] + "…") if len(texto) > 200 else texto,
+        result.get("attempts"),
+        "1" if result.get("ok") else "0",
+        result.get("reason", ""),
+        result.get("packet_id", ""),
+    ])
     return ConversationHandler.END
 
 
@@ -7908,12 +7799,6 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 ]
                 lines.append("".join(parts))
 
-            # Si el broker responde pero no aporta nodos, NO devolvemos "(sin datos)" aquí.
-            # Esto ocurría tras traceroute, pero también puede pasar al arrancar si el receiver/caché aún no está poblado.
-            # En ese caso forzamos fallback a nodos.txt.
-            if not lines:
-                raise RuntimeError("LIST_NODES vacío; usar fallback nodos.txt")
-
             await update.effective_message.reply_text(
                 "📡 Últimos vecinos (broker):\n\n" + ("\n\n".join(lines) if lines else "(sin datos)"),
                 parse_mode="HTML"
@@ -7927,45 +7812,6 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     # ====================================================
     try:
         tuples = get_visible_nodes_with_hops(NODES_FILE)
-
-        # Si el parser heredado devuelve vacío pero nodos.txt tiene contenido,
-        # construimos tuplas directamente desde _parse_nodes_table() usando last_heard/since.
-        # (En algunas versiones, get_visible_nodes_with_hops leía una clave distinta y devolvía mins=9999 o lista vacía.)
-        if (not tuples) and os.path.exists(NODES_FILE):
-            try:
-                rows_nf = _parse_nodes_table(NODES_FILE) or []
-                tuples2 = []
-                for r in rows_nf:
-                    nid = (r.get("id") or "").strip()
-                    if not nid:
-                        continue
-                    alias = (r.get("alias") or "").strip() or nid
-
-                    # minutos: preferimos last_heard/since y mantenemos compat con last_seen_text
-                    txt_age = (r.get("last_heard") or r.get("since") or r.get("last_seen_text") or "")
-                    mins = parse_minutes(str(txt_age))
-                    try:
-                        mins = int(mins) if mins is not None else 9999
-                    except Exception:
-                        mins = 9999
-
-                    # hops: si el parser los dejó en 'hops' o 'hops_text'
-                    hops = r.get("hops")
-                    if hops is None:
-                        hops = r.get("hops_text")
-                    try:
-                        if hops is not None:
-                            hs = str(hops).strip().lower().replace("hops", "").replace("hop", "").replace("≈", "").replace("~", "")
-                            hs = "".join(ch for ch in hs if ch in "+-0123456789.")
-                            hops = int(float(hs)) if hs else None
-                    except Exception:
-                        hops = None
-
-                    tuples2.append((nid, alias, mins, hops))
-                tuples2.sort(key=lambda x: x[2])
-                tuples = tuples2
-            except Exception:
-                pass
 
         # filtro temprano
         if hops_max is not None:
@@ -8403,7 +8249,7 @@ async def ver_nodos_b_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         timeout = 60
 
     # Mantengo exactamente tu estilo de "reutilizar vecinos_*"
-    context.args = [str(max_n), "all", str(timeout)]
+    context.args = [str(max_n), str(timeout), "all"]
 
     return await vecinos_b_cmd(update, context)
 
@@ -12737,7 +12583,6 @@ def _evt_extract_channels(evt: dict) -> Tuple[Optional[int], Optional[int]]:
         rf = None
     return ch, rf
 
-
 async def _broker_listen_loop_jsonl(chat_id: int, listen_chan: Optional[int], context) -> None:
     """
     Abre conexión TCP al broker JSONL, lee 1 JSON por línea y reenvía a Telegram.
@@ -12790,26 +12635,14 @@ async def _broker_listen_loop_jsonl(chat_id: int, listen_chan: Optional[int], co
                     src  = (evt.get("from") or evt.get("src") or evt.get("id") or "?")
                     txt  = (evt.get("text") or evt.get("payload") or "").strip()
 
-                    # ---- NUEVO: detectar marca de ruta añadida por el bridge y presentarla en Telegram
-                    route_line = ""
-                    if txt:
-                        # Acepta tanto flecha unicode como ascii
-                        if "[BRIDGE B→A]" in txt or "[BRIDGE B->A]" in txt:
-                            route_line = "[BRIDGE B→A]\n"
-                            txt = txt.replace("[BRIDGE B→A]", "").replace("[BRIDGE B->A]", "").strip()
-                        elif "[BRIDGE C→A]" in txt or "[BRIDGE C->A]" in txt:
-                            route_line = "[BRIDGE C→A]\n"
-                            txt = txt.replace("[BRIDGE C→A]", "").replace("[BRIDGE C->A]", "").strip()
-
                     ts   = time.strftime("%H:%M:%S")
                     header = f"📡 [{ts}] ch{ch if ch is not None else '?'}"
                     if rf is not None:
                         header += f"/rf{rf}"
                     header += f" | {app} | {src}\n"
-                    #body = f"📝 {txt}" if txt else ""
-                    body = (route_line + f"📝 {txt}") if txt else route_line.strip()
+                    body = f"📝 {txt}" if txt else ""
 
-                    msg = header + (body if body else "")
+                    msg = header + body
                     # troceo para evitar límite de Telegram
                     for chunk in (msg[i:i+3800] for i in range(0, len(msg), 3800)):
                         if chunk:
@@ -13566,8 +13399,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("aprs", aprs_cmd))
     app.add_handler(CommandHandler("aprs_on", aprs_on_cmd))
     app.add_handler(CommandHandler("aprs_off", aprs_off_cmd))
-    app.add_handler(CommandHandler("aprsis_push", aprsis_push_cmd))
-
     # opcional:
     app.add_handler(CommandHandler("aprs_status", aprs_status_cmd))
 
