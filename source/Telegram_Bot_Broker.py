@@ -5593,7 +5593,8 @@ async def ver_nodos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     # Preparamos args para vecinos_cmd:
     #   /vecinos [max_n] [timeout] [hops_mode]
     # Aquí NO queremos filtrar hops, así que usamos hops_mode="all"
-    context.args = [str(max_n), str(timeout), "all"]
+    # Enviamos hops_max no numérico para que vecinos_cmd NO filtre por hops.
+    context.args = [str(max_n), "all", str(timeout)]
 
     # Reutilizamos la lógica probada de vecinos_cmd
     return await vecinos_cmd(update, context)
@@ -7907,6 +7908,12 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     f"📍 <b>{dist_txt}</b> km — <b>{place_txt}</b>",
                 ]
                 lines.append("".join(parts))
+
+            # Si el broker contesta pero NO trae nodos, no devolvemos "(sin datos)" aquí.
+            # Esto pasa típicamente tras /traceroute cuando el broker queda "running" pero sin tráfico,
+            # o con connected=false. Forzamos fallback a nodos.txt.
+            if not norm or not lines:
+                raise RuntimeError("LIST_NODES vacío; usar fallback nodos.txt")
 
             await update.effective_message.reply_text(
                 "📡 Últimos vecinos (broker):\n\n" + ("\n\n".join(lines) if lines else "(sin datos)"),
