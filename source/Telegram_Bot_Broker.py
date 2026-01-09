@@ -5593,7 +5593,6 @@ async def ver_nodos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     # Preparamos args para vecinos_cmd:
     #   /vecinos [max_n] [timeout] [hops_mode]
     # Aquí NO queremos filtrar hops, así que usamos hops_mode="all"
-    # Enviamos hops_max no numérico para que vecinos_cmd NO filtre por hops.
     context.args = [str(max_n), "all", str(timeout)]
 
     # Reutilizamos la lógica probada de vecinos_cmd
@@ -7909,10 +7908,10 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 ]
                 lines.append("".join(parts))
 
-            # Si el broker contesta pero NO trae nodos, no devolvemos "(sin datos)" aquí.
-            # Esto pasa típicamente tras /traceroute cuando el broker queda "running" pero sin tráfico,
-            # o con connected=false. Forzamos fallback a nodos.txt.
-            if not norm or not lines:
+            # Si el broker responde pero no aporta nodos, NO devolvemos "(sin datos)" aquí.
+            # Esto ocurría tras traceroute, pero también puede pasar al arrancar si el receiver/caché aún no está poblado.
+            # En ese caso forzamos fallback a nodos.txt.
+            if not lines:
                 raise RuntimeError("LIST_NODES vacío; usar fallback nodos.txt")
 
             await update.effective_message.reply_text(
@@ -7928,6 +7927,45 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     # ====================================================
     try:
         tuples = get_visible_nodes_with_hops(NODES_FILE)
+
+        # Si el parser heredado devuelve vacío pero nodos.txt tiene contenido,
+        # construimos tuplas directamente desde _parse_nodes_table() usando last_heard/since.
+        # (En algunas versiones, get_visible_nodes_with_hops leía una clave distinta y devolvía mins=9999 o lista vacía.)
+        if (not tuples) and os.path.exists(NODES_FILE):
+            try:
+                rows_nf = _parse_nodes_table(NODES_FILE) or []
+                tuples2 = []
+                for r in rows_nf:
+                    nid = (r.get("id") or "").strip()
+                    if not nid:
+                        continue
+                    alias = (r.get("alias") or "").strip() or nid
+
+                    # minutos: preferimos last_heard/since y mantenemos compat con last_seen_text
+                    txt_age = (r.get("last_heard") or r.get("since") or r.get("last_seen_text") or "")
+                    mins = parse_minutes(str(txt_age))
+                    try:
+                        mins = int(mins) if mins is not None else 9999
+                    except Exception:
+                        mins = 9999
+
+                    # hops: si el parser los dejó en 'hops' o 'hops_text'
+                    hops = r.get("hops")
+                    if hops is None:
+                        hops = r.get("hops_text")
+                    try:
+                        if hops is not None:
+                            hs = str(hops).strip().lower().replace("hops", "").replace("hop", "").replace("≈", "").replace("~", "")
+                            hs = "".join(ch for ch in hs if ch in "+-0123456789.")
+                            hops = int(float(hs)) if hs else None
+                    except Exception:
+                        hops = None
+
+                    tuples2.append((nid, alias, mins, hops))
+                tuples2.sort(key=lambda x: x[2])
+                tuples = tuples2
+            except Exception:
+                pass
 
         # filtro temprano
         if hops_max is not None:
@@ -8365,7 +8403,7 @@ async def ver_nodos_b_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         timeout = 60
 
     # Mantengo exactamente tu estilo de "reutilizar vecinos_*"
-    context.args = [str(max_n), str(timeout), "all"]
+    context.args = [str(max_n), "all", str(timeout)]
 
     return await vecinos_b_cmd(update, context)
 
