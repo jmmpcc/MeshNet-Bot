@@ -1293,7 +1293,11 @@ async def task_aprs_to_meshtastic():
       - Posiciones/otros que lleven [CHx] en el comentario dentro de 'info'
     Respeta el flag APRS_GATE_ENABLED (ON/OFF).
     """
+    last_channels_raw = None
+    push_ch_set = None
+
     backoff = 2.0
+    
     while True:
         try:
             reader, writer = await asyncio.open_connection(KISS_HOST, KISS_PORT)
@@ -1998,7 +2002,7 @@ async def task_mesh_channels_to_aprsis():
     - Lee el stream JSONL del broker (BROKER_HOST:BROKER_PORT).
     - Normaliza distintos formatos de evento del broker:
         A) plano:    {"portnum":"TEXT_MESSAGE_APP","text":"...","channel":2,...}
-        B) envuelto: {"type":"packet","packet":{...},"summary":{...},...}
+        B) envuelto: {"packet":{...},"summary":{...},...}   (type puede variar)
         C) mixto:    {"decoded":{...}} o {"payload":{...}} en raíz o en packet
     - Para cada TEXT_MESSAGE_APP normal (no /aprs) y canal autorizado,
       lo envía a APRS-IS como mensaje dirigido a APRSIS_PUSH_TO.
@@ -2007,7 +2011,10 @@ async def task_mesh_channels_to_aprsis():
     global _APRSIS_PUSH_LAST_TS
 
     backoff = 2.0
-    push_ch_set = _parse_push_channels(APRSIS_PUSH_CHANNELS_RAW)
+
+    # Cache para recalcular canales al vuelo cuando cambie APRSIS_PUSH_CHANNELS_RAW
+    last_channels_raw = None
+    push_ch_set = None
 
     def _as_dict(x):
         return x if isinstance(x, dict) else {}
@@ -2032,13 +2039,15 @@ async def task_mesh_channels_to_aprsis():
 
         # Posibles contenedores
         summ = _as_dict(obj.get("summary"))
-        pkt = _as_dict(obj.get("packet")) if obj.get("type") == "packet" else obj
+
+        # Si hay clave "packet", úsala SIEMPRE (no dependas de obj["type"])
+        pkt = _as_dict(obj.get("packet")) if isinstance(obj.get("packet"), dict) else obj
 
         # decoded/payload pueden estar en raíz o en packet
         dec_root = _as_dict(obj.get("decoded"))
         pay_root = _as_dict(obj.get("payload"))
-        dec_pkt  = _as_dict(_as_dict(pkt).get("decoded"))
-        pay_pkt  = _as_dict(_as_dict(pkt).get("payload"))
+        dec_pkt  = _as_dict(pkt.get("decoded"))
+        pay_pkt  = _as_dict(pkt.get("payload"))
 
         # Portnum
         port = _first_str(
@@ -2090,6 +2099,13 @@ async def task_mesh_channels_to_aprsis():
             print("[mesh→IS push] Conectado.")
             backoff = 2.0
 
+            # Log de configuración al conectar (aunque todavía no lleguen líneas del broker)
+            cur_raw = (APRSIS_PUSH_CHANNELS_RAW or "all").strip().lower()
+            last_channels_raw = cur_raw
+            push_ch_set = _parse_push_channels(cur_raw)
+            print(f"[mesh→IS push] cfg channels={cur_raw} -> {push_ch_set if push_ch_set is not None else 'ALL'}", flush=True)
+                
+
             while True:
                 line = await reader.readline()
                 if not line:
@@ -2097,6 +2113,20 @@ async def task_mesh_channels_to_aprsis():
 
                 if not _aprsis_push_is_enabled():
                     continue
+
+                # Refrescar canales en caliente (si el bot cambia channels=all, etc.)
+                cur_raw = (APRSIS_PUSH_CHANNELS_RAW or "all").strip().lower()
+                if cur_raw != last_channels_raw:
+                    last_channels_raw = cur_raw
+                    push_ch_set = _parse_push_channels(cur_raw)
+                    try:
+                        print(
+                            f"[mesh→IS push] cfg channels={cur_raw} -> "
+                            f"{push_ch_set if push_ch_set is not None else 'ALL'}",
+                            flush=True
+                        )
+                    except Exception:
+                        pass
 
                 try:
                     obj = json.loads(line.decode("utf-8", "ignore"))
@@ -2123,7 +2153,10 @@ async def task_mesh_channels_to_aprsis():
                 if ch is None:
                     continue
 
+                # Filtro de canal
                 if push_ch_set is not None and ch not in push_ch_set:
+                    # Debug de descartes por canal (opcional, útil mientras validas)
+                    print(f"[mesh→IS push] skip ch={ch} (allowed={push_ch_set})", flush=True)
                     continue
 
                 # Rate limit
@@ -2140,6 +2173,8 @@ async def task_mesh_channels_to_aprsis():
                 if ok:
                     _APRSIS_PUSH_LAST_TS = now
                     print(f"[mesh→IS push] → {APRSIS_PUSH_TO} {prefix}{tnorm[:80]}")
+                else:
+                    print(f"[mesh→IS push] ❌ TX FAIL -> {APRSIS_PUSH_TO} ch={ch}")
 
         except Exception as e:
             print(f"[mesh→IS push] ❌ {type(e).__name__}: {e}")
