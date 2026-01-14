@@ -1,6 +1,6 @@
 # meshtastic_api_adapter.py
 # -*- coding: utf-8 -*-
-# Version v6.1.3
+# Version v6.2.2
 
 """
 Capa 'API-first' para Meshtastic.
@@ -529,43 +529,55 @@ def _parse_route_from_text(raw: str) -> List[str]:
 
 def api_traceroute(host: str, dest_id: str, timeout: int = 30) -> Dict[str, Any]:
     """
-    Retorna dict {ok: bool, hops: int, route: [ids], raw: str}
+    Lanza traceroute por API (sendTraceRoute) sin CLI.
+
+    Retorno:
+      { ok: bool, started: bool, dest_node_num: int|None, raw: str }
+
+    Nota importante:
+      - sendTraceRoute() no devuelve la ruta inmediatamente.
+      - La ruta se obtiene escuchando TRACEROUTE_APP/ROUTING_APP por el flujo RX (como hace el broker/backlog).
     """
     dest = str(dest_id).strip()
     if not dest:
-        return {"ok": False, "hops": 0, "route": [], "raw": "dest_id vacío"}
+        return {"ok": False, "started": False, "dest_node_num": None, "raw": "dest_id vacío"}
 
-    # 1) API directa si está disponible
+    def _to_node_num(v: str) -> int:
+        v = v.strip()
+        if v.startswith("!"):
+            return int(v[1:], 16)
+        return int(v)
+
+    try:
+        node_num = _to_node_num(dest)
+    except Exception as e:
+        return {"ok": False, "started": False, "dest_node_num": None, "raw": f"dest_id inválido: {e}"}
+
     try:
         iface = _open_iface(host)
         try:
-            # La función puede no existir según la versión de la librería
-            for cand in ("traceroute", "traceRoute", "trace_route"):
-                tr_fn = getattr(iface, cand, None)
-                if callable(tr_fn):
-                    res = tr_fn(dest)  # firma dependiente; devolvemos str(dict)
-                    raw = str(res)
-                    route = _parse_route_from_text(raw)
-                    hops = max(0, len(route) - 1) if route else 0
-                    ok = bool(route and len(route) >= 2)
-                    return {"ok": ok, "hops": hops, "route": route, "raw": raw}
+            fn = getattr(iface, "sendTraceRoute", None)
+            if not callable(fn):
+                return {"ok": False, "started": False, "dest_node_num": node_num, "raw": "sendTraceRoute no disponible"}
+
+            # Intento firma completa; si falla, degradamos
+            try:
+                fn(node_num, 20, channelIndex=0)
+            except TypeError:
+                try:
+                    fn(node_num, 20, 0)
+                except TypeError:
+                    fn(node_num, 20)
+
+            return {"ok": True, "started": True, "dest_node_num": node_num, "raw": "started"}
         finally:
-            # En el pool no cerramos la interfaz; este close es defensivo si no fuera la misma instancia
+            # defensivo: si no fuera pool
             try:
                 iface.close()
             except Exception:
                 pass
-    except Exception:
-        # fallback CLI
-        pass
-
-    # 2) CLI
-    out, _rc = _run_cli(["--host", host, "--traceroute", dest], timeout=timeout)
-    raw = out.strip()
-    route = _parse_route_from_text(raw)
-    hops = max(0, len(route) - 1) if route else 0
-    ok = bool(route and len(route) >= 2)
-    return {"ok": ok, "hops": hops, "route": route, "raw": raw}
+    except Exception as e:
+        return {"ok": False, "started": False, "dest_node_num": node_num, "raw": str(e)}
 
 
 # ===============================================================

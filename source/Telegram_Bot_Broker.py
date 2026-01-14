@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v6.2.1 py
+Telegram_Bot_Broker_v6.2.2 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -5182,9 +5182,10 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <code>/aprs en &lt;min|m1,m2,&gt; canal N &lt;texto&gt;</code>\n"
         "  (Si no indicas canal, usa el por defecto del bot)\n\n"
         "<b>Ejemplos:</b>\n"
-        "• <code>/aprs broadcast Saludos desde la red Meshtastic</code>\n"
-        "• <code>/aprs EB2ABC-10 Hola EB2ABC, QSO en 144.800</code>\n"
-        "• <code>/aprs canal 1 EB7XYZ-7 Estoy operativo en sierra</code>\n\n"
+        "• <code>/aprs broadcast: Saludos desde la red Meshtastic</code>\n"
+        "• <code>/aprs EB2ABC-10: Hola EB2ABC, QSO en 144.800</code>\n"
+        "• <code>/aprs canal 1 EB7XYZ-7: Estoy operativo en sierra</code>\n\n"
+        "• <code>/aprs 1 EB7XYZ-7: Estoy operativo en sierra</code>\n\n"
         "<b>Notas:</b>\n"
         "• <code>broadcast</code> envía como <i>status</i> APRS (no a un destinatario concreto).\n"
         "• <code>CALL</code> envía como <i>message</i> APRS a ese indicativo (p.ej. EB2XXX-7).\n"
@@ -6671,19 +6672,59 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Pasarela APRS: <code>{escape(aprs_status)}</code>"
         ).strip()
         return html
-
+   
     # nuevos atajos inmediatos
     dest_clean = None
     canal = BROKER_CHANNEL
     texto_final = ""
     ok_simple = False
+
+    def _split_dest_prefix_if_any(s: str) -> tuple[Optional[str], str]:
+        """
+        Si s tiene formato 'CALL: texto', devuelve ('CALL', 'texto').
+        Si no, devuelve (None, s).
+        """
+        s = (s or "").strip()
+        if not s or ":" not in s:
+            return None, s
+        left, right = s.split(":", 1)
+        cand = (left or "").strip()
+        rest = (right or "").strip()
+        if not cand or not rest:
+            return None, s
+        # Validación mínima de CALL APRS (letras/números/guión)
+        import re
+        if re.fullmatch(r"[A-Za-z0-9\-]+", cand):
+            return cand, rest
+        return None, s
+
     if len(args) >= 2:
         if args[0].lower() == "canal" and args[1].lstrip("-").isdigit():
-            canal = int(args[1]); texto_final = " ".join(args[2:]).strip()
-            dest_clean = "broadcast"; ok_simple = True
+            canal = int(args[1])
+            texto_final = " ".join(args[2:]).strip()
+
+            # NUEVO: permitir "/aprs canal N CALL: texto"
+            d, t = _split_dest_prefix_if_any(texto_final)
+            if d:
+                dest_clean = d
+                texto_final = t
+            else:
+                dest_clean = "broadcast"
+            ok_simple = True
+
         elif args[0].lstrip("-").isdigit():
-            canal = int(args[0]); texto_final = " ".join(args[1:]).strip()
-            dest_clean = "broadcast"; ok_simple = True
+            canal = int(args[0])
+            texto_final = " ".join(args[1:]).strip()
+
+            # NUEVO: permitir "/aprs N CALL: texto"
+            d, t = _split_dest_prefix_if_any(texto_final)
+            if d:
+                dest_clean = d
+                texto_final = t
+            else:
+                dest_clean = "broadcast"
+            ok_simple = True
+
 
     if ok_simple:
         if not texto_final:
@@ -6692,7 +6733,8 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Falta el texto. Uso: <code>/aprs canal N &lt;texto&gt;</code>  |  <code>/aprs N &lt;texto&gt;</code>"
             )
             return
-        html = _send("broadcast", canal, texto_final)
+        html = _send(dest_clean or "broadcast", canal, texto_final)
+
     
         await _safe_reply_html(update.effective_message, html)
         # si tu _safe_reply_html no admite disable_preview, usa:
@@ -6727,7 +6769,7 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _safe_reply_html(update.effective_message, "Falta el texto tras ‘:’.")
         return
 
-    html = _send(dest_clean, canal, texto_final)
+    html = _send(dest_clean or "broadcast", canal, texto_final)
     await _safe_reply_html(update.effective_message, html)
 
 
@@ -8859,14 +8901,21 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pass
 
     # Intento 2: broker (RUN_TRACEROUTE / RUN_CLI)
+        # Intento 2: broker (RUN_TRACEROUTE) - sin CLI, sin pausa
     if not launched:
-        resA = await _broker_cmd("RUN_TRACEROUTE", {"target": node_id, "timeout": int(timeout)})
+        resA = await _broker_cmd(
+            "RUN_TRACEROUTE",
+            {
+                "target": node_id,
+                "hop_limit": int(context.args[1]) if len(context.args) >= 2 and str(context.args[1]).isdigit() else 20,
+                "ch_index": 0,
+            },
+        )
         if isinstance(resA, dict) and (resA.get("ok") or resA.get("status") == "ok"):
             launched = True
         else:
-            resB = await _broker_cmd("RUN_CLI", {"action": "traceroute", "target": node_id, "timeout": int(timeout)})
-            if isinstance(resB, dict) and (resB.get("ok") or resB.get("status") == "ok"):
-                launched = True
+            launched = False
+
 
     # Intento 3: efímero con acquire (permitimos crear si no hay)
     if not launched and hasattr(pool, "acquire") and callable(pool.acquire):
@@ -8892,7 +8941,9 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Intento 4: CLI (último recurso) — PAUSAR (await) → CLI (hilo) → REANUDAR (await)
     if not launched:
-        used_cli_fallback = True
+        await _safe_reply_html(update.effective_message, "No se pudo iniciar el traceroute desde el broker (API).")
+        return ConversationHandler.END
+        #used_cli_fallback = True
 
         import sys
 

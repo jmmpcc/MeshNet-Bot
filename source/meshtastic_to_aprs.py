@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-meshtastic_to_aprs.py (v6.1.3)
+meshtastic_to_aprs.py (v6.2.2)
 Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
 - /aprs (bot) -> UDP local -> TX APRS (troceo automático).
@@ -153,26 +153,34 @@ def _aprsis_tnc2_message_line(dst_call: str, text: str) -> str:
 async def _aprsis_send_line_safe(line: str) -> bool:
     """
     Envía una línea a APRS-IS si hay cliente conectado.
-    Reutiliza el cliente que ya tienes en este script.
+
+    IMPORTANTE:
+    - En este proyecto el cliente APRS-IS real es _aprsis_client (clase _AprsISClient),
+      no una global llamada APRSIS_CLIENT.
+    - Esta función NO debe romper nada: si no hay cliente, devuelve False en silencio.
     """
     try:
         if not line:
             return False
-        # En tu script ya existe un cliente APRS-IS (aprslib) para uplink/downlink.
-        # Normalmente se usa .sendall() o .send() según cómo lo implementaste.
-        # Aquí asumimos que guardas el cliente en una global tipo APRSIS_CLIENT.
-        global APRSIS_CLIENT
-        c = globals().get("APRSIS_CLIENT", None)
+
+        c = globals().get("_aprsis_client", None)
         if c is None:
             return False
-        # aprslib.IS tiene sendall(str) en muchas implementaciones
+
+        # _AprsISClient es async, su método correcto es send_line()
+        if hasattr(c, "send_line"):
+            await c.send_line(line)
+            return True
+
+        # Fallback por compatibilidad (por si alguien cambia el tipo del cliente)
         if hasattr(c, "sendall"):
             c.sendall(line)
-        elif hasattr(c, "send"):
+            return True
+        if hasattr(c, "send"):
             c.send(line)
-        else:
-            return False
-        return True
+            return True
+
+        return False
     except Exception as e:
         print(f"[aprs→IS push] ❌ {type(e).__name__}: {e}")
         return False
@@ -1657,13 +1665,15 @@ async def task_aprsis_to_meshtastic():
 
 
                 # Comandos CH0 (APRS ON/OFF) vía APRS-IS
+                # CH0 se reserva para control SOLO si el mensaje es un comando válido.
+                # Si NO es comando, se reenvía como texto normal por el canal 0
                 if ch == 0:
                     if _handle_aprs_control_from_rf(src, msg):
                         continue
-                    _aprs_dbg(
-                        f"[aprs←IS ctrl] CH0 sin comando conocido desde {src}: {msg[:80]}"
-                    )
-                    continue
+                    #_aprs_dbg(
+                    #    f"[aprs←IS ctrl] CH0 sin comando conocido desde {src}: {msg[:80]}"
+                    #)
+                    #continue
 
                 # Programación local con [CHx+N]
                 if delay_min is not None and delay_min > 0:
@@ -1980,19 +1990,100 @@ def _apply_cli_overrides():
     if args.broker_port is not None:     BROKER_PORT = int(args.broker_port)
     if args.mesh_channel is not None:    MESHTASTIC_CHANNEL = int(args.mesh_channel)
 
+
 async def task_mesh_channels_to_aprsis():
     """
-    NUEVO:
-      - Lee el JSONL del broker (igual que task_broker_to_aprs()) :contentReference[oaicite:6]{index=6}
-      - Para cada TEXT_MESSAGE_APP normal (no /aprs), si el canal coincide,
-        lo envía a APRS-IS como mensaje dirigido a APRSIS_PUSH_TO (p.ej. EB2EAS-7)
+    Mesh → APRS-IS (push de canales)
+
+    - Lee el stream JSONL del broker (BROKER_HOST:BROKER_PORT).
+    - Normaliza distintos formatos de evento del broker:
+        A) plano:    {"portnum":"TEXT_MESSAGE_APP","text":"...","channel":2,...}
+        B) envuelto: {"type":"packet","packet":{...},"summary":{...},...}
+        C) mixto:    {"decoded":{...}} o {"payload":{...}} en raíz o en packet
+    - Para cada TEXT_MESSAGE_APP normal (no /aprs) y canal autorizado,
+      lo envía a APRS-IS como mensaje dirigido a APRSIS_PUSH_TO.
+    - No emite por RF (usa APRS-IS directo).
     """
     global _APRSIS_PUSH_LAST_TS
 
     backoff = 2.0
     push_ch_set = _parse_push_channels(APRSIS_PUSH_CHANNELS_RAW)
 
+    def _as_dict(x):
+        return x if isinstance(x, dict) else {}
+
+    def _first_str(*vals) -> str:
+        for v in vals:
+            if isinstance(v, str) and v.strip():
+                return v
+        return ""
+
+    def _first_any(*vals):
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    def _norm_event(obj: dict):
+        """
+        Devuelve: (port_upper:str, text:str, ch:int|None)
+        """
+        obj = _as_dict(obj)
+
+        # Posibles contenedores
+        summ = _as_dict(obj.get("summary"))
+        pkt = _as_dict(obj.get("packet")) if obj.get("type") == "packet" else obj
+
+        # decoded/payload pueden estar en raíz o en packet
+        dec_root = _as_dict(obj.get("decoded"))
+        pay_root = _as_dict(obj.get("payload"))
+        dec_pkt  = _as_dict(_as_dict(pkt).get("decoded"))
+        pay_pkt  = _as_dict(_as_dict(pkt).get("payload"))
+
+        # Portnum
+        port = _first_str(
+            str(summ.get("portnum") or ""),
+            str(dec_pkt.get("portnum") or ""),
+            str(dec_root.get("portnum") or ""),
+            str(pkt.get("portnum") or ""),
+            str(obj.get("portnum") or ""),
+        ).upper().strip()
+
+        # Texto (orden de preferencia)
+        txt = _first_str(
+            summ.get("text"),
+            dec_pkt.get("text"),
+            pay_pkt.get("text"),
+            dec_root.get("text"),
+            pay_root.get("text"),
+            pkt.get("text"),
+            obj.get("text"),
+        )
+
+        # Canal (muchas variantes)
+        ch_raw = _first_any(
+            summ.get("canal"),
+            summ.get("channel"),
+            pkt.get("channel"),
+            pkt.get("channelIndex"),
+            _as_dict(pkt.get("meta")).get("channelIndex"),
+            dec_pkt.get("channel"),
+            dec_pkt.get("channelIndex"),
+            dec_root.get("channel"),
+            dec_root.get("channelIndex"),
+            obj.get("channel"),
+            obj.get("channelIndex"),
+        )
+
+        try:
+            ch = int(ch_raw) if ch_raw is not None else None
+        except Exception:
+            ch = None
+
+        return port, txt, ch
+
     while True:
+        writer = None
         try:
             print(f"[mesh→IS push] Conectando JSONL {BROKER_HOST}:{BROKER_PORT} …")
             reader, writer = await asyncio.open_connection(BROKER_HOST, BROKER_PORT)
@@ -2012,53 +2103,54 @@ async def task_mesh_channels_to_aprsis():
                 except Exception:
                     continue
 
-                if (obj.get("portnum") or "").upper() != "TEXT_MESSAGE_APP":
+                port, txt, ch = _norm_event(obj)
+
+                if port != "TEXT_MESSAGE_APP":
                     continue
 
-                txt = obj.get("text")
-                if not isinstance(txt, str):
+                if not isinstance(txt, str) or not txt.strip():
                     continue
 
-                # Evita reenviar comandos /aprs (eso ya lo hace task_broker_to_aprs) :contentReference[oaicite:7]{index=7}
+                # Evita reenviar comandos /aprs (eso ya lo gestiona task_broker_to_aprs)
                 if txt.lstrip().lower().startswith("/aprs"):
                     continue
 
-                # Filtro anti-eco: no reenviar “ecos” y marcas típicas de entrada APRS
-                # (tu propio script crea ecos con "[APRS eco de ...]" :contentReference[oaicite:8]{index=8})
+                # Anti-eco de entradas APRS (evita bucles)
                 tnorm = txt.strip()
                 if tnorm.startswith("[APRS eco de") or tnorm.startswith("[APRS-IS eco de"):
                     continue
 
-                ch = obj.get("channel")
-                try:
-                    ch = int(ch) if ch is not None else None
-                except Exception:
-                    ch = None
-
                 if ch is None:
-                    # si el broker no incluye channel, no publicamos (mejor silencioso que inventar)
                     continue
 
                 if push_ch_set is not None and ch not in push_ch_set:
                     continue
 
-                # Rate limit sencillo
+                # Rate limit
                 now = asyncio.get_running_loop().time()
                 if (now - float(_APRSIS_PUSH_LAST_TS or 0.0)) < float(APRSIS_PUSH_MIN_GAP_S):
                     continue
 
                 prefix = f"[CH{ch}] " if APRSIS_PUSH_PREFIX else ""
                 line2 = _aprsis_tnc2_message_line(APRSIS_PUSH_TO, prefix + tnorm)
+                if not line2:
+                    continue
+
                 ok = await _aprsis_send_line_safe(line2)
                 if ok:
                     _APRSIS_PUSH_LAST_TS = now
                     print(f"[mesh→IS push] → {APRSIS_PUSH_TO} {prefix}{tnorm[:80]}")
+
         except Exception as e:
             print(f"[mesh→IS push] ❌ {type(e).__name__}: {e}")
+            try:
+                if writer is not None:
+                    writer.close()
+                    await writer.wait_closed()
+            except Exception:
+                pass
             await asyncio.sleep(backoff)
             backoff = min(30.0, backoff * 1.6)
-
-
 
 
 # =========================

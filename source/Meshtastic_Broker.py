@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Version v6.2.1
+# Version v6.2.2
 
 from __future__ import annotations
 """
@@ -1920,77 +1920,119 @@ class _BacklogServer(threading.Thread):
             # --- [NUEVO] comando: RUN_TRACEROUTE -----------------------------------------
                         # --- [NUEVO] comando: RUN_TRACEROUTE -----------------------------------------
             elif cmd == "RUN_TRACEROUTE":
-                    node = str(params.get("target") or params.get("node") or "").strip()
-                    if not node:
+                    # ------------------------------------------------------------
+                    # RUN_TRACEROUTE (API Meshtastic) - NO PAUSA el broker
+                    #
+                    # Acepta target en 2 formatos:
+                    #   - "!2744ee88" (hex Meshtastic)  -> se convierte a decimal (nodeNum)
+                    #   - "1623194643" (decimal nodeNum) -> se usa tal cual
+                    #
+                    # Params:
+                    #   - target | node : str
+                    #   - hop_limit     : int (default 20, 1..50)
+                    #   - ch_index      : int (default 0, 0..7)
+                    #
+                    # Acción:
+                    #   - Lanza traceroute por API (sendTraceRoute) de forma NO bloqueante
+                    #   - La respuesta llega por el RX normal como TRACEROUTE_APP/ROUTING_APP
+                    # ------------------------------------------------------------
+                    raw_target = str(params.get("target") or params.get("node") or "").strip()
+                    if not raw_target:
                         resp = {"ok": False, "error": "missing target"}
                         conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                         return
 
-                    if not node.startswith("!"):
-                        node = "!" + node
+                    def _parse_dest_to_node_num(v: str) -> int:
+                        """
+                        Convierte target a nodeNum (decimal) para sendTraceRoute().
+                        Acepta '!xxxxxxxx' hex o decimal en texto.
+                        """
+                        v = v.strip()
+                        if v.startswith("!"):
+                            hx = v[1:]
+                            return int(hx, 16)
+                        # decimal
+                        return int(v)
+
+                    # hop_limit
+                    try:
+                        hop_limit = int(params.get("hop_limit") or params.get("hopLimit") or 20)
+                    except Exception:
+                        hop_limit = 20
+                    hop_limit = max(1, min(hop_limit, 50))
+
+                    # ch_index
+                    try:
+                        ch_index = int(params.get("ch_index") or params.get("channel_index") or params.get("channelIndex") or 0)
+                    except Exception:
+                        ch_index = 0
+                    ch_index = max(0, min(ch_index, 7))
 
                     ok = False
+                    err = None
+                    node_num = None
+
                     try:
+                        # Convierte a nodeNum decimal (forma canónica para sendTraceRoute)
+                        node_num = _parse_dest_to_node_num(raw_target)
+
                         # Host/port REALES del nodo (los fijaste en main())
                         mesh_host = globals().get("RUNTIME_MESH_HOST")
                         mesh_port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
 
-                        # Gestor global de la interfaz persistente del broker
                         mgr = globals().get("BROKER_IFACE_MGR")
-                        if mgr and hasattr(mgr, "acquire") and callable(mgr.acquire):
-                            iface = None
+                        if not (mgr and hasattr(mgr, "acquire") and callable(mgr.acquire)):
+                            raise RuntimeError("BROKER_IFACE_MGR no disponible")
+
+                        iface = None
+                        try:
+                            # Reutiliza la interfaz persistente del broker (no abre sockets extra)
                             try:
+                                iface = mgr.acquire(mesh_host, mesh_port, timeout=4.0, reuse_only=True)
+                            except TypeError:
+                                iface = mgr.acquire(mesh_host, mesh_port, timeout=4.0)
+
+                            if not iface:
+                                raise RuntimeError("No se pudo adquirir iface del pool")
+
+                            # API moderna (prioridad)
+                            fn = getattr(iface, "sendTraceRoute", None)
+                            if callable(fn):
+                                # Probamos la firma completa; si la librería no acepta kwargs, reducimos
                                 try:
-                                    iface = mgr.acquire(mesh_host, mesh_port, timeout=4.0, reuse_only=True)
+                                    fn(node_num, hop_limit, channelIndex=ch_index)
                                 except TypeError:
-                                    iface = mgr.acquire(mesh_host, mesh_port, timeout=4.0)
-
-                                if iface:
-                                    # Probar varias firmas según SDK
-                                    candidates = [
-                                        ("traceroute",     {"node_id": node}),
-                                        ("traceroute",     {"dest_id": node}),
-                                        ("traceroute",     {"id": node}),
-                                        ("sendTraceroute", {"dest_id": node}),
-                                        ("tracerouteNode", {"dest_id": node}),
-                                        ("requestTraceroute", {"dest_id": node}),
-                                        ("routeDiscovery", {"dest_id": node}),
-                                    ]
-                                    for name, kwargs in candidates:
-                                        fn = getattr(iface, name, None)
-                                        if not callable(fn):
-                                            continue
-                                        try:
-                                            import inspect
-                                            sig = inspect.signature(fn)
-                                            accepted = set(sig.parameters.keys())
-                                            safe_kwargs = {k: v for k, v in kwargs.items() if k in accepted}
-                                        except Exception:
-                                            safe_kwargs = kwargs
-                                        try:
-                                            fn(**safe_kwargs)  # no bloqueante
-                                            ok = True
-                                            break
-                                        except Exception:
-                                            continue
-                            finally:
-                                try:
-                                    if iface and hasattr(iface, "release"):
-                                        iface.release()
-                                except Exception:
-                                    pass
-                        # alternativa si defines self.run_traceroute(...)
-                        if (not ok) and hasattr(self, "run_traceroute"):
-                            try:
-                                self.run_traceroute(node)
+                                    try:
+                                        fn(node_num, hop_limit, ch_index)
+                                    except TypeError:
+                                        fn(node_num, hop_limit)
                                 ok = True
+                            else:
+                                raise RuntimeError("sendTraceRoute no disponible en esta versión")
+
+                        finally:
+                            # devuelve la iface al pool si soporta release()
+                            try:
+                                if iface and hasattr(iface, "release"):
+                                    iface.release()
                             except Exception:
-                                ok = False
+                                pass
 
-                    except Exception:
+                    except Exception as e:
                         ok = False
+                        err = str(e)
 
-                    resp = {"ok": bool(ok)}
+                    resp = {
+                        "ok": bool(ok),
+                        "started": bool(ok),
+                        "target": raw_target,
+                        "dest_node_num": node_num,
+                        "hop_limit": hop_limit,
+                        "ch_index": ch_index,
+                    }
+                    if not ok:
+                        resp["error"] = err or "traceroute start failed"
+
                     conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                     return
 
