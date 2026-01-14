@@ -154,10 +154,12 @@ async def _aprsis_send_line_safe(line: str) -> bool:
     """
     Envía una línea a APRS-IS si hay cliente conectado.
 
-    IMPORTANTE:
-    - En este proyecto el cliente APRS-IS real es _aprsis_client (clase _AprsISClient),
-      no una global llamada APRSIS_CLIENT.
-    - Esta función NO debe romper nada: si no hay cliente, devuelve False en silencio.
+    OBJETIVO:
+    - No tocar la clase _AprsISClient (porque ya la consideras estable).
+    - Hacer el envío "mesh→IS push" resistente a cierres remotos:
+        * Normaliza fin de línea (APRS-IS es por líneas)
+        * Si hay Broken pipe (errno 32) o cierre remoto, fuerza reconexión y reintenta 1 vez.
+    - Si no hay cliente, devuelve False sin romper nada.
     """
     try:
         if not line:
@@ -167,20 +169,51 @@ async def _aprsis_send_line_safe(line: str) -> bool:
         if c is None:
             return False
 
-        # _AprsISClient es async, su método correcto es send_line()
+        # --- Normaliza fin de línea ---
+        # APRS-IS opera por líneas; si mandas sin '\n' algunos servidores acaban cerrando la sesión.
+        line_norm = str(line).rstrip("\r\n") + "\n"
+
+        # --- 1er intento ---
         if hasattr(c, "send_line"):
-            await c.send_line(line)
-            return True
+            try:
+                await c.send_line(line_norm)
+                return True
+            except (BrokenPipeError, ConnectionError, OSError) as e:
+                # Broken pipe típico: errno 32
+                eno = getattr(e, "errno", None)
+                if eno not in (None, 32):
+                    raise
 
-        # Fallback por compatibilidad (por si alguien cambia el tipo del cliente)
-        if hasattr(c, "sendall"):
-            c.sendall(line)
-            return True
-        if hasattr(c, "send"):
-            c.send(line)
-            return True
+                # --- Forzar reconexión + 2º intento ---
+                try:
+                    # La clase ya tiene lógica: si _is es None, reconecta.
+                    # Forzamos el estado a "reconectar" sin modificar la clase.
+                    if hasattr(c, "_is"):
+                        c._is = None
 
-        return False
+                    # Si existe connect(), úsalo para levantar sesión antes de reintentar
+                    if hasattr(c, "connect"):
+                        await c.connect()
+
+                    await c.send_line(line_norm)
+                    return True
+                except Exception as e2:
+                    print(f"[aprs→IS push] ❌ {type(e2).__name__}: {e2}")
+                    return False
+
+        # --- Fallbacks (no deberían usarse en tu proyecto, pero se mantienen) ---
+        try:
+            if hasattr(c, "sendall"):
+                c.sendall(line_norm)
+                return True
+            if hasattr(c, "send"):
+                c.send(line_norm)
+                return True
+            return False
+        except Exception as e:
+            print(f"[aprs→IS push] ❌ {type(e).__name__}: {e}")
+            return False
+
     except Exception as e:
         print(f"[aprs→IS push] ❌ {type(e).__name__}: {e}")
         return False

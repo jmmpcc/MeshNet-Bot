@@ -6683,20 +6683,47 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Si s tiene formato 'CALL: texto', devuelve ('CALL', 'texto').
         Si no, devuelve (None, s).
+
+        Robusto:
+        - Normaliza ':' raro (fullwidth) y limpia caracteres invisibles (LRM/RLM/ZW*)
+        - Limpia restos tipo 'CALL>:' 'CALL,:' etc.
+        - Acepta callsigns APRS típicos con SSID (EB2EAS-7) y también '/' (tácticos)
         """
+        import re
+
         s = (s or "").strip()
-        if not s or ":" not in s:
+        if not s:
             return None, s
-        left, right = s.split(":", 1)
+
+        # Normaliza ":" fullwidth a ":" normal
+        s_norm = s.replace("：", ":")
+
+        # Elimina invisibles comunes que rompen el regex sin que se vean en Telegram
+        # (LRM/RLM, bidi marks, zero-width)
+        s_norm = re.sub(r"[\u200B-\u200F\u202A-\u202E\u2066-\u2069]", "", s_norm)
+
+        if ":" not in s_norm:
+            return None, s
+
+        left, right = s_norm.split(":", 1)
+
         cand = (left or "").strip()
         rest = (right or "").strip()
+
         if not cand or not rest:
             return None, s
-        # Validación mínima de CALL APRS (letras/números/guión)
-        import re
-        if re.fullmatch(r"[A-Za-z0-9\-]+", cand):
-            return cand, rest
+
+        # Limpieza típica de separadores que se cuelan
+        cand = cand.rstrip(" ,;>)]}").lstrip("[{(").strip()
+
+        # Validación mínima CALL APRS:
+        #  - letras/números
+        #  - permite '-' (SSID) y '/' (tácticos tipo EA2XXX/9)
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9\-\/]*", cand):
+            return cand.upper(), rest
+
         return None, s
+
 
     if len(args) >= 2:
         if args[0].lower() == "canal" and args[1].lstrip("-").isdigit():
@@ -6744,6 +6771,7 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # compat clásica: "<CALL|broadcast>: <texto> [canal N]"
+    raw = (raw or "").replace("：", ":")
     if not raw or ":" not in raw:
         await _safe_reply_html(
             update.effective_message,
