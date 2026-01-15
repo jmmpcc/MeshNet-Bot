@@ -2074,6 +2074,40 @@ def _apply_cli_overrides():
     if args.broker_port is not None:     BROKER_PORT = int(args.broker_port)
     if args.mesh_channel is not None:    MESHTASTIC_CHANNEL = int(args.mesh_channel)
 
+async def task_aprsis_uplink_keepalive():
+    """
+    Mantiene viva la conexión uplink a APRS-IS para evitar que el servidor la cierre por inactividad.
+
+    - APRS-IS acepta líneas de comentario que empiezan por '#'
+    - Se envía cada N segundos usando _aprsis_send_line_safe() (normaliza \\n + retry si hay Broken pipe)
+    - No interfiere con /aprs ni con la pasarela RF.
+    """
+    import os, time
+
+    interval_s = int(os.getenv("APRSIS_UPLINK_KEEPALIVE_S", "75"))
+    interval_s = max(30, interval_s)
+
+    while True:
+        try:
+            await asyncio.sleep(interval_s)
+
+            # Si no está listo, no hacemos nada
+            if not _aprsis_ready():
+                continue
+
+            # Si no hay cliente aún, no forzamos; ya se levantará al primer envío real
+            c = globals().get("_aprsis_client", None)
+            if c is None:
+                continue
+
+            # Comentario keepalive (no es una trama APRS, es para APRS-IS)
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            await _aprsis_send_line_safe(f"# keepalive {APRSIS_USER} {ts}")
+
+        except Exception:
+            # Nunca romper el bucle por el keepalive
+            pass
+
 
 async def task_mesh_channels_to_aprsis():
     """
@@ -2273,27 +2307,28 @@ async def task_mesh_channels_to_aprsis():
 # =========================
 async def main():
     # Tareas existentes
-    t1 = asyncio.create_task(task_broker_to_aprs())        # Mesh → APRS
-    t2 = asyncio.create_task(task_aprs_to_meshtastic())    # APRS RF → Mesh
-    t3 = asyncio.create_task(task_control_udp())           # Bot(/aprs) → APRS
-    t4 = asyncio.create_task(task_aprsis_connect_on_startup())  # Conexión inicial APRS-IS (uplink)
-   
-    tasks = [t1, t2, t3, t4]
+    tasks = [
+        asyncio.create_task(task_broker_to_aprs()),             # Mesh → APRS
+        asyncio.create_task(task_aprs_to_meshtastic()),         # APRS RF → Mesh
+        asyncio.create_task(task_control_udp()),                # Bot(/aprs) → APRS
+        asyncio.create_task(task_aprsis_connect_on_startup()),  # Conexión inicial APRS-IS (uplink)
+    ]
 
-    # NUEVO: activar la recepción APRS-IS → Mesh si hay credenciales
+    # Recepción APRS-IS → Mesh (downlink)
     if _aprsis_ready():
         print("[aprs←IS] Recepción APRS-IS habilitada (downlink).")
-        t5 = asyncio.create_task(task_aprsis_to_meshtastic())   # <<< NUEVO
-        tasks.append(t5)
+        tasks.append(asyncio.create_task(task_aprsis_to_meshtastic()))
     else:
         print("[aprs←IS] Downlink deshabilitado (faltan credenciales APRSIS_USER/PASSCODE).")
 
-    # NUEVO: mirror Mesh -> APRS-IS (para ver canales en APRSDroid)
-    t6 = asyncio.create_task(task_mesh_channels_to_aprsis())
-    tasks.append(t6)
+    # Mirror Mesh -> APRS-IS (aprsis_push)
+    tasks.append(asyncio.create_task(task_mesh_channels_to_aprsis()))
 
-    # Ejecutar todas las tareas de forma concurrente
+    # Keepalive uplink APRS-IS
+    tasks.append(asyncio.create_task(task_aprsis_uplink_keepalive()))
+
     await asyncio.gather(*tasks)
+
 
 
 if __name__ == "__main__":
