@@ -152,11 +152,13 @@ def _aprsis_push_is_enabled() -> bool:
 
 def _aprsis_tnc2_message_line(dst_call: str, text: str, *, with_msgid: bool = True) -> str:
     """
-    Construye una línea APRS-IS tipo mensaje:
-      SRC>APRS,TCPIP*: :DEST     :texto{nn}
+    Construye una línea APRS-IS tipo mensaje (TNC2):
 
+      SRC>APRS,TCPIP*::DEST     :texto{nn}
+
+    - Importante: en APRS un "message packet" lleva "::DEST....:" (doble ':' sin espacios).
     - DEST debe ir a 9 chars (APRS spec).
-    - El cuerpo de mensaje se limita a MAX_MSG_LEN (por defecto 67).
+    - El cuerpo se limita a MAX_MSG_LEN (por defecto 67).
     - Incluye ID {nn} para evitar supresión de duplicados y mejorar visibilidad.
     """
     src = (APRSIS_USER or MY_CALL or "").strip().upper()
@@ -169,16 +171,16 @@ def _aprsis_tnc2_message_line(dst_call: str, text: str, *, with_msgid: bool = Tr
         return ""
 
     msgid = _aprsis_next_msgid(dst) if with_msgid else ""
-    # Reserva para {nn} si aplica
     reserve = len(msgid)
     max_body = max(1, int(MAX_MSG_LEN) - reserve)
 
-    # Recorta a límite APRS
     if len(msg) > max_body:
         msg = msg[:max_body]
 
     dst9 = (dst[:9]).ljust(9, " ")
-    return f"{src}>APRS,TCPIP*: :{dst9}:{msg}{msgid}"
+
+    # CRÍTICO: "::DEST9:mensaje" (sin espacios)
+    return f"{src}>APRS,TCPIP*::{dst9}:{msg}{msgid}"
 
 
 async def _aprsis_send_line_safe(line: str) -> bool:
@@ -1963,8 +1965,12 @@ _APRS_CMD_RE = re.compile(r"^\s*/aprs\s+([A-Za-z0-9\-]+)\s*:\s*(.+)\s*$", re.IGN
 async def task_broker_to_aprs():
     """
     Conecta al servidor JSONL del broker (BROKER_HOST:BROKER_PORT),
-    detecta /aprs broadcast: ... y /aprs EA2ABC: ... y los transmite por APRS.
+    detecta /aprs broadcast: . y /aprs EA2ABC: . y los transmite por APRS RF (KISS).
     Evita duplicados con el dedup (si el bot ya envió por UDP).
+
+    FIX v6.2.2:
+      - El texto puede venir en obj["text"] o en obj["decoded"]["text"] o en obj["payload"]["text"].
+        El bot ya lo contemplaba, pero aquí se estaba descartando.
     """
     backoff = 2.0
     while True:
@@ -1978,18 +1984,28 @@ async def task_broker_to_aprs():
                 line = await reader.readline()
                 if not line:
                     raise ConnectionError("broker closed")
+
                 try:
                     obj = json.loads(line.decode("utf-8", "ignore"))
                 except Exception:
                     continue
 
-                # Sólo textos de usuario
+                # Solo textos de usuario
                 if (obj.get("portnum") or "").upper() != "TEXT_MESSAGE_APP":
                     continue
 
+                # --- FIX: el texto puede venir en distintas rutas ---
                 text = obj.get("text")
-                if not isinstance(text, str):
+                if not isinstance(text, str) or not text.strip():
+                    dec = obj.get("decoded") or {}
+                    if isinstance(dec, dict):
+                        text = dec.get("text")
+                if (not isinstance(text, str) or not text.strip()) and isinstance(obj.get("payload"), dict):
+                    text = obj["payload"].get("text")
+
+                if not isinstance(text, str) or not text.strip():
                     continue
+
                 if not text.lstrip().lower().startswith("/aprs"):
                     continue
 
@@ -1998,8 +2014,8 @@ async def task_broker_to_aprs():
                     # Ignoramos formatos /aprs N <texto> o /aprs canal N <texto>
                     continue
 
-                dest_token = _aprs_ascii((m.group(1) or "").strip())      # [NUEVO]
-                payload_text = _aprs_ascii((m.group(2) or "").strip())    # [NUEVO]
+                dest_token = _aprs_ascii((m.group(1) or "").strip())
+                payload_text = _aprs_ascii((m.group(2) or "").strip())
 
                 if not payload_text:
                     continue
@@ -2020,19 +2036,23 @@ async def task_broker_to_aprs():
                     payloads = build_aprs_message_chunks(dest_norm, payload_text, MAX_MSG_LEN)
 
                 ok_all = True
-                for p in payloads:
-                    ok = _tx_aprs_payload(pld := p, dest_hdr)
+                for pld in payloads:
+                    ok = _tx_aprs_payload(pld, dest_hdr)
                     ok_all = ok_all and ok
-                    # Pequeña pausa para no saturar el TNC
                     await asyncio.sleep(0.12)
 
                 _dedup_mark(dest_norm, payload_text)
-                print(f"[broker→aprs] {dest_norm} parts={len(payloads)} → {'OK' if ok_all else 'KO'}")
+                print(f"[broker→aprs] /aprs desde mesh → RF: {'OK' if ok_all else 'KO'} dest={dest_norm}")
 
         except Exception as e:
-            print(f"[broker→aprs] ❌ {type(e).__name__}: {e} — reintento en {backoff:.1f}s")
+            print(f"[broker→aprs] ❌ {type(e).__name__}: {e}")
+
+        # backoff reconexión
+        try:
             await asyncio.sleep(backoff)
-            backoff = min(30.0, backoff * 1.5)
+        except Exception:
+            pass
+        backoff = min(30.0, backoff * 1.7)
 
 
 import argparse
