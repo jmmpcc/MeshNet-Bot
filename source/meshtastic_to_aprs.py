@@ -111,6 +111,23 @@ APRSIS_PUSH_MIN_GAP_S = float(os.getenv("APRSIS_PUSH_MIN_GAP_S", "1.0") or "1.0"
 
 _APRSIS_PUSH_LAST_TS = 0.0
 
+# --- IDs de mensajes APRS-IS (para evitar dedupe y mejorar visibilidad en clientes) ---
+_APRSIS_PUSH_MSGID: dict[str, int] = {}
+
+def _aprsis_next_msgid(dst_call: str) -> str:
+    """
+    Devuelve un ID de mensaje '{nn}' (00-99) por destino, para evitar supresión de duplicados.
+    APRSdroid y otros clientes suelen mostrar mejor los mensajes con ID.
+    """
+    d = (dst_call or "").strip().upper()
+    if not d:
+        return "{00}"
+    n = int(_APRSIS_PUSH_MSGID.get(d, 0))
+    n = (n + 1) % 100
+    _APRSIS_PUSH_MSGID[d] = n
+    return f"{{{n:02d}}}"
+
+
 def _parse_push_channels(raw: str) -> Optional[set[int]]:
     """
     raw:
@@ -133,22 +150,36 @@ def _parse_push_channels(raw: str) -> Optional[set[int]]:
 def _aprsis_push_is_enabled() -> bool:
     return bool(APRSIS_PUSH_ENABLED) and bool(APRSIS_PUSH_TO) and _aprsis_ready()
 
-def _aprsis_tnc2_message_line(dst_call: str, text: str) -> str:
+def _aprsis_tnc2_message_line(dst_call: str, text: str, *, with_msgid: bool = True) -> str:
     """
     Construye una línea APRS-IS tipo mensaje:
-      SRC>APRS,TCPIP*: :DEST     :texto
-    DEST debe ir a 9 chars (APRS spec). Se rellena con espacios.
+      SRC>APRS,TCPIP*: :DEST     :texto{nn}
+
+    - DEST debe ir a 9 chars (APRS spec).
+    - El cuerpo de mensaje se limita a MAX_MSG_LEN (por defecto 67).
+    - Incluye ID {nn} para evitar supresión de duplicados y mejorar visibilidad.
     """
     src = (APRSIS_USER or MY_CALL or "").strip().upper()
     dst = (dst_call or "").strip().upper()
     if not src or not dst:
         return ""
-    # saneo ASCII como ya haces para APRS :contentReference[oaicite:5]{index=5}
+
     msg = _aprs_ascii(text)
     if not msg:
         return ""
+
+    msgid = _aprsis_next_msgid(dst) if with_msgid else ""
+    # Reserva para {nn} si aplica
+    reserve = len(msgid)
+    max_body = max(1, int(MAX_MSG_LEN) - reserve)
+
+    # Recorta a límite APRS
+    if len(msg) > max_body:
+        msg = msg[:max_body]
+
     dst9 = (dst[:9]).ljust(9, " ")
-    return f"{src}>APRS,TCPIP*: :{dst9}:{msg}"
+    return f"{src}>APRS,TCPIP*: :{dst9}:{msg}{msgid}"
+
 
 async def _aprsis_send_line_safe(line: str) -> bool:
     """
@@ -177,7 +208,20 @@ async def _aprsis_send_line_safe(line: str) -> bool:
         if hasattr(c, "send_line"):
             try:
                 await c.send_line(line_norm)
+
+                # Log explícito de envío OK a APRS-IS
+                try:
+                    preview = line_norm.strip()
+                    # Acorta para no ensuciar consola si es largo
+                    if len(preview) > 160:
+                        preview = preview[:157] + "..."
+                    print(f"[aprs→IS push] ✅ TX OK -> {preview}")
+                except Exception:
+                    # Nunca romper el flujo por logging
+                    pass
+
                 return True
+
             except (BrokenPipeError, ConnectionError, OSError) as e:
                 # Broken pipe típico: errno 32
                 eno = getattr(e, "errno", None)
@@ -588,7 +632,7 @@ class _AprsISClient:
                         pass
                 if not self._announced:
                     print(f"[aprs→IS] Conectado OK como {self.user} a {self.host}:{self.port} (filtro='{self.filt or '-'}').")
-                    print("           Subiré SOLO POSICIONES con [CHx] en formato third-party (respetando NOGATE/RFONLY).")
+                    print("Subiré SOLO POSICIONES con [CHx] en formato third-party (respetando NOGATE/RFONLY).")
                     self._announced = True
             except Exception as e:
                 if not self._announced:
@@ -1531,11 +1575,14 @@ async def task_aprs_to_meshtastic():
                         try:
                             global _aprsis_client
                             if _aprsis_client is None:
-                                _aprsis_client = _AprsISClient(APRSIS_USER, APRSIS_PASSCODE, APRSIS_HOST, APRSIS_PORT, APRSIS_FILTER)
+                                _aprsis_client = _AprsISClient(APRSIS_USER, APRSIS_PASSCODE, APRSIS_HOST, APRSIS_PORT, "")
+
                             line = _make_thirdparty_line(pkt, APRSIS_USER)
                             if line:
-                                await _aprsis_client.send_line(line)
-                                print(f"[aprs→IS] UP {len(line)}B")
+                                ok = await _aprsis_send_line_safe(line)  # normaliza '\n' + retry tras Broken pipe
+                                print(f"[aprs→IS] UP {len(line)}B -> {'OK' if ok else 'KO'}")
+
+                       
                         except Exception as e:
                             print(f"[aprs→IS] ❌ {e}")
 
@@ -1766,7 +1813,7 @@ async def task_aprsis_connect_on_startup():
     try:
         global _aprsis_client
         if _aprsis_client is None:
-            _aprsis_client = _AprsISClient(APRSIS_USER, APRSIS_PASSCODE, APRSIS_HOST, APRSIS_PORT, APRSIS_FILTER)
+            _aprsis_client = _AprsISClient(APRSIS_USER, APRSIS_PASSCODE, APRSIS_HOST, APRSIS_PORT, "")
         await _aprsis_client.connect()
         # Si llega aquí, ya se anunció "Conectado OK ..." desde _ensure_sync()
     except Exception as e:
