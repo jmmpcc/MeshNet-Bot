@@ -1965,14 +1965,82 @@ _APRS_CMD_RE = re.compile(r"^\s*/aprs\s+([A-Za-z0-9\-]+)\s*:\s*(.+)\s*$", re.IGN
 async def task_broker_to_aprs():
     """
     Conecta al servidor JSONL del broker (BROKER_HOST:BROKER_PORT),
-    detecta /aprs broadcast: . y /aprs EA2ABC: . y los transmite por APRS RF (KISS).
-    Evita duplicados con el dedup (si el bot ya envió por UDP).
+    detecta /aprs broadcast: ... y /aprs EA2ABC: ... y los transmite por APRS.
 
-    FIX v6.2.2:
-      - El texto puede venir en obj["text"] o en obj["decoded"]["text"] o en obj["payload"]["text"].
-        El bot ya lo contemplaba, pero aquí se estaba descartando.
+    - RF (KISS): build_aprs_* + _tx_aprs_payload
+    - APRS-IS: también publica el mensaje en APRS-IS (si hay credenciales)
+    - Evita duplicados con dedup
+    - ROBUSTO: soporta eventos envueltos del broker (packet/summary/decoded/payload)
     """
     backoff = 2.0
+
+    def _as_dict(x):
+        return x if isinstance(x, dict) else {}
+
+    def _first_str(*vals) -> str:
+        for v in vals:
+            if isinstance(v, str) and v.strip():
+                return v
+        return ""
+
+    def _first_any(*vals):
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    def _norm_event(obj: dict):
+        """
+        Devuelve: (port_upper:str, text:str, ch:int|None)
+
+        Soporta:
+          - plano:    {"portnum":"TEXT_MESSAGE_APP","text":"...","channel":2}
+          - envuelto: {"packet":{...},"summary":{...}}
+          - mixto:    {"decoded":{...}} / {"payload":{...}} en raíz o en packet
+        """
+        obj = _as_dict(obj)
+        summ = _as_dict(obj.get("summary"))
+        pkt = _as_dict(obj.get("packet")) if isinstance(obj.get("packet"), dict) else obj
+
+        dec_root = _as_dict(obj.get("decoded"))
+        pay_root = _as_dict(obj.get("payload"))
+        dec_pkt  = _as_dict(pkt.get("decoded"))
+        pay_pkt  = _as_dict(pkt.get("payload"))
+        meta_pkt = _as_dict(pkt.get("meta"))
+
+        port = _first_str(
+            str(summ.get("portnum") or ""),
+            str(dec_pkt.get("portnum") or ""),
+            str(dec_root.get("portnum") or ""),
+            str(pkt.get("portnum") or ""),
+            str(obj.get("portnum") or ""),
+        ).upper().strip()
+
+        txt = _first_str(
+            summ.get("text"),
+            dec_pkt.get("text"),
+            pay_pkt.get("text"),
+            dec_root.get("text"),
+            pay_root.get("text"),
+            pkt.get("text"),
+            obj.get("text"),
+        )
+
+        ch_raw = _first_any(
+            summ.get("channel"), summ.get("canal"),
+            pkt.get("channel"), pkt.get("channelIndex"),
+            meta_pkt.get("channelIndex"),
+            dec_pkt.get("channel"), dec_pkt.get("channelIndex"),
+            dec_root.get("channel"), dec_root.get("channelIndex"),
+            obj.get("channel"), obj.get("channelIndex"),
+        )
+        try:
+            ch = int(ch_raw) if ch_raw is not None else None
+        except Exception:
+            ch = None
+
+        return port, txt, ch
+
     while True:
         try:
             print(f"[broker→aprs] Conectando JSONL {BROKER_HOST}:{BROKER_PORT} …")
@@ -1981,31 +2049,31 @@ async def task_broker_to_aprs():
             backoff = 2.0
 
             while True:
-                line = await reader.readline()
-                if not line:
+                raw = await reader.readline()
+                if not raw:
                     raise ConnectionError("broker closed")
 
                 try:
-                    obj = json.loads(line.decode("utf-8", "ignore"))
+                    obj = json.loads(raw.decode("utf-8", "ignore"))
                 except Exception:
                     continue
 
-                # Solo textos de usuario
-                if (obj.get("portnum") or "").upper() != "TEXT_MESSAGE_APP":
+                # DEBUG: confirma que vemos TEXT_MESSAGE_APP con /aprs (también envueltos)
+                try:
+                    _p, _t, _c = _norm_event(obj)
+                    if _p == "TEXT_MESSAGE_APP" and isinstance(_t, str) and _t.lstrip().lower().startswith("/aprs"):
+                        print(f"[broker→aprs][DBG] RX ch={_c} from={obj.get('from')} text={_t!r}")
+                except Exception:
+                    pass
+
+
+                port, text, ch = _norm_event(obj)
+
+                # Sólo textos de usuario
+                if port != "TEXT_MESSAGE_APP":
                     continue
-
-                # --- FIX: el texto puede venir en distintas rutas ---
-                text = obj.get("text")
-                if not isinstance(text, str) or not text.strip():
-                    dec = obj.get("decoded") or {}
-                    if isinstance(dec, dict):
-                        text = dec.get("text")
-                if (not isinstance(text, str) or not text.strip()) and isinstance(obj.get("payload"), dict):
-                    text = obj["payload"].get("text")
-
                 if not isinstance(text, str) or not text.strip():
                     continue
-
                 if not text.lstrip().lower().startswith("/aprs"):
                     continue
 
@@ -2013,46 +2081,91 @@ async def task_broker_to_aprs():
                 if not m:
                     # Ignoramos formatos /aprs N <texto> o /aprs canal N <texto>
                     continue
-
+                
+                
                 dest_token = _aprs_ascii((m.group(1) or "").strip())
                 payload_text = _aprs_ascii((m.group(2) or "").strip())
-
                 if not payload_text:
                     continue
 
-                # Normaliza destino
+                print(f"[broker→aprs][DBG] PARSED dest_token={dest_token!r} payload={payload_text!r} ch={ch}")
+
+                # Normaliza destino + dedup + payloads RF
                 if dest_token.lower() in ("broadcast", "all"):
                     dest_norm = "broadcast"
                     dest_hdr = "APRS"
+                    
                     if _dedup_seen(dest_norm, payload_text):
-                        # Ya lo manejó el bot por UDP
+                        print(f"[broker→aprs][DBG] DEDUP HIT dest={dest_norm} payload={payload_text!r} -> SKIP")
                         continue
+
                     payloads = build_aprs_status_chunks(payload_text, MAX_STATUS_LEN)
                 else:
                     dest_norm = dest_token.upper()
                     dest_hdr = dest_norm
+
                     if _dedup_seen(dest_norm, payload_text):
+                        print(f"[broker→aprs][DBG] DEDUP HIT dest={dest_norm} payload={payload_text!r} -> SKIP")
                         continue
+
                     payloads = build_aprs_message_chunks(dest_norm, payload_text, MAX_MSG_LEN)
 
+
+                # --- 1) RF (KISS) ---
                 ok_all = True
-                for pld in payloads:
-                    ok = _tx_aprs_payload(pld, dest_hdr)
-                    ok_all = ok_all and ok
+                for i, pld in enumerate(payloads, 1):
+                    try:
+                        print(f"[broker→aprs][DBG] RF TX part {i}/{len(payloads)} dest_hdr={dest_hdr} bytes={len(pld)}")
+
+                        try:
+                            prev = pld
+                            if isinstance(prev, (bytes, bytearray)):
+                                prev = prev.decode("utf-8", "ignore")
+                            prev = str(prev).replace("\r", "\\r").replace("\n", "\\n")
+                            if len(prev) > 220:
+                                prev = prev[:217] + "..."
+                            print(f"[broker→aprs][DBG] RF PAYLOAD preview={prev}")
+                        except Exception:
+                            pass
+
+                        ok = _tx_aprs_payload(pld, dest_hdr)
+                        print(f"[broker→aprs][DBG] RF TX part {i}/{len(payloads)} -> {'OK' if ok else 'KO'}")
+                        ok_all = ok_all and ok
+    
+                    except Exception as e:
+                        ok_all = False
+                        print(f"[broker→aprs][DBG] RF TX EXC part {i}/{len(payloads)}: {type(e).__name__}: {e}")
                     await asyncio.sleep(0.12)
 
+
+                # --- 2) APRS-IS (opcional) ---
+                ok_is = True
+                if _aprsis_ready():
+                    try:
+                        prefix = f"[CH{ch}] " if (ch is not None) else ""
+                        if dest_norm == "broadcast":
+                            src = (APRSIS_USER or MY_CALL or "").strip().upper()
+                            if src:
+                                is_line = f"{src}>APRS,TCPIP*:>{prefix}{payload_text}"
+                                ok_is = await _aprsis_send_line_safe(is_line)
+                            else:
+                                ok_is = False
+                        else:
+                            is_line = _aprsis_tnc2_message_line(dest_norm, f"{prefix}{payload_text}", with_msgid=True)
+                            ok_is = await _aprsis_send_line_safe(is_line) if is_line else False
+                    except Exception as e:
+                        ok_is = False
+                        print(f"[broker→IS] ❌ {type(e).__name__}: {e}")
+
                 _dedup_mark(dest_norm, payload_text)
-                print(f"[broker→aprs] /aprs desde mesh → RF: {'OK' if ok_all else 'KO'} dest={dest_norm}")
+                print(f"[broker→aprs][DBG] DEDUP MARK dest={dest_norm} payload={payload_text!r}")
+
+                print(f"[broker→aprs] {dest_norm} parts={len(payloads)} → RF={'OK' if ok_all else 'KO'} IS={'OK' if ok_is else 'KO'}")
 
         except Exception as e:
-            print(f"[broker→aprs] ❌ {type(e).__name__}: {e}")
-
-        # backoff reconexión
-        try:
+            print(f"[broker→aprs] ❌ {type(e).__name__}: {e} — reintento en {backoff:.1f}s")
             await asyncio.sleep(backoff)
-        except Exception:
-            pass
-        backoff = min(30.0, backoff * 1.7)
+            backoff = min(30.0, backoff * 1.5)
 
 
 import argparse
