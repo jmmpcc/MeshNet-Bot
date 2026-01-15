@@ -2235,7 +2235,7 @@ async def task_aprsis_uplink_keepalive():
 
             # Comentario keepalive (no es una trama APRS, es para APRS-IS)
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            await _aprsis_send_line_safe(f"# keepalive {APRSIS_USER} {ts}")
+            await _aprsis_send_line_safe(f"{APRSIS_USER}>APRS,TCPIP*:>keepalive {ts}")
 
         except Exception:
             # Nunca romper el bucle por el keepalive
