@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.py
+Meshtastic_Broker_v6.2.3.py
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 
@@ -30,6 +30,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
+import re
 
 from pubsub import pub
 from meshtastic.tcp_interface import TCPInterface
@@ -454,6 +455,23 @@ COOLDOWN = _CooldownCtrl()
 # --- [NUEVO] Próximo cooldown forzado (se consume una sola vez) ---
 COOLDOWN_FORCE_NEXT = None
 COOLDOWN_FORCE_LOCK = threading.Lock()
+
+# === HOME_NODE_ID (DM estricto) ===
+def _norm_node_id(v: str) -> str:
+    """
+    Normaliza node_id a formato '!xxxxxxxx' en minúsculas.
+    Acepta '9ef0c2cc' o '!9ef0c2cc'.
+    """
+    v = (v or "").strip().lower()
+    if not v:
+        return ""
+    if not v.startswith("!"):
+        v = "!" + v
+    return v
+
+HOME_NODE_ID = _norm_node_id(os.getenv("HOME_NODE_ID", ""))
+
+
 
 # --- [NUEVO] Inicialización global (arriba del fichero, con otros singletons) ---
 try:
@@ -2343,6 +2361,15 @@ def stamp_channels(pkt: dict, canal: Optional[int], rfch: Optional[int]) -> None
 
 _SYSTEM_PORTS = {"POSITION_APP","TELEMETRY_APP","NODEINFO_APP","NEIGHBORINFO_APP","ROUTING_APP"}
 
+# === [NUEVO] Regex: /aprs canal N DEST: texto (orden privado) ===
+# Se usa para permitir que un DM actúe como orden: enviar por APRS (RF/IS lo decide la pasarela)
+# y, además, reinyectar SOLO el texto limpio en un canal Mesh indicado.
+_APRS_CANAL_CMD_RE = re.compile(
+    r"^\s*/aprs(?:\s+(?:canal|ch)\s+(\d{1,2}))\s+([A-Za-z0-9\-]+)\s*:\s*(.+)\s*$",
+    re.IGNORECASE
+)
+
+
 def infer_logical_channel(portnum: Optional[str], enable: bool) -> Tuple[Optional[int], bool]:
     if not enable:
         return (None, False)
@@ -3000,6 +3027,8 @@ class MeshReceiver:
                     self._alias_cache_put(who_from, from_alias)
 
             if who_to and who_to not in ("^all", "?"):
+
+
                 to_alias = self._alias_cache_get(who_to) or self._alias_from_iface(iface_now, who_to)
                 if to_alias:
                     self._alias_cache_put(who_to, to_alias)
@@ -3074,6 +3103,54 @@ class MeshReceiver:
                         "hop_start": pkt.get("hop_start"),
                         "relay_node": pkt.get("relay_node"),
                     })
+
+                    # === [NUEVO] DM /aprs canal N ... -> reinyectar SOLO el texto limpio en canal N ===
+                    # Motivo: permitir mandar una orden por privado (no visible en canales públicos)
+                    # y que el broker publique únicamente el texto resultante en el canal indicado.
+                    #
+                    # Formato aceptado (DM):
+                    #   /aprs canal 2 EB2EAS-7: Hola
+                    #   /aprs ch 2 broadcast: Hola
+                    #
+                    # Nota:
+                    #   - El envío APRS (RF/IS) lo seguirá haciendo la pasarela APRS al ver el /aprs en el stream.
+                    #   - Aquí SOLO reinyectamos el texto a Mesh, sin /aprs, para evitar bucles.
+                    try:
+                        if str(portnum) == "TEXT_MESSAGE_APP" and isinstance(text, str) and text.lstrip().lower().startswith("/aprs"):
+                            _to = _norm_node_id(who_to)
+
+                            # DM estrictamente dirigido a ESTE nodo (HOME_NODE_ID).
+                            # Si HOME_NODE_ID no está configurado, fallback al comportamiento anterior (no romper nada).
+                            if HOME_NODE_ID:
+                                if _to != HOME_NODE_ID:
+                                     # No es un DM dirigido a mi nodo -> no hacer nada
+                                     raise StopIteration
+                                
+                            else:
+                                # fallback: DM genérico (no broadcast)
+                                if not who_to or who_to in ("^all", "?"):
+                                    raise StopIteration
+                                                                
+                            m_cmd = _APRS_CANAL_CMD_RE.match(text)
+                            if m_cmd:
+                                ch_out = int(m_cmd.group(1))
+                                clean_txt = (m_cmd.group(3) or "").strip()
+                                if clean_txt:
+                                    q = globals().get("SENDQ")
+                                    if q is not None and hasattr(q, "offer"):
+                                        q.offer(
+                                                {"channel": ch_out, "text": clean_txt, "destination": None, "require_ack": False, "type": "text"},
+                                                coalesce=False
+                                        )
+                                        if self.verbose:
+                                            print(f"[dm→mesh] Reinyectado CH{ch_out} len={len(clean_txt.encode('utf-8'))}", flush=True)
+                    except StopIteration:
+                        pass           
+                    except Exception as _e_dm:
+                        if self.verbose:
+                            print(f"⚠️ dm→mesh: {_e_dm}", flush=True)
+
+
                 except Exception as _e:
                     if self.verbose:
                         print(f"⚠️ offline_log: {_e}", flush=True)

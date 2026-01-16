@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-meshtastic_to_aprs.py (v6.2.2)
+meshtastic_to_aprs.py (v6.2.3)
 Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
 - /aprs (bot) -> UDP local -> TX APRS (troceo automático).
@@ -1960,7 +1960,11 @@ async def task_control_udp():
 # =========================
 # === Mesh → APRS (stream broker)
 # =========================
-_APRS_CMD_RE = re.compile(r"^\s*/aprs\s+([A-Za-z0-9\-]+)\s*:\s*(.+)\s*$", re.IGNORECASE)
+
+_APRS_CMD_RE = re.compile(
+    r"^\s*/aprs(?:\s+(?:canal|ch)\s+(\d{1,2}))?\s+([A-Za-z0-9\-]+)\s*:\s*(.+)\s*$",
+    re.IGNORECASE
+)
 
 async def task_broker_to_aprs():
     """
@@ -2079,12 +2083,15 @@ async def task_broker_to_aprs():
 
                 m = _APRS_CMD_RE.match(text)
                 if not m:
-                    # Ignoramos formatos /aprs N <texto> o /aprs canal N <texto>
                     continue
-                
-                
-                dest_token = _aprs_ascii((m.group(1) or "").strip())
-                payload_text = _aprs_ascii((m.group(2) or "").strip())
+
+                # group(1) = canal (opcional, solo informativo para mesh)
+                # group(2) = destino APRS
+                # group(3) = texto a enviar
+                dest_token = _aprs_ascii((m.group(2) or "").strip())
+                payload_text = _aprs_ascii((m.group(3) or "").strip())
+
+               
                 if not payload_text:
                     continue
 
