@@ -182,17 +182,16 @@ def _aprsis_tnc2_message_line(dst_call: str, text: str, *, with_msgid: bool = Tr
     # CRÍTICO: "::DEST9:mensaje" (sin espacios)
     return f"{src}>APRS,TCPIP*::{dst9}:{msg}{msgid}"
 
-
 async def _aprsis_send_line_safe(line: str) -> bool:
     """
     Envía una línea a APRS-IS si hay cliente conectado.
 
     OBJETIVO:
-    - No tocar la clase _AprsISClient (porque ya la consideras estable).
-    - Hacer el envío "mesh→IS push" resistente a cierres remotos:
-        * Normaliza fin de línea (APRS-IS es por líneas)
-        * Si hay Broken pipe (errno 32) o cierre remoto, fuerza reconexión y reintenta 1 vez.
-    - Si no hay cliente, devuelve False sin romper nada.
+    - Mantener compatibilidad (misma firma y comportamiento base).
+    - Reintento ante Broken pipe / cierre remoto (errno 32) sin tocar _AprsISClient.
+    - Logging inteligente:
+        * NO loguear líneas de comentario APRS-IS (empiezan por '#') -> keepalive transparente.
+        * Sí loguear tráfico real (paquetes APRS, mensajes, etc.).
     """
     try:
         if not line:
@@ -203,24 +202,26 @@ async def _aprsis_send_line_safe(line: str) -> bool:
             return False
 
         # --- Normaliza fin de línea ---
-        # APRS-IS opera por líneas; si mandas sin '\n' algunos servidores acaban cerrando la sesión.
         line_norm = str(line).rstrip("\r\n") + "\n"
+
+        # --- Detecta comentario APRS-IS (keepalive/metadata) ---
+        # APRS-IS usa líneas que empiezan por '#'. No interesa llenar la consola con keepalives.
+        is_comment = line_norm.lstrip().startswith("#")
 
         # --- 1er intento ---
         if hasattr(c, "send_line"):
             try:
                 await c.send_line(line_norm)
 
-                # Log explícito de envío OK a APRS-IS
-                try:
-                    preview = line_norm.strip()
-                    # Acorta para no ensuciar consola si es largo
-                    if len(preview) > 160:
-                        preview = preview[:157] + "..."
-                    print(f"[aprs→IS push] ✅ TX OK -> {preview}")
-                except Exception:
-                    # Nunca romper el flujo por logging
-                    pass
+                # Log explícito SOLO si NO es comentario
+                if not is_comment:
+                    try:
+                        preview = line_norm.strip()
+                        if len(preview) > 160:
+                            preview = preview[:157] + "..."
+                        print(f"[aprs→IS push] ✅ TX OK -> {preview}")
+                    except Exception:
+                        pass
 
                 return True
 
@@ -232,22 +233,30 @@ async def _aprsis_send_line_safe(line: str) -> bool:
 
                 # --- Forzar reconexión + 2º intento ---
                 try:
-                    # La clase ya tiene lógica: si _is es None, reconecta.
-                    # Forzamos el estado a "reconectar" sin modificar la clase.
                     if hasattr(c, "_is"):
                         c._is = None
-
-                    # Si existe connect(), úsalo para levantar sesión antes de reintentar
                     if hasattr(c, "connect"):
                         await c.connect()
 
                     await c.send_line(line_norm)
+
+                    # Log SOLO si NO es comentario
+                    if not is_comment:
+                        try:
+                            preview = line_norm.strip()
+                            if len(preview) > 160:
+                                preview = preview[:157] + "..."
+                            print(f"[aprs→IS push] ✅ TX OK (retry) -> {preview}")
+                        except Exception:
+                            pass
+
                     return True
                 except Exception as e2:
+                    # Errores sí se muestran (son relevantes)
                     print(f"[aprs→IS push] ❌ {type(e2).__name__}: {e2}")
                     return False
 
-        # --- Fallbacks (no deberían usarse en tu proyecto, pero se mantienen) ---
+        # --- Fallbacks (se mantienen) ---
         try:
             if hasattr(c, "sendall"):
                 c.sendall(line_norm)
@@ -2242,8 +2251,7 @@ async def task_aprsis_uplink_keepalive():
 
             # Comentario keepalive (no es una trama APRS, es para APRS-IS)
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            await _aprsis_send_line_safe(f"{APRSIS_USER}>APRS,TCPIP*:>keepalive {ts}")
-
+            await _aprsis_send_line_safe(f"# keepalive {APRSIS_USER} {ts}")
 
         except Exception:
             # Nunca romper el bucle por el keepalive
