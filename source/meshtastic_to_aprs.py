@@ -1624,7 +1624,7 @@ async def task_aprsis_to_meshtastic():
 
             flt = APRSIS_FILTER or "m/50"
             login = (
-                f"user {APRSIS_USER} pass {APRSIS_PASSCODE} "
+                f"user {APRSIS_USER} pass -1"
                 f"vers MESH-APRS 0.1 filter {flt}\n"
             )
             try:
