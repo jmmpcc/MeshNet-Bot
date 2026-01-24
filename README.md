@@ -79,6 +79,178 @@ Ambas funciones analizan la información del backlog, nodos escuchados, métrica
 
 ## 🧾 Historial de versiones
 
+# Changelog — MeshNet v6.2.3
+
+Fecha: 2026-01-24
+Versión: **v6.2.3**
+
+---
+
+## 🆕 Cambios principales
+
+### 1. Control estricto de mensajes privados (DM) hacia el nodo “home”
+Se introduce el uso explícito de la variable de entorno:
+
+```env
+HOME_NODE_ID=!xxxxxxxx
+```
+
+El broker ahora **solo considera órdenes especiales** aquellas que llegan como **mensaje privado (DM) dirigido lógicamente a este nodo**, independientemente de los saltos realizados en la malla.
+
+- No se activan órdenes por:
+  - mensajes de canal
+  - broadcast (`^all`)
+  - DMs dirigidos a otros nodos
+- Se elimina cualquier ambigüedad en el tratamiento de mensajes privados.
+
+---
+
+### 2. Nuevo flujo: DM `/aprs canal N …` → doble acción controlada
+
+Se implementa un comportamiento nuevo, sin romper nada existente:
+
+1. **Entrada**: mensaje privado (DM) al nodo `HOME_NODE_ID` con el formato  
+   ```
+   /aprs canal N DESTINO: Texto
+   ```
+
+2. **Acciones automáticas del broker**:
+   - **APRS**  
+     El mensaje se envía por APRS:
+       - por **RF (KISS)**  
+       - y por **APRS-IS** si hay credenciales activas  
+   - **Mesh**  
+     El broker **reinyecta únicamente el texto limpio** en el **canal N** de la malla.
+
+3. **Privacidad garantizada**:
+   - El comando `/aprs …` **nunca aparece en canales públicos**
+   - En la malla solo se ve el texto final
+
+---
+
+### 3. Reinyección segura y sin bucles
+La reinyección al canal Mesh:
+- elimina el prefijo `/aprs`
+- elimina destino y metadatos
+- evita bucles y re-disparo del gateway APRS
+- no interfiere con el tráfico normal de la malla
+
+---
+
+### 4. Mejora del parser `/aprs`
+El gateway APRS ahora acepta:
+
+- `/aprs DESTINO: texto`
+- `/aprs canal N DESTINO: texto`
+- `/aprs ch N DESTINO: texto`
+
+El identificador `canal N`:
+- **se ignora para APRS** (APRS no tiene canales)
+- **se usa únicamente** para decidir la reinyección en Mesh
+
+Compatibilidad total con versiones anteriores.
+
+---
+
+## ✅ Ejemplos de uso
+
+### Ejemplo 1 — Envío silencioso a APRS + publicación en canal Mesh
+
+**Mensaje privado (DM) enviado al nodo HOME:**
+```
+/aprs canal 2 EB2EAS-7: Hola buenas tardes
+```
+
+**Resultado:**
+- Mesh:
+  - En **canal 2** aparece:
+    ```
+    Hola buenas tardes
+    ```
+- APRS:
+  - Mensaje enviado a `EB2EAS-7` por RF
+  - También por APRS-IS si está habilitado
+- Privacidad:
+  - El comando `/aprs …` no se ve en ningún canal
+
+---
+
+### Ejemplo 2 — Envío silencioso solo a APRS (sin reinyección)
+
+**Mensaje privado (DM):**
+```
+/aprs EB2EAS-7: Recibido OK
+```
+
+**Resultado:**
+- Mesh:
+  - No aparece nada en canales
+- APRS:
+  - Mensaje enviado a `EB2EAS-7`
+- Comportamiento idéntico a versiones anteriores
+
+---
+
+### Ejemplo 3 — Mensaje de canal (sin reinyección especial)
+
+**Mensaje enviado en canal 4:**
+```
+/aprs EB2EAS-7: Prueba desde canal
+```
+
+**Resultado:**
+- Mesh:
+  - Visible en canal 4
+- APRS:
+  - Mensaje enviado
+- No hay lógica DM→canal (no es privado)
+
+---
+
+## 🔒 Reglas de seguridad y diseño
+
+- Solo los DMs dirigidos a `HOME_NODE_ID` pueden activar reinyección.
+- No se interpreta texto como control de ruteo Mesh.
+- No se altera el comportamiento de nodos terceros.
+- No se modifica el flujo APRS existente.
+
+---
+
+## ⚙️ Requisitos de configuración
+
+```env
+HOME_NODE_ID=!9ef0c2cc
+```
+
+Opcional:
+- Si `HOME_NODE_ID` no está definido, el broker vuelve al comportamiento previo
+  (DM genérico, sin estricta validación).
+
+---
+
+## 🧩 Archivos afectados
+
+- `Meshtastic_Broker.py`
+  - Nueva lógica DM estricta
+  - Reinyección controlada Mesh
+- `meshtastic_to_aprs.py`
+  - Parser `/aprs` extendido
+  - Compatibilidad con `canal/ch`
+
+---
+
+## ✔️ Compatibilidad
+
+- Totalmente compatible con v6.2.2
+- Sin cambios en comandos existentes
+- Sin impacto en nodos que no usen `/aprs`
+
+---
+
+**MeshNet v6.2.3**  
+Control fino, privacidad real y pasarela Mesh ↔ APRS más potente sin ruido en la red.
+
+
 ## [v6.2.2] - 2026-01-14 Enero
 
 > Enfoque de esta versión: estabilidad 24/7 (reconexión segura), unificación del “control plane” vía BacklogServer (JSONL/TCP), y enriquecimiento de datos (nodos/telemetría/cobertura) usando el broker como fuente de verdad.
@@ -113,7 +285,6 @@ Ambas funciones analizan la información del backlog, nodos escuchados, métrica
   - cooldown + bloqueo TX durante reconexión en el broker. fileciteturn1file1
   - serialización de reconexiones y locks por transporte (evita dos procesos luchando por el mismo TCP). fileciteturn1file17
 - Errores típicos de await (mezcla sync/async) mitigados con helper `maybe_await()`. fileciteturn1file13
-
 ## [6.2.0-1] - 2026-01-04 Enero 
 
 ### Añadido

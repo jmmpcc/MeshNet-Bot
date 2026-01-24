@@ -413,6 +413,95 @@ def _print_frame_line(*values, sep=" ", end="\n", file=None, flush=False):
         except Exception:
             pass
 
+def _parse_channel_names_env(raw: str) -> dict[int, str]:
+    """
+    Convierte '0:ZARAGOZA,1:GENERAL,2:MADRID' en {0:'ZARAGOZA',1:'GENERAL',2:'MADRID'}.
+    Acepta separadores ',' ';' y asignación ':' '='.
+    Ignora entradas inválidas sin romper.
+    """
+    out: dict[int, str] = {}
+    if not raw:
+        return out
+
+    s = str(raw).strip().strip('"').strip("'")
+    if not s:
+        return out
+
+    # Normalizar separadores
+    for part in s.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" in part:
+            k, v = part.split(":", 1)
+        elif "=" in part:
+            k, v = part.split("=", 1)
+        else:
+            continue
+
+        try:
+            idx = int(str(k).strip())
+        except Exception:
+            continue
+
+        name = str(v).strip().strip('"').strip("'")
+        if name:
+            out[idx] = name
+
+    return out
+
+
+# NUEVO: mapa de nombres de canal por índice local (no viene por tramas)
+CHANNEL_NAME_BY_INDEX = _parse_channel_names_env(
+    os.getenv("BROKER_CHANNEL_NAMES", "")
+    or os.getenv("MESH_CHANNEL_NAMES", "")
+    or os.getenv("CHANNEL_NAMES", "")
+)
+
+
+def _get_channel_name_from_iface(iface, ch_index: int) -> str | None:
+    """
+    Intenta obtener el nombre del canal (settings.name) desde la interfaz Meshtastic.
+    Soporta estructuras dict u objetos (según versión de librería).
+    Devuelve None si no se puede resolver.
+    """
+    try:
+        if iface is None:
+            return None
+
+        local = getattr(iface, "localNode", None)
+        if local is None:
+            return None
+
+        chs = getattr(local, "channels", None)
+        if not isinstance(chs, (list, tuple)):
+            return None
+
+        if ch_index is None:
+            return None
+        ch_index = int(ch_index)
+        if ch_index < 0 or ch_index >= len(chs):
+            return None
+
+        ch = chs[ch_index]
+
+        # Caso dict
+        if isinstance(ch, dict):
+            settings = ch.get("settings") or {}
+            if isinstance(settings, dict):
+                name = settings.get("name")
+                name = (str(name).strip() if name is not None else "")
+                return name or None
+            return None
+
+        # Caso objeto (protobuf-ish)
+        settings = getattr(ch, "settings", None)
+        name = getattr(settings, "name", None) if settings is not None else None
+        name = (str(name).strip() if name is not None else "")
+        return name or None
+
+    except Exception:
+        return None
 
 
 # Barrera de TX: mientras esté activa, no se intenta ningún envío
@@ -1936,7 +2025,7 @@ class _BacklogServer(threading.Thread):
                 return
 
             # --- [NUEVO] comando: RUN_TRACEROUTE -----------------------------------------
-                        # --- [NUEVO] comando: RUN_TRACEROUTE -----------------------------------------
+           
             elif cmd == "RUN_TRACEROUTE":
                     # ------------------------------------------------------------
                     # RUN_TRACEROUTE (API Meshtastic) - NO PAUSA el broker
@@ -1972,12 +2061,13 @@ class _BacklogServer(threading.Thread):
                         # decimal
                         return int(v)
 
-                    # hop_limit
+                    # hop_limit (Meshtastic traceroute: valores realistas)
                     try:
-                        hop_limit = int(params.get("hop_limit") or params.get("hopLimit") or 20)
+                        hop_limit = int(params.get("hop_limit") or params.get("hopLimit") or 5)
                     except Exception:
-                        hop_limit = 20
-                    hop_limit = max(1, min(hop_limit, 50))
+                        hop_limit = 5
+                    hop_limit = max(1, min(hop_limit, 7))
+
 
                     # ch_index
                     try:
@@ -1999,46 +2089,33 @@ class _BacklogServer(threading.Thread):
                         mesh_port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
 
                         mgr = globals().get("BROKER_IFACE_MGR")
-                        if not (mgr and hasattr(mgr, "acquire") and callable(mgr.acquire)):
-                            raise RuntimeError("BROKER_IFACE_MGR no disponible")
+                        if not (mgr and hasattr(mgr, "get_iface") and callable(mgr.get_iface)):
+                            raise RuntimeError("BROKER_IFACE_MGR no disponible (sin get_iface)")
 
-                        iface = None
+                        iface = mgr.get_iface()
+                        if not iface:
+                            raise RuntimeError("Sin iface activa (aún no conectado)")
+
+                        # API moderna (prioridad)
+                        fn = getattr(iface, "sendTraceRoute", None)
+                        if not callable(fn):
+                            raise RuntimeError("sendTraceRoute no disponible en esta versión")
+
+                        # Probamos firma completa; si la librería no acepta kwargs, reducimos
                         try:
-                            # Reutiliza la interfaz persistente del broker (no abre sockets extra)
+                            fn(node_num, hop_limit, channelIndex=ch_index)
+                        except TypeError:
                             try:
-                                iface = mgr.acquire(mesh_host, mesh_port, timeout=4.0, reuse_only=True)
+                                fn(node_num, hop_limit, ch_index)
                             except TypeError:
-                                iface = mgr.acquire(mesh_host, mesh_port, timeout=4.0)
+                                fn(node_num, hop_limit)
 
-                            if not iface:
-                                raise RuntimeError("No se pudo adquirir iface del pool")
-
-                            # API moderna (prioridad)
-                            fn = getattr(iface, "sendTraceRoute", None)
-                            if callable(fn):
-                                # Probamos la firma completa; si la librería no acepta kwargs, reducimos
-                                try:
-                                    fn(node_num, hop_limit, channelIndex=ch_index)
-                                except TypeError:
-                                    try:
-                                        fn(node_num, hop_limit, ch_index)
-                                    except TypeError:
-                                        fn(node_num, hop_limit)
-                                ok = True
-                            else:
-                                raise RuntimeError("sendTraceRoute no disponible en esta versión")
-
-                        finally:
-                            # devuelve la iface al pool si soporta release()
-                            try:
-                                if iface and hasattr(iface, "release"):
-                                    iface.release()
-                            except Exception:
-                                pass
+                        ok = True
 
                     except Exception as e:
                         ok = False
-                        err = str(e)
+                       
+                        err = f"{type(e).__name__}: {e}"
 
                     resp = {
                         "ok": bool(ok),
@@ -3046,6 +3123,14 @@ class MeshReceiver:
                 from_txt = f"{(from_alias or '').strip()} ({who_from})" if (from_alias or "").strip() else str(who_from)
                 to_txt   = f"{(to_alias or '').strip()} ({who_to})"     if (to_alias or "").strip()   else str(who_to)
                 _print_frame_line(f"[Canal {canal_s} | RFch {rfch_s} | {portnum or 'UNKNOWN'} | {from_txt} → {to_txt} | RSSI {rssi_s} | SNR {snr_s}] {text_s}", flush=True)
+            
+            channel_name = None
+            try:
+                if canal is not None:
+                    channel_name = CHANNEL_NAME_BY_INDEX.get(int(canal))
+            except Exception:
+                channel_name = None
+
 
             # === Emitir JSONL a clientes ===
             event = {
@@ -3056,11 +3141,15 @@ class MeshReceiver:
                 "to":   who_to,
                 "from_alias": from_alias or None,
                 "to_alias":   to_alias   or None,
+                "channel_name": channel_name,
                 "summary": {
                     "portnum": portnum,
                     "text": text,
                     "payload_hex": payload_hex,
                     "canal": canal,
+                    # NUEVO
+                    "channel_name": channel_name,
+                    
                     "rfch": rfch,
                     "rssi": rssi,
                     "snr": snr,
@@ -3091,6 +3180,7 @@ class MeshReceiver:
                     append_offline_log({
                         "ts": int(_now_s()),
                         "channel": canal,
+                        "channel_name": channel_name,
                         "portnum": "TEXT_MESSAGE_APP",
                         "from": who_from,
                         "to": who_to,

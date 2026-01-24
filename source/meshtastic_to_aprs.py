@@ -21,6 +21,24 @@ import aprslib
 # === [NUEVO] Canal KISS (0=A, 1=B, etc.) y saneo ASCII ===
 import unicodedata
 
+# === [WEB ADMIN] Log jsonl de tramas APRS RX para el mapa del panel ===
+# Nota: se escribe en un fichero separado (por defecto bot_data/aprs_rx.jsonl) para NO tocar positions.jsonl.
+BOT_DATA_DIR = os.getenv("BOT_DATA_DIR", "bot_data")
+APRS_RX_LOG_PATH = os.getenv("BOT_APRS_RX_PATH", os.path.join(BOT_DATA_DIR, "aprs_rx.jsonl"))
+try:
+    os.makedirs(BOT_DATA_DIR, exist_ok=True)
+except Exception:
+    pass
+
+def _aprs_web_append(rec: dict) -> None:
+    """Append robusto (best-effort) a APRS_RX_LOG_PATH en formato JSONL."""
+    try:
+        with open(APRS_RX_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        # No interrumpir la pasarela por fallos de IO
+        return
+
 KISS_CHANNEL = int(os.getenv("KISS_CHANNEL", "0"))
 if not (0 <= KISS_CHANNEL <= 15):
     KISS_CHANNEL = 0
@@ -1430,6 +1448,34 @@ async def task_aprs_to_meshtastic():
                     except Exception:
                         ap = None
 
+                    # --- [WEB ADMIN] Persistir RX APRS en jsonl para mapa/stream del panel ---
+                    # Se guarda SIEMPRE (best-effort) para no depender del backlog del broker.
+                    try:
+                        rec = {
+                            "ts": int(time.time()),
+                            "callsign": src,
+                            "type": typ,
+                            "dest": dest,
+                            "path": path,
+                            "info": preview,
+                            "raw": tnc2 if 'tnc2' in locals() else None,
+                        }
+                        if isinstance(ap, dict):
+                            if "latitude" in ap and "longitude" in ap:
+                                rec["lat"] = float(ap.get("latitude"))
+                                rec["lon"] = float(ap.get("longitude"))
+                            if ap.get("course") is not None:
+                                rec["course"] = ap.get("course")
+                            if ap.get("speed") is not None:
+                                rec["speed"] = ap.get("speed")
+                            # aprslib suele usar altitude (m) en 'altitude'
+                            if ap.get("altitude") is not None:
+                                rec["alt"] = ap.get("altitude")
+                            if ap.get("symbol") is not None:
+                                rec["symbol"] = ap.get("symbol")
+                        _aprs_web_append(rec)
+                    except Exception:
+                        pass
                     # --- Extraer canal + posible delay (+N minutos) desde [CH x] / [CANAL x+N] ---
                     ch, delay_min, msg = _parse_ch_and_delay_from_pkt(pkt, default_ch=MESHTASTIC_CHANNEL)
                     if ch is None or not msg:
@@ -2495,4 +2541,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Bye")
-

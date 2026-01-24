@@ -296,6 +296,40 @@ import math
 
 # ========= Helpers de ubicación compartidos (DISTANCIA + PROVINCIA/CIUDAD) =========
 
+def _parse_channel_names_env(raw: str) -> dict[int, str]:
+    out: dict[int, str] = {}
+    if not raw:
+        return out
+    s = str(raw).strip().strip('"').strip("'")
+    if not s:
+        return out
+    for part in s.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" in part:
+            k, v = part.split(":", 1)
+        elif "=" in part:
+            k, v = part.split("=", 1)
+        else:
+            continue
+        try:
+            idx = int(str(k).strip())
+        except Exception:
+            continue
+        name = str(v).strip().strip('"').strip("'")
+        if name:
+            out[idx] = name
+    return out
+
+
+CHANNEL_NAME_BY_INDEX = _parse_channel_names_env(
+    os.getenv("BROKER_CHANNEL_NAMES", "")
+    or os.getenv("MESH_CHANNEL_NAMES", "")
+    or os.getenv("CHANNEL_NAMES", "")
+)
+
+
 from html import escape
 
 def _safe_float(v):
@@ -8927,23 +8961,22 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             used_adapter = True
         except Exception:
             pass
+        
+    broker_err = ""
 
-    # Intento 2: broker (RUN_TRACEROUTE / RUN_CLI)
-        # Intento 2: broker (RUN_TRACEROUTE) - sin CLI, sin pausa
+    # Intento 2 (solo si aún no se lanzó)
     if not launched:
         resA = await _broker_cmd(
             "RUN_TRACEROUTE",
-            {
-                "target": node_id,
-                "hop_limit": int(context.args[1]) if len(context.args) >= 2 and str(context.args[1]).isdigit() else 20,
-                "ch_index": 0,
-            },
+            {"target": node_id, "hop_limit": 5, "ch_index": 0},
         )
         if isinstance(resA, dict) and (resA.get("ok") or resA.get("status") == "ok"):
             launched = True
         else:
             launched = False
-
+            broker_err = ((resA or {}).get("error") if isinstance(resA, dict) else "") or ""
+            broker_err = broker_err.strip()
+               
 
     # Intento 3: efímero con acquire (permitimos crear si no hay)
     if not launched and hasattr(pool, "acquire") and callable(pool.acquire):
@@ -8953,9 +8986,19 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 temp_iface = pool.acquire(host, port, timeout=5.0, reuse_only=False)
             except TypeError:
                 temp_iface = pool.acquire(host, port, timeout=5.0)
-            if temp_iface and hasattr(temp_iface, "traceroute") and callable(getattr(temp_iface, "traceroute")):
-                temp_iface.traceroute(node_id)
-                launched = True
+            if temp_iface:
+                fn = getattr(temp_iface, "sendTraceRoute", None)
+                if callable(fn):
+                    dest_u32 = int(node_id[1:], 16)
+                    try:
+                        fn(dest_u32, 5, channelIndex=0)
+                    except TypeError:
+                        try:
+                            fn(dest_u32, 5, 0)
+                        except TypeError:
+                            fn(dest_u32, 5)
+                    launched = True
+
         except Exception:
             pass
         finally:
@@ -8969,12 +9012,10 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Intento 4: CLI (último recurso) — PAUSAR (await) → CLI (hilo) → REANUDAR (await)
     if not launched:
-        await _safe_reply_html(update.effective_message, "No se pudo iniciar el traceroute desde el broker (API).")
-        return ConversationHandler.END
-        #used_cli_fallback = True
-
+        pass
+    
         import sys
-
+      
         def _build_cli_variants(host_str: str, node: str) -> list[list[str]]:
             py = sys.executable or "python"
             return [
@@ -9040,6 +9081,7 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 ok = (rc == 0) or bool(parsed)
                 if ok:
                     launched = True
+                    used_cli_fallback = True
                     if parsed:
                         cli_hops_lines = parsed
                     break
@@ -9088,7 +9130,12 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # 8) Salidas
     if not launched and not hops:
-        await update.effective_message.reply_text("❌ No se pudo lanzar el traceroute (broker/interfaz) ni hay respuestas en el backlog.")
+        try:
+            if broker_err:
+                await _safe_reply_html(update.effective_message, f"Motivo broker: <code>{broker_err}</code>")
+        except Exception:
+            pass
+        
         return ConversationHandler.END
 
     if not hops:
@@ -12398,6 +12445,7 @@ def _safe_int(x, default=None):
     except:
         return default
 
+
 async def replay_offline_messages(update: Update, chat_id: int, listen_chan: int | None, since_epoch: int) -> int:
     """
     Lee el broker_offline_log.jsonl, filtra por canal (si procede) y por ts>=since_epoch,
@@ -12428,7 +12476,7 @@ async def replay_offline_messages(update: Update, chat_id: int, listen_chan: int
                 try:
                     if int(ch) != int(listen_chan):
                         continue
-                except:
+                except Exception:
                     continue
 
             rows.append(evt)
@@ -12442,20 +12490,19 @@ async def replay_offline_messages(update: Update, chat_id: int, listen_chan: int
     count = 0
     for evt in rows:
         port = evt.get("portnum") or evt.get("decoded", {}).get("portnum") or "?"
-        frm  = evt.get("from") or "?"
-        frm_alias  = evt.get("from_alias") or "?"
-        to_alias = frm  = evt.get("to_alias") or "?"
-        to   = evt.get("to") or "?"
-        ch   = evt.get("channel")
-        rxr  = evt.get("rx_rssi", None)
-        rsn  = evt.get("rx_snr", None)
+        frm = evt.get("from") or "?"
+        frm_alias = evt.get("from_alias") or "?"
+        to_alias = evt.get("to_alias") or "?"   # FIX: no sobrescribir frm
+        to = evt.get("to") or "?"
+        ch = evt.get("channel")
+
+        rxr = evt.get("rx_rssi", None)
+        rsn = evt.get("rx_snr", None)
         hlim = evt.get("hop_limit", None)
-        hst  = evt.get("hop_start", None)
+        hst = evt.get("hop_start", None)
         rnod = evt.get("relay_node", None)
 
         # texto decodificado si vino como TEXT_MESSAGE_APP
-        text = None
-        # v1: a veces viene 'text' plano; v2: dentro de 'payload' decodificado
         text = evt.get("text") or evt.get("decoded", {}).get("text")
         if not text and isinstance(evt.get("payload"), dict):
             text = evt["payload"].get("text")
@@ -12466,14 +12513,27 @@ async def replay_offline_messages(update: Update, chat_id: int, listen_chan: int
         when = dt.strftime("%Y-%m-%d %H:%M:%S")
 
         # Línea “cabecera” con métricas
-        head = (f"📩 [Canal {ch} | {port} | {frm_alias} {frm} → {to_alias} {to}\n "
-                f" RX: RSSI {rxr if rxr is not None else '?'}\n "    
+        summary = evt.get("summary")
+        if not isinstance(summary, dict):
+            summary = {}
+
+        ch_name = evt.get("channel_name") or summary.get("channel_name")
+
+        if not ch_name:
+            try:
+                ch_name = CHANNEL_NAME_BY_INDEX.get(int(ch)) if ch is not None else None
+            except Exception:
+                ch_name = None
+
+        ch_label = f"{ch} ({ch_name})" if isinstance(ch_name, str) and ch_name.strip() else f"{ch}"
+
+        head = (f"📩 [Canal {ch_label} | {port} | {frm_alias} {frm} → {to_alias} {to}\n "
+                f" RX: RSSI {rxr if rxr is not None else '?'}\n "
                 f" RX: SNR {rsn if rsn is not None else '?'}\n "
                 f" hop_limit {hlim if hlim is not None else '?'} | "
                 f" hop_start {hst if hst is not None else '?'} | "
                 f" relay {rnod if rnod is not None else '?'}\n"
                 f"{when}]")
-       
 
         body = (text if isinstance(text, str) and text.strip()
                 else "(no-texto)")

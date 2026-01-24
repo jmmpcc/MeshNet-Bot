@@ -654,6 +654,21 @@ class BrokerEmbeddedBridge:
             fn = getattr(iface, "sendText", None)
             if not callable(fn):
                 raise RuntimeError("iface.sendText no disponible")
+           
+            # === [NUEVO] Retardo opcional SOLO en A->B (emisión por nodo B embebido) ===
+            # Variable de entorno:
+            #   BRIDGE_B_TX_DELAY_MS=0  (por defecto sin retardo)
+            # Ejemplo:
+            #   BRIDGE_B_TX_DELAY_MS=350  -> 350ms antes de cada TX hacia B
+            if direction == "A2B":
+                try:
+                    d_ms = float(os.getenv("BRIDGE_B_TX_DELAY_MS", "0") or "0")
+                except Exception:
+                    d_ms = 0.0
+
+                # Evita valores absurdos que bloqueen el worker: cap a 10s
+                if d_ms > 0:
+                    time.sleep(min(10.0, d_ms / 1000.0))
 
             try:
                 fn(msg, channelIndex=ch, wantAck=want_ack)
