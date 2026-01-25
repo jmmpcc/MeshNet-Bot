@@ -12322,11 +12322,21 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
 
                 origen_txt = f"{alias} ({origen})" if alias else origen
 
-                # Canal visible en el encabezado
-                if listen_chan is None:
-                    canal_str = f"{ch}*" if ch is not None else "??*"
+                # Canal visible en el encabezado (con nombre local por .env)
+                ch_num_txt = (str(ch) if ch is not None else "??")
+                star = "*" if listen_chan is None else ""
+
+                ch_name = None
+                try:
+                    ch_name = CHANNEL_NAME_BY_INDEX.get(int(ch)) if ch is not None else None
+                except Exception:
+                    ch_name = None
+
+                if isinstance(ch_name, str) and ch_name.strip():
+                    canal_str = f"{ch_num_txt}{star} ({ch_name.strip()})"
                 else:
-                    canal_str = str(ch) if ch is not None else "??"
+                    canal_str = f"{ch_num_txt}{star}"
+
 
                 # Métricas de señal y hops (reutilizando tus funciones)
                 try:
@@ -12547,7 +12557,6 @@ async def replay_offline_messages(update: Update, chat_id: int, listen_chan: int
             pass
 
     return count
-
 
 
 async def parar_escucha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
