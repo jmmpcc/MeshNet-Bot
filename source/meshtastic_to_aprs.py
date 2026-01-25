@@ -1664,6 +1664,9 @@ async def task_aprsis_to_meshtastic():
         return
 
     backoff = 5.0
+    # === [FIX] Indicativo propio en APRS-IS para filtrar ecos ===
+    _SELF_APRSIS = (APRSIS_USER or "").strip().upper()
+
     while True:
         try:
             reader, writer = await asyncio.open_connection(APRSIS_HOST, APRSIS_PORT)
@@ -1744,6 +1747,14 @@ async def task_aprsis_to_meshtastic():
                     src = inner_hdr.split(">")[0].strip()
                 except Exception:
                     src = "?"
+
+                # === [FIX QUIRÚRGICO] Ignorar eco APRS-IS de nuestro propio indicativo ===
+                # APRS-IS puede devolver nuestras propias tramas. Si se procesan como RX,
+                # se reinyectan a Mesh y aparecen duplicados/eco.
+                if _SELF_APRSIS and src and src.strip().upper() == _SELF_APRSIS:
+                    _aprs_dbg(f"[aprs←IS] drop(self-echo) src={src} info={inner_info[:120]}")
+                    continue
+
 
                 # Lista blanca
                 if not _aprs_source_allowed(src):
