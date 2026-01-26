@@ -3504,15 +3504,25 @@ class MeshReceiver:
 
     def _on_disconnect(self, interface=None, **kwargs):
         
-        # --- IGNORAR desconexiones que no sean la interfaz principal del broker (A) ---
+        # --- IGNORAR desconexiones que no sean la interfaz principal del broker (A),
+        #     PERO cerrarlas para evitar fuga de hilos/timers internos de meshtastic. ---
         try:
             main_iface = self.iface_mgr.get_iface()
             if interface is not None and interface is not main_iface:
                 if self.verbose:
-                    print("[conn] (ignorado) disconnect de interfaz no principal (bridge/B).", flush=True)
+                    print("[conn] (ignorado) disconnect de interfaz no principal (bridge/B) -> close() para evitar fuga.", flush=True)
+
+                # Cierre agresivo: evita que queden heartbeatTimer/Timers vivos en esa interfaz “fantasma”
+                try:
+                    if hasattr(interface, "close"):
+                        interface.close()
+                except Exception:
+                    pass
+
                 return
         except Exception:
             pass
+
         
         if self.verbose:
             print("ℹ️ Broker: desconectado del nodo Meshtastic", flush=True)
