@@ -39,10 +39,12 @@ from meshtastic.tcp_interface import TCPInterface
 
 
 # === [NUEVO] BBS (broker-side) ==============================================
+_BBS_IMPORT_ERROR = None
 try:
     from bbs_server import BbsServer
-except Exception:
+except Exception as e:
     BbsServer = None
+    _BBS_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 
 BBS = None  # instancia global
 # ============================================================================
@@ -4474,18 +4476,34 @@ def main():
             bbs_callsign = os.getenv("BBS_CALLSIGN", "EB2EAS-5").strip() or "EB2EAS-5"
             bbs_channel = int(os.getenv("BBS_CHANNEL", "5"))
             bbs_max_tx = int(os.getenv("BBS_MAX_TX", "234"))
+            
+            # Base de datos del contenedor (misma idea que el bot)
+            BROKER_DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "/app/bot_data")).resolve()
+            BROKER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-            # Rutas (si vienen relativas, las hacemos relativas al cwd)
-            bbs_db = (os.getenv("BBS_DB_PATH", "bot_data/bbs/bbs_data.db").strip() or "bot_data/bbs/bbs_data.db")
-            bbs_key = (os.getenv("BBS_KEY_PATH", "bot_data/bbs/.bbs_key").strip() or "bot_data/bbs/.bbs_key")
+            bbs_db = (os.getenv("BBS_DB_PATH", "bbs/bbs_data.db").strip() or "bbs/bbs_data.db")
+            bbs_key = (os.getenv("BBS_KEY_PATH", "bbs/.bbs_key").strip() or "bbs/.bbs_key")
 
-            # Normaliza rutas: si BBS_DB_PATH es carpeta, crea un fichero por defecto dentro
+            # Si vienen como carpeta, normaliza a archivo
             if bbs_db.endswith(os.sep) or (os.path.splitext(bbs_db)[1] == ""):
                 bbs_db = os.path.join(bbs_db, "bbs_data.db")
-
-            # Si BBS_KEY_PATH se da como carpeta, mete el fichero de clave dentro
             if bbs_key.endswith(os.sep) or (os.path.splitext(bbs_key)[1] == ""):
                 bbs_key = os.path.join(bbs_key, ".bbs_key")
+
+            # Resolver rutas relativas contra /app/bot_data
+            bbs_db_p = Path(bbs_db)
+            bbs_key_p = Path(bbs_key)
+            if not bbs_db_p.is_absolute():
+                bbs_db_p = (BROKER_DATA_DIR / bbs_db_p).resolve()
+            if not bbs_key_p.is_absolute():
+                bbs_key_p = (BROKER_DATA_DIR / bbs_key_p).resolve()
+
+            bbs_db_p.parent.mkdir(parents=True, exist_ok=True)
+            bbs_key_p.parent.mkdir(parents=True, exist_ok=True)
+
+            bbs_db = str(bbs_db_p)
+            bbs_key = str(bbs_key_p)
+
 
             globals()["BBS_ENGINE"] = BbsServer(
                 send_func=lambda dest, ch, txt: None,  # broker: no usa send_func
@@ -4505,12 +4523,16 @@ def main():
                 poll_list_limit=int(os.getenv("BBS_POLL_LIST_LIMIT", "3")),
             )
 
-            if args.verbose:
-                print(f"[BBS] ✅ Inicializado callsign={bbs_callsign} ch={bbs_channel} db={bbs_db}", flush=True)
+            #if args.verbose:
+            print(f"[BBS] ✅ Inicializado callsign={bbs_callsign} ch={bbs_channel} db={bbs_db}", flush=True)
+
         else:
             globals()["BBS_ENGINE"] = None
-            if args.verbose:
-                print("[BBS] Desactivado (BBS_ENABLE=0 / BBS_ENABLED=0 o módulo no disponible).", flush=True)
+            #if args.verbose:
+            if not enabled:
+                print(f"[BBS] Desactivado (BBS_ENABLED/BBS_ENABLE='{enabled_raw}').", flush=True)
+            else:
+                print(f"[BBS] Desactivado: módulo BBS no disponible (import bbs_server falló: {_BBS_IMPORT_ERROR}).", flush=True)
 
     except Exception as e:
         globals()["BBS_ENGINE"] = None
