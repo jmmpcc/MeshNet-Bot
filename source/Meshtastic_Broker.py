@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.3.py
+Meshtastic_Broker_v6.2.4.py
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 
@@ -34,6 +34,17 @@ import re
 
 from pubsub import pub
 from meshtastic.tcp_interface import TCPInterface
+
+
+# === [NUEVO] BBS (broker-side) ==============================================
+try:
+    from bbs_server import BbsServer
+except Exception:
+    BbsServer = None
+
+BBS = None  # instancia global
+# ============================================================================
+
 
 # --- Pasarela embebida (NUEVO) ---
 from bridge_in_broker import (
@@ -3194,6 +3205,151 @@ class MeshReceiver:
                         "relay_node": pkt.get("relay_node"),
                     })
 
+                    # === [NUEVO] BBS: interceptar #BBS en mensajes de texto (CANAL BBS) ===
+                    try:
+                        bbs = globals().get("BBS_ENGINE")
+                        if bbs and str(portnum) == "TEXT_MESSAGE_APP":
+                            t0 = (text or "").strip()
+                            if t0.upper().startswith("#BBS"):
+                                
+                                # Heurística DM: si who_to es un destino concreto (no broadcast)
+                                # Heurística DM robusta: destino presente y NO es broadcast
+                                _to_norm = _norm_node_id(who_to)
+                                is_dm = bool(_to_norm) and _to_norm not in {"^all", "broadcast", "?"}
+
+                                # Solo exigir BBS_CHANNEL cuando NO es DM
+                                try:
+                                    bbs_ch = int(os.getenv("BBS_CHANNEL", "5"))
+                                except Exception:
+                                    bbs_ch = None
+
+                                if (bbs_ch is not None) and (not is_dm) and (int(canal) != bbs_ch):
+                                    raise StopIteration  # No es el canal BBS → ignorar
+
+
+                                # ---- NUEVO: validación estricta de indicativo BBS ----
+                                bbs_callsign = (os.getenv("BBS_CALLSIGN") or getattr(bbs, "bbs_callsign", "") or "").strip().upper()
+                                if not bbs_callsign:
+                                    raise StopIteration
+
+
+
+                                parts = t0.split(maxsplit=2)
+                                # parts[0] = #BBS
+                                # parts[1] = CALLSIGN (esperado)
+
+                                if len(parts) < 2:
+                                    # No se especifica a qué BBS se quiere conectar -> DM de ayuda (si procede)
+                                    dm_only = (os.getenv("BBS_DM_ONLY", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
+                                    dm_init_hint = (os.getenv("BBS_DM_INIT_HINT", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
+
+                                # Canal a usar para DMs (por defecto CH0)
+                                try:
+                                    dm_ch = int(os.getenv("BBS_DM_CHANNEL", "0"))
+                                except Exception:
+                                    dm_ch = 0
+                                    
+
+                                    q = globals().get("SENDQ")
+                                    if dm_only and (not is_dm) and dm_init_hint and q is not None and hasattr(q, "offer"):
+                                        hint = (
+                                            "BBS: sintaxis obligatoria (multi-BBS).\n"
+                                            "Usa en canal solo:\n"
+                                            f"#BBS {bbs_callsign}\n"
+                                            "Y continúa por DM con:\n"
+                                            f"#BBS {bbs_callsign} LOGIN TU-INDICATIVO\n"
+                                            f"#BBS {bbs_callsign} PASS TU-PASS\n"
+                                            f"#BBS {bbs_callsign} MENU"
+                                        )
+                                        q.offer(
+                                            {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                            coalesce=False
+                                        )
+
+                                    raise StopIteration
+
+
+                                target_bbs = parts[1].strip().upper()
+
+                                if not bbs_callsign:
+                                     raise StopIteration
+
+
+                                if target_bbs != bbs_callsign:
+                                    # El mensaje no va dirigido a esta BBS
+                                    raise StopIteration
+
+
+                                # ---- NUEVO: modo privacidad por DM ----
+                                dm_only = (os.getenv("BBS_DM_ONLY", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
+                                dm_init_hint = (os.getenv("BBS_DM_INIT_HINT", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
+
+                                # Canal a usar para DMs (por defecto CH0)
+                                try:
+                                    dm_ch = int(os.getenv("BBS_DM_CHANNEL", "0"))
+                                except Exception:
+                                    dm_ch = 0
+
+                                q = globals().get("SENDQ")
+
+                                # Si viene por canal y estamos en dm_only: NO procesar sesión en público.
+                                # Mandar guía por DM y cortar.
+                                if dm_only and (not is_dm):
+                                    if q is not None and hasattr(q, "offer"):
+                                        if dm_init_hint:
+                                            hint = (
+                                                "BBS: sesión privada por DM.\n"
+                                                "Abre DM conmigo y usa:\n"
+                                                f"#BBS {bbs_callsign} LOGIN TU-INDICATIVO\n"
+                                                f"#BBS {bbs_callsign} PASS TU-PASS\n"
+                                                f"#BBS {bbs_callsign} MENU"
+                                            )
+                                        else:
+                                            hint = f"BBS: usa DM para comandos (#BBS {bbs_callsign} ...)."
+
+
+                                        q.offer(
+                                            {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                            coalesce=False
+                                        )
+                                    raise StopIteration
+
+                                # Si estamos aquí, o bien es DM, o dm_only está desactivado.
+                                chunks = bbs.handle_text(from_id=str(who_from), ch=int(canal), text=t0)
+
+                                if chunks and (q is not None) and hasattr(q, "offer"):
+                                    for c in chunks:
+                                        c = (c or "").strip()
+                                        if not c:
+                                            continue
+
+                                        # RESPUESTA:
+                                        # - si dm_only o si el usuario ya está en DM => responder por DM
+                                        # - si no dm_only => se mantiene comportamiento original (canal)
+                                        if dm_only or is_dm:
+                                            q.offer(
+                                                {"channel": dm_ch, "text": c, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                                coalesce=False
+                                            )
+                                        else:
+                                            q.offer(
+                                                {"channel": int(canal), "text": c, "destination": None, "require_ack": False, "type": "text"},
+                                                coalesce=False
+                                            )
+
+                                # Si era BBS, no continuar con el bloque /aprs (evita interferencias)
+                                raise StopIteration
+
+                    except StopIteration:
+                        return
+                    except Exception as _e_bbs:
+                        if self.verbose:
+                            print(f"⚠️ bbs: {_e_bbs}", flush=True)
+                    # ======================================================================================
+
+
+
+
                     # === [NUEVO] DM /aprs canal N ... -> reinyectar SOLO el texto limpio en canal N ===
                     # Motivo: permitir mandar una orden por privado (no visible en canales públicos)
                     # y que el broker publique únicamente el texto resultante en el canal indicado.
@@ -4274,15 +4430,66 @@ def main():
 
     start_backlog_worker()  # ← NUEVO: comienza a vaciar SENDQ
 
-# ==========================================================================================
-
     # ==========================================================================================
 
     # === NUEVO: iniciar scheduler de tareas ===
     init_broker_tasks()
 
-    print(f"🟢 Broker v6.2 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
+    print(f"🟢 Broker v6.2.4 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
     print("   Clientes pueden conectarse por TCP y leer líneas JSONL (una por evento).", flush=True)
+
+        # === [NUEVO] Inicializar motor BBS (broker-side) ======================================
+    try:
+        enabled_raw = (os.getenv("BBS_ENABLED") or os.getenv("BBS_ENABLE") or "0").strip().lower()
+        enabled = enabled_raw in {"1", "true", "on", "si", "sí", "y", "yes"}
+
+        if enabled and (BbsServer is not None):
+            bbs_callsign = os.getenv("BBS_CALLSIGN", "EB2EAS-5").strip() or "EB2EAS-5"
+            bbs_channel = int(os.getenv("BBS_CHANNEL", "5"))
+            bbs_max_tx = int(os.getenv("BBS_MAX_TX", "234"))
+
+            # Rutas (si vienen relativas, las hacemos relativas al cwd)
+            bbs_db = (os.getenv("BBS_DB_PATH", "bot_data/bbs/bbs_data.db").strip() or "bot_data/bbs/bbs_data.db")
+            bbs_key = (os.getenv("BBS_KEY_PATH", "bot_data/bbs/.bbs_key").strip() or "bot_data/bbs/.bbs_key")
+
+            # Normaliza rutas: si BBS_DB_PATH es carpeta, crea un fichero por defecto dentro
+            if bbs_db.endswith(os.sep) or (os.path.splitext(bbs_db)[1] == ""):
+                bbs_db = os.path.join(bbs_db, "bbs_data.db")
+
+            # Si BBS_KEY_PATH se da como carpeta, mete el fichero de clave dentro
+            if bbs_key.endswith(os.sep) or (os.path.splitext(bbs_key)[1] == ""):
+                bbs_key = os.path.join(bbs_key, ".bbs_key")
+
+            globals()["BBS_ENGINE"] = BbsServer(
+                send_func=lambda dest, ch, txt: None,  # broker: no usa send_func
+                enabled=True,
+                bbs_callsign=bbs_callsign,
+                bbs_channel=bbs_channel,
+                db_path=bbs_db,
+                key_path=bbs_key,
+                max_tx=bbs_max_tx,
+
+                # Techos por comando (tus env)
+                list_limit=int(os.getenv("BBS_LIST_LIMIT", "6")),
+                all_list_limit=int(os.getenv("BBS_ALL_LIST_LIMIT", "10")),
+                read_list_limit=int(os.getenv("BBS_READ_LIST_LIMIT", "10")),
+                search_limit=int(os.getenv("BBS_SEARCH_LIMIT", "10")),
+                inbox_limit=int(os.getenv("BBS_INBOX_LIMIT", "6")),
+                poll_list_limit=int(os.getenv("BBS_POLL_LIST_LIMIT", "3")),
+            )
+
+            if args.verbose:
+                print(f"[BBS] ✅ Inicializado callsign={bbs_callsign} ch={bbs_channel} db={bbs_db}", flush=True)
+        else:
+            globals()["BBS_ENGINE"] = None
+            if args.verbose:
+                print("[BBS] Desactivado (BBS_ENABLE=0 / BBS_ENABLED=0 o módulo no disponible).", flush=True)
+
+    except Exception as e:
+        globals()["BBS_ENGINE"] = None
+        print(f"[BBS] ⚠️ No se pudo iniciar: {type(e).__name__}: {e}", flush=True)
+    # ======================================================================================
+
 
     # Gestor de conexión (autoreconexión)
     iface_mgr = InterfaceManager(host=args.host, verbose=args.verbose, enable_reconnect=bool(getattr(args, "reconnect", True)))

@@ -3,7 +3,7 @@
 # Version v6.1.3
 
 from __future__ import annotations
-import os, json, socket, math, time
+import os, json, socket, math, time, html
 from datetime import datetime, timezone
 from typing import List, Tuple, Optional
 
@@ -206,7 +206,7 @@ def _kml_circle_polygon(lon: float, lat: float, radius_m: float, label: str, num
     ring = " ".join(coords)
     return f"""
 <Placemark>
-  <name>{label}</name>
+    <name>{html.escape(str(label or ""))}</name>
   <Style>
     <PolyStyle><color>40ff0000</color><fill>1</fill><outline>0</outline></PolyStyle>
   </Style>
@@ -237,7 +237,7 @@ def _write_kml(points: List[Tuple[float, float, float]], out_path: str, env: str
         label = (rest[0] if rest else "Cobertura")
         parts += [
             "<Placemark>",
-            f"<name>{label}</name>",
+            f"<name>{html.escape(str(label or ''))}</name>",
             "<styleUrl>#pin</styleUrl>",
             "<Point>",
             f"<coordinates>{lon:.7f},{lat:.7f},0</coordinates>",
@@ -378,7 +378,7 @@ def build_coverage_combined(
         # Intentar primero backlog
         return build_coverage_from_backlog(
             hours=hours,
-            target_node=target,
+            target_node=target_node,
             output_dir=output_dir,
             backlog_host=backlog_host,
             backlog_port=backlog_port,

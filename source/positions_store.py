@@ -63,20 +63,37 @@ def read_positions_recent(last_minutes: int, max_nodes: int) -> list[dict]:
     rows.sort(key=lambda r: int(r.get("ts", 0)), reverse=True)
     return rows[:max_nodes] if max_nodes > 0 else rows
 
+import html
+
 def build_kml(rows: list[dict], name="Meshtastic Positions") -> bytes:
-    out = ['<?xml version="1.0" encoding="UTF-8"?>',
-           '<kml xmlns="http://www.opengis.net/kml/2.2">',
-           f'  <Document><name>{name}</name>']
+    out = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<kml xmlns="http://www.opengis.net/kml/2.2">',
+        f'  <Document><name>{html.escape(name)}</name>'
+    ]
+
     for r in rows:
         lat, lon = r.get("lat"), r.get("lon")
-        if lat is None or lon is None: continue
-        alias = r.get("alias") or r.get("id")
+        if lat is None or lon is None:
+            continue
+
+        alias = html.escape(r.get("alias") or r.get("id") or "")
+        desc_raw = f"!{r.get('id')} • SNR {r.get('rx_snr')} • RSSI {r.get('rx_rssi')}"
+        desc = html.escape(desc_raw)
+
         coords = f"{lon},{lat},{r.get('alt') or 0}"
-        desc = f"!{r.get('id')} • SNR {r.get('rx_snr')} • RSSI {r.get('rx_rssi')}"
-        out.append(f"    <Placemark><name>{alias}</name><description>{desc}</description>"
-                   f"<Point><coordinates>{coords}</coordinates></Point></Placemark>")
+
+        out.append(
+            "    <Placemark>"
+            f"<name>{alias}</name>"
+            f"<description>{desc}</description>"
+            f"<Point><coordinates>{coords}</coordinates></Point>"
+            "</Placemark>"
+        )
+
     out.append("  </Document></kml>")
     return "\n".join(out).encode("utf-8")
+
 
 def build_gpx(rows: list[dict], name="Meshtastic Positions") -> bytes:
     out = ['<?xml version="1.0" encoding="UTF-8"?>',

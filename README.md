@@ -711,6 +711,16 @@ docker compose -f docker-compose.yml up -d
 Compatible con Raspberry Pi **2B**, **3**, **4**, **5**.  
 La arquitectura correcta se selecciona automáticamente (arm/v7 o arm64).
 
+---
+
+### 🌐 Manual instalación MeshNet The Boss desde 0 en Rasp 2B/3/4/5
+
+> 🔄 MANUAL de despliegue desde 0, en Raspberry PI
+
+📘 **[Abrir MANUAL → Manual_Instalacion_MeshNet_RaspberryPi.md](./docs/Manual_Instalacion_MeshNet_RaspberryPi.md)**
+
+---
+
 ## 1. Instalar Docker + Docker Compose Plugin
 ```bash
 curl -sSL https://get.docker.com | sh

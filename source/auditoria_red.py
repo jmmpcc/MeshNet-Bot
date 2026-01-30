@@ -1,4 +1,4 @@
-# v6.2.1 uditoria_red.py
+# v6.2.4 uditoria_red.py
 import os, json, csv, math, time, hashlib, logging
 from datetime import datetime, timezone
 from statistics import fmean
@@ -49,6 +49,10 @@ PATH_POS   = os.getenv("BOT_POSITIONS_PATH",   "bot_data/positions.jsonl")
 PATH_COV   = os.getenv("BOT_COVERAGE_PATH",    "bot_data/coverage.jsonl")
 PATH_TEL   = os.getenv("BOT_TELEMETRY_PATH",   "bot_data/telemetry.jsonl")  # opcional
 PATH_OFF   = os.getenv("BOT_OFFLINE_LOG_PATH", "bot_data/broker_offline_log.jsonl")
+
+# Nodo principal (tu nodo/gateway) para comparativas de impacto.
+# Debe ser un ID Meshtastic estilo "!9ef0c2cc".
+HOME_NODE_ID = (os.getenv("HOME_NODE_ID", "") or "").strip()
 
 OUT_DIR         = os.getenv("BOT_REPORTS_DIR", "bot_data/reportes")
 HEATMAP_OUTDIR  = os.getenv("BOT_MAPS_DIR", OUT_DIR)
@@ -284,8 +288,22 @@ def _extract_metrics(row: Dict[str, Any]) -> Dict[str, Any]:
         raw = f"{nid}|{int(ts)}|{app}|{pl}".encode("utf-8", "ignore")
         mid = hashlib.blake2s(raw, digest_size=8).hexdigest()
 
+    # Campos adicionales (no rompen compatibilidad):
+    # - via/relay_node: para inferencia de rol e impacto (si el backlog lo aporta)
+    via = row.get("via") or row.get("relay_node")
+    if via is None:
+        try:
+            dec = row.get("decoded") or {}
+            if isinstance(dec, dict):
+                via = dec.get("via") or dec.get("relay_node") or (dec.get("route") or {}).get("relay_node")
+        except Exception:
+            via = None
+
     return {"ts": float(ts), "nid": str(nid), "alias": alias, "snr": snr, "rssi": rssi,
-            "hops": hops, "app": app, "pl": pl, "lat": lat, "lon": lon, "mid": mid}
+            "hops": hops, "app": app, "pl": pl, "lat": lat, "lon": lon, "mid": mid,
+            "via": (str(via).strip() if isinstance(via, str) and via.strip() else None)}
+
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Utilidades internas
@@ -712,6 +730,247 @@ def _channel_load_estimate(rows: List[Dict[str, Any]], hours: int) -> Dict[str, 
         "dup_ratio": float(dup_ratio),
         "dups_count": int(dups_count),
         "uniq_count": int(uniq_count),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rol observado e impacto (auditoría aparte)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _relay_seen_counts(rows: List[Dict[str, Any]], hours: int) -> Dict[str, int]:
+    """Cuenta cuántas veces aparece cada nodo como relay/via en la ventana.
+
+    Depende de que el backlog incluya algún campo tipo "via" / "relay_node".
+    Es tolerante: si no existe, devuelve vacío.
+    """
+    cutoff = time.time() - hours * 3600
+    out: Dict[str, int] = {}
+    for r in rows:
+        try:
+            m = _extract_metrics(r)
+            if m["ts"] < cutoff:
+                continue
+            via = m.get("via")
+            if isinstance(via, str) and via.startswith("!"):
+                out[via] = out.get(via, 0) + 1
+        except Exception:
+            continue
+    return out
+
+
+def _node_airtime_stats(rows: List[Dict[str, Any]], node_id: str, hours: int) -> Dict[str, Any]:
+    """Estima la huella de tráfico (airtime) de un nodo en la ventana.
+
+    - No depende de métricas de firmware.
+    - Usa la misma aproximación LoRa que _channel_load_estimate().
+    """
+    node_id = (node_id or "").strip()
+    if not node_id:
+        return {
+            "airtime_ms": 0.0,
+            "duty_window": 0.0,
+            "msgs_total": 0,
+            "airtime_by_app": {},
+        }
+
+    cutoff = time.time() - hours * 3600
+    sf = int(os.getenv("LORA_SF", str(LORA_SF)))
+    bw = int(os.getenv("LORA_BW", str(LORA_BW)))
+    cr = int(os.getenv("LORA_CR", str(LORA_CR)))
+    cr = min(max(cr, 5), 8)
+
+    total_ms = 0.0
+    by_app: Dict[str, float] = {}
+    msgs_total = 0
+
+    for r in rows:
+        m = _extract_metrics(r)
+        if m["ts"] < cutoff:
+            continue
+        if m.get("nid") != node_id:
+            continue
+
+        pl = m.get("pl")
+        if pl is None:
+            pl = LORA_PL
+        try:
+            pl = int(pl)
+        except Exception:
+            pl = LORA_PL
+        pl = max(1, pl)
+
+        tms = _airtime_ms(sf, bw, cr, pl)
+        total_ms += tms
+        msgs_total += 1
+
+        app = m.get("app") or "?"
+        by_app[app] = by_app.get(app, 0.0) + tms
+
+    window_ms = max(1.0, float(hours)) * 3_600_000.0
+    duty = total_ms / window_ms
+
+    return {
+        "airtime_ms": float(total_ms),
+        "duty_window": float(duty),
+        "msgs_total": int(msgs_total),
+        "airtime_by_app": by_app,
+    }
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Haversine (km)."""
+    R = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    d1 = math.radians(lat2 - lat1)
+    d2 = math.radians(lon2 - lon1)
+    a = math.sin(d1 / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(d2 / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _node_mobility_km(rows: List[Dict[str, Any]], node_id: str, hours: int) -> float:
+    """Movilidad aproximada (km) del nodo en la ventana usando POSITION_APP."""
+    node_id = (node_id or "").strip()
+    if not node_id:
+        return 0.0
+    cutoff = time.time() - hours * 3600
+    pts: List[tuple[float, float, float]] = []  # (ts, lat, lon)
+    for r in rows:
+        m = _extract_metrics(r)
+        if m["ts"] < cutoff:
+            continue
+        if m.get("nid") != node_id:
+            continue
+        if str(m.get("app") or "").upper() != "POSITION_APP":
+            continue
+        if m.get("lat") is None or m.get("lon") is None:
+            continue
+        pts.append((float(m["ts"]), float(m["lat"]), float(m["lon"])))
+
+    if len(pts) < 2:
+        return 0.0
+    pts.sort(key=lambda x: x[0])
+
+    try:
+        _, lat1, lon1 = pts[0]
+        _, lat2, lon2 = pts[-1]
+        return float(_haversine_km(lat1, lon1, lat2, lon2))
+    except Exception:
+        return 0.0
+
+
+def _infer_observed_role(neighbors_count: int, relay_seen: int, mobility_km: float) -> Dict[str, Any]:
+    """Reglas deterministas para rol observado."""
+    role = "unknown"
+    conf = 0.25
+    reasons: List[str] = []
+
+    if mobility_km >= 2.0:
+        role = "mobile"
+        conf = 0.85 if mobility_km >= 5.0 else 0.70
+        reasons.append(f"movilidad≈{mobility_km:.1f}km")
+    else:
+        if neighbors_count >= 3 and relay_seen >= 5:
+            role = "router"
+            conf = 0.80
+            reasons.append("vecinos>=3 y relay>=5")
+        elif relay_seen >= 10 and neighbors_count <= 2:
+            role = "repeater_like"
+            conf = 0.70
+            reasons.append("relay alto con pocos vecinos")
+        elif neighbors_count <= 2 and relay_seen <= 2:
+            role = "edge"
+            conf = 0.65
+            reasons.append("pocos vecinos y poco relay")
+        else:
+            role = "mixed"
+            conf = 0.55
+            reasons.append("señales mixtas")
+
+    return {"observed_role": role, "confidence": round(float(conf), 2), "reasons": reasons}
+
+
+def _impact_assessment(
+    node_id: str,
+    nei_list: List[Dict[str, Any]],
+    rows: List[Dict[str, Any]],
+    hours: int,
+    load_global: Dict[str, Any],
+    relay_counts: Dict[str, int],
+) -> Optional[Dict[str, Any]]:
+    """Evalúa impacto del nodo respecto al resto (operacional)."""
+    node_id = (node_id or "").strip()
+    if not node_id:
+        return None
+
+    neighbors_count = len(nei_list)
+    relay_seen = int(relay_counts.get(node_id, 0))
+    mobility_km = float(_node_mobility_km(rows, node_id, hours))
+
+    role_info = _infer_observed_role(neighbors_count=neighbors_count, relay_seen=relay_seen, mobility_km=mobility_km)
+
+    node_air = _node_airtime_stats(rows, node_id, hours)
+    total_air = float(load_global.get("airtime_ms") or 0.0)
+    air_share = (float(node_air["airtime_ms"]) / total_air) if total_air > 0 else 0.0
+
+    dup_ratio = float(load_global.get("dup_ratio") or 0.0)
+
+    all_relay = sorted([int(v) for v in relay_counts.values()])
+    relay_pctl = _pctl(90, all_relay) if all_relay else None
+
+    benefit = 0.0
+    if relay_pctl and relay_pctl > 0:
+        benefit = min(1.0, relay_seen / float(relay_pctl))
+    benefit = max(0.0, min(1.0, benefit))
+
+    cost = 0.0
+    cost += min(1.0, air_share / 0.15) * 0.6
+    cost += min(1.0, dup_ratio / 0.30) * 0.4
+    cost = max(0.0, min(1.0, cost))
+
+    impact = (benefit * 100.0) - (cost * 100.0)
+    impact_score = max(0.0, min(100.0, 50.0 + (impact / 2.0)))
+
+    flags: List[str] = []
+    reasons: List[str] = []
+
+    if air_share >= 0.25:
+        flags.append("chatty")
+        reasons.append(f"huella de aire alta: {air_share*100:.1f}%")
+
+    if mobility_km >= 2.0 and role_info["observed_role"] in ("router", "repeater_like", "mixed") and relay_seen >= 5:
+        flags.append("mobile_router")
+        reasons.append("movilidad + señales de relay")
+
+    if dup_ratio >= 0.30 and air_share >= 0.10:
+        flags.append("congestion")
+        reasons.append(f"duplicados globales altos ({dup_ratio:.2f}) con consumo de canal")
+
+    if impact_score >= 60:
+        impact_label = "positivo"
+    elif impact_score >= 40:
+        impact_label = "neutro"
+    else:
+        impact_label = "degradante"
+
+    return {
+        "node_id": node_id,
+        "observed_role": role_info["observed_role"],
+        "role_confidence": role_info["confidence"],
+        "impact_score": round(float(impact_score), 1),
+        "impact_label": impact_label,
+        "flags": flags,
+        "reasons": role_info.get("reasons", []) + reasons,
+        "metrics": {
+            "neighbors_count": int(neighbors_count),
+            "relay_seen": int(relay_seen),
+            "mobility_km": round(float(mobility_km), 2),
+            "airtime_ms": round(float(node_air["airtime_ms"]), 1),
+            "airtime_share": round(float(air_share), 4),
+            "msgs_total": int(node_air["msgs_total"]),
+            "dup_ratio_global": round(float(dup_ratio), 3),
+            "window_h": int(hours),
+        },
     }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1359,5 +1618,121 @@ async def auditoria_integral_cmd(update: Update, context: ContextTypes.DEFAULT_T
         try:
             with open(path, "rb") as f:
                 await update.effective_message.reply_document(InputFile(f, filename=os.path.basename(path)))
+        except Exception:
+            pass
+
+
+
+async def auditoria_impacto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /auditoria_impacto [horas=72] [!node_id]
+    Auditoría operacional del impacto de un nodo sobre la malla:
+      - rol observado (por comportamiento)
+      - impacto (positivo/neutro/degradante) con score 0..100
+      - flags y motivos
+    Si no se indica !node_id, se usa HOME_NODE_ID.
+    """
+    args = context.args or []
+    try:
+        tok0 = args[0] if args else None
+        hours = _parse_window_to_hours(tok0, WINDOW_H)
+    except Exception:
+        hours = WINDOW_H
+
+    # Segundo argumento opcional: node_id explícito
+    node_id = None
+    if len(args) >= 2 and isinstance(args[1], str) and args[1].strip().startswith('!'):
+        node_id = args[1].strip()
+    elif len(args) >= 1 and isinstance(args[0], str) and args[0].strip().startswith('!'):
+        # permite /auditoria_impacto !id (sin horas)
+        node_id = args[0].strip()
+        hours = WINDOW_H
+    else:
+        node_id = HOME_NODE_ID
+
+    if not node_id:
+        await update.effective_message.reply_text(
+            "auditoria_impacto: HOME_NODE_ID no definido y no se indicó !node_id.\nEjemplo: /auditoria_impacto 72 !9ef0c2cc",
+            disable_web_page_preview=True
+        )
+        return
+
+    _ensure_outdir()
+    rows = _collect_rows(hours)
+    if not rows:
+        await update.effective_message.reply_text(
+            "Sin datos en la ventana solicitada.\n" + _file_diag(hours),
+            disable_web_page_preview=True
+        )
+        return
+
+    # Vecinos directos (respecto a este broker/nodo local)
+    T = _build_neighbors(rows)
+    nei = _summarize_neighbors(T)
+
+    _nodos_by_id = _parse_nodos_txt(NODOS_TXT_PATH)
+    if _nodos_by_id:
+        _enriquecer_con_nodos_txt(nei, _nodos_by_id)
+
+    # Métricas globales + impacto del nodo
+    load = _channel_load_estimate(rows, hours)
+    relay_counts = _relay_seen_counts(rows, hours)
+    impact = _impact_assessment(
+        node_id=node_id,
+        nei_list=nei,
+        rows=rows,
+        hours=hours,
+        load_global=load,
+        relay_counts=relay_counts,
+    )
+
+    if not impact:
+        await update.effective_message.reply_text(
+            f'auditoria_impacto: sin datos suficientes para {node_id}',
+            disable_web_page_preview=True
+        )
+        return
+
+    ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+    base = f'auditoria_impacto_{ts}'
+    out_json = os.path.join(OUT_DIR, f'{base}.json')
+
+    payload = {
+        'generated_at': ts,
+        'window_hours': hours,
+        'node_id': node_id,
+        'impact': impact,
+        'channel_load': load,
+    }
+    try:
+        with open(out_json, 'w', encoding='utf-8') as f:
+            import json
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+    m = impact['metrics']
+    duty_pct = float(load.get('duty_window', 0.0)) * 100.0
+    dup_pct = float(load.get('dup_ratio', 0.0)) * 100.0
+
+    msg = (
+        f"Auditoría de impacto ({hours} h) — {impact['node_id']}\n"
+        f"Rol observado: {impact['observed_role']} (conf {impact['role_confidence']})\n"
+        f"Impacto: {impact['impact_label']} ({impact['impact_score']}/100)\n\n"
+        "Métricas:\n"
+        f"• vecinos_directos: {m['neighbors_count']} | relay_seen: {m['relay_seen']} | movilidad≈{m['mobility_km']} km\n"
+        f"• airtime_nodo: {m['airtime_ms']} ms ({m['airtime_share']*100:.1f}% de la ventana) | msgs: {m['msgs_total']}\n"
+        f"• canal_global: duty {duty_pct:.2f}% | duplicados {dup_pct:.2f}%\n"
+        f"• flags: {', '.join(impact['flags']) if impact['flags'] else '-'}\n"
+        f"• motivos: {'; '.join(impact['reasons']) if impact['reasons'] else '-'}"
+    )
+
+    await update.effective_message.reply_text(msg, disable_web_page_preview=True)
+
+    if os.path.exists(out_json):
+        try:
+            from telegram import InputFile
+            with open(out_json, 'rb') as f:
+                await update.effective_message.reply_document(InputFile(f, filename=os.path.basename(out_json)))
         except Exception:
             pass

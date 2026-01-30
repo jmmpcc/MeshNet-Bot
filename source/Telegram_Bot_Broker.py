@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v6.2.2 py
+Telegram_Bot_Broker_v6.2.4 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -45,7 +45,7 @@ import html
 from meshtastic import tcp_interface
 from positions_store import read_positions_recent, build_kml, build_gpx
 
-from auditoria_red import auditoria_red_cmd, auditoria_integral_cmd
+from auditoria_red import auditoria_red_cmd, auditoria_integral_cmd, auditoria_impacto_cmd
 
 # === [NUEVO] Helper para compatibilizar funciones sync/async ===
 import inspect
@@ -5276,9 +5276,18 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  • Genera: CSV de vecinos, CSV de recomendaciones por vecino, JSON integral y mapa de calor HTML.\n"
         "  • Por defecto 72 h. Ej.: <code>/auditoria_integral 168</code>\n"
         "\n"
+        "• <code>/auditoria_impacto [horas] [!node_id]</code>\n"
+        "  Auditoría de impacto del nodo sobre la malla.\n"
+        "  • Rol observado (por comportamiento): mobile, router, edge, repeater_like, mixed.\n"
+        "  • Impacto: positivo / neutro / degradante + impact_score 0..100.\n"
+        "  • Huella estimada: airtime_ms, airtime_share, msgs_total.\n"
+        "  • Señales de relay: relay_seen (si el backlog aporta via/relay_node).\n"
+        "  • Por defecto usa <code>HOME_NODE_ID</code>. Ej.: <code>/auditoria_impacto 72 !9ef0c2cc</code>\n"
+        "\n"
         "<u>Notas</u>:\n"
-        "• Los umbrales se ajustan por variables de entorno: <code>AUD_*</code> (p.ej. <code>AUD_HOPS_MAX</code>, "
+        "• Umbrales por variables de entorno: <code>AUD_*</code> (p.ej. <code>AUD_HOPS_MAX</code>, "
         "<code>AUD_P90_STRONG</code>, <code>AUD_BEACON_R</code>, <code>AUD_BEACON_C</code>…).\n"
+        "• Nodo por defecto para impacto: <code>HOME_NODE_ID</code>.\n"
         "• Salidas en <code>bot_data/reportes/</code>. El mapa HTML se guarda también ahí (o en <code>BOT_MAPS_DIR</code> si está definido).\n"
     )
 
@@ -13778,6 +13787,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("broker_status", broker_status_cmd))
     app.add_handler(CommandHandler("auditoria_red", auditoria_red_cmd))
     app.add_handler(CommandHandler("auditoria_integral", auditoria_integral_cmd))
+    app.add_handler(CommandHandler("auditoria_impacto", auditoria_impacto_cmd))
 
 # ...
   
