@@ -8,7 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates tzdata iputils-ping \
     build-essential python3-dev gfortran pkg-config \
     libopenblas-dev liblapack-dev \
+    libssl-dev libffi-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Importante en buildx/multi-arch: asegurar wheel/pip modernos
+RUN python -m pip install --upgrade pip setuptools wheel
+
 
 WORKDIR /app
 
