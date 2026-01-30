@@ -31,6 +31,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 import re
+from pathlib import Path
+import os
 
 from pubsub import pub
 from meshtastic.tcp_interface import TCPInterface
@@ -53,6 +55,31 @@ from bridge_in_broker import (
     bridge_status_in_broker,
     bridge_mirror_outgoing_from_broker,   # ← NUEVO
 )
+
+
+# Directorio base único (igual que en el bot)
+DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "/app/bot_data")).resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Subdirectorio BBS
+BBS_DIR = DATA_DIR / "bbs"
+BBS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Resolver rutas BBS: si vienen relativas, se hacen relativas a DATA_DIR
+def _resolve_under_data_dir(p: str, default_rel: str) -> Path:
+    raw = (os.getenv(p) or default_rel).strip()
+    path = Path(raw)
+    if not path.is_absolute():
+        path = DATA_DIR / path
+    return path
+
+BBS_DB_PATH  = _resolve_under_data_dir("BBS_DB_PATH",  "bbs/bbs_data.db")
+BBS_KEY_PATH = _resolve_under_data_dir("BBS_KEY_PATH", "bbs/.bbs_key")
+
+# Asegura carpetas padre (por si en .env ponen rutas más profundas)
+BBS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+BBS_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 
 # === NUEVO: host/port runtime para Meshtastic (rellenos en main() desde --host)
 RUNTIME_MESH_HOST = None   # se fija en main()
