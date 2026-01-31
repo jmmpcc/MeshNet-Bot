@@ -1188,8 +1188,26 @@ class BbsServer:
         self._touch_from(from_id)
 
         after = text.strip()[4:].strip()
-        if not after:
+
+        # --- NUEVO: soportar "#BBS <BBS_CALLSIGN> <COMANDO> ..." ---
+        # Si el primer token tras #BBS es el callsign de esta BBS, lo retiramos para interpretar el comando.
+        # Mantiene compatibilidad con el formato corto "#BBS LOGIN ..." durante la sesión.
+        tokens = after.split()
+        addressed = False
+        after_cmd = after
+
+        if tokens and _norm_callsign(tokens[0]) == self.bbs_callsign:
+            addressed = True
+            after_cmd = " ".join(tokens[1:]).strip()
+
+        # Si solo mandan "#BBS" o "#BBS <CALLSIGN>" sin más, guiamos al usuario
+        if not after or (addressed and not after_cmd):
             return self._apply_limits_small_reply(from_id, f"Para conectarte: #BBS {self.bbs_callsign}")
+
+        # A partir de aquí, el "comando real" a interpretar es after_cmd (si venía direccionado),
+        # o after (si venía en formato corto)
+        after_to_parse = after_cmd if addressed else after
+
 
         if not self._allow_cmd(from_id):
             return self._apply_limits_small_reply(from_id, "Demasiado rápido. Reintenta.")
@@ -1202,8 +1220,12 @@ class BbsServer:
 
         # Conectar a esta BBS (multi-BBS)
         if s.state == "idle":
-            if _norm_callsign(after) != self.bbs_callsign:
+            # En idle, aceptamos conexión si:
+            # - formato corto: "#BBS <CALLSIGN>"
+            # - formato direccionado: "#BBS <CALLSIGN> <COMANDO...>" (conecta y sigue)
+            if (not addressed) and (_norm_callsign(after) != self.bbs_callsign):
                 return None
+
             self._clear_pending_out(from_id)
             self._pending_subject_by_from.pop(from_id, None)
             self._last_search_ts.pop(from_id, None)
@@ -1213,8 +1235,9 @@ class BbsServer:
                 "Conexión iniciada.\nEnvía tu indicativo: #BBS LOGIN TU_INDICATIVO"
             )
 
-        up = after.strip()
+        up = after_to_parse.strip()
         up_u = up.upper()
+
 
         # --- Login ---
         if s.state == "wait_login":
