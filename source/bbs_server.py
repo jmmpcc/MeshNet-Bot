@@ -1200,9 +1200,19 @@ class BbsServer:
             addressed = True
             after_cmd = " ".join(tokens[1:]).strip()
 
-        # Si solo mandan "#BBS" o "#BBS <CALLSIGN>" sin más, guiamos al usuario
-        if not after or (addressed and not after_cmd):
-            return self._apply_limits_small_reply(from_id, f"Para conectarte: #BBS {self.bbs_callsign}")
+        # Si solo mandan "#BBS" sin más, guiamos al usuario.
+        # Nota: "#BBS <CALLSIGN>" SÍ debe iniciar sesión (estado idle) y pedir LOGIN.
+        if not after:
+            return self._apply_limits_small_reply(
+                from_id,
+                (
+                    "Para conectarte a esta BBS, todos los comandos deben ir precedidos por su indicativo.\n"
+                    f"Formato obligatorio: #BBS {self.bbs_callsign} <COMANDO>\n"
+                    f"Ejemplo: #BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                )
+            )
+
+
 
         # A partir de aquí, el "comando real" a interpretar es after_cmd (si venía direccionado),
         # o after (si venía en formato corto)
@@ -1242,13 +1252,34 @@ class BbsServer:
         # --- Login ---
         if s.state == "wait_login":
             if not up_u.startswith("LOGIN"):
-                return self._apply_limits_small_reply(from_id, "Envía tu indicativo: #BBS LOGIN TU_INDICATIVO")
+                return self._apply_limits_small_reply(
+                    from_id,
+                    (
+                        "Envía tu indicativo usando el formato obligatorio:\n"
+                        f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                    )
+                )
+            
+            
             parts = up.split(maxsplit=1)
             if len(parts) != 2:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS LOGIN TU_INDICATIVO")
+                return self._apply_limits_small_reply(
+                    from_id,
+                    (
+                        "Envía tu indicativo usando el formato obligatorio:\n"
+                        f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                    )
+                )
+            
             cs = _norm_callsign(parts[1])
             if not cs:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS LOGIN TU_INDICATIVO")
+                return self._apply_limits_small_reply(
+                    from_id,
+                    (
+                        "Envía tu indicativo usando el formato obligatorio:\n"
+                        f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                    )
+                )
 
             self._clear_pending_out(from_id)
             self._pending_subject_by_from.pop(from_id, None)
@@ -1256,14 +1287,14 @@ class BbsServer:
 
             s.pending_login = cs
             s.state = "wait_pass"
-            return self._apply_limits_small_reply(from_id, "Ahora la contraseña: #BBS PASS TU_CONTRASEÑA")
+            return self._apply_limits_small_reply(from_id, "Ahora la contraseña: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
 
         if s.state == "wait_pass":
             if not up_u.startswith("PASS"):
-                return self._apply_limits_small_reply(from_id, "Envía la contraseña: #BBS PASS TU_CONTRASEÑA")
+                return self._apply_limits_small_reply(from_id, "Envía la contraseña: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
             parts = up.split(maxsplit=1)
             if len(parts) != 2:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS PASS TU_CONTRASEÑA")
+                return self._apply_limits_small_reply(from_id, "Formato: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
 
             pwd = parts[1].strip()
             cs = _norm_callsign(s.pending_login or "")
