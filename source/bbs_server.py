@@ -43,6 +43,22 @@ def _env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
+def _env_csv_ints(name: str, default_csv: str) -> set:
+    """Lee una lista CSV de enteros desde una variable de entorno.
+    - Ej.: "5,7,9" -> {5,7,9}
+    - Ignora elementos vacíos o no numéricos.
+    """
+    raw = (os.getenv(name) or default_csv or "").strip()
+    out = set()
+    for part in raw.split(","):
+        p = (part or "").strip()
+        if not p:
+            continue
+        try:
+            out.add(int(p))
+        except Exception:
+            continue
+    return out
 
 def _env_str(name: str, default: str = "") -> str:
     v = os.getenv(name, default)
@@ -1153,8 +1169,18 @@ class BbsServer:
         """
         if not self.enabled:
             return None
-        if int(ch) != int(self.bbs_channel):
+        # Permitir entrada por varios canales públicos y por DM sin romper compatibilidad:
+        # - BBS_CHANNEL: canal principal (histórico)
+        # - BBS_CHANNELS: lista CSV opcional (p.ej. "5,7,9")
+        # - BBS_DM_CHANNEL: canal DM (por defecto 0)
+        dm_ch = _env_int("BBS_DM_CHANNEL", 0)
+        allowed = _env_csv_ints("BBS_CHANNELS", str(self.bbs_channel))
+        allowed.add(int(dm_ch))
+        if int(ch) not in allowed:
             return None
+
+       
+
         if not text or not text.strip().upper().startswith("#BBS"):
             return None
 

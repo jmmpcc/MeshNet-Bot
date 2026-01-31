@@ -3247,13 +3247,25 @@ class MeshReceiver:
                                 is_dm = bool(_to_norm) and _to_norm not in {"^all", "broadcast", "?"}
 
                                 # Solo exigir BBS_CHANNEL cuando NO es DM
-                                try:
-                                    bbs_ch = int(os.getenv("BBS_CHANNEL", "5"))
-                                except Exception:
-                                    bbs_ch = None
-
-                                if (bbs_ch is not None) and (not is_dm) and (int(canal) != bbs_ch):
-                                    raise StopIteration  # No es el canal BBS → ignorar
+                                # Canales públicos autorizados de entrada a la BBS:
+                                # - BBS_CHANNELS: lista CSV (p.ej. "5,7,9")
+                                # - fallback: BBS_CHANNEL (histórico)
+                                def _parse_bbs_channels() -> set:
+                                    raw = (os.getenv("BBS_CHANNELS") or os.getenv("BBS_CHANNEL") or "").strip()
+                                    out = set()
+                                    for part in raw.split(","):
+                                        p = (part or "").strip()
+                                        if not p:
+                                            continue
+                                        try:
+                                            out.add(int(p))
+                                        except Exception:
+                                            continue
+                                    return out
+                                
+                                allowed_ch = _parse_bbs_channels()
+                                if (not is_dm) and allowed_ch and (int(canal) not in allowed_ch):
+                                    raise StopIteration  # No es un canal BBS autorizado → ignorar
 
 
                                 # ---- NUEVO: validación estricta de indicativo BBS ----
