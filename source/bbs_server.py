@@ -569,43 +569,59 @@ class BbsServer:
     # --------------------------
 
     def _menu(self) -> str:
+        """
+        Menú principal de la BBS.
+
+        Regla de diseño (obligatoria):
+        Todos los comandos deben ir siempre precedidos por el indicativo de la BBS
+        justo después de #BBS, usando el formato:
+            #BBS <BBS_CALLSIGN> <COMANDO> [parámetros]
+
+        Ejemplo:
+            #BBS EB2EAS-5 MENU
+        """
+        cs = self.bbs_callsign
+
         return (
-            f"BBS {self.bbs_callsign}\n"
-            "MENU: #BBS MENU\n"
+            f"BBS {cs}\n"
+            f"MENU: #BBS {cs} MENU\n"
             "\n"
             "Boletines (usuarios):\n"
-            "  #BBS NEWS [p] | #BBS LISTA [p]\n"
-            "  #BBS LEER <id> | #BBS VER <id> | #BBS CUERPO <id>\n"
-            "  #BBS LEIDOS [p]\n"
+            f"  #BBS {cs} NEWS [p] | #BBS {cs} LISTA [p]\n"
+            f"  #BBS {cs} LEER <id> | #BBS {cs} VER <id> | #BBS {cs} CUERPO <id>\n"
+            f"  #BBS {cs} LEIDOS [p]\n"
             "\n"
             "Noticias automáticas:\n"
-            "  #BBS NOTICIAS [p]\n"
-            "  #BBS NOTICIAS CAT\n"
-            "  #BBS NOTICIAS CAT <categoria> [p]\n"
-            "  #BBS NOTICIAS VER <id>\n"
+            f"  #BBS {cs} NOTICIAS [p]\n"
+            f"  #BBS {cs} NOTICIAS CAT\n"
+            f"  #BBS {cs} NOTICIAS CAT <categoria> [p]\n"
+            f"  #BBS {cs} NOTICIAS VER <id>\n"
             "\n"
             "Publicar:\n"
-            "  #BBS NUEVA | #BBS ASUNTO <texto> → #BBS TEXTO <cuerpo>\n"
+            f"  #BBS {cs} NUEVA\n"
+            f"  #BBS {cs} ASUNTO <texto>\n"
+            f"  #BBS {cs} TEXTO <cuerpo>\n"
             "\n"
             "Buscar:\n"
-            "  #BBS BUSCAR <palabra/frase> [p]\n"
+            f"  #BBS {cs} BUSCAR <palabra/frase> [p]\n"
             "\n"
             "Privados:\n"
-            "  #BBS MP DEST:Mensaje | #BBS BANDEJA [p]\n"
+            f"  #BBS {cs} MP DEST:Mensaje | #BBS {cs} BANDEJA [p]\n"
             "\n"
             "Encuestas:\n"
-            "  #BBS ENCUESTA Pregunta?|Op1|Op2|...\n"
-            "  #BBS ENCUESTAS | #BBS VOTO <id> <op>\n"
+            f"  #BBS {cs} ENCUESTA Pregunta?|Op1|Op2|...\n"
+            f"  #BBS {cs} ENCUESTAS | #BBS {cs} VOTO <id> <op>\n"
             "\n"
             "Resultados:\n"
-            "  #BBS RESULT <id>\n"
+            f"  #BBS {cs} RESULT <id>\n"
             "\n"
             "Estadísticas:\n"
-            "  #BBS ESTADISTICAS\n"
+            f"  #BBS {cs} ESTADISTICAS\n"
             "\n"
             "Salir:\n"
-            "  #BBS SALIR"
+            f"  #BBS {cs} SALIR"
         )
+
 
 
     def send_chunks(self, dest_node_id: str, chunks: List[str], ch: Optional[int] = None) -> None:
@@ -1228,11 +1244,14 @@ class BbsServer:
             self._sess[from_id] = s
         s.last_activity_ts = time.time()
 
-        # Conectar a esta BBS (multi-BBS)
+                # Conectar a esta BBS (multi-BBS)
         if s.state == "idle":
             # En idle, aceptamos conexión si:
-            # - formato corto: "#BBS <CALLSIGN>"
-            # - formato direccionado: "#BBS <CALLSIGN> <COMANDO...>" (conecta y sigue)
+            # - formato corto: "#BBS <CALLSIGN>"  → conecta y pide LOGIN
+            # - formato direccionado: "#BBS <CALLSIGN> <COMANDO...>" → conecta y ejecuta el comando en el mismo mensaje
+            #
+            # Compatibilidad:
+            # - Si NO viene direccionado y el callsign no coincide con esta BBS, ignoramos.
             if (not addressed) and (_norm_callsign(after) != self.bbs_callsign):
                 return None
 
@@ -1240,10 +1259,21 @@ class BbsServer:
             self._pending_subject_by_from.pop(from_id, None)
             self._last_search_ts.pop(from_id, None)
             s.state = "wait_login"
-            return self._apply_limits_small_reply(
-                from_id,
-                "Conexión iniciada.\nEnvía tu indicativo: #BBS LOGIN TU_INDICATIVO"
-            )
+
+            # Si el mensaje ya trae comando (p.ej. "#BBS EB2EAS-5 LOGIN EB2EAS"),
+            # continuamos el parseo sin responder todavía, para que LOGIN/PASS funcionen en un solo paso.
+            if addressed and after_cmd:
+                pass
+            else:
+                return self._apply_limits_small_reply(
+                    from_id,
+                    (
+                        "Conexión iniciada.\n"
+                        "Envía tu indicativo usando el formato obligatorio:\n"
+                        f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                    )
+                )
+
 
         up = after_to_parse.strip()
         up_u = up.upper()
@@ -1287,14 +1317,14 @@ class BbsServer:
 
             s.pending_login = cs
             s.state = "wait_pass"
-            return self._apply_limits_small_reply(from_id, "Ahora la contraseña: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
+            return self._apply_limits_small_reply(from_id, f"Ahora la contraseña: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
 
         if s.state == "wait_pass":
             if not up_u.startswith("PASS"):
-                return self._apply_limits_small_reply(from_id, "Envía la contraseña: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
+                return self._apply_limits_small_reply(from_id, f"Envía la contraseña: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
             parts = up.split(maxsplit=1)
             if len(parts) != 2:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
+                return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
 
             pwd = parts[1].strip()
             cs = _norm_callsign(s.pending_login or "")

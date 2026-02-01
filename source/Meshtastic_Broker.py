@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Version v6.2.4 
+# Version v6.2.2
 
 from __future__ import annotations
 """
@@ -125,6 +125,33 @@ except Exception as _e:
 
 
 # ===================== Utilidades =====================
+
+def _safe_first_int(raw: str, default: int = 0) -> int:
+    """
+    Devuelve el primer entero válido encontrado en una cadena.
+    Soporta CSV tipo '3,4,5' -> 3.
+    Si falla, devuelve `default`.
+
+    Uso típico:
+        ch = _safe_first_int(os.getenv("BBS_CHANNELS") or os.getenv("BBS_CHANNEL", "5"), default=5)
+    """
+    s = (raw or "").strip()
+    if not s:
+        return default
+
+    # Si viene en CSV, tomamos el primer token
+    first = s.split(",")[0].strip()
+    if not first:
+        return default
+
+    try:
+        return int(first)
+    except Exception:
+        return default
+
+
+
+
 
 # === NUEVO: lock de instancia única para Meshtastic TCPInterface ===
 import os, sys, time, tempfile
@@ -614,23 +641,44 @@ except Exception:
 def _extract_ids_from_packet(pkt: dict, decoded: dict) -> tuple[str, str]:
     """
     Devuelve (who_from, who_to) siempre definidos.
-    Intenta varias claves habituales que pueden aparecer en diferentes versiones/estructuras.
+
+    Importante:
+    - NO usar 'or' encadenados con get() para 'to/toId', porque valores como 0 se pierden
+      y acaban degradándose a '^all', rompiendo la detección de DM.
     """
+
+    def _get_if_present(d: dict, key: str):
+        if isinstance(d, dict) and (key in d):
+            return d.get(key)
+        return None
+
+    # from (normalmente siempre viene, pero mantenemos fallback robusto)
     who_from = (
-        pkt.get("fromId")
-        or decoded.get("fromId")
-        or pkt.get("from")
-        or decoded.get("from")
-        or "?"
+        _get_if_present(pkt, "fromId")
+        if _get_if_present(pkt, "fromId") is not None
+        else _get_if_present(decoded, "fromId")
+        if _get_if_present(decoded, "fromId") is not None
+        else _get_if_present(pkt, "from")
+        if _get_if_present(pkt, "from") is not None
+        else _get_if_present(decoded, "from")
+        if _get_if_present(decoded, "from") is not None
+        else "?"
     )
-    who_to = (
-        pkt.get("toId")
-        or decoded.get("toId")
-        or pkt.get("to")
-        or decoded.get("to")
-        or "^all"
-    )
+
+    # to (aquí está el fallo: puede venir 0 y NO debe descartarse por falsy)
+    if _get_if_present(pkt, "toId") is not None:
+        who_to = _get_if_present(pkt, "toId")
+    elif _get_if_present(decoded, "toId") is not None:
+        who_to = _get_if_present(decoded, "toId")
+    elif _get_if_present(pkt, "to") is not None:
+        who_to = _get_if_present(pkt, "to")
+    elif _get_if_present(decoded, "to") is not None:
+        who_to = _get_if_present(decoded, "to")
+    else:
+        who_to = "^all"
+
     return str(who_from), str(who_to)
+
 
 # Helpers reutilizables (colócalos junto a otros helpers de logging):
 def _cooldown_total_secs():
@@ -3200,7 +3248,20 @@ class MeshReceiver:
                 },
                 "ts": _now_s(),
             }
-            self.hub.broadcast_line(_json_dumps(event) + "\n")
+            # --- [NUEVO] No ecoar al bot/listeners los comandos de la BBS ---
+            # Motivo: /escuchar all no debería mostrar tráfico de control (#BBS ...).
+            # Esto NO afecta al procesamiento interno de la BBS: el intercept sigue ejecutándose.
+            try:
+                t0 = (text or "").strip()
+                hide_bbs = (os.getenv("BBS_HIDE_ECHO", "1").strip().lower() in {"1", "true", "on", "si", "sí", "y", "yes"})
+                if hide_bbs and str(portnum) == "TEXT_MESSAGE_APP" and t0.upper().startswith("#BBS"):
+                    pass  # no emitimos a JSONL (bot/escucha)
+                else:
+                    self.hub.broadcast_line(_json_dumps(event) + "\n")
+            except Exception:
+                # fallback: no romper el flujo si falla el filtro
+                self.hub.broadcast_line(_json_dumps(event) + "\n")
+
 
             # === Contador simple por tipo de puerto/canal ===
             try:
@@ -3241,10 +3302,17 @@ class MeshReceiver:
                             t0 = (text or "").strip()
                             if t0.upper().startswith("#BBS"):
                                 
-                                # Heurística DM: si who_to es un destino concreto (no broadcast)
                                 # Heurística DM robusta: destino presente y NO es broadcast
-                                _to_norm = _norm_node_id(who_to)
-                                is_dm = bool(_to_norm) and _to_norm not in {"^all", "broadcast", "?"}
+                                _to_raw = (str(who_to) if who_to is not None else "").strip().lower()
+
+                                # Valores típicos de broadcast / no-dirigido (según builds/versiones)
+                                if _to_raw in {"^all", "broadcast", "?", "0", "!0", ""}:
+                                    _to_norm = ""
+                                else:
+                                    _to_norm = _norm_node_id(str(who_to))
+
+                                is_dm = bool(_to_norm)
+
 
                                 # Solo exigir BBS_CHANNEL cuando NO es DM
                                 # Canales públicos autorizados de entrada a la BBS:
@@ -3339,12 +3407,13 @@ class MeshReceiver:
                                     if q is not None and hasattr(q, "offer"):
                                         if dm_init_hint:
                                             hint = (
-                                                "BBS: sesión privada por DM.\n"
-                                                "Abre DM conmigo y usa:\n"
-                                                f"#BBS {bbs_callsign} LOGIN TU-INDICATIVO\n"
+                                                f"Para conectarte: #BBS {bbs_callsign}\n"
+                                                "Continúa por DM con:\n"
+                                                f"#BBS {bbs_callsign} LOGIN TU_INDICATIVO\n"
                                                 f"#BBS {bbs_callsign} PASS TU-PASS\n"
                                                 f"#BBS {bbs_callsign} MENU"
                                             )
+
                                         else:
                                             hint = f"BBS: usa DM para comandos (#BBS {bbs_callsign} ...)."
 
@@ -4479,14 +4548,14 @@ def main():
     print(f"🟢 Broker v6.2.4 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
     print("   Clientes pueden conectarse por TCP y leer líneas JSONL (una por evento).", flush=True)
 
-        # === [NUEVO] Inicializar motor BBS (broker-side) ======================================
+    # === [NUEVO] Inicializar motor BBS (broker-side) ======================================
     try:
         enabled_raw = (os.getenv("BBS_ENABLED") or os.getenv("BBS_ENABLE") or "0").strip().lower()
         enabled = enabled_raw in {"1", "true", "on", "si", "sí", "y", "yes"}
 
         if enabled and (BbsServer is not None):
             bbs_callsign = os.getenv("BBS_CALLSIGN", "EB2EAS-5").strip() or "EB2EAS-5"
-            bbs_channel = int(os.getenv("BBS_CHANNEL", "5"))
+            bbs_channel = _safe_first_int(os.getenv("BBS_CHANNELS") or os.getenv("BBS_CHANNEL", "5"), default=5)
             bbs_max_tx = int(os.getenv("BBS_MAX_TX", "234"))
             
             # Base de datos del contenedor (misma idea que el bot)
