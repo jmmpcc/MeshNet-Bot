@@ -733,11 +733,8 @@ class BbsServer:
         prev = body[:preview_chars]
         if len(body) > preview_chars:
             prev += "..."
-        return f"{header}
+        return f"{header}"
 
-{prev}
-
-Cuerpo: #BBS {self.bbs_callsign} CUERPO {bid} | Leer: #BBS {self.bbs_callsign} LEER {bid}"
 
     def _bbs_subject_set(self, from_id: str, subject: str) -> str:
         subject = (subject or "").strip()
@@ -1081,8 +1078,7 @@ Cuerpo: #BBS {self.bbs_callsign} CUERPO {bid} | Leer: #BBS {self.bbs_callsign} L
             out.append("Fin de categorías.")
 
         out.append(f"Filtrar: #BBS {cs} NOTICIAS CAT <categoria> [p]")
-        return "
-".join(out)
+        return "\n".join(out)
 
     def _news_list(self, *, tag: Optional[str] = None, page: int = 1) -> str:
         """
