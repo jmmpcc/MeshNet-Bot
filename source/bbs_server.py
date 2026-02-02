@@ -118,54 +118,7 @@ def _split_chunks(text: str, max_len: int) -> List[str]:
     flush()
     return out
 
-def cmd_news(con, limit=10, tag=None):
-    limit = max(1, min(int(limit), 50))
 
-    params = []
-    sql = """
-        SELECT source, title, published_at, url, tags
-        FROM news
-    """
-    if tag:
-        sql += " WHERE LOWER(tags) LIKE ? "
-        params.append(f"%{str(tag).lower()}%")
-
-    sql += " ORDER BY COALESCE(published_at, created_at) DESC LIMIT ? "
-    params.append(limit)
-
-    rows = con.execute(sql, params).fetchall()
-
-    if not rows:
-        return "No hay noticias."
-
-    out = ["Noticias:"]
-    for i, (source, title, published_at, url, tags) in enumerate(rows, 1):
-        ts = published_at or ""
-        tag_txt = f" [{tags}]" if tags else ""
-        url_txt = f"\n{url}" if url else ""
-        out.append(f"{i:02d}. {title}{tag_txt}\n{source} {ts}{url_txt}")
-
-    return "\n".join(out)
-
-def cmd_news_categories(con):
-    rows = con.execute(
-        """
-        SELECT tags, COUNT(*) as total
-        FROM news
-        WHERE tags IS NOT NULL AND TRIM(tags) != ''
-        GROUP BY tags
-        ORDER BY total DESC
-        """
-    ).fetchall()
-
-    if not rows:
-        return "No hay categorías disponibles."
-
-    out = ["Categorías disponibles:"]
-    for tags, total in rows:
-        out.append(f"• {tags} ({total})")
-
-    return "\n".join(out)
 
 
 # =========================
@@ -497,7 +450,7 @@ class BbsServer:
         if rest:
             self._pending_out[from_id] = rest
             if add_more_hint:
-                now_send.append("Más: #BBS MAS | Menú: #BBS MENU")
+                now_send.append(f"Más: #BBS {self.bbs_callsign} MAS | Menú: #BBS {self.bbs_callsign} MENU")
         else:
             self._pending_out.pop(from_id, None)
 
@@ -703,7 +656,7 @@ class BbsServer:
         for bid, asunto, autor, ts in rows:
             d = (ts or "").split("T")[0]
             out.append(f"[{bid}] {asunto} ({autor}) {d}")
-        out.append(f"Leer: #BBS LEER <id> | Vista: #BBS VER <id> | Sig: #BBS NEWS {page + 1}")
+        out.append(f"Leer: #BBS {self.bbs_callsign} LEER <id> | Vista: #BBS {self.bbs_callsign} VER <id> | Sig: #BBS {self.bbs_callsign} NEWS {page + 1}")
         return "\n".join(out)
 
     def _bbs_list_recent(self, page: int) -> str:
@@ -727,7 +680,7 @@ class BbsServer:
         for bid, asunto, autor, ts in rows:
             d = (ts or "").split("T")[0]
             out.append(f"[{bid}] {asunto} ({autor}) {d}")
-        out.append(f"Leer: #BBS LEER <id> | Vista: #BBS VER <id> | Sig: #BBS LISTA {page + 1}")
+        out.append(f"Leer: #BBS {self.bbs_callsign} LEER <id> | Vista: #BBS {self.bbs_callsign} VER <id> | Sig: #BBS {self.bbs_callsign} LISTA {page + 1}")
         return "\n".join(out)
 
     def _bbs_list_read(self, user_id: str, page: int) -> str:
@@ -753,7 +706,7 @@ class BbsServer:
         for bid, asunto, autor, ts in rows:
             d = (ts or "").split("T")[0]
             out.append(f"[{bid}] {asunto} ({autor}) {d}")
-        out.append(f"Leer: #BBS LEER <id> | Vista: #BBS VER <id> | Sig: #BBS LEIDOS {page + 1}")
+        out.append(f"Leer: #BBS {self.bbs_callsign} LEER <id> | Vista: #BBS {self.bbs_callsign} VER <id> | Sig: #BBS {self.bbs_callsign} LEIDOS {page + 1}")
         return "\n".join(out)
 
     def _bbs_read_full(self, user_id: str, bid: int) -> Tuple[str, str]:
@@ -780,7 +733,11 @@ class BbsServer:
         prev = body[:preview_chars]
         if len(body) > preview_chars:
             prev += "..."
-        return f"{header}\n\n{prev}\n\nCuerpo: #BBS CUERPO {bid} | Leer: #BBS LEER {bid}"
+        return f"{header}
+
+{prev}
+
+Cuerpo: #BBS {self.bbs_callsign} CUERPO {bid} | Leer: #BBS {self.bbs_callsign} LEER {bid}"
 
     def _bbs_subject_set(self, from_id: str, subject: str) -> str:
         subject = (subject or "").strip()
@@ -1019,7 +976,7 @@ class BbsServer:
         for bid, asunto, autor, ts in page_items:
             d = (ts or "").split("T")[0]
             out.append(f"[{bid}] {asunto} ({autor}) {d}")
-        out.append(f"Leer: #BBS LEER <id> | Vista: #BBS VER <id> | Sig: #BBS BUSCAR {q} {page + 1}")
+        out.append(f"Leer: #BBS {self.bbs_callsign} LEER <id> | Vista: #BBS {self.bbs_callsign} VER <id> | Sig: #BBS {self.bbs_callsign} BUSCAR {q} {page + 1}")
         return "\n".join(out)
 
     # --------------------------
@@ -1076,12 +1033,24 @@ class BbsServer:
                 seen.add(p)
         return out
 
-    def _news_categories(self) -> str:
+    def _news_categories(self, page: int = 1) -> str:
         """
-        Devuelve categorías (tags) más frecuentes.
+        Devuelve categorías (tags) disponibles en NOTICIAS con conteo y paginación.
+
+        - Normaliza tags separadas por espacios o comas (usa _news_split_tags()).
+        - Paginación para no saturar el canal.
+
+        Uso:
+          #BBS <BBS> NOTICIAS CAT            -> página 1
+          #BBS <BBS> NOTICIAS CAT 2          -> página 2
         """
+        page = max(1, int(page))
+        per = 20  # tamaño página categorías (ajustable si se quiere exponer por env)
+
         cur = self._conn.cursor()
-        rows = cur.execute("SELECT tags FROM news WHERE tags IS NOT NULL AND tags != ''").fetchall()
+        rows = cur.execute(
+            "SELECT tags FROM news WHERE tags IS NOT NULL AND TRIM(tags) != ''"
+        ).fetchall()
 
         counts: Dict[str, int] = {}
         for (tags_raw,) in rows:
@@ -1092,14 +1061,28 @@ class BbsServer:
             return "NOTICIAS: sin categorías (aún no hay noticias)."
 
         ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-        top = ordered[:20]
 
-        out = ["Categorías NOTICIAS (top):"]
-        for tag, n in top:
+        total = len(ordered)
+        max_page = max(1, (total + per - 1) // per)
+        page = min(page, max_page)
+
+        start = (page - 1) * per
+        chunk = ordered[start:start + per]
+
+        cs = self.bbs_callsign
+
+        out = [f"Categorías NOTICIAS ({page}/{max_page}) — total: {total}"]
+        for tag, n in chunk:
             out.append(f"• {tag} ({n})")
 
-        out.append("Ver: #BBS {bbs} NOTICIAS CAT <categoria> [pag]".format(bbs=self.bbs_callsign))
-        return "\n".join(out)
+        if page < max_page:
+            out.append(f"Más categorías: #BBS {cs} NOTICIAS CAT {page + 1}")
+        else:
+            out.append("Fin de categorías.")
+
+        out.append(f"Filtrar: #BBS {cs} NOTICIAS CAT <categoria> [p]")
+        return "
+".join(out)
 
     def _news_list(self, *, tag: Optional[str] = None, page: int = 1) -> str:
         """
@@ -1424,9 +1407,22 @@ class BbsServer:
             tokens = up.split()
 
             if len(tokens) >= 2 and tokens[1].upper() == "CAT":
-                if len(tokens) == 2:
-                    return self._apply_limits_small_reply(from_id, self._news_categories())
+                # Formatos:
+                # 1) NOTICIAS CAT                 -> lista categorías (p1)
+                # 2) NOTICIAS CAT <p>             -> lista categorías (p)
+                # 3) NOTICIAS CAT <tag> [p]       -> lista noticias filtradas por tag
 
+                if len(tokens) == 2:
+                    return self._apply_limits_small_reply(from_id, self._news_categories(page=1))
+
+                # Si el tercer token es numérico -> es página de categorías
+                try:
+                    cat_page = int(tokens[2])
+                    return self._apply_limits_small_reply(from_id, self._news_categories(page=max(1, cat_page)))
+                except Exception:
+                    pass
+
+                # Si no es número -> es tag
                 tag = tokens[2]
                 page = 1
                 if len(tokens) >= 4:
@@ -1436,9 +1432,10 @@ class BbsServer:
                         pass
                 return self._apply_limits_small_reply(from_id, self._news_list(tag=tag, page=page))
 
+
             if len(tokens) >= 2 and tokens[1].upper() == "VER":
                 if len(tokens) < 3:
-                    return self._apply_limits_small_reply(from_id, "Uso: #BBS NOTICIAS VER <id>")
+                    return self._apply_limits_small_reply(from_id, f"Uso: #BBS {self.bbs_callsign} NOTICIAS VER <id>")
                 try:
                     nid = int(tokens[2])
                 except Exception:
@@ -1475,7 +1472,7 @@ class BbsServer:
         if up_u.startswith("BUSCAR"):
             tokens = up.split()
             if len(tokens) < 2:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS BUSCAR <palabra/frase> [p]")
+                return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} BUSCAR <palabra/frase> [p]")
 
             now = time.time()
             last_s = float(self._last_search_ts.get(from_id, 0.0))
@@ -1488,7 +1485,7 @@ class BbsServer:
                 page = int(tokens[-1])
                 q = " ".join(tokens[1:-1]).strip()
                 if not q:
-                    return self._apply_limits_small_reply(from_id, "Formato: #BBS BUSCAR <palabra/frase> [p]")
+                    return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} BUSCAR <palabra/frase> [p]")
             except Exception:
                 q = " ".join(tokens[1:]).strip()
                 page = 1
@@ -1499,7 +1496,7 @@ class BbsServer:
         if up_u.startswith("VER"):
             parts = up.split()
             if len(parts) != 2:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS VER <id>")
+                return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} VER <id>")
             try:
                 bid = int(parts[1])
             except Exception:
@@ -1509,7 +1506,7 @@ class BbsServer:
         if up_u.startswith("CUERPO"):
             parts = up.split()
             if len(parts) != 2:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS CUERPO <id>")
+                return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} CUERPO <id>")
             try:
                 bid = int(parts[1])
             except Exception:
@@ -1529,7 +1526,7 @@ class BbsServer:
         if up_u.startswith("LEER"):
             parts = up.split()
             if len(parts) != 2:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS LEER <id>")
+                return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} LEER <id>")
             try:
                 bid = int(parts[1])
             except Exception:
