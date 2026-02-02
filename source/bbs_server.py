@@ -733,7 +733,8 @@ class BbsServer:
         prev = body[:preview_chars]
         if len(body) > preview_chars:
             prev += "..."
-        return f"{header}"
+        return f"{header}\n\n{prev}"
+
 
 
     def _bbs_subject_set(self, from_id: str, subject: str) -> str:
@@ -743,7 +744,7 @@ class BbsServer:
         if len(subject) > self.max_subject_chars:
             subject = subject[:self.max_subject_chars].rstrip()
         self._pending_subject_by_from[from_id] = subject
-        return "Asunto guardado. Envía el texto con: #BBS TEXTO <cuerpo>"
+        return f"Asunto guardado. Envía el texto con: #BBS {self.bbs_callsign} TEXTO <cuerpo>"
 
     def _bbs_post(self, from_id: str, user_id: str, body: str) -> str:
         body = (body or "").strip()
@@ -754,7 +755,7 @@ class BbsServer:
 
         subject = self._pending_subject_by_from.get(from_id)
         if not subject:
-            return "Primero define el asunto con: #BBS ASUNTO <texto>"
+            return f"Primero define el asunto con: #BBS {self.bbs_callsign} ASUNTO <texto>"
 
         if (not self.allow_public_posts) and (not self._is_admin(user_id)):
             return "Publicación deshabilitada para usuarios. Solo admins."
@@ -782,12 +783,12 @@ class BbsServer:
 
     def _bbs_mp_send(self, sender: str, spec: str) -> str:
         if ":" not in spec:
-            return "Formato: #BBS MP DEST:Mensaje"
+            return f"Formato: #BBS {self.bbs_callsign} MP DEST:Mensaje"
         dest, msg = spec.split(":", 1)
         dest = _norm_callsign(dest)
         msg = (msg or "").strip()
         if not dest or not msg:
-            return "Formato: #BBS MP DEST:Mensaje"
+            return f"Formato: #BBS {self.bbs_callsign} MP DEST:Mensaje"
         if len(msg) > self.max_mp_chars:
             return f"Mensaje demasiado largo ({len(msg)}). Máximo: {self.max_mp_chars}"
 
@@ -832,7 +833,7 @@ class BbsServer:
                 cur.execute("UPDATE privados SET leido=1 WHERE id=?", (mid,))
         self._conn.commit()
 
-        out.append(f"Sig: #BBS BANDEJA {page + 1}")
+        out.append(f"Sig: #BBS {self.bbs_callsign} BANDEJA {page + 1}")
         return "\n".join(out)
 
     # --------------------------
@@ -842,7 +843,7 @@ class BbsServer:
     def _poll_create(self, author: str, spec: str) -> str:
         parts = [p.strip() for p in (spec or "").split("|") if p.strip()]
         if len(parts) < 3:
-            return "Formato: #BBS ENCUESTA Pregunta?|Op1|Op2|..."
+            return f"Formato: #BBS {self.bbs_callsign} ENCUESTA Pregunta?|Op1|Op2|..."
         pregunta = parts[0]
         opciones = parts[1:]
 
@@ -860,7 +861,7 @@ class BbsServer:
         if not self._is_admin(author):
             self._quota_inc_polls(author)
 
-        return "Encuesta creada. Ver con: #BBS ENCUESTAS"
+        return f"Encuesta creada. Ver con: #BBS {self.bbs_callsign} ENCUESTAS"
 
     def _poll_list(self) -> str:
         cur = self._conn.cursor()
@@ -878,7 +879,7 @@ class BbsServer:
             block = [f"[{pid}] {pregunta} ({autor}) {d}"]
             for i, op in enumerate(opciones, start=1):
                 block.append(f" {i}. {op}")
-            block.append(f"Vota: #BBS VOTO {pid} <opción> | Resultados: #BBS RESULT {pid}")
+            block.append(f"Vota: #BBS {self.bbs_callsign} VOTO {pid} <opción> | Resultados: #BBS {self.bbs_callsign} RESULT {pid}")
             out.append("\n".join(block))
         return "\n\n".join(out)
 
@@ -920,7 +921,7 @@ class BbsServer:
     def _bbs_search(self, query: str, page: int) -> str:
         q = (query or "").strip()
         if not q:
-            return "Formato: #BBS BUSCAR <palabra/frase> [p]"
+            return f"Formato: #BBS {self.bbs_callsign} BUSCAR <palabra/frase> [p]"
         page = max(1, int(page))
         like = f"%{q}%"
 
@@ -1007,7 +1008,81 @@ class BbsServer:
                 return default_page
         return default_page
 
-        # --------------------------
+    
+    @staticmethod
+    def _parse_login_pass_chain(cmdline: str) -> Tuple[Optional[str], Optional[str], str]:
+        """Parsea una cadena compacta del tipo:
+
+            LOGIN <CALLSIGN> PASS <PASSWORD> [RESTO...]
+
+        Devuelve:
+        - callsign (str) o None
+        - password (str) o None
+        - resto (str) (puede ser "")
+
+        Notas:
+        - El password se interpreta como UN token (sin espacios).
+        - "RESTO" conserva el resto de la línea tras el password.
+        - Si la cadena no encaja, devuelve (None, None, "").
+        """
+        s = (cmdline or "").strip()
+        if not s:
+            return None, None, ""
+
+        parts = s.split()
+        if len(parts) < 4:
+            return None, None, ""
+
+        if parts[0].upper() != "LOGIN":
+            return None, None, ""
+
+        # Buscar el primer PASS (para permitir que el callsign tenga guiones, etc.)
+        pass_idx = None
+        for i in range(2, len(parts)):
+            if parts[i].upper() == "PASS":
+                pass_idx = i
+                break
+        if pass_idx is None:
+            return None, None, ""
+
+        login = " ".join(parts[1:pass_idx]).strip()
+        if not login:
+            return None, None, ""
+
+        if pass_idx + 1 >= len(parts):
+            return None, None, ""
+        pwd = parts[pass_idx + 1].strip()
+        if not pwd:
+            return None, None, ""
+
+        rest = " ".join(parts[pass_idx + 2:]).strip() if (pass_idx + 2) < len(parts) else ""
+        return _norm_callsign(login), pwd, rest
+
+
+    @staticmethod
+    def _parse_pass_with_rest(cmdline: str) -> Tuple[Optional[str], str]:
+        """Parsea:
+
+            PASS <PASSWORD> [RESTO...]
+
+        Devuelve (password o None, resto). El password es un token.
+        """
+        s = (cmdline or "").strip()
+        if not s:
+            return None, ""
+
+        parts = s.split(maxsplit=2)
+        if len(parts) < 2:
+            return None, ""
+        if parts[0].upper() != "PASS":
+            return None, ""
+
+        pwd = (parts[1] or "").strip()
+        rest = (parts[2] if len(parts) >= 3 else "").strip()
+        if not pwd:
+            return None, ""
+        return pwd, rest
+
     # NEWS: helpers
     # --------------------------
 
@@ -1038,8 +1113,8 @@ class BbsServer:
         - Paginación para no saturar el canal.
 
         Uso:
-          #BBS <BBS> NOTICIAS CAT            -> página 1
-          #BBS <BBS> NOTICIAS CAT 2          -> página 2
+          #BBS <BBS_ID> NOTICIAS CAT            -> página 1
+          #BBS <BBS_ID> NOTICIAS CAT 2          -> página 2
         """
         page = max(1, int(page))
         per = 20  # tamaño página categorías (ajustable si se quiere exponer por env)
@@ -1114,10 +1189,10 @@ class BbsServer:
 
         if not rows:
             if tag:
-                return f"NEWS: sin resultados para categoría: {tag} (pág {page})"
-            return f"NEWS: sin noticias (pág {page})"
+                return f"NOTICIAS: sin resultados para categoría: {tag} (pág {page})"
+            return f"NOTICIAS: sin noticias (pág {page})"
 
-        hdr = f"NEWS (pág {page})" + (f" — categoría: {tag}" if tag else "")
+        hdr = f"NOTICIAS (pág {page})" + (f" — categoría: {tag}" if tag else "")
         out = [hdr]
         for nid, title, source, published_at, url, tags in rows:
             d = (published_at or "").split("T")[0] if published_at else ""
@@ -1173,7 +1248,6 @@ class BbsServer:
         allowed.add(int(dm_ch))
         if int(ch) not in allowed:
             return None
-
        
 
         if not text or not text.strip().upper().startswith("#BBS"):
@@ -1206,8 +1280,6 @@ class BbsServer:
                     f"Ejemplo: #BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
                 )
             )
-
-
 
         # A partir de aquí, el "comando real" a interpretar es after_cmd (si venía direccionado),
         # o after (si venía en formato corto)
@@ -1257,93 +1329,168 @@ class BbsServer:
         up = after_to_parse.strip()
         up_u = up.upper()
 
-
         # --- Login ---
-        if s.state == "wait_login":
-            if not up_u.startswith("LOGIN"):
-                return self._apply_limits_small_reply(
-                    from_id,
-                    (
-                        "Envía tu indicativo usando el formato obligatorio:\n"
-                        f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+        # ============================================================
+        # Login / PASS compactos (una sola trama)
+        # ============================================================
+        # Soporta, sin romper el modo clásico paso-a-paso:
+        #   #BBS <BBS> LOGIN <CALLSIGN> PASS <PWD> [COMANDO...]
+        # Ejemplo:
+        #   #BBS EB2EAS-5 LOGIN EB2-XXXX PASS 1234 NEWS
+        #
+        # Reglas:
+        # - El password es un solo token (sin espacios).
+        # - Si hay comando tras PASS, se ejecuta ya autenticado.
+        # - Límite de pasos por mensaje: 3 (evita bucles).
+        up = after_to_parse.strip()
+        for _step in range(3):
+            up = (up or "").strip()
+            up_u = up.upper()
+
+            # --- Login ---
+            if s.state == "wait_login":
+                # Modo compacto: LOGIN ... PASS ... [RESTO]
+                login_cs, login_pwd, rest = self._parse_login_pass_chain(up)
+                if login_cs and login_pwd:
+                    # Limpieza coherente (igual que en el flujo clásico)
+                    self._clear_pending_out(from_id)
+                    self._pending_subject_by_from.pop(from_id, None)
+                    self._last_search_ts.pop(from_id, None)
+
+                    # Autenticar/crear directamente
+                    cs = _norm_callsign(login_cs)
+                    pwd = (login_pwd or "").strip()
+                    if not cs or not pwd:
+                        return self._apply_limits_small_reply(
+                            from_id,
+                            (
+                                "Envía tu indicativo usando el formato obligatorio:\n"
+                                f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                            )
+                        )
+
+                    if self._user_exists(cs):
+                        just_created = False
+                        if not self._user_check_password(cs, pwd):
+                            # limpieza inmediata en fallo
+                            self._sess.pop(from_id, None)
+                            self._clear_pending_out(from_id)
+                            self._pending_subject_by_from.pop(from_id, None)
+                            self._last_search_ts.pop(from_id, None)
+                            return self._apply_limits_small_reply(from_id, f"Contraseña incorrecta. Conecta de nuevo: #BBS {self.bbs_callsign}")
+                        self._user_touch(cs)
+                    else:
+                        self._user_create(cs, pwd)
+                        just_created = True
+
+                    s.pending_login = None
+                    s.authed_user = cs
+                    s.state = "authed"
+
+                    # Si hay comando restante, ejecutarlo ya autenticado
+                    if rest:
+                        up = rest
+                        continue
+
+                    # Si no hay comando restante, mantener el comportamiento original (menú)
+                    if just_created:
+                        return self._apply_limits_small_reply(from_id, f"Usuario registrado: {cs}\n\n{self._menu()}")
+                    return self._apply_limits_small_reply(from_id, f"Conectado como {cs}\n\n{self._menu()}")
+
+                # Modo clásico: LOGIN <CALLSIGN>
+                if not up_u.startswith("LOGIN"):
+                    return self._apply_limits_small_reply(
+                        from_id,
+                        (
+                            "Envía tu indicativo usando el formato obligatorio:\n"
+                            f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                        )
                     )
-                )
-            
-            
-            parts = up.split(maxsplit=1)
-            if len(parts) != 2:
-                return self._apply_limits_small_reply(
-                    from_id,
-                    (
-                        "Envía tu indicativo usando el formato obligatorio:\n"
-                        f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+
+                parts = up.split(maxsplit=1)
+                if len(parts) != 2:
+                    return self._apply_limits_small_reply(
+                        from_id,
+                        (
+                            "Envía tu indicativo usando el formato obligatorio:\n"
+                            f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                        )
                     )
-                )
-            
-            cs = _norm_callsign(parts[1])
-            if not cs:
-                return self._apply_limits_small_reply(
-                    from_id,
-                    (
-                        "Envía tu indicativo usando el formato obligatorio:\n"
-                        f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+
+                cs = _norm_callsign(parts[1])
+                if not cs:
+                    return self._apply_limits_small_reply(
+                        from_id,
+                        (
+                            "Envía tu indicativo usando el formato obligatorio:\n"
+                            f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                        )
                     )
-                )
 
-            self._clear_pending_out(from_id)
-            self._pending_subject_by_from.pop(from_id, None)
-            self._last_search_ts.pop(from_id, None)
-
-            s.pending_login = cs
-            s.state = "wait_pass"
-            return self._apply_limits_small_reply(from_id, f"Ahora la contraseña: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
-
-        if s.state == "wait_pass":
-            if not up_u.startswith("PASS"):
-                return self._apply_limits_small_reply(from_id, f"Envía la contraseña: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
-            parts = up.split(maxsplit=1)
-            if len(parts) != 2:
-                return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} PASS TU_CONTRASEÑA")
-
-            pwd = parts[1].strip()
-            cs = _norm_callsign(s.pending_login or "")
-            if not cs:
-                self._sess.pop(from_id, None)
                 self._clear_pending_out(from_id)
                 self._pending_subject_by_from.pop(from_id, None)
                 self._last_search_ts.pop(from_id, None)
-                return self._apply_limits_small_reply(from_id, "Sesión reiniciada. Conecta: #BBS <BBS_ID>")
 
-            self._clear_pending_out(from_id)
-            self._pending_subject_by_from.pop(from_id, None)
-            self._last_search_ts.pop(from_id, None)
+                s.pending_login = cs
+                s.state = "wait_pass"
+                return self._apply_limits_small_reply(from_id, f"Ahora la contraseña: #BBS {self.bbs_callsign} PASS <TU_CONTRASEÑA>")
 
-            if self._user_exists(cs):
-                if not self._user_check_password(cs, pwd):
-                    # B) limpieza inmediata en fallo
+            # --- PASS ---
+            if s.state == "wait_pass":
+                pwd, rest = self._parse_pass_with_rest(up)
+                if not pwd:
+                    return self._apply_limits_small_reply(from_id, f"Envía la contraseña: #BBS {self.bbs_callsign} PASS <TU_CONTRASEÑA>")
+
+                cs = _norm_callsign(s.pending_login or "")
+                if not cs:
                     self._sess.pop(from_id, None)
                     self._clear_pending_out(from_id)
                     self._pending_subject_by_from.pop(from_id, None)
                     self._last_search_ts.pop(from_id, None)
-                    return self._apply_limits_small_reply(from_id, "Contraseña incorrecta. Conecta de nuevo: #BBS <BBS_ID>")
 
-                self._user_touch(cs)
+                    return self._apply_limits_small_reply(from_id, f"Sesión reiniciada. Conecta: #BBS {self.bbs_callsign} LOGIN TU_INDICATIVO")
+
+                self._clear_pending_out(from_id)
+                self._pending_subject_by_from.pop(from_id, None)
+                self._last_search_ts.pop(from_id, None)
+
+                if self._user_exists(cs):
+                    if not self._user_check_password(cs, pwd):
+                        # limpieza inmediata en fallo
+                        self._sess.pop(from_id, None)
+                        self._clear_pending_out(from_id)
+                        self._pending_subject_by_from.pop(from_id, None)
+                        self._last_search_ts.pop(from_id, None)
+                        return self._apply_limits_small_reply(from_id, f"Contraseña incorrecta. Conecta de nuevo: #BBS {self.bbs_callsign}")
+                    self._user_touch(cs)
+                    just_created = False
+                else:
+                    self._user_create(cs, pwd)
+                    just_created = True
+
+                s.pending_login = None
                 s.authed_user = cs
                 s.state = "authed"
+
+                if rest:
+                    up = rest
+                    continue
+
+                if just_created:
+                    return self._apply_limits_small_reply(from_id, f"Usuario registrado: {cs}\n\n{self._menu()}")
                 return self._apply_limits_small_reply(from_id, f"Conectado como {cs}\n\n{self._menu()}")
 
-            self._user_create(cs, pwd)
-            s.authed_user = cs
-            s.state = "authed"
-            return self._apply_limits_small_reply(from_id, f"Usuario registrado: {cs}\n\n{self._menu()}")
+            # --- Sesión ---
+            if s.state != "authed" or not s.authed_user:
+                self._sess.pop(from_id, None)
+                self._clear_pending_out(from_id)
+                self._pending_subject_by_from.pop(from_id, None)
+                self._last_search_ts.pop(from_id, None)
+                return self._apply_limits_small_reply(from_id, f"Sesión inválida. Conecta: #BBS {self.bbs_callsign} LOGIN TU_INDICATIVO")
 
-        # --- Sesión ---
-        if s.state != "authed" or not s.authed_user:
-            self._sess.pop(from_id, None)
-            self._clear_pending_out(from_id)
-            self._pending_subject_by_from.pop(from_id, None)
-            self._last_search_ts.pop(from_id, None)
-            return self._apply_limits_small_reply(from_id, "Sesión inválida. Conecta: #BBS <BBS_ID>")
+            # Si llegamos aquí, estamos autenticados: salimos del loop y pasamos al dispatcher normal.
+            break
+
 
         user = s.authed_user
 
@@ -1384,18 +1531,18 @@ class BbsServer:
             posts, _ = self._quota_get(user)
             if (not self._is_admin(user)) and posts >= self.max_posts_per_day:
                 return self._apply_limits_small_reply(from_id, f"Límite diario de boletines alcanzado ({self.max_posts_per_day}).")
-            return self._apply_limits_small_reply(from_id, "Publicación: #BBS ASUNTO <texto>  y luego  #BBS TEXTO <cuerpo>")
+            return self._apply_limits_small_reply(from_id, f"Publicación: #BBS {self.bbs_callsign} ASUNTO <texto>  y luego  #BBS {self.bbs_callsign} TEXTO <cuerpo>")
 
         if up_u.startswith("ASUNTO"):
             parts = up.split(maxsplit=1)
             if len(parts) != 2:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS ASUNTO <texto>")
+                return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} ASUNTO <texto>")
             return self._apply_limits_small_reply(from_id, self._bbs_subject_set(from_id, parts[1]))
 
         if up_u.startswith("TEXTO"):
             parts = up.split(maxsplit=1)
             if len(parts) != 2:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS TEXTO <cuerpo>")
+                return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} TEXTO <cuerpo>")
             return self._apply_limits_small_reply(from_id, self._bbs_post(from_id, user, parts[1]))
 
         # ---------- NOTICIAS (RSS / automáticas) ----------
@@ -1515,7 +1662,7 @@ class BbsServer:
             chunks = _split_chunks(body, min(self.max_tx, self.page_chars))
             cost = self._estimate_cost(len(chunks), self.max_chunks_per_reply, add_more_hint=True)
             if not self._rate_allow(from_id, cost=cost):
-                return self._apply_limits_small_reply(from_id, "Límite de envío alcanzado. Usa #BBS MAS en unos segundos.")
+                return self._apply_limits_small_reply(from_id, f"Límite de envío alcanzado. Usa #BBS {self.bbs_callsign} MAS en unos segundos.")
 
             return self._enqueue_reply(from_id, chunks, max_now=self.max_chunks_per_reply, add_more_hint=True)
 
@@ -1536,7 +1683,7 @@ class BbsServer:
             chunks = _split_chunks(full, min(self.max_tx, self.page_chars))
             cost = self._estimate_cost(len(chunks), self.max_chunks_per_reply, add_more_hint=True)
             if not self._rate_allow(from_id, cost=cost):
-                return self._apply_limits_small_reply(from_id, "Límite de envío alcanzado. Usa #BBS MAS en unos segundos.")
+                return self._apply_limits_small_reply(from_id, f"Límite de envío alcanzado. Usa #BBS {self.bbs_callsign} MAS en unos segundos.")
 
             return self._enqueue_reply(from_id, chunks, max_now=self.max_chunks_per_reply, add_more_hint=True)
 
@@ -1561,18 +1708,18 @@ class BbsServer:
         if up_u.startswith("VOTO"):
             parts = up.split()
             if len(parts) != 3:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS VOTO <id> <op>")
+                return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} VOTO <id> <op>")
             try:
                 pid = int(parts[1])
                 op = int(parts[2])
             except Exception:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS VOTO <id> <op>")
+                return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} VOTO <id> <op>")
             return self._apply_limits_small_reply(from_id, self._poll_vote(user, pid, op))
 
         if up_u.startswith("RESULT"):
             parts = up.split()
             if len(parts) != 2:
-                return self._apply_limits_small_reply(from_id, "Formato: #BBS RESULT <id>")
+                return self._apply_limits_small_reply(from_id, f"Formato: #BBS {self.bbs_callsign} RESULT <id>")
             try:
                 pid = int(parts[1])
             except Exception:
@@ -1582,4 +1729,4 @@ class BbsServer:
         if up_u == "ESTADISTICAS":
             return self._apply_limits_small_reply(from_id, self._stats())
 
-        return self._apply_limits_small_reply(from_id, "Comando no reconocido. Usa: #BBS MENU")
+        return self._apply_limits_small_reply(from_id, f"Comando no reconocido. Usa: #BBS {self.bbs_callsign} MENU")

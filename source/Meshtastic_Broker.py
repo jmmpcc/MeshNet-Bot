@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Version v6.2.4 con BBS
+# Version v6.2.4 con BBS SERVER
 
 from __future__ import annotations
 """
