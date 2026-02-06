@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Version v6.2.4 con BBS SERVER
+# Version v6.2.2
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.4.py
+Meshtastic_Broker_v6.2.4.py Incluida la BBS
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 
@@ -641,44 +641,23 @@ except Exception:
 def _extract_ids_from_packet(pkt: dict, decoded: dict) -> tuple[str, str]:
     """
     Devuelve (who_from, who_to) siempre definidos.
-
-    Importante:
-    - NO usar 'or' encadenados con get() para 'to/toId', porque valores como 0 se pierden
-      y acaban degradándose a '^all', rompiendo la detección de DM.
+    Intenta varias claves habituales que pueden aparecer en diferentes versiones/estructuras.
     """
-
-    def _get_if_present(d: dict, key: str):
-        if isinstance(d, dict) and (key in d):
-            return d.get(key)
-        return None
-
-    # from (normalmente siempre viene, pero mantenemos fallback robusto)
     who_from = (
-        _get_if_present(pkt, "fromId")
-        if _get_if_present(pkt, "fromId") is not None
-        else _get_if_present(decoded, "fromId")
-        if _get_if_present(decoded, "fromId") is not None
-        else _get_if_present(pkt, "from")
-        if _get_if_present(pkt, "from") is not None
-        else _get_if_present(decoded, "from")
-        if _get_if_present(decoded, "from") is not None
-        else "?"
+        pkt.get("fromId")
+        or decoded.get("fromId")
+        or pkt.get("from")
+        or decoded.get("from")
+        or "?"
     )
-
-    # to (aquí está el fallo: puede venir 0 y NO debe descartarse por falsy)
-    if _get_if_present(pkt, "toId") is not None:
-        who_to = _get_if_present(pkt, "toId")
-    elif _get_if_present(decoded, "toId") is not None:
-        who_to = _get_if_present(decoded, "toId")
-    elif _get_if_present(pkt, "to") is not None:
-        who_to = _get_if_present(pkt, "to")
-    elif _get_if_present(decoded, "to") is not None:
-        who_to = _get_if_present(decoded, "to")
-    else:
-        who_to = "^all"
-
+    who_to = (
+        pkt.get("toId")
+        or decoded.get("toId")
+        or pkt.get("to")
+        or decoded.get("to")
+        or "^all"
+    )
     return str(who_from), str(who_to)
-
 
 # Helpers reutilizables (colócalos junto a otros helpers de logging):
 def _cooldown_total_secs():
@@ -3300,24 +3279,33 @@ class MeshReceiver:
                         bbs = globals().get("BBS_ENGINE")
                         if bbs and str(portnum) == "TEXT_MESSAGE_APP":
                             t0 = (text or "").strip()
+
                             if t0.upper().startswith("#BBS"):
-                                
+
                                 # Heurística DM robusta: destino presente y NO es broadcast
-                                _to_raw = (str(who_to) if who_to is not None else "").strip().lower()
+                                _to_norm = _norm_node_id(who_to)
+                                is_dm = bool(_to_norm) and _to_norm not in {"^all", "broadcast", "?"}
 
-                                # Valores típicos de broadcast / no-dirigido (según builds/versiones)
-                                if _to_raw in {"^all", "broadcast", "?", "0", "!0", ""}:
-                                    _to_norm = ""
-                                else:
-                                    _to_norm = _norm_node_id(str(who_to))
+                                # Motor BBS
+                                bbs = globals().get("BBS_ENGINE")
+                                if not bbs:
+                                    raise StopIteration
 
-                                is_dm = bool(_to_norm)
+                                bbs_callsign = (os.getenv("BBS_CALLSIGN") or getattr(bbs, "bbs_callsign", "") or "").strip().upper()
+                                if not bbs_callsign:
+                                    raise StopIteration
 
+                                # Política
+                                dm_only = (os.getenv("BBS_DM_ONLY", "1").strip().lower() in {"1", "true", "on", "si", "sí", "y", "yes"})
+                                dm_init_hint = (os.getenv("BBS_DM_INIT_HINT", "1").strip().lower() in {"1", "true", "on", "si", "sí", "y", "yes"})
 
-                                # Solo exigir BBS_CHANNEL cuando NO es DM
-                                # Canales públicos autorizados de entrada a la BBS:
-                                # - BBS_CHANNELS: lista CSV (p.ej. "5,7,9")
-                                # - fallback: BBS_CHANNEL (histórico)
+                                # Canal DM (por defecto CH0)
+                                try:
+                                    dm_ch = int(os.getenv("BBS_DM_CHANNEL", "0"))
+                                except Exception:
+                                    dm_ch = 0
+
+                                # Canales públicos permitidos (BBS_CHANNELS o fallback BBS_CHANNEL)
                                 def _parse_bbs_channels() -> set:
                                     raw = (os.getenv("BBS_CHANNELS") or os.getenv("BBS_CHANNEL") or "").strip()
                                     out = set()
@@ -3330,115 +3318,132 @@ class MeshReceiver:
                                         except Exception:
                                             continue
                                     return out
-                                
+
                                 allowed_ch = _parse_bbs_channels()
-                                if (not is_dm) and allowed_ch and (int(canal) not in allowed_ch):
-                                    raise StopIteration  # No es un canal BBS autorizado → ignorar
 
-
-                                # ---- NUEVO: validación estricta de indicativo BBS ----
-                                bbs_callsign = (os.getenv("BBS_CALLSIGN") or getattr(bbs, "bbs_callsign", "") or "").strip().upper()
-                                if not bbs_callsign:
+                                # Si NO es DM y no hay canales configurados, no atendemos en público (evita enganches accidentales)
+                                if (not is_dm) and (not allowed_ch):
                                     raise StopIteration
 
+                                # Filtrado: si no es DM, solo atender en canales BBS autorizados
+                                if (not is_dm) and (int(canal) not in allowed_ch):
+                                    raise StopIteration
 
-
+                                # Parseo
                                 parts = t0.split(maxsplit=2)
                                 # parts[0] = #BBS
-                                # parts[1] = CALLSIGN (esperado)
+                                # parts[1] = CALLSIGN (opcional en DM, obligatorio en canal)
+                                # parts[2] = RESTO (opcional)
 
-                                if len(parts) < 2:
-                                    # No se especifica a qué BBS se quiere conectar -> DM de ayuda (si procede)
-                                    dm_only = (os.getenv("BBS_DM_ONLY", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
-                                    dm_init_hint = (os.getenv("BBS_DM_INIT_HINT", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
-
-                                # Canal a usar para DMs (por defecto CH0)
-                                try:
-                                    dm_ch = int(os.getenv("BBS_DM_CHANNEL", "0"))
-                                except Exception:
-                                    dm_ch = 0
-                                    
-
-                                    q = globals().get("SENDQ")
-                                    if dm_only and (not is_dm) and dm_init_hint and q is not None and hasattr(q, "offer"):
-                                        hint = (
-                                            "BBS: sintaxis obligatoria (multi-BBS).\n"
-                                            "Usa en canal solo:\n"
-                                            f"#BBS {bbs_callsign}\n"
-                                            "Y continúa por DM con:\n"
-                                            f"#BBS {bbs_callsign} LOGIN TU-INDICATIVO\n"
-                                            f"#BBS {bbs_callsign} PASS TU-PASS\n"
-                                            f"#BBS {bbs_callsign} MENU"
-                                        )
-                                        q.offer(
-                                            {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text"},
-                                            coalesce=False
-                                        )
-
-                                    raise StopIteration
-
-
-                                target_bbs = parts[1].strip().upper()
-
-                                if not bbs_callsign:
-                                     raise StopIteration
-
-
-                                if target_bbs != bbs_callsign:
-                                    # El mensaje no va dirigido a esta BBS
-                                    raise StopIteration
-
-
-                                # ---- NUEVO: modo privacidad por DM ----
-                                dm_only = (os.getenv("BBS_DM_ONLY", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
-                                dm_init_hint = (os.getenv("BBS_DM_INIT_HINT", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
-
-                                # Canal a usar para DMs (por defecto CH0)
-                                try:
-                                    dm_ch = int(os.getenv("BBS_DM_CHANNEL", "0"))
-                                except Exception:
-                                    dm_ch = 0
+                                # Normalización por defecto (SIEMPRE definidos)
+                                text_for_bbs = t0
+                                ch_for_bbs = int(canal)
 
                                 q = globals().get("SENDQ")
 
-                                # Si viene por canal y estamos en dm_only: NO procesar sesión en público.
-                                # Mandar guía por DM y cortar.
-                                if dm_only and (not is_dm):
-                                    if q is not None and hasattr(q, "offer"):
-                                        if dm_init_hint:
+                                # ─────────────────────────────
+                                # CANAL PÚBLICO
+                                # ─────────────────────────────
+                                if not is_dm:
+
+                                    # En canal público SIEMPRE se exige CALLSIGN
+                                    if len(parts) < 2:
+                                        if dm_only and dm_init_hint and (q is not None) and hasattr(q, "offer"):
                                             hint = (
-                                                f"Para conectarte: #BBS {bbs_callsign}\n"
-                                                "Continúa por DM con:\n"
-                                                f"#BBS {bbs_callsign} LOGIN TU_INDICATIVO\n"
-                                                f"#BBS {bbs_callsign} PASS TU-PASS\n"
-                                                f"#BBS {bbs_callsign} MENU"
+                                                "BBS: sintaxis obligatoria en canal (multi-BBS).\n"
+                                                f"Usa: #BBS {bbs_callsign} <COMANDO>\n"
+                                                "Responderé por DM.\n"
+                                                "En DM puedes iniciar con: #BBS"
                                             )
+                                            q.offer(
+                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                                coalesce=False
+                                            )
+                                        raise StopIteration
 
+                                    target_bbs = (parts[1] or "").strip().upper()
+
+                                    def _looks_like_callsign(tok: str) -> bool:
+                                        t = (tok or "").strip().upper()
+                                        if len(t) < 3 or len(t) > 16:
+                                            return False
+                                        if not any(c.isalpha() for c in t):
+                                            return False
+                                        if not any(c.isdigit() for c in t):
+                                            return False
+                                        return all(c.isalnum() or c in "-/" for c in t)
+
+                                    if target_bbs != bbs_callsign:
+                                        # Si parece que se han olvidado el callsign (p.ej. "#BBS MENU"), mandamos hint por DM.
+                                        if (dm_only and dm_init_hint and (q is not None) and hasattr(q, "offer") and (not _looks_like_callsign(target_bbs))):
+                                            hint = (
+                                                "BBS: sintaxis obligatoria en canal (multi-BBS).\n"
+                                                f"Usa: #BBS {bbs_callsign} <COMANDO>\n"
+                                                "Responderé por DM.\n"
+                                                "En DM puedes iniciar con: #BBS"
+                                            )
+                                            q.offer(
+                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                                coalesce=False
+                                            )
+                                        raise StopIteration
+
+                                    # dm_only: bootstrap a DM y normaliza a formato corto "#BBS <COMANDO...>"
+                                    if dm_only:
+                                        if len(parts) == 2:
+                                            text_for_bbs = "#BBS"
                                         else:
-                                            hint = f"BBS: usa DM para comandos (#BBS {bbs_callsign} ...)."
+                                            text_for_bbs = "#BBS " + (parts[2] or "").strip()
+                                        ch_for_bbs = int(dm_ch)
+                                    else:
+                                        text_for_bbs = t0
+                                        ch_for_bbs = int(canal)
 
+                                # ─────────────────────────────
+                                # DM
+                                # ─────────────────────────────
+                                else:
 
-                                        q.offer(
-                                            {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text"},
-                                            coalesce=False
-                                        )
-                                    raise StopIteration
+                                    # Si llega "#BBS <CALLSIGN> ..." en DM:
+                                    # - si es nuestra BBS, se normaliza a "#BBS <COMANDO...>"
+                                    # - si es otra BBS, se ignora
+                                    def _looks_like_callsign(tok: str) -> bool:
+                                        t = (tok or "").strip().upper()
+                                        if len(t) < 3 or len(t) > 16:
+                                            return False
+                                        if not any(c.isalpha() for c in t):
+                                            return False
+                                        if not any(c.isdigit() for c in t):
+                                            return False
+                                        return all(c.isalnum() or c in "-/" for c in t)
 
-                                # Si estamos aquí, o bien es DM, o dm_only está desactivado.
-                                chunks = bbs.handle_text(from_id=str(who_from), ch=int(canal), text=t0)
+                                    if len(parts) >= 2:
+                                        maybe = (parts[1] or "").strip().upper()
+                                        if _looks_like_callsign(maybe):
+                                            if maybe != bbs_callsign:
+                                                raise StopIteration
+                                            # es nuestra BBS: normalizar
+                                            if len(parts) == 2:
+                                                text_for_bbs = "#BBS"
+                                            else:
+                                                text_for_bbs = "#BBS " + (parts[2] or "").strip()
 
+                                    # En DM siempre usamos dm_ch
+                                    ch_for_bbs = int(dm_ch)
+
+                                # Procesar por el motor BBS
+                                chunks = bbs.handle_text(from_id=str(who_from), ch=int(ch_for_bbs), text=text_for_bbs)
+
+                                # Enviar respuesta
                                 if chunks and (q is not None) and hasattr(q, "offer"):
                                     for c in chunks:
                                         c = (c or "").strip()
                                         if not c:
                                             continue
-
-                                        # RESPUESTA:
-                                        # - si dm_only o si el usuario ya está en DM => responder por DM
-                                        # - si no dm_only => se mantiene comportamiento original (canal)
-                                        if dm_only or is_dm:
+                                        # Responder por DM cuando sea DM o cuando dm_only esté activo
+                                        if is_dm or dm_only:
                                             q.offer(
-                                                {"channel": dm_ch, "text": c, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                                {"channel": int(dm_ch), "text": c, "destination": str(who_from), "require_ack": False, "type": "text"},
                                                 coalesce=False
                                             )
                                         else:
@@ -3449,17 +3454,18 @@ class MeshReceiver:
 
                                 # Si era BBS, no continuar con el bloque /aprs (evita interferencias)
                                 raise StopIteration
+                          
+                        
+
+
+                        
 
                     except StopIteration:
                         return
                     except Exception as _e_bbs:
                         if self.verbose:
                             print(f"⚠️ bbs: {_e_bbs}", flush=True)
-                    # ======================================================================================
-
-
-
-
+                  
                     # === [NUEVO] DM /aprs canal N ... -> reinyectar SOLO el texto limpio en canal N ===
                     # Motivo: permitir mandar una orden por privado (no visible en canales públicos)
                     # y que el broker publique únicamente el texto resultante en el canal indicado.
