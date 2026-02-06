@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.4.py Incluida la BBS
+Meshtastic_Broker_v6.2.4.py Incluye servidor BBS Meshtastic
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 

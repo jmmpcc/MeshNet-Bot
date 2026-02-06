@@ -1386,7 +1386,10 @@ class BbsServer:
 
                 # Si el mensaje ya trae comando (p.ej. "#BBS EB2EAS-5 LOGIN EB2EAS"),
                 # continuamos el parseo sin responder todavía, para que LOGIN/PASS funcionen en un solo paso.
-                if addressed and after_cmd:
+                #
+                # En DM, también permitimos entrar ya con comando (p.ej. "#BBS LOGIN EA2XXX")
+                # sin obligar al usuario a mandar primero "#BBS" vacío.
+                if (addressed and after_cmd) or (is_dm and after_to_parse.strip()):
                     pass
                 else:
                     return self._apply_limits_small_reply(
@@ -1441,7 +1444,7 @@ class BbsServer:
                                 from_id,
                                 (
                                     "Envía tu indicativo usando el formato obligatorio:\n"
-                                    f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                                    + ("#BBS LOGIN TU_INDICATIVO" if is_dm else f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO")
                                 )
                             )
 
@@ -1453,7 +1456,7 @@ class BbsServer:
                                 self._clear_pending_out(from_id)
                                 self._pending_subject_by_from.pop(from_id, None)
                                 self._last_search_ts.pop(from_id, None)
-                                return self._apply_limits_small_reply(from_id, f"Contraseña incorrecta. Conecta de nuevo: #BBS {self.bbs_callsign}")
+                                return self._apply_limits_small_reply(from_id, ("Contraseña incorrecta. Conecta de nuevo: #BBS" if is_dm else f"Contraseña incorrecta. Conecta de nuevo: #BBS {self.bbs_callsign}"))
                             self._user_touch(cs)
                         else:
                             self._user_create(cs, pwd)
@@ -1479,7 +1482,7 @@ class BbsServer:
                             from_id,
                             (
                                 "Envía tu indicativo usando el formato obligatorio:\n"
-                                f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                                + ("#BBS LOGIN TU_INDICATIVO" if is_dm else f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO")
                             )
                         )
 
@@ -1489,7 +1492,7 @@ class BbsServer:
                             from_id,
                             (
                                 "Envía tu indicativo usando el formato obligatorio:\n"
-                                f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                                + ("#BBS LOGIN TU_INDICATIVO" if is_dm else f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO")
                             )
                         )
 
@@ -1499,7 +1502,7 @@ class BbsServer:
                             from_id,
                             (
                                 "Envía tu indicativo usando el formato obligatorio:\n"
-                                f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"
+                                + ("#BBS LOGIN TU_INDICATIVO" if is_dm else f"#BBS {self.bbs_callsign} LOGIN TU_INDICATIVO")
                             )
                         )
 
@@ -1509,13 +1512,13 @@ class BbsServer:
 
                     s.pending_login = cs
                     s.state = "wait_pass"
-                    return self._apply_limits_small_reply(from_id, f"Ahora la contraseña: #BBS {self.bbs_callsign} PASS <TU_CONTRASEÑA>")
+                    return self._apply_limits_small_reply(from_id, ("Ahora la contraseña: #BBS PASS <TU_CONTRASEÑA>" if is_dm else f"Ahora la contraseña: #BBS {self.bbs_callsign} PASS <TU_CONTRASEÑA>"))
 
                 # --- PASS ---
                 if s.state == "wait_pass":
                     pwd, rest = self._parse_pass_with_rest(up)
                     if not pwd:
-                        return self._apply_limits_small_reply(from_id, f"Envía la contraseña: #BBS {self.bbs_callsign} PASS <TU_CONTRASEÑA>")
+                        return self._apply_limits_small_reply(from_id, ("Envía la contraseña: #BBS PASS <TU_CONTRASEÑA>" if is_dm else f"Envía la contraseña: #BBS {self.bbs_callsign} PASS <TU_CONTRASEÑA>"))
 
                     cs = _norm_callsign(s.pending_login or "")
                     if not cs:
@@ -1524,7 +1527,7 @@ class BbsServer:
                         self._pending_subject_by_from.pop(from_id, None)
                         self._last_search_ts.pop(from_id, None)
 
-                        return self._apply_limits_small_reply(from_id, f"Sesión reiniciada. Conecta: #BBS {self.bbs_callsign} LOGIN TU_INDICATIVO")
+                        return self._apply_limits_small_reply(from_id, ("Sesión reiniciada. Conecta: #BBS LOGIN TU_INDICATIVO" if is_dm else f"Sesión reiniciada. Conecta: #BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"))
 
                     self._clear_pending_out(from_id)
                     self._pending_subject_by_from.pop(from_id, None)
@@ -1537,7 +1540,7 @@ class BbsServer:
                             self._clear_pending_out(from_id)
                             self._pending_subject_by_from.pop(from_id, None)
                             self._last_search_ts.pop(from_id, None)
-                            return self._apply_limits_small_reply(from_id, f"Contraseña incorrecta. Conecta de nuevo: #BBS {self.bbs_callsign}")
+                            return self._apply_limits_small_reply(from_id, ("Contraseña incorrecta. Conecta de nuevo: #BBS" if is_dm else f"Contraseña incorrecta. Conecta de nuevo: #BBS {self.bbs_callsign}"))
                         self._user_touch(cs)
                         just_created = False
                     else:
@@ -1562,7 +1565,7 @@ class BbsServer:
                     self._clear_pending_out(from_id)
                     self._pending_subject_by_from.pop(from_id, None)
                     self._last_search_ts.pop(from_id, None)
-                    return self._apply_limits_small_reply(from_id, f"Sesión inválida. Conecta: #BBS {self.bbs_callsign} LOGIN TU_INDICATIVO")
+                    return self._apply_limits_small_reply(from_id, ("Sesión inválida. Conecta: #BBS LOGIN TU_INDICATIVO" if is_dm else f"Sesión inválida. Conecta: #BBS {self.bbs_callsign} LOGIN TU_INDICATIVO"))
 
                 # Si llegamos aquí, estamos autenticados: salimos del loop y pasamos al dispatcher normal.
                 break
