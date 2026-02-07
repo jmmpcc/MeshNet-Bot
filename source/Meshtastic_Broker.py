@@ -126,6 +126,61 @@ except Exception as _e:
 
 # ===================== Utilidades =====================
 
+import inspect
+
+def _bridge_mirror_safe(channel: int, message: str, dest_id: str = None, require_ack: bool = False) -> None:
+    """
+    Llama al mirror hook del bridge embebido tolerando cambios de firma.
+    - Firma antigua: bridge_mirror_outgoing_from_broker(channel, message)
+    - Firma nueva (si existiera): bridge_mirror_outgoing_from_broker(payload=..., direction="A2B")
+    Nunca lanza excepción hacia arriba (no rompe TX).
+    """
+    try:
+        fn = globals().get("bridge_mirror_outgoing_from_broker")
+        if not callable(fn):
+            return
+
+        # Intenta detectar si acepta 'payload' por nombre
+        try:
+            sig = inspect.signature(fn)
+            params = sig.parameters
+        except Exception:
+            params = {}
+
+        # 1) Si acepta payload, úsalo (compat con tu patch “payload=…”)
+        if "payload" in params:
+            try:
+                fn(
+                    payload={
+                        "type": "text",
+                        "text": message,
+                        "channel": int(channel),
+                        "destination": (dest_id if dest_id else "broadcast"),
+                        "require_ack": bool(require_ack),
+                    },
+                    direction="A2B",
+                )
+                return
+            except TypeError:
+                # cae a la firma posicional
+                pass
+
+        # 2) Firma posicional (la que tienes ahora en el repo)
+        try:
+            fn(int(channel), message)
+            return
+        except TypeError:
+            # 3) Último intento: por si el orden fuese distinto
+            try:
+                fn(message, int(channel))
+                return
+            except Exception:
+                return
+
+    except Exception as _e:
+        print(f"[bridge] mirror hook ERROR: {type(_e).__name__}: {_e}", flush=True)
+
+
 def _safe_first_int(raw: str, default: int = 0) -> int:
     """
     Devuelve el primer entero válido encontrado en una cadena.
@@ -1274,18 +1329,10 @@ def _tasks_send_adapter(
 
             # [NUEVO] espejo hacia B si la pasarela embebida está activa (firma correcta)
             try:
-                bridge_mirror_outgoing_from_broker(
-                    payload={
-                        "type": "text",
-                        "text": message_s,
-                        "channel": int(channel_i),
-                        "destination": (dest_id if dest_id else "broadcast"),
-                        "require_ack": bool(require_ack),
-                    },
-                    direction="A2B"
-                )
+                bridge_mirror_outgoing_from_broker(int(channel_i), message_s)
             except Exception as _e:
                 print(f"[bridge] mirror hook ERROR: {type(_e).__name__}: {_e}", flush=True)
+
 
             print(
                 f"[tx] broker sendText ch={int(channel_i)} dest={dest_id or 'broadcast'} "
