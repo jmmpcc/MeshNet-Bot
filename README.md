@@ -768,6 +768,17 @@ docker compose -f docker-compose.rpi.yml pull
     docker logs -f aprs-gateway
     docker logs -f meshtastic-bridge
 
+  3.- Ver logs de TODOS los contenedores al mismo tiempo
+  
+    docker compose -f docker-compose.rpi.yml logs -f
+  
+  4.- Ver logs de cada UNO de los contenedores
+
+    docker compose -f docker-compose.rpi.yml logs -f broker
+    docker compose -f docker-compose.rpi.yml logs -f bot
+    docker compose -f docker-compose.rpi.yml logs -f aprs
+    docker compose -f docker-compose.rpi.yml logs -f bridgehub-bc
+
 ```
 ## 6. Si hicimos 'docker compose down'
 

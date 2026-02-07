@@ -1372,9 +1372,14 @@ class BbsServer:
                 )
 
             s = self._sess.get(from_id)
-            
-            if not self._allow_cmd(from_id):
-                return self._apply_limits_small_reply(from_id, "Demasiado rápido. Reintenta.")
+
+            # Permitir PASS inmediato tras LOGIN (robusto en LoRa/DM)
+            is_fast_pass = bool(s and s.state == "wait_pass" and after_to_parse.strip().upper().startswith("PASS"))
+
+            if not is_fast_pass:
+                if not self._allow_cmd(from_id):
+                    return self._apply_limits_small_reply(from_id, "Demasiado rápido. Reintenta.")
+
 
             
             if not s:
@@ -1491,9 +1496,15 @@ class BbsServer:
                             continue
 
                         # Si no hay comando restante, mantener el comportamiento original (menú)
+                        # Respuesta corta para evitar pérdidas tras PASS (más robusto 24/7).
+                        # El menú se pide explícitamente con #BBS MENU.
+                        menu_hint = "#BBS MENU" if is_dm else f"#BBS {self.bbs_callsign} MENU"
+
                         if just_created:
-                            return self._apply_limits_small_reply(from_id, f"Usuario registrado: {cs}\n\n{self._menu()}")
-                        return self._apply_limits_small_reply(from_id, f"Conectado como {cs}\n\n{self._menu()}")
+                            return self._apply_limits_small_reply(from_id, f"Usuario registrado: {cs}\nUsa: {menu_hint}")
+                        return self._apply_limits_small_reply(from_id, f"Conectado como {cs}\nUsa: {menu_hint}")
+
+
 
                     # Modo clásico: LOGIN <CALLSIGN>
                     if up_u.startswith("PASS"):
@@ -1604,9 +1615,12 @@ class BbsServer:
                         up = rest
                         continue
 
+                    # Respuesta corta para evitar pérdidas (menú bajo demanda).
+                    menu_hint = "#BBS MENU" if is_dm else f"#BBS {self.bbs_callsign} MENU"
+
                     if just_created:
-                        return self._apply_limits_small_reply(from_id, f"Usuario registrado: {cs}\n\n{self._menu()}")
-                    return self._apply_limits_small_reply(from_id, f"Conectado como {cs}\n\n{self._menu()}")
+                        return self._apply_limits_small_reply(from_id, f"Usuario registrado: {cs}\nUsa: {menu_hint}")
+                    return self._apply_limits_small_reply(from_id, f"Conectado como {cs}\nUsa: {menu_hint}")
 
                 # --- Sesión ---
                 if s.state != "authed" or not s.authed_user:

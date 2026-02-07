@@ -460,6 +460,52 @@ def _guard_log(kind: str, msg: str, interval: float = 5.0):
         print(msg, flush=True)
         _guard_last_log[kind] = now
 
+# === Throttle de logs de ctrl SEND_TEXT (evita floods) ===
+# BROKER_CTRL_VERBOSE:
+#   0 -> throttle (modo recomendado 24/7)
+#   1 -> más verboso, pero AÚN amortiguado (intervalo mínimo)
+#   2 -> sin throttle (solo debugging puntual)
+_ctrl_verbose_raw = os.getenv("BROKER_CTRL_VERBOSE", "0").strip().lower()
+if _ctrl_verbose_raw in {"true","yes","on"}:
+    CTRL_VERBOSE_LEVEL = 1
+else:
+    try:
+        CTRL_VERBOSE_LEVEL = int(_ctrl_verbose_raw or "0")
+    except Exception:
+        CTRL_VERBOSE_LEVEL = 0
+
+# Intervalo mínimo en modo verbose=1 (evita floods incluso cuando está activo)
+CTRL_VERBOSE_MIN_INTERVAL = float(os.getenv("BROKER_CTRL_VERBOSE_MIN_INTERVAL", "0.5") or "0.5")
+
+_ctrl_last_log = {}
+
+def _ctrl_log(kind: str, msg: str, interval: float = 5.0):
+    """
+    Log de control amortiguado por 'kind'.
+
+    - BROKER_CTRL_VERBOSE=0: imprime como máximo 1 vez cada 'interval' segundos por 'kind'.
+    - BROKER_CTRL_VERBOSE=1: imprime más a menudo, pero sigue amortiguado (intervalo mínimo).
+    - BROKER_CTRL_VERBOSE>=2: imprime siempre (sin throttle).
+    """
+    try:
+        lvl = int(CTRL_VERBOSE_LEVEL)
+    except Exception:
+        lvl = 0
+
+    if lvl >= 2:
+        print(msg, flush=True)
+        return
+
+    # En verbose=1, nunca permitir intervalos por debajo del mínimo configurado
+    eff_interval = float(interval)
+    if lvl == 1:
+        eff_interval = max(eff_interval, CTRL_VERBOSE_MIN_INTERVAL)
+
+    now = time.time()
+    last = float(_ctrl_last_log.get(kind, 0.0))
+    if (now - last) >= eff_interval:
+        print(msg, flush=True)
+        _ctrl_last_log[kind] = now
 
 
 def _print_frame_line(*values, sep=" ", end="\n", file=None, flush=False):
@@ -1060,21 +1106,26 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     """
     msg: {"channel":int, "text":str, "destination":None|"!id", "require_ack":bool}
     Respeta CircuitBreaker y sólo intenta TX cuando la interfaz está lista.
-    Si no lo está, reencola sin ruido (con un aviso amortiguado) y sale.
+    Si no lo está, reencola con backoff y sale.
     """
-    # --- Log al desencolar (diagnóstico útil) ---
+    # --- Log al desencolar (diagnóstico) ---
     try:
         _ch   = int(msg.get("channel", 0) or 0)
         _dest = msg.get("destination") or "broadcast"
         _txt  = str(msg.get("text") or "")
-        print(f"[ctrl] SEND_TEXT dequeued ch={_ch} dest={_dest} len={len(_txt.encode('utf-8'))}", flush=True)
+        _ctrl_log("send_text_dequeued", f"[ctrl] SEND_TEXT dequeued ch={_ch} dest={_dest} len={len(_txt.encode('utf-8'))}", interval=5.0)
     except Exception as _e:
-        print(f"[ctrl] SEND_TEXT dequeue log error: {type(_e).__name__}: {_e}", flush=True)
+        _ctrl_log("send_text_deq_err", f"[ctrl] SEND_TEXT dequeue log error: {type(_e).__name__}: {_e}", interval=5.0)
 
-    # --- CircuitBreaker: si está abierto, reencola y sal silencioso ---
+    # --- CircuitBreaker: si está abierto, reencola y aplica backoff (evita busy-loop) ---
     if not CIRCUIT_BREAKER.can_attempt():
         try:
-            SENDQ.offer(msg, coalesce=False)  # no coalesce para no perder ACK/flags
+            SENDQ.offer(msg, coalesce=False)
+        except Exception:
+            pass
+        _ctrl_log("circuit_open", "[ctrl] CircuitBreaker abierto. TX pausada temporalmente; reintentará.", interval=5.0)
+        try:
+            time.sleep(0.35)  # backoff para que el worker no haga spin
         except Exception:
             pass
         return False
@@ -1082,20 +1133,13 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     # --- Comprobación de estado de interfaz del broker ---
     ready, reason = _iface_ready_reason()
     if not ready:
-        # Reencola y emite un aviso amortiguado cada ~5 s para evitar bucle de logs
         try:
             SENDQ.offer(msg, coalesce=False)
         except Exception:
             pass
+        _ctrl_log("tx_wait", f"[ctrl] TX en espera — {reason}. Reintentará al reconectar.", interval=5.0)
         try:
-            import time as _t
-            global _TX_WAIT_LOG_TS
-            now = _t.time()
-            if (now - float(_TX_WAIT_LOG_TS or 0.0)) >= 5.0:
-                print(f"[ctrl] TX en espera — {reason}. Reintentará al reconectar.", flush=True)
-                _TX_WAIT_LOG_TS = now
-            # Pequeño backoff para que el worker no haga busy-loop
-            _t.sleep(0.35)
+            time.sleep(0.35)
         except Exception:
             pass
         return False
@@ -1103,29 +1147,26 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     # --- Interfaz lista: ejecutar ruta de envío real ---
     try:
         r = _tasks_send_adapter(
-            int(msg.get("channel", 0)),
-            str(msg.get("text") or ""),
-            (msg.get("destination") or "broadcast"),
-            bool(msg.get("require_ack"))
+            ch=int(msg.get("channel", 0) or 0),
+            text=str(msg.get("text") or ""),
+            dest=msg.get("destination"),
+            require_ack=bool(msg.get("require_ack")),
+            timeout_s=None
         )
-        ok = bool(r.get("ok"))
-        if ok:
-            CIRCUIT_BREAKER.record_success()
-        else:
-            CIRCUIT_BREAKER.record_error()
-        return ok
-    except Exception:
-        # Error en el camino de envío: marcar error y solicitar reconnect suave
-        CIRCUIT_BREAKER.record_error()
+        return bool(r)
+    except Exception as e:
+        # Si falla el envío, reporta al CircuitBreaker y reencola con backoff
         try:
-            mgr = globals().get("BROKER_IFACE_MGR")
-            if mgr and hasattr(mgr, "signal_disconnect"):
-                mgr.signal_disconnect()
+            CIRCUIT_BREAKER.on_failure()
         except Exception:
             pass
-        # Reencola para no perder el mensaje
         try:
             SENDQ.offer(msg, coalesce=False)
+        except Exception:
+            pass
+        _ctrl_log("tx_fail", f"[ctrl] TX fallo: {type(e).__name__}: {e}. Reencolado.", interval=5.0)
+        try:
+            time.sleep(0.35)
         except Exception:
             pass
         return False
@@ -1162,11 +1203,45 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
                 channelIndex=int(channel),
             )
 
-            # [NUEVO] espejo hacia B si la pasarela embebida está activa
+            # [NUEVO] Persistir también el TX del broker en OFFLINE_LOG para que bridgehub (hub_mode=broker)
+            # lo vea vía FETCH_BACKLOG y lo reenvíe igual que si fuera RX del nodo embebido.
             try:
-                bridge_mirror_outgoing_from_broker(int(channel), message)
+                _ts = int(time.time())
+                rec_tx = {
+                    "ts": _ts,
+                    "rx_time": _ts,                 # IMPORTANTE: FETCH_BACKLOG filtra por rx_time
+                    "channel": int(channel),
+                    "portnum": "TEXT_MESSAGE_APP",
+                    "from": "BROKER",               # origen lógico
+                    "to": (dest_id if dest_id else "^all"),
+                    "from_alias": "broker",
+                    "to_alias": None,
+                    "text": message,
+                    # metadatos para evitar ambigüedad aguas abajo
+                    "direction": "tx",
+                    "origin": "broker_local",
+                }
+                append_offline_log(rec_tx)
+            except Exception as _e:
+                print(f"⚠️ offline_log TX mirror failed: {type(_e).__name__}: {_e}", flush=True)
+
+
+            # [NUEVO] espejo hacia B si la pasarela embebida está activa
+            # [FIX] espejo hacia B (firma correcta)
+            try:
+                bridge_mirror_outgoing_from_broker(
+                    payload={
+                        "type": "text",
+                        "text": message,
+                        "channel": int(channel),
+                        "destination": (dest_id if dest_id else "broadcast"),
+                        "require_ack": bool(require_ack),
+                    },
+                    direction="A2B"
+                )
             except Exception as _e:
                 print(f"[bridge] mirror hook ERROR: {type(_e).__name__}: {_e}", flush=True)
+
 
             print(f"[tx] broker sendText ch={int(channel)} dest={dest_id or 'broadcast'} len={len(message.encode('utf-8'))}", flush=True)
 
@@ -1697,12 +1772,12 @@ class _BacklogServer(threading.Thread):
 
                 ack_flag = bool(params.get("ack")) and bool(dest)
 
-                 # === [LOG] controlar recepción (antes de encolar)
+                # === [LOG] controlar recepción (antes de encolar) ===
                 try:
-                    print(f"[ctrl] SEND_TEXT recv ch={int(ch)} dest={dest or 'broadcast'} len={len(text.encode('utf-8'))}", flush=True)
+                    msg = f"[ctrl] SEND_TEXT recv ch={int(ch)} dest={dest or 'broadcast'} len={len(text.encode('utf-8'))}"
+                    _ctrl_log("send_text_recv", msg, interval=5.0)
                 except Exception as _e:
-                    print(f"[ctrl] SEND_TEXT recv log error: {type(_e).__name__}: {_e}", flush=True)
-
+                    _ctrl_log("send_text_recv_err", f"[ctrl] SEND_TEXT recv log error: {type(_e).__name__}: {_e}", interval=5.0)
                 # === [NUEVO] Encolar (no coalesce para textos de usuario)
                 try:
 
