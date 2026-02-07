@@ -69,6 +69,83 @@ def _parse_ch_map(s: str | None) -> dict[int, int]:
             continue
     return out
 
+# ============================
+#  [NUEVO] Filtro BBS (no bridge)
+# ============================
+
+def _csv_int_set(raw: str | None) -> set[int]:
+    out: set[int] = set()
+    s = (raw or "").strip()
+    if not s:
+        return out
+    for part in s.split(","):
+        p = (part or "").strip()
+        if not p:
+            continue
+        try:
+            out.add(int(p))
+        except Exception:
+            continue
+    return out
+
+# - Por defecto, bloqueamos tráfico BBS en el bridge (más seguro 24/7).
+# - Puedes desactivarlo con TRIPLE_BLOCK_BBS=0 si alguna vez lo necesitas.
+_TRIPLE_BLOCK_BBS = (os.getenv("TRIPLE_BLOCK_BBS", "1") or "1").strip().lower() in {"1","true","yes","on","si","sí"}
+
+# Canales BBS (compat con tu broker/BBS):
+#   - BBS_CHANNELS puede venir como CSV
+#   - BBS_CHANNEL como fallback simple
+#   - default conservador: 5 (tu histórico)
+_BBS_CH_SET = (
+    _csv_int_set(os.getenv("BBS_CHANNELS"))
+    or _csv_int_set(os.getenv("BBS_CHANNEL"))
+    or {5}
+)
+
+def _strip_leading_tags(s: str) -> str:
+    """
+    El bridge puede ver textos con prefijos tipo "[B] ..." o "[BRIDGE] ...".
+    Eliminamos tags consecutivos al inicio: "[...]" repetidos + espacios.
+    Se limita longitud del contenido del tag para evitar falsos positivos.
+    """
+    t = (s or "").strip()
+    # Quita uno o varios "[...]" al principio, donde "..." tiene 1..24 chars y no contiene ']'
+    t = re.sub(r"^(?:\[[^\]\r\n]{1,24}\]\s*)+", "", t).strip()
+    return t
+
+
+def _is_bbs_command(text: str) -> bool:
+    """
+    Detecta comandos BBS (solicitudes).
+    Regla práctica: empieza por '#BBS' (case-insensitive) tras tags/espacios.
+    (Incluye compat '@bbs' por si aparece en pruebas antiguas.)
+    """
+    t = _strip_leading_tags(text)
+    tl = t.lower().lstrip()
+    return tl.startswith("#bbs") or tl.startswith("@bbs")
+
+def _should_block_bbs_bridge(ch: int, text: str) -> bool:
+    """
+    Bloquea SOLO comandos (solicitudes) de BBS para que no crucen el bridge.
+    - Limitamos por canal para no cortar textos casuales '#bbs...' fuera del canal BBS.
+    - Aun así, si quieres bloquear globalmente, pon TRIPLE_BLOCK_BBS_FORCE=1.
+    """
+    if not _TRIPLE_BLOCK_BBS:
+        return False
+
+    force = (os.getenv("TRIPLE_BLOCK_BBS_FORCE", "0") or "0").strip().lower() in {"1","true","yes","on","si","sí"}
+    if force:
+        return _is_bbs_command(text)
+
+    try:
+        ch_i = int(ch)
+    except Exception:
+        ch_i = 0
+
+    if ch_i in _BBS_CH_SET and _is_bbs_command(text):
+        return True
+
+    return False
 
 def _norm_text(s: str) -> str:
     if not s:
@@ -83,6 +160,48 @@ def _norm_text(s: str) -> str:
     s = s.translate(str.maketrans(rep))
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+def _split_text_chunks(text: str, max_len: int) -> list[str]:
+    """
+    Divide texto en trozos <= max_len, intentando cortar por espacios.
+    Si no encuentra un espacio razonable, corta a longitud fija.
+    """
+    if text is None:
+        return []
+    text = str(text).strip()
+    if not text:
+        return []
+
+    max_len = int(max_len or 160)
+    if max_len < 40:
+        max_len = 40
+
+    chunks: list[str] = []
+    while len(text) > max_len:
+        cut = text.rfind(" ", 0, max_len + 1)
+        if cut < 20:
+            cut = max_len
+        chunk = text[:cut].strip()
+        if chunk:
+            chunks.append(chunk)
+        text = text[cut:].strip()
+
+    if text:
+        chunks.append(text)
+
+    return chunks
+
+
+def _safe_max_text_len() -> int:
+    """
+    Límite conservador para evitar 'Data payload too big' por overhead interno.
+    Configurable por env TRIPLE_MAX_TEXT_LEN (default 160).
+    """
+    try:
+        v = int((os.getenv("TRIPLE_MAX_TEXT_LEN") or "160").strip())
+    except Exception:
+        v = 160
+    return max(80, min(v, 220))
 
 
 def _hash_key(direction: str, from_id: str, ch: int, payload: str) -> str:
@@ -276,6 +395,29 @@ class TripleBridge:
         self.forward_position = bool(forward_position)
         self.require_ack = bool(require_ack)
 
+        # En HUB_MODE=broker, el bridge no puede verificar ACK real por RF.
+        # Para evitar reintentos innecesarios y falsas expectativas, forzamos require_ack=False.
+        if self.hub_mode == "broker":
+            self.require_ack = False
+
+        # Rate-limit específico para replay de backlog (HUB_MODE=broker).
+        # Por defecto, lo dejamos igual que rate_limit_per_side, pero puede ajustarse por env.
+        try:
+            backlog_rate = int(os.getenv("TRIPLE_BACKLOG_RATE", str(rate_limit_per_side)).strip())
+        except Exception:
+            backlog_rate = int(rate_limit_per_side)
+
+        # Persistencia del cursor del backlog para evitar reinyectar histórico tras reinicios.
+        # Se guarda bajo BOT_DATA_DIR si existe; si no, en el directorio actual.
+        base_data_dir = (os.getenv("BOT_DATA_DIR") or os.getenv("DATA_DIR") or ".").strip() or "."
+        default_cursor = os.path.join(base_data_dir, "triple_bridge_hub_cursor.json")
+        self._hub_cursor_path = (os.getenv("TRIPLE_HUB_CURSOR_PATH") or default_cursor).strip() or default_cursor
+        try:
+            self._hub_cursor_save_every_sec = float(os.getenv("TRIPLE_HUB_CURSOR_SAVE_EVERY", "5") or "5")
+        except Exception:
+            self._hub_cursor_save_every_sec = 5.0
+        self._hub_cursor_last_save_ts = 0.0
+
         # --- Etiquetas ---
         base = str(tag_bridge or "").strip()
         self.tag_a2b = (tag_bridge_a2b.strip() if tag_bridge_a2b else base)
@@ -299,10 +441,15 @@ class TripleBridge:
 
         # --- Dedupe y rate-limit ---
         self.dedup = DedupWindow(dedup_ttl)
+        # Limitadores por sentido:
+        # - rl_*    : tráfico en tiempo real (RX por TCP)
+        # - rl_*_bl : replay de backlog (HUB_MODE=broker)
         self.rl_a2b = RateLimiter(rate_limit_per_side)
         self.rl_b2a = RateLimiter(rate_limit_per_side)
         self.rl_a2c = RateLimiter(rate_limit_per_side)
         self.rl_c2a = RateLimiter(rate_limit_per_side)
+        self.rl_a2b_bl = RateLimiter(backlog_rate)
+        self.rl_a2c_bl = RateLimiter(backlog_rate)
 
         # --- Broker client (solo broker-mode) ---
         self._broker: BrokerBacklogClient | None = None
@@ -523,10 +670,22 @@ class TripleBridge:
         direction = str(item.get("direction") or "?")
 
         # Rate-limit por dirección
-        if direction == "A2B" and not self.rl_a2b.allow():
-            self._reschedule(item, 2.0); return
-        if direction == "A2C" and not self.rl_a2c.allow():
-            self._reschedule(item, 2.0); return
+
+        # Rate-limit por dirección (src-aware) + evita doble limitación si ya pasó por el filtro de entrada.
+        # - src="tcp": tráfico RX directo desde A (modo tcp)
+        # - src="hub": replay desde BacklogServer (modo broker)
+        src = str(item.get("src") or "tcp").strip().lower()
+        already_checked = bool(item.get("rl_checked", False))
+
+        if not already_checked:
+            if direction == "A2B":
+                limiter = (self.rl_a2b_bl if src == "hub" else self.rl_a2b)
+                if not limiter.allow():
+                    self._reschedule(item, 2.0); return
+            elif direction == "A2C":
+                limiter = (self.rl_a2c_bl if src == "hub" else self.rl_a2c)
+                if not limiter.allow():
+                    self._reschedule(item, 2.0); return
 
         # Peer suprimido
         if peer == "B":
@@ -571,25 +730,58 @@ class TripleBridge:
             if not callable(fn):
                 raise RuntimeError("iface.sendText no disponible")
 
-            try:
-                fn(msg, destinationId="^all", wantAck=want_ack, wantResponse=False, channelIndex=int(ch))
-            except TypeError:
-                # compatibilidad con SDKs distintos
-                try:
-                    fn(msg, channelIndex=int(ch), wantAck=want_ack)
-                except TypeError:
-                    fn(msg, channelIndex=int(ch))
+            max_len = _safe_max_text_len()
+            parts = _split_text_chunks(msg, max_len)
 
-            print(
-                f"[brokerhub TX] {direction} → {peer} ch={ch} OK "
-                f"len={len(msg)} txt='{msg[:120]}'",
-                flush=True
-            )
+            # Si hay varias partes, numera sin pasarte del límite
+            if len(parts) > 1:
+                total = len(parts)
+                numbered_parts: list[str] = []
+                for i, p in enumerate(parts, start=1):
+                    prefix = f"{i}/{total} "
+                    space = max_len - len(prefix)
+                    if space < 10:
+                        space = max_len
+                        prefix = ""
+                    numbered = (prefix + p[:space]).strip()
+                    numbered_parts.append(numbered)
+                parts = numbered_parts
+
+            for p in parts:
+                try:
+                    fn(p, destinationId="^all", wantAck=want_ack, wantResponse=False, channelIndex=int(ch))
+                except TypeError:
+                    # compatibilidad con SDKs distintos
+                    try:
+                        fn(p, channelIndex=int(ch), wantAck=want_ack)
+                    except TypeError:
+                        fn(p, channelIndex=int(ch))
+
+                print(
+                    f"[brokerhub TX] {direction} → {peer} ch={ch} OK "
+                    f"len={len(p)} txt='{p[:120]}'",
+                    flush=True
+                )
 
             return
 
         except Exception as e:
-            # Marca peer down y reintenta con backoff
+            # Manejo especial: payload demasiado grande => no es caída del peer.
+            msg_l = ""
+            try:
+                msg_l = (str(e) or "").lower()
+            except Exception:
+                msg_l = ""
+
+            if "data payload too big" in msg_l:
+                print(
+                    f"[triple-bridge] {direction} → {peer} DROP: payload too big "
+                    f"(len={len(msg)})",
+                    flush=True
+                )
+                # No reintentar, no marcar offline.
+                return
+
             # Caso especial: error "falso OFFLINE" del SDK (handshake incompleto)
             if self._is_false_offline_error(e):
                 self._soft_reset_peer(peer, f"{type(e).__name__}: {e}")
@@ -599,12 +791,12 @@ class TripleBridge:
                 else:
                     self._mark_c_down(f"{type(e).__name__}: {e}")
 
-
             if attempt < max_r:
                 delay = self._retry_schedule[min(attempt, len(self._retry_schedule) - 1)]
                 self._reschedule(item, delay)
             else:
                 print(f"[triple-bridge] {direction} → {peer} ERROR (agotado): {type(e).__name__}: {e}", flush=True)
+
 
     # ---------------------- Watchdog ----------------------
 
@@ -662,6 +854,59 @@ class TripleBridge:
         except Exception:
             pass
 
+    # ---------------------- Cursor backlog (HUB_MODE=broker) ----------------------
+
+    def _load_hub_cursor(self) -> Optional[int]:
+        """Carga el cursor persistido del backlog. Devuelve None si no existe o no es válido."""
+        try:
+            p = str(self._hub_cursor_path or "").strip()
+            if not p or not os.path.exists(p):
+                return None
+            with open(p, "r", encoding="utf-8") as f:
+                obj = json.load(f) or {}
+            v = obj.get("hub_last_ts")
+            if v is None:
+                return None
+            v = int(v)
+            return v if v > 0 else None
+        except Exception:
+            return None
+
+    def _save_hub_cursor(self, force: bool = False) -> None:
+        """Guarda el cursor del backlog en disco de forma segura (tmp + rename).
+        Se limita por intervalo para minimizar IO (importante en SD).
+        """
+        try:
+            if self._hub_last_ts is None:
+                return
+            v = int(self._hub_last_ts)
+            if v <= 0:
+                return
+
+            now = time.time()
+            if not force:
+                if (now - float(self._hub_cursor_last_save_ts or 0.0)) < float(self._hub_cursor_save_every_sec or 5.0):
+                    return
+
+            p = str(self._hub_cursor_path or "").strip()
+            if not p:
+                return
+
+            d = os.path.dirname(p)
+            if d and not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+
+            tmp = p + ".tmp"
+            payload = {"hub_last_ts": v, "saved_at": int(now)}
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, p)
+
+            self._hub_cursor_last_save_ts = now
+        except Exception:
+            return
+
+
     # ---------------------- Connect / Close ----------------------
 
     def connect(self):
@@ -680,6 +925,8 @@ class TripleBridge:
 
         if self.hub_mode == "broker":
             print("[triple-bridge] HUB_MODE=broker: NO se abre TCP a A (se usa broker backlog).", flush=True)
+            self.iface_a = None
+            self.local_id_a = None
             if not self.broker_ctrl_host:
                 raise SystemExit("Falta BROKER_CTRL_HOST en HUB_MODE=broker")
             self._broker = BrokerBacklogClient(
@@ -729,6 +976,11 @@ class TripleBridge:
 
     def close(self):
         self._stop.set()
+        # Persistir cursor del backlog (si aplica)
+        try:
+            self._save_hub_cursor(force=True)
+        except Exception:
+            pass
         self._stop_watchdog()
         try:
             pub.unsubscribe(self._on_rx, "meshtastic.receive")
@@ -737,6 +989,19 @@ class TripleBridge:
 
         with self._pq_cv:
             self._pq_cv.notify_all()
+
+        # Espera breve de hilos para cierre limpio (24/7, reinicios y upgrades)
+        try:
+            if getattr(self, "_poll_thread", None) and self._poll_thread.is_alive():
+                self._poll_thread.join(timeout=2.5)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_tx_thread", None) and self._tx_thread.is_alive():
+                self._tx_thread.join(timeout=2.5)
+        except Exception:
+            pass
+
 
         # Cierre consistente de interfaces
         self._safe_close_iface(self.iface_a, "A")
@@ -760,8 +1025,13 @@ class TripleBridge:
     # ---------------------- HUB poll (A events en broker-mode) ----------------------
 
     def _hub_poll_loop(self) -> None:
+        # Cursor inicial: preferimos el persistido para evitar replay tras reinicios.
         if self._hub_last_ts is None:
-            self._hub_last_ts = int(time.time())
+            persisted = self._load_hub_cursor()
+            if persisted is not None:
+                self._hub_last_ts = int(persisted)
+            else:
+                self._hub_last_ts = int(time.time())
 
         portnums: list[str] = []
         if self.forward_text:
@@ -781,11 +1051,10 @@ class TripleBridge:
                 for obj in items:
                     self._process_hub_event(obj)
 
+                # Persistir cursor si avanzó
+                self._save_hub_cursor(force=False)
+
                 # === [NUEVO] si el fetch viene vacío, avanza ligeramente el cursor para evitar bordes pegajosos ===
-                if not items and self._hub_last_ts is not None:
-                    now_ts = int(time.time())
-                    if now_ts >= self._hub_last_ts:
-                        self._hub_last_ts = now_ts
 
             except Exception as e:
                 print(f"[triple-bridge] HUB poll error: {type(e).__name__}: {e}", flush=True)
@@ -832,7 +1101,7 @@ class TripleBridge:
                 flush=True
             )
 
-            self._bridge_from_a(ch, frm, text, decoded, want_text, want_pos)
+            self._bridge_from_a(ch, frm, text, decoded, want_text, want_pos, source=("tcp" if self.hub_mode == "tcp" else "hub"))
 
         except Exception as e:
             print(f"[triple-bridge] HUB event error: {type(e).__name__}: {e}", flush=True)
@@ -910,7 +1179,7 @@ class TripleBridge:
                 self._last_rx_c_ts = time.time()
 
             if came_from_a:
-                self._bridge_from_a(ch, frm, text, decoded, want_text, want_pos)
+                self._bridge_from_a(ch, frm, text, decoded, want_text, want_pos, source=("tcp" if self.hub_mode == "tcp" else "hub"))
             elif came_from_b:
                 self._bridge_from_b(ch, frm, text, decoded, want_text, want_pos)
             elif came_from_c:
@@ -921,26 +1190,41 @@ class TripleBridge:
 
     # ---------------------- Bridging por origen ----------------------
 
-    def _bridge_from_a(self, ch: int, frm: str, text: str, decoded: dict, want_text: bool, want_pos: bool):
+    def _bridge_from_a(self, ch: int, frm: str, text: str, decoded: dict, want_text: bool, want_pos: bool, *, source: str = "tcp"):
         
         # === [NUEVO] Dedupe también para A->B/A->C (protege contra duplicados del backlog) ===
         payload_for_hash = _norm_text(text) if want_text else json.dumps(decoded, sort_keys=True, ensure_ascii=False)
+
+        src_l = (source or "tcp").strip().lower()
 
         # A -> B
         if self.enable_b and ch in self.a2b_map:
             out_ch = self.a2b_map[ch]
             if self.local_id_b and frm == self.local_id_b:
                 return
-        
+
+            # Rate-limit por peer (A->B)
+            if src_l == "hub":
+                if not self.rl_a2b_bl.allow():
+                    return
+            else:
+                if not self.rl_a2b.allow():
+                    return
+
             if self.dedup.seen(_hash_key("A2B", frm, int(ch), payload_for_hash)):
                 return
 
             if want_text:
                 msg = _norm_text(text)
+
+                # === [NUEVO] NO reenviar solicitudes BBS por el bridge ===
+                if _should_block_bbs_bridge(int(ch), msg):
+                    return
+            
                 if self.tag_a2b and self.tag_a2b not in msg:
                     msg = f"{self.tag_a2b} {msg}"
                 self._enqueue(
-                    {"peer": "B", "direction": "A2B", "ch": int(out_ch), "msg": msg, "want_ack": bool(self.require_ack), "attempt": 0, "max_retries": 8},
+                    {"peer": "B", "direction": "A2B", "ch": int(out_ch), "msg": msg, "want_ack": bool(self.require_ack), "attempt": 0, "max_retries": 8, "src": src_l, "rl_checked": True},
                     due=float(self._b_offline_until) if self._is_b_suppressed() else None,
                 )
 
@@ -949,15 +1233,28 @@ class TripleBridge:
             out_ch = self.a2c_map[ch]
             if self.local_id_c and frm == self.local_id_c:
                 return
+
+            # Rate-limit por peer (A->C)
+            if src_l == "hub":
+                if not self.rl_a2c_bl.allow():
+                    return
+            else:
+                if not self.rl_a2c.allow():
+                    return
+
             if self.dedup.seen(_hash_key("A2C", frm, int(ch), payload_for_hash)):
                 return
 
             if want_text:
                 msg = _norm_text(text)
+                # === [NUEVO] NO reenviar solicitudes BBS por el bridge ===
+                if _should_block_bbs_bridge(int(ch), msg):
+                    return
+            
                 if self.tag_a2c and self.tag_a2c not in msg:
                     msg = f"{self.tag_a2c} {msg}"
                 self._enqueue(
-                    {"peer": "C", "direction": "A2C", "ch": int(out_ch), "msg": msg, "want_ack": bool(self.require_ack), "attempt": 0, "max_retries": 8},
+                    {"peer": "C", "direction": "A2C", "ch": int(out_ch), "msg": msg, "want_ack": bool(self.require_ack), "attempt": 0, "max_retries": 8, "src": src_l, "rl_checked": True},
                     due=float(self._c_offline_until) if self._is_c_suppressed() else None,
                 )
 
@@ -978,6 +1275,11 @@ class TripleBridge:
 
         if want_text:
             msg = _norm_text(text)
+
+            # === [NUEVO] NO reenviar solicitudes BBS por el bridge ===
+            if _should_block_bbs_bridge(int(ch), msg):
+                return
+            
             if self.tag_b2a and self.tag_b2a not in msg:
                 msg = f"{self.tag_b2a} {msg}"
             ok = self._send_text_to_hub(msg, int(out_ch))
@@ -1000,6 +1302,10 @@ class TripleBridge:
 
         if want_text:
             msg = _norm_text(text)
+            # === [NUEVO] NO reenviar solicitudes BBS por el bridge ===
+            if _should_block_bbs_bridge(int(ch), msg):
+                return
+            
             if self.tag_c2a and self.tag_c2a not in msg:
                 msg = f"{self.tag_c2a} {msg}"
             ok = self._send_text_to_hub(msg, int(out_ch))
