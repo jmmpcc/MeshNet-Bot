@@ -753,6 +753,9 @@ docker compose -f docker-compose.rpi.yml pull
     
     Aprs:
       docker compose -f docker-compose.rpi.yml up -d aprs
+    
+    Bridgehub-bc:
+      docker compose -f docker-compose.rpi.yml up -d bridgehub-bc
 
 ```
 
