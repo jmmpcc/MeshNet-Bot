@@ -1188,11 +1188,11 @@ class BbsServer:
             out.append(f"• {tag} ({n})")
 
         if page < max_page:
-            out.append(f"Más categorías: #BBS {cs} NOTICIAS CAT {page + 1}")
+            out.append(f"Más categorías: #BBS NOTICIAS CAT {page + 1}")
         else:
             out.append("Fin de categorías.")
 
-        out.append(f"Filtrar: #BBS {cs} NOTICIAS CAT <categoria> [p]")
+        out.append(f"Filtrar: #BBS NOTICIAS CAT <categoria> [p]")
         return "\n".join(out)
 
     def _news_list(self, *, tag: Optional[str] = None, page: int = 1) -> str:
@@ -1244,6 +1244,9 @@ class BbsServer:
     def _news_read(self, nid: int) -> str:
         """
         Lee una noticia por id.
+
+        FIX: asegurar que URL y un preview del resumen aparecen en el primer chunk,
+        incluso con límites LoRa (max_tx / BBS_MAX_CHUNKS_PER_REPLY).
         """
         cur = self._conn.cursor()
         row = cur.execute(
@@ -1252,20 +1255,39 @@ class BbsServer:
         ).fetchone()
 
         if not row:
-            return f"NEWS: id no encontrado: {nid}"
+            return f"NOTICIAS: id no encontrado: {nid}"
 
         title, summary, source, published_at, url, tags = row
         d = (published_at or "").split("T")[0] if published_at else ""
+
+        # Normalizar campos para evitar None
+        title = (title or "").strip()
+        source = (source or "").strip()
+        url = (url or "").strip()
+        tags = (tags or "").strip()
+        summary = (summary or "").strip()
+
+        # Preview corto del resumen para que quepa siempre en el primer envío
+        preview_len = 220
+        summary_preview = summary.replace("\n", " ").strip()
+        if len(summary_preview) > preview_len:
+            summary_preview = summary_preview[:preview_len].rstrip() + "..."
+
         out = [
-            f"NEWS [{nid}] {title}",
-            f"Fuente: {source}",
+            f"NOTICIAS [{nid}] {title}".strip(),
+            f"Fuente: {source}".strip(),
             (f"Fecha: {d}" if d else "").strip(),
             (f"Tags: {tags}" if tags else "").strip(),
-            "",
-            (summary or "").strip(),
-            "",
-            f"URL: {url}",
+            (f"URL: {url}" if url else "URL: (sin enlace)"),
+            (f"Resumen: {summary_preview}" if summary_preview else "Resumen: (vacío)"),
         ]
+
+        # Si hay más resumen, lo mandamos después (quedará disponible vía #BBS MAS si se trocea)
+        if summary and len(summary.replace("\n", " ").strip()) > len(summary_preview.replace("...", "")):
+            out.append("")
+            out.append("Resumen completo:")
+            out.append(summary)
+
         return "\n".join([x for x in out if x != ""])
 
 
@@ -1425,7 +1447,14 @@ class BbsServer:
 
 
             up = after_to_parse.strip()
+
+            # Normalización: permitir "#BBS <BBS_CALLSIGN> <CMD> ..." y "#BBS <CMD> ..."
+            tokens = up.split()
+            if tokens and tokens[0].upper() == (self.bbs_callsign or "").upper():
+                up = " ".join(tokens[1:]).strip()
+
             up_u = up.upper()
+
 
             # --- Login ---
             # ============================================================
