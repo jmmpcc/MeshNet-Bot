@@ -1149,11 +1149,14 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
         r = _tasks_send_adapter(
             ch=int(msg.get("channel", 0) or 0),
             text=str(msg.get("text") or ""),
-            dest=msg.get("destination"),
+            dest=msg.get("destination") or "broadcast",
             require_ack=bool(msg.get("require_ack")),
             timeout_s=None
         )
-        return bool(r)
+        ok = bool(r.get("ok")) if isinstance(r, dict) else bool(r)
+        if not ok:
+            raise RuntimeError(r.get("error") if isinstance(r, dict) else "tx_failed")
+        return True
     except Exception as e:
         # Si falla el envío, reporta al CircuitBreaker y reencola con backoff
         try:
@@ -1172,13 +1175,57 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
         return False
 
 
-def _tasks_send_adapter(channel: int, message: str, destination: str, require_ack: bool) -> dict:
+def _tasks_send_adapter(
+    channel: int | None = None,
+    message: str | None = None,
+    destination: str | None = None,
+    require_ack: bool = False,
+    **kwargs
+) -> dict:
     """
-    1) Intentar enviar por la MISMA conexión TCP del broker (iface_mgr) para no abrir 2 sesiones al nodo.
-    2) Si no es posible (no iniciado / no conectado / error), caer al adapter resiliente (pool).
+    Adapter de envío usado por:
+      - el scheduler (broker_tasks) -> firma histórica (channel, message, destination, require_ack)
+      - la cola SENDQ/_safe_send_to_radio_via_iface_or_fallback -> firma por keywords (ch/text/dest/require_ack/timeout_s)
+
+    Objetivo 24/7:
+      1) Intentar enviar por la MISMA conexión TCP del broker (iface_mgr) para no abrir 2 sesiones al nodo.
+      2) Si no es posible (no iniciado / no conectado / error), caer al adapter resiliente (pool).
     Devuelve: {ok: bool, packet_id?: int, error?: str}
     """
-    dest_id = None if (not destination or destination.lower() == "broadcast") else destination
+    # --- Compatibilidad con llamadas por keyword (legacy/flex) ---
+    # _safe_send_to_radio_via_iface_or_fallback llama así:
+    #   _tasks_send_adapter(ch=..., text=..., dest=..., require_ack=..., timeout_s=None)
+    if channel is None and "ch" in kwargs:
+        try:
+            channel = int(kwargs.get("ch") or 0)
+        except Exception:
+            channel = 0
+
+    if message is None and "text" in kwargs:
+        message = str(kwargs.get("text") or "")
+
+    if destination is None and "dest" in kwargs:
+        destination = kwargs.get("dest")
+
+    if "require_ack" in kwargs:
+        require_ack = bool(kwargs.get("require_ack"))
+
+    # timeout_s (si viene) se aplica solo a la espera de ACK (si procede)
+    timeout_s = kwargs.get("timeout_s", None)
+    try:
+        timeout_s = float(timeout_s) if timeout_s is not None else None
+    except Exception:
+        timeout_s = None
+
+    # Normalización final
+    try:
+        channel_i = int(channel or 0)
+    except Exception:
+        channel_i = 0
+    message_s = "" if message is None else str(message)
+    destination_s = None if destination is None else str(destination)
+
+    dest_id = None if (not destination_s or destination_s.lower() == "broadcast") else destination_s
 
     # 1) Preferente: usar la interfaz activa del broker
     try:
@@ -1196,11 +1243,11 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
                 raise RuntimeError("iface no disponible (todavía no conectado)")
 
             pkt = iface.sendText(
-                message,
-                destinationId=(dest_id if dest_id else "^all"),  # ← broadcast explícito
-                wantAck=bool(require_ack),          # ACK solo tiene sentido en unicast
+                message_s,
+                destinationId=(dest_id if dest_id else "^all"),  # broadcast explícito
+                wantAck=bool(require_ack),                       # ACK solo tiene sentido en unicast
                 wantResponse=False,
-                channelIndex=int(channel),
+                channelIndex=int(channel_i),
             )
 
             # [NUEVO] Persistir también el TX del broker en OFFLINE_LOG para que bridgehub (hub_mode=broker)
@@ -1210,13 +1257,13 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
                 rec_tx = {
                     "ts": _ts,
                     "rx_time": _ts,                 # IMPORTANTE: FETCH_BACKLOG filtra por rx_time
-                    "channel": int(channel),
+                    "channel": int(channel_i),
                     "portnum": "TEXT_MESSAGE_APP",
                     "from": "BROKER",               # origen lógico
                     "to": (dest_id if dest_id else "^all"),
                     "from_alias": "broker",
                     "to_alias": None,
-                    "text": message,
+                    "text": message_s,
                     # metadatos para evitar ambigüedad aguas abajo
                     "direction": "tx",
                     "origin": "broker_local",
@@ -1225,15 +1272,13 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
             except Exception as _e:
                 print(f"⚠️ offline_log TX mirror failed: {type(_e).__name__}: {_e}", flush=True)
 
-
-            # [NUEVO] espejo hacia B si la pasarela embebida está activa
-            # [FIX] espejo hacia B (firma correcta)
+            # [NUEVO] espejo hacia B si la pasarela embebida está activa (firma correcta)
             try:
                 bridge_mirror_outgoing_from_broker(
                     payload={
                         "type": "text",
-                        "text": message,
-                        "channel": int(channel),
+                        "text": message_s,
+                        "channel": int(channel_i),
                         "destination": (dest_id if dest_id else "broadcast"),
                         "require_ack": bool(require_ack),
                     },
@@ -1242,9 +1287,11 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
             except Exception as _e:
                 print(f"[bridge] mirror hook ERROR: {type(_e).__name__}: {_e}", flush=True)
 
-
-            print(f"[tx] broker sendText ch={int(channel)} dest={dest_id or 'broadcast'} len={len(message.encode('utf-8'))}", flush=True)
-
+            print(
+                f"[tx] broker sendText ch={int(channel_i)} dest={dest_id or 'broadcast'} "
+                f"len={len(message_s.encode('utf-8'))}",
+                flush=True
+            )
 
             # Extraer packet_id de dict u objeto
             pid = None
@@ -1260,7 +1307,8 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
             # Si se pide ACK (solo unicast) e iface lo soporta, esperar
             if require_ack and dest_id and pid is not None and hasattr(iface, "waitForAck"):
                 try:
-                    ok_ack = bool(iface.waitForAck(pid, timeout=15.0))
+                    _to = 15.0 if timeout_s is None else max(1.0, float(timeout_s))
+                    ok_ack = bool(iface.waitForAck(pid, timeout=_to))
                 except Exception:
                     ok_ack = False
                 return {"ok": ok_ack, "packet_id": pid, "error": (None if ok_ack else "NO_APP_ACK")}
@@ -1284,9 +1332,9 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
         res = _send(
             host=host,
             port=port,
-            text=message,
+            text=message_s,
             dest_id=dest_id,
-            channel_index=int(channel),
+            channel_index=int(channel_i),
             want_ack=bool(require_ack),
         )
         ok = bool(res.get("ok"))
@@ -1294,7 +1342,6 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
         return {"ok": ok, "packet_id": pid, "error": (None if ok else res.get("error"))}
     except Exception as e:
         return {"ok": False, "packet_id": None, "error": f"{type(e).__name__}: {e}"}
-
 def _tasks_reconnect_adapter() -> bool:
     """
     Preferente: pedir al broker (iface_mgr) que se reconecte él.
