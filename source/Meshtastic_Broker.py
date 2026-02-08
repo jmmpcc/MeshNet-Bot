@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Version v6.2.2
+# Version v6.2.4
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.5.py
+Meshtastic_Broker_v6.2.5.py Incluye servidor BBS Meshtastic server corregiso por DM
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 
@@ -28,7 +28,6 @@ import selectors
 import socket
 import threading
 import time
-import inspect
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 import re
@@ -60,59 +59,6 @@ from bridge_in_broker import (
 )
 
 
-
-
-def _bridge_mirror_safe(channel: int, message: str, dest_id: str = None, require_ack: bool = False) -> None:
-    """
-    Llama al mirror hook del bridge embebido tolerando cambios de firma.
-    - Firma antigua: bridge_mirror_outgoing_from_broker(channel, message)
-    - Firma nueva (si existiera): bridge_mirror_outgoing_from_broker(payload=..., direction="A2B")
-    Nunca lanza excepción hacia arriba (no rompe TX).
-    """
-    try:
-        fn = globals().get("bridge_mirror_outgoing_from_broker")
-        if not callable(fn):
-            return
-
-        # Intenta detectar si acepta 'payload' por nombre
-        try:
-            sig = inspect.signature(fn)
-            params = sig.parameters
-        except Exception:
-            params = {}
-
-        # 1) Si acepta payload, úsalo (compat con patch “payload=…”)
-        if "payload" in params:
-            try:
-                fn(
-                    payload={
-                        "type": "text",
-                        "text": message,
-                        "channel": int(channel),
-                        "destination": (dest_id if dest_id else "broadcast"),
-                        "require_ack": bool(require_ack),
-                    },
-                    direction="A2B",
-                )
-                return
-            except TypeError:
-                # cae a la firma posicional
-                pass
-
-        # 2) Firma posicional (la que tienes ahora en el repo)
-        try:
-            fn(int(channel), message)
-            return
-        except TypeError:
-            # 3) Último intento: por si el orden fuese distinto
-            try:
-                fn(message, int(channel))
-                return
-            except Exception:
-                return
-
-    except Exception as _e:
-        print(f"[bridge] mirror hook ERROR: {type(_e).__name__}: {_e}", flush=True)
 # Directorio base único (igual que en el bot)
 DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "/app/bot_data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -179,6 +125,61 @@ except Exception as _e:
 
 
 # ===================== Utilidades =====================
+
+import inspect
+
+def _bridge_mirror_safe(channel: int, message: str, dest_id: str = None, require_ack: bool = False) -> None:
+    """
+    Llama al mirror hook del bridge embebido tolerando cambios de firma.
+    - Firma antigua: bridge_mirror_outgoing_from_broker(channel, message)
+    - Firma nueva (si existiera): bridge_mirror_outgoing_from_broker(payload=..., direction="A2B")
+    Nunca lanza excepción hacia arriba (no rompe TX).
+    """
+    try:
+        fn = globals().get("bridge_mirror_outgoing_from_broker")
+        if not callable(fn):
+            return
+
+        # Intenta detectar si acepta 'payload' por nombre
+        try:
+            sig = inspect.signature(fn)
+            params = sig.parameters
+        except Exception:
+            params = {}
+
+        # 1) Si acepta payload, úsalo (compat con tu patch “payload=…”)
+        if "payload" in params:
+            try:
+                fn(
+                    payload={
+                        "type": "text",
+                        "text": message,
+                        "channel": int(channel),
+                        "destination": (dest_id if dest_id else "broadcast"),
+                        "require_ack": bool(require_ack),
+                    },
+                    direction="A2B",
+                )
+                return
+            except TypeError:
+                # cae a la firma posicional
+                pass
+
+        # 2) Firma posicional (la que tienes ahora en el repo)
+        try:
+            fn(int(channel), message)
+            return
+        except TypeError:
+            # 3) Último intento: por si el orden fuese distinto
+            try:
+                fn(message, int(channel))
+                return
+            except Exception:
+                return
+
+    except Exception as _e:
+        print(f"[bridge] mirror hook ERROR: {type(_e).__name__}: {_e}", flush=True)
+
 
 def _safe_first_int(raw: str, default: int = 0) -> int:
     """
@@ -514,6 +515,52 @@ def _guard_log(kind: str, msg: str, interval: float = 5.0):
         print(msg, flush=True)
         _guard_last_log[kind] = now
 
+# === Throttle de logs de ctrl SEND_TEXT (evita floods) ===
+# BROKER_CTRL_VERBOSE:
+#   0 -> throttle (modo recomendado 24/7)
+#   1 -> más verboso, pero AÚN amortiguado (intervalo mínimo)
+#   2 -> sin throttle (solo debugging puntual)
+_ctrl_verbose_raw = os.getenv("BROKER_CTRL_VERBOSE", "0").strip().lower()
+if _ctrl_verbose_raw in {"true","yes","on"}:
+    CTRL_VERBOSE_LEVEL = 1
+else:
+    try:
+        CTRL_VERBOSE_LEVEL = int(_ctrl_verbose_raw or "0")
+    except Exception:
+        CTRL_VERBOSE_LEVEL = 0
+
+# Intervalo mínimo en modo verbose=1 (evita floods incluso cuando está activo)
+CTRL_VERBOSE_MIN_INTERVAL = float(os.getenv("BROKER_CTRL_VERBOSE_MIN_INTERVAL", "0.5") or "0.5")
+
+_ctrl_last_log = {}
+
+def _ctrl_log(kind: str, msg: str, interval: float = 5.0):
+    """
+    Log de control amortiguado por 'kind'.
+
+    - BROKER_CTRL_VERBOSE=0: imprime como máximo 1 vez cada 'interval' segundos por 'kind'.
+    - BROKER_CTRL_VERBOSE=1: imprime más a menudo, pero sigue amortiguado (intervalo mínimo).
+    - BROKER_CTRL_VERBOSE>=2: imprime siempre (sin throttle).
+    """
+    try:
+        lvl = int(CTRL_VERBOSE_LEVEL)
+    except Exception:
+        lvl = 0
+
+    if lvl >= 2:
+        print(msg, flush=True)
+        return
+
+    # En verbose=1, nunca permitir intervalos por debajo del mínimo configurado
+    eff_interval = float(interval)
+    if lvl == 1:
+        eff_interval = max(eff_interval, CTRL_VERBOSE_MIN_INTERVAL)
+
+    now = time.time()
+    last = float(_ctrl_last_log.get(kind, 0.0))
+    if (now - last) >= eff_interval:
+        print(msg, flush=True)
+        _ctrl_last_log[kind] = now
 
 
 def _print_frame_line(*values, sep=" ", end="\n", file=None, flush=False):
@@ -1114,63 +1161,40 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     """
     msg: {"channel":int, "text":str, "destination":None|"!id", "require_ack":bool}
     Respeta CircuitBreaker y sólo intenta TX cuando la interfaz está lista.
-    Si no lo está, reencola sin ruido (con un aviso amortiguado) y sale.
+    Si no lo está, reencola con backoff y sale.
     """
-    # --- Log al desencolar (diagnóstico útil) ---
+    # --- Log al desencolar (diagnóstico) ---
     try:
         _ch   = int(msg.get("channel", 0) or 0)
         _dest = msg.get("destination") or "broadcast"
         _txt  = str(msg.get("text") or "")
         _ctrl_log("send_text_dequeued", f"[ctrl] SEND_TEXT dequeued ch={_ch} dest={_dest} len={len(_txt.encode('utf-8'))}", interval=5.0)
     except Exception as _e:
-        _ctrl_log("send_text_dequeued_err", f"[ctrl] SEND_TEXT dequeue log error: {type(_e).__name__}: {_e}", interval=10.0)
+        _ctrl_log("send_text_deq_err", f"[ctrl] SEND_TEXT dequeue log error: {type(_e).__name__}: {_e}", interval=5.0)
 
-    # --- CircuitBreaker: si está abierto, reencola y sal silencioso ---
+    # --- CircuitBreaker: si está abierto, reencola y aplica backoff (evita busy-loop) ---
     if not CIRCUIT_BREAKER.can_attempt():
         try:
-            SENDQ.offer(msg, coalesce=False)  # no coalesce para no perder ACK/flags
+            SENDQ.offer(msg, coalesce=False)
         except Exception:
             pass
         _ctrl_log("circuit_open", "[ctrl] CircuitBreaker abierto. TX pausada temporalmente; reintentará.", interval=5.0)
         try:
-            time.sleep(0.35)
+            time.sleep(0.35)  # backoff para que el worker no haga spin
         except Exception:
             pass
         return False
 
     # --- Comprobación de estado de interfaz del broker ---
     ready, reason = _iface_ready_reason()
-
-    # Si hay cooldown activo, esperar el tiempo restante (acotado) antes de reintentar.
-    if (not ready) and reason == "cooldown":
-        try:
-            c = globals().get("COOLDOWN")
-            wait_s = float(c.remaining()) if (c and hasattr(c, "remaining")) else 0.5
-        except Exception:
-            wait_s = 0.5
-        # Limitar para no bloquear el worker demasiado tiempo.
-        wait_s = max(0.25, min(wait_s, 3.0))
-        try:
-            time.sleep(wait_s)
-        except Exception:
-            pass
-        ready, reason = _iface_ready_reason()
-
     if not ready:
-        # Reencola y emite un aviso amortiguado cada ~5 s para evitar bucle de logs
         try:
             SENDQ.offer(msg, coalesce=False)
         except Exception:
             pass
+        _ctrl_log("tx_wait", f"[ctrl] TX en espera — {reason}. Reintentará al reconectar.", interval=5.0)
         try:
-            import time as _t
-            global _TX_WAIT_LOG_TS
-            now = _t.time()
-            if (now - float(_TX_WAIT_LOG_TS or 0.0)) >= 5.0:
-                print(f"[ctrl] TX en espera — {reason}. Reintentará al reconectar.", flush=True)
-                _TX_WAIT_LOG_TS = now
-            # Pequeño backoff para que el worker no haga busy-loop
-            _t.sleep(0.35)
+            time.sleep(0.35)
         except Exception:
             pass
         return False
@@ -1178,64 +1202,86 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     # --- Interfaz lista: ejecutar ruta de envío real ---
     try:
         r = _tasks_send_adapter(
-            int(msg.get("channel", 0)),
-            str(msg.get("text") or ""),
-            (msg.get("destination") or "broadcast"),
-            bool(msg.get("require_ack"))
+            ch=int(msg.get("channel", 0) or 0),
+            text=str(msg.get("text") or ""),
+            dest=msg.get("destination") or "broadcast",
+            require_ack=bool(msg.get("require_ack")),
+            timeout_s=None
         )
-        ok = bool(r.get("ok"))
-        if ok:
-            CIRCUIT_BREAKER.record_success()
-        else:
-            CIRCUIT_BREAKER.record_error()
-        return ok
-    except Exception:
-        # Error en el camino de envío: marcar error y solicitar reconnect suave
-        CIRCUIT_BREAKER.record_error()
+        ok = bool(r.get("ok")) if isinstance(r, dict) else bool(r)
+        if not ok:
+            raise RuntimeError(r.get("error") if isinstance(r, dict) else "tx_failed")
+        return True
+    except Exception as e:
+        # Si falla el envío, reporta al CircuitBreaker y reencola con backoff
         try:
-            mgr = globals().get("BROKER_IFACE_MGR")
-            if mgr and hasattr(mgr, "signal_disconnect"):
-                mgr.signal_disconnect()
+            CIRCUIT_BREAKER.on_failure()
         except Exception:
             pass
-        # Reencola para no perder el mensaje
         try:
             SENDQ.offer(msg, coalesce=False)
+        except Exception:
+            pass
+        _ctrl_log("tx_fail", f"[ctrl] TX fallo: {type(e).__name__}: {e}. Reencolado.", interval=5.0)
+        try:
+            time.sleep(0.35)
         except Exception:
             pass
         return False
 
 
-def _tasks_send_adapter(*args, **kwargs) -> dict:
+def _tasks_send_adapter(
+    channel: int | None = None,
+    message: str | None = None,
+    destination: str | None = None,
+    require_ack: bool = False,
+    **kwargs
+) -> dict:
     """
-    1) Intentar enviar por la MISMA conexión TCP del broker (iface_mgr) para no abrir 2 sesiones al nodo.
-    2) Si no es posible (no iniciado / no conectado / error), caer al adapter resiliente (pool).
+    Adapter de envío usado por:
+      - el scheduler (broker_tasks) -> firma histórica (channel, message, destination, require_ack)
+      - la cola SENDQ/_safe_send_to_radio_via_iface_or_fallback -> firma por keywords (ch/text/dest/require_ack/timeout_s)
+
+    Objetivo 24/7:
+      1) Intentar enviar por la MISMA conexión TCP del broker (iface_mgr) para no abrir 2 sesiones al nodo.
+      2) Si no es posible (no iniciado / no conectado / error), caer al adapter resiliente (pool).
     Devuelve: {ok: bool, packet_id?: int, error?: str}
     """
-    # --- Compatibilidad de firma ---
-    # Puede ser llamada de dos formas:
-    # 1) Legacy posicional: (channel, message, destination, require_ack)
-    # 2) Keyword moderno: ch=, text=, dest=, require_ack=, timeout_s=...
-    if args and len(args) >= 4:
-        channel, message, destination, require_ack = args[0], args[1], args[2], args[3]
-    else:
-        channel     = kwargs.get("channel", kwargs.get("ch", 0))
-        message     = kwargs.get("message", kwargs.get("text", ""))
-        destination = kwargs.get("destination", kwargs.get("dest"))
-        require_ack = kwargs.get("require_ack", False)
-    
-    # Normalizar tipos
+    # --- Compatibilidad con llamadas por keyword (legacy/flex) ---
+    # _safe_send_to_radio_via_iface_or_fallback llama así:
+    #   _tasks_send_adapter(ch=..., text=..., dest=..., require_ack=..., timeout_s=None)
+    if channel is None and "ch" in kwargs:
+        try:
+            channel = int(kwargs.get("ch") or 0)
+        except Exception:
+            channel = 0
+
+    if message is None and "text" in kwargs:
+        message = str(kwargs.get("text") or "")
+
+    if destination is None and "dest" in kwargs:
+        destination = kwargs.get("dest")
+
+    if "require_ack" in kwargs:
+        require_ack = bool(kwargs.get("require_ack"))
+
+    # timeout_s (si viene) se aplica solo a la espera de ACK (si procede)
+    timeout_s = kwargs.get("timeout_s", None)
     try:
-        channel = int(channel or 0)
+        timeout_s = float(timeout_s) if timeout_s is not None else None
     except Exception:
-        channel = 0
-    message = "" if message is None else str(message)
-    if destination is not None:
-        destination = str(destination)
-    require_ack = bool(require_ack)
-    
-    
-    dest_id = None if (not destination or destination.lower() == "broadcast") else destination
+        timeout_s = None
+
+    # Normalización final
+    try:
+        channel_i = int(channel or 0)
+    except Exception:
+        channel_i = 0
+    message_s = "" if message is None else str(message)
+    destination_s = None if destination is None else str(destination)
+
+    dest_id = None if (not destination_s or destination_s.lower() == "broadcast") else destination_s
+
     # 1) Preferente: usar la interfaz activa del broker
     try:
         mgr = globals().get("BROKER_IFACE_MGR")
@@ -1252,21 +1298,47 @@ def _tasks_send_adapter(*args, **kwargs) -> dict:
                 raise RuntimeError("iface no disponible (todavía no conectado)")
 
             pkt = iface.sendText(
-                message,
-                destinationId=(dest_id if dest_id else "^all"),  # ← broadcast explícito
-                wantAck=bool(require_ack),          # ACK solo tiene sentido en unicast
+                message_s,
+                destinationId=(dest_id if dest_id else "^all"),  # broadcast explícito
+                wantAck=bool(require_ack),                       # ACK solo tiene sentido en unicast
                 wantResponse=False,
-                channelIndex=int(channel),
+                channelIndex=int(channel_i),
             )
 
-            # [NUEVO] espejo hacia B si la pasarela embebida está activa
+            # [NUEVO] Persistir también el TX del broker en OFFLINE_LOG para que bridgehub (hub_mode=broker)
+            # lo vea vía FETCH_BACKLOG y lo reenvíe igual que si fuera RX del nodo embebido.
             try:
-                _bridge_mirror_safe(int(channel), message, dest_id=destination, require_ack=require_ack)
+                _ts = int(time.time())
+                rec_tx = {
+                    "ts": _ts,
+                    "rx_time": _ts,                 # IMPORTANTE: FETCH_BACKLOG filtra por rx_time
+                    "channel": int(channel_i),
+                    "portnum": "TEXT_MESSAGE_APP",
+                    "from": "BROKER",               # origen lógico
+                    "to": (dest_id if dest_id else "^all"),
+                    "from_alias": "broker",
+                    "to_alias": None,
+                    "text": message_s,
+                    # metadatos para evitar ambigüedad aguas abajo
+                    "direction": "tx",
+                    "origin": "broker_local",
+                }
+                append_offline_log(rec_tx)
+            except Exception as _e:
+                print(f"⚠️ offline_log TX mirror failed: {type(_e).__name__}: {_e}", flush=True)
+
+            # [NUEVO] espejo hacia B si la pasarela embebida está activa (firma correcta)
+            try:
+                bridge_mirror_outgoing_from_broker(int(channel_i), message_s)
             except Exception as _e:
                 print(f"[bridge] mirror hook ERROR: {type(_e).__name__}: {_e}", flush=True)
 
-            print(f"[tx] broker sendText ch={int(channel)} dest={dest_id or 'broadcast'} len={len(message.encode('utf-8'))}", flush=True)
 
+            print(
+                f"[tx] broker sendText ch={int(channel_i)} dest={dest_id or 'broadcast'} "
+                f"len={len(message_s.encode('utf-8'))}",
+                flush=True
+            )
 
             # Extraer packet_id de dict u objeto
             pid = None
@@ -1282,7 +1354,8 @@ def _tasks_send_adapter(*args, **kwargs) -> dict:
             # Si se pide ACK (solo unicast) e iface lo soporta, esperar
             if require_ack and dest_id and pid is not None and hasattr(iface, "waitForAck"):
                 try:
-                    ok_ack = bool(iface.waitForAck(pid, timeout=15.0))
+                    _to = 15.0 if timeout_s is None else max(1.0, float(timeout_s))
+                    ok_ack = bool(iface.waitForAck(pid, timeout=_to))
                 except Exception:
                     ok_ack = False
                 return {"ok": ok_ack, "packet_id": pid, "error": (None if ok_ack else "NO_APP_ACK")}
@@ -1306,9 +1379,9 @@ def _tasks_send_adapter(*args, **kwargs) -> dict:
         res = _send(
             host=host,
             port=port,
-            text=message,
+            text=message_s,
             dest_id=dest_id,
-            channel_index=int(channel),
+            channel_index=int(channel_i),
             want_ack=bool(require_ack),
         )
         ok = bool(res.get("ok"))
@@ -1316,7 +1389,6 @@ def _tasks_send_adapter(*args, **kwargs) -> dict:
         return {"ok": ok, "packet_id": pid, "error": (None if ok else res.get("error"))}
     except Exception as e:
         return {"ok": False, "packet_id": None, "error": f"{type(e).__name__}: {e}"}
-
 def _tasks_reconnect_adapter() -> bool:
     """
     Preferente: pedir al broker (iface_mgr) que se reconecte él.
@@ -1794,12 +1866,12 @@ class _BacklogServer(threading.Thread):
 
                 ack_flag = bool(params.get("ack")) and bool(dest)
 
-                 # === [LOG] controlar recepción (antes de encolar)
+                # === [LOG] controlar recepción (antes de encolar) ===
                 try:
-                    print(f"[ctrl] SEND_TEXT recv ch={int(ch)} dest={dest or 'broadcast'} len={len(text.encode('utf-8'))}", flush=True)
+                    msg = f"[ctrl] SEND_TEXT recv ch={int(ch)} dest={dest or 'broadcast'} len={len(text.encode('utf-8'))}"
+                    _ctrl_log("send_text_recv", msg, interval=5.0)
                 except Exception as _e:
-                    print(f"[ctrl] SEND_TEXT recv log error: {type(_e).__name__}: {_e}", flush=True)
-
+                    _ctrl_log("send_text_recv_err", f"[ctrl] SEND_TEXT recv log error: {type(_e).__name__}: {_e}", interval=5.0)
                 # === [NUEVO] Encolar (no coalesce para textos de usuario)
                 try:
 
@@ -1846,7 +1918,10 @@ class _BacklogServer(threading.Thread):
 
                 try:
                     # Este helper se encarga de reflejar el paquete hacia el lado B
-                    _bridge_mirror_safe(int(ch), text, dest_id=dest, require_ack=bool(ack_flag))
+                    bridge_mirror_outgoing_from_broker(
+                        payload={"type": "text", "text": text, "channel": ch},
+                        direction="A2B"  # semántica: enviamos desde A hacia B
+                    )
                     resp = {"ok": True, "mirrored": True, "via": "B"}
                 except Exception as e:
                     resp = {"ok": False, "error": f"bridge_send_failed: {type(e).__name__}: {e}"}
