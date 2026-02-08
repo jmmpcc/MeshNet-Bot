@@ -1194,82 +1194,7 @@ class BbsServer:
 
         out.append(f"Filtrar: #BBS NOTICIAS CAT <categoria> [p]")
         return "\n".join(out)
-
-   def _news_list(self, *, tag: Optional[str] = None, page: int = 1) -> str:
-    """
-    Lista noticias recientes, opcionalmente filtradas por tag.
-
-    Cambio quirúrgico:
-      - Mostrar URL en el listado sin saturar tramas LoRa.
-      - Se añade un "Más: <url>" recortado (single-line) por cada noticia.
-    """
-    per = max(1, int(self.list_page_size))
-    offset = (max(1, page) - 1) * per
-
-    cur = self._conn.cursor()
-    if tag:
-        tag_n = (tag or "").strip().lower()
-        # match flexible en string de tags
-        rows = cur.execute(
-            """
-            SELECT id, title, source, published_at, url, tags
-            FROM news
-            WHERE LOWER(tags) LIKE ?
-            ORDER BY COALESCE(published_at, created_at) DESC
-            LIMIT ? OFFSET ?
-            """,
-            (f"%{tag_n}%", per, offset),
-        ).fetchall()
-    else:
-        rows = cur.execute(
-            """
-            SELECT id, title, source, published_at, url, tags
-            FROM news
-            ORDER BY COALESCE(published_at, created_at) DESC
-            LIMIT ? OFFSET ?
-            """,
-            (per, offset),
-        ).fetchall()
-
-    if not rows:
-        if tag:
-            return f"NOTICIAS: sin resultados para categoría: {tag} (pág {page})"
-        return f"NOTICIAS: sin noticias (pág {page})"
-
-    def _short_url(u: str, max_len: int = 90) -> str:
-        """
-        Recorta URL para no reventar el ancho de trama.
-        Mantiene visible el enlace (aunque sea truncado).
-        """
-        u = (u or "").strip()
-        if not u:
-            return ""
-        u = u.replace("\n", " ").replace("\r", " ").strip()
-        if len(u) <= max_len:
-            return u
-        return u[: max_len - 3].rstrip() + "..."
-
-    hdr = f"NOTICIAS (pág {page})" + (f" — categoría: {tag}" if tag else "")
-    out = [hdr]
-
-    # IMPORTANTE: dos líneas por noticia (título + URL) para que el enlace sea visible siempre.
-    for nid, title, source, published_at, url, tags in rows:
-        d = (published_at or "").split("T")[0] if published_at else ""
-        t0 = (title or "").strip()
-        src = (source or "").strip()
-        out.append(f"[{nid}] {t0} ({src}) {d}".rstrip())
-
-        u = _short_url(url)
-        if u:
-            out.append(f"Más: {u}")
-        else:
-            out.append("Más: (sin enlace)")
-
-    out.append(f"Ver: #BBS NOTICIAS VER <id>")
-    out.append(f"Más: #BBS NOTICIAS" + (f" CAT {tag} {page+1}" if tag else f" {page+1}"))
-    return "\n".join(out)
-
-
+    
     def _news_read(self, nid: int) -> str:
         """
         Lee una noticia por id.
@@ -1319,6 +1244,82 @@ class BbsServer:
 
         return "\n".join([x for x in out if x != ""])
 
+    @staticmethod
+    def _short_url(u: str, max_len: int = 90) -> str:
+        """
+        Recorta URL para no reventar el ancho de trama.
+        Mantiene visible el enlace (aunque sea truncado).
+        """
+        u = (u or "").strip()
+        if not u:
+            return ""
+        u = u.replace("\n", " ").replace("\r", " ").strip()
+        if len(u) <= max_len:
+            return u
+        return u[: max_len - 3].rstrip() + "..."
+
+
+    def _news_list(self, *, tag: Optional[str] = None, page: int = 1) -> str:
+        """
+        Lista noticias recientes, opcionalmente filtradas por tag.
+
+        Cambio quirúrgico:
+        - Mostrar URL en el listado sin saturar tramas LoRa.
+        - Se añade un "Más: <url>" recortado (single-line) por cada noticia.
+        """
+        per = max(1, int(self.list_page_size))
+        page = max(1, int(page))
+        offset = (page - 1) * per
+
+        cur = self._conn.cursor()
+        if tag:
+            tag_n = (tag or "").strip().lower()
+            # match flexible en string de tags
+            rows = cur.execute(
+                """
+                SELECT id, title, source, published_at, url, tags
+                FROM news
+                WHERE LOWER(tags) LIKE ?
+                ORDER BY COALESCE(published_at, created_at) DESC
+                LIMIT ? OFFSET ?
+                """,
+                (f"%{tag_n}%", per, offset),
+            ).fetchall()
+        else:
+            rows = cur.execute(
+                """
+                SELECT id, title, source, published_at, url, tags
+                FROM news
+                ORDER BY COALESCE(published_at, created_at) DESC
+                LIMIT ? OFFSET ?
+                """,
+                (per, offset),
+            ).fetchall()
+
+        if not rows:
+            if tag:
+                return f"NOTICIAS: sin resultados para categoría: {tag} (pág {page})"
+            return f"NOTICIAS: sin noticias (pág {page})"
+
+        hdr = f"NOTICIAS (pág {page})" + (f" — categoría: {tag}" if tag else "")
+        out = [hdr]
+
+        # IMPORTANTE: dos líneas por noticia (título + URL) para que el enlace sea visible siempre.
+        for nid, title, source, published_at, url, tags in rows:
+            d = (published_at or "").split("T")[0] if published_at else ""
+            t0 = (title or "").strip()
+            src = (source or "").strip()
+            out.append(f"[{nid}] {t0} ({src}) {d}".rstrip())
+
+            u = self._short_url(url)
+            if u:
+                out.append(f"Más: {u}")
+            else:
+                out.append("Más: (sin enlace)")
+
+        out.append("Ver: #BBS NOTICIAS VER <id>")
+        out.append("Más: #BBS NOTICIAS" + (f" CAT {tag} {page + 1}" if tag else f" {page + 1}"))
+        return "\n".join(out)
 
     # =========================
     # Public entry
