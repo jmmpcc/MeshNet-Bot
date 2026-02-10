@@ -30,7 +30,101 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 # MeshNet — Changelog Consolidado
 
-## 🆕 v6.2.4 (30 Enero 2026)
+# Changelog — MeshNet / MeshBot v6.2.6
+
+> Estado: **Validado para producción 24/7**  
+> Fecha: 2026-02-10
+
+---
+
+## 🔒 BBS y Bridge (cambios críticos)
+- **Bloqueo total de tráfico BBS en bridges**  
+  - Las **solicitudes BBS** (`#BBS`, `@bbs`) **no cruzan** el bridge.
+  - Las **respuestas BBS** (aunque no lleven `#BBS`) se marcan y **no se replican**.
+  - Implementado de forma robusta mediante flag **`no_bridge`** en broker/backlog.
+- **Filtro adicional en bridge externo**  
+  - Variables `TRIPLE_BLOCK_BBS`, `TRIPLE_BLOCK_BBS_FORCE`.
+  - Filtro por canales BBS configurables (`BBS_CHANNELS` / `BBS_CHANNEL`).
+
+---
+
+## 🔁 Broker (Meshtastic_Broker_v6.2.6)
+- **Compatibilidad completa de firma en TX**  
+  - `_tasks_send_adapter` acepta `ch`, `dest`, `ack` vía `**kwargs`.
+- **Espejo A→B seguro**  
+  - Evita `TypeError` ante cambios de firma.
+  - Soporte de `payload` estructurado.
+- **Persistencia 24/7**  
+  - Envíos fallidos se registran en `offline_log.jsonl`.
+- **Normalización de rutas BBS**  
+  - `BBS_DB_PATH` y `BBS_KEY_PATH` aceptan **directorios** o **ficheros**.
+  - Resolución automática a `bbs_data.db` / `.bbs_key`.
+
+---
+
+## 🤖 Bot de Telegram (Telegram_Bot_Broker_v6.2.6)
+- **SQLite en modo seguro de solo lectura**  
+  - `mode=ro`, `cache=shared`, `busy_timeout`.
+  - `query_only=ON` para evitar escrituras accidentales.
+  - Compatible con WAL y alta concurrencia.
+- **Acceso BBS desde el bot**  
+  - Lectura directa de **noticias** y **boletines**.
+  - Paginación y filtros por categoría.
+  - Shortlinks locales para URLs largas.
+- **Comandos admin reforzados**  
+  - `/reconectar` con verificación real de estado del broker.
+- **Mayor resiliencia de red**  
+  - Reintentos controlados, timeouts y logs explicativos.
+
+---
+
+## 🌉 Bridge externo (mesh_triple_bridge.py)
+- **Prevención de loops y ecos**
+  - Dedupe por hash + ventana TTL.
+  - Rate-limit por dirección.
+- **Gestión de tamaño de payload**
+  - Límite conservador (`TRIPLE_MAX_TEXT_LEN`, default 160).
+  - Troceo por palabras para evitar `Data payload too big`.
+- **Modo broker estable**
+  - No abre TCP a A cuando hay broker activo.
+  - RX vía `FETCH_BACKLOG`, TX vía `SEND_TEXT`.
+
+---
+
+## 📡 APRS (meshtastic_to_aprs.py)
+- **Saneo ASCII 7-bit estricto**
+  - Normalización Unicode → ASCII seguro.
+- **Deduplicación de tramas**
+  - TTL configurable (`APRS_DEDUP_TTL`).
+- **Push APRS-IS robusto**
+  - Reintento automático ante `Broken pipe`.
+  - IDs de mensaje `{nn}` para evitar supresión en clientes.
+- **Log separado para WebAdmin**
+  - `aprs_rx.jsonl` independiente de `positions.jsonl`.
+
+---
+
+## 🧱 Infraestructura y utilidades
+- **TCPInterface persistente**
+  - Pool reutilizable para evitar colisiones.
+- **BacklogServer**
+  - Comandos: `SEND_TEXT`, `SEND_TEXT_WAIT`, `FETCH_BACKLOG`, `BROKER_STATUS`, `FORCE_RECONNECT`.
+- **Auditoría y cobertura**
+  - Herramientas consolidadas sin cambios funcionales.
+- **Sin regresiones**
+  - No se ha modificado comportamiento previo que ya funcionaba.
+
+---
+
+## ✅ Dictamen
+- Código **coherente**, **estable** y **apto para operación continua 24/7**.
+- Riesgos conocidos mitigados (BBS↔bridge, SQLite locks, payload size).
+- Cambios realizados de forma **quirúrgica**, sin romper flujos existentes.
+
+---
+
+
+## 🆕 v6.2.4-5 (30 Enero 2026)
 
 ### Arquitectura general
 - Consolidación completa del modo **24/7 production** en todos los servicios (broker, APRS, bridges y BBS).

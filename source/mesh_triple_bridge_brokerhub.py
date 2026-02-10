@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-mesh_triple_bridge.py  v6.2.5 — Pasarela externa A↔B y A↔C usando TCP Meshtastic.
+mesh_triple_bridge.py  v6.2.4 — Pasarela externa A↔B y A↔C usando TCP Meshtastic.
 
 Modo tcp:
 - Abre TCP directo a A, B y C.
@@ -133,7 +133,7 @@ def _should_block_bbs_bridge(ch: int, text: str) -> bool:
     if not _TRIPLE_BLOCK_BBS:
         return False
 
-    force = (os.getenv("TRIPLE_BLOCK_BBS_FORCE", "0") or "0").strip().lower() in {"1","true","yes","on","si","sí"}
+    force = (os.getenv("TRIPLE_BLOCK_BBS_FORCE", "1") or "0").strip().lower() in {"1","true","yes","on","si","sí"}
     if force:
         return _is_bbs_command(text)
 
@@ -1084,6 +1084,14 @@ class TripleBridge:
                 return
 
             decoded = {"portnum": port, "channel": ch}
+
+            # [FIX 24/7] Si el broker marca un mensaje como 'no_bridge', no debe cruzar el bridge.
+            # Usado para BBS y tráfico interno.
+            try:
+                if bool(obj.get("no_bridge", False)):
+                    return
+            except Exception:
+                pass
             text = ""
             if want_text:
                 text = str(obj.get("text") or "")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v6.2.4 py
+Telegram_Bot_Broker_v6.2.6 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -293,6 +293,307 @@ from contextlib import contextmanager
 
 # --- Necesario para cálculo de distancias en TODAS las funciones ---
 import math
+
+# ========= Helpers BBS BOT: Acceso a noticias, boletines de la BBS por el BOT ==========
+
+# ==========================
+# BBS (lectura directa DB)
+# ==========================
+import sqlite3
+import hashlib
+from urllib.parse import urlparse
+
+# ==========================
+# BBS (lectura directa DB) - 24/7 safe
+# ==========================
+
+import sqlite3
+from pathlib import Path
+
+BBS_PAGE_SIZE = int(os.getenv("BBS_LIST_PAGE_SIZE", "6"))
+
+def _bbs_resolve_db_path() -> Path:
+    """
+    Resuelve la ruta real del fichero SQLite de la BBS.
+
+    En este proyecto, BBS_DB_PATH suele ser un DIRECTORIO (ej: bot_data/bbs).
+    Si llega un fichero, se respeta.
+    """
+    raw = os.getenv("BBS_DB_PATH", str(DATA_DIR / "bbs")).strip() or str(DATA_DIR / "bbs")
+    p = Path(raw).expanduser().resolve()
+    if p.is_dir():
+        p = p / "bbs_data.db"
+    return p
+
+BBS_DB_PATH = _bbs_resolve_db_path()
+
+def _bbs_db_connect() -> sqlite3.Connection:
+    """
+    Abre SQLite en modo SOLO LECTURA, robusto para convivencia con escritores (WAL).
+    Objetivo 24/7:
+      - Evitar 'database is locked' en ráfagas de escritura/checkpoint.
+      - No romper lecturas recientes (compatible con -wal).
+      - Blindar contra escrituras accidentales desde el bot.
+    """
+    db_file = str(BBS_DB_PATH)
+
+    # URI SQLite: solo lectura + cache compartida (mejor para múltiples conexiones lectoras)
+    # IMPORTANTE: NO usar immutable=1 con WAL si quieres leer cambios recientes del -wal.
+    uri = f"file:{db_file}?mode=ro&cache=shared"
+
+    conn = sqlite3.connect(
+        uri,
+        uri=True,
+        timeout=30,              # timeout del driver (segundos)
+        check_same_thread=False
+    )
+    conn.row_factory = sqlite3.Row
+
+    try:
+        conn.execute("PRAGMA busy_timeout=5000;")  # tolera locks transitorios por escritura/checkpoint
+        conn.execute("PRAGMA query_only=ON;")      # blinda contra writes
+        conn.execute("PRAGMA foreign_keys=ON;")
+        # Opcional: reduce contención en lectores (no siempre necesario)
+        # conn.execute("PRAGMA read_uncommitted=1;")
+    except Exception:
+        pass
+
+    return conn
+
+
+def _bbs_table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (name,))
+    return cur.fetchone() is not None
+
+def _bbs_norm_tag(tag: str) -> str:
+    return (tag or "").strip().lower()
+
+def _bbs_make_shortcode(url: str) -> str:
+    """
+    Shortcode estable (12 chars) basado en SHA1(url). No requiere servicios externos.
+    """
+    h = hashlib.sha1((url or "").encode("utf-8", errors="ignore")).hexdigest()
+    return h[:12]
+
+def _bbs_init_shortlinks(conn: sqlite3.Connection) -> None:
+    """
+    Tabla auxiliar para acortar enlaces (solo si decides usar /bbs link).
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS shortlinks (
+            code TEXT PRIMARY KEY,
+            url  TEXT NOT NULL,
+            ts   INTEGER NOT NULL
+        )
+    """)
+    conn.commit()
+
+def _bbs_put_shortlink(conn: sqlite3.Connection, url: str) -> str:
+    """
+    Inserta/actualiza shortlink y devuelve code.
+    """
+    code = _bbs_make_shortcode(url)
+    conn.execute(
+        "INSERT OR REPLACE INTO shortlinks(code,url,ts) VALUES(?,?,strftime('%s','now'))",
+        (code, url)
+    )
+    conn.commit()
+    return code
+
+def _bbs_get_shortlink(conn: sqlite3.Connection, code: str) -> str | None:
+    cur = conn.execute("SELECT url FROM shortlinks WHERE code=? LIMIT 1", (code,))
+    row = cur.fetchone()
+    return (row["url"] if row else None)
+
+def _bbs_domain(url: str) -> str:
+    try:
+        p = urlparse(url)
+        return (p.netloc or "").lower()
+    except Exception:
+        return ""
+
+def bbs_list_news(tag: str | None, page: int, page_size: int) -> list[dict]:
+    """
+    Lista noticias desde la tabla 'news' (tu ingestor ya la crea).
+    Devuelve dicts con campos comunes si existen.
+    """
+    page = max(1, int(page or 1))
+    page_size = max(1, int(page_size or 6))
+    off = (page - 1) * page_size
+
+    with _bbs_db_connect() as conn:
+        if not _bbs_table_exists(conn, "news"):
+            return []
+
+        where = ""
+        params: list = []
+        if tag:
+            # tags suele ser string "ham,sdr" o similar → LIKE defensivo
+            where = "WHERE lower(coalesce(tags,'')) LIKE ?"
+            params.append(f"%{_bbs_norm_tag(tag)}%")
+
+        q = f"""
+            SELECT
+                id,
+                coalesce(title,'')   AS title,
+                coalesce(source,'')  AS source,
+                coalesce(tags,'')    AS tags,
+                coalesce(url,'')     AS url,
+                coalesce(summary,'') AS summary,
+                coalesce(published_at,'') AS published_at,
+                coalesce(created_at,'')   AS created_at
+            FROM news
+            {where}
+            ORDER BY
+                -- published_at suele ser ISO; si viene vacío, cae a created_at/id
+                CASE WHEN published_at='' THEN created_at ELSE published_at END DESC,
+                id DESC
+            LIMIT ? OFFSET ?
+        """
+        params.extend([page_size, off])
+        cur = conn.execute(q, tuple(params))
+        return [dict(r) for r in cur.fetchall()]
+
+def bbs_list_news_last(tag: str | None, limit: int) -> list[dict]:
+    """
+    Devuelve las últimas 'limit' noticias (opcionalmente filtradas por tag).
+    """
+    limit = max(1, int(limit or 1))
+    # límite duro para evitar floods en Telegram
+    limit = BBS_LAST_MAX
+
+    with _bbs_db_connect() as conn:
+        if not _bbs_table_exists(conn, "news"):
+            return []
+
+        where = ""
+        params: list = []
+        if tag:
+            where = "WHERE lower(coalesce(tags,'')) LIKE ?"
+            params.append(f"%{_bbs_norm_tag(tag)}%")
+
+        q = f"""
+            SELECT
+                id,
+                coalesce(title,'')   AS title,
+                coalesce(source,'')  AS source,
+                coalesce(tags,'')    AS tags,
+                coalesce(url,'')     AS url,
+                coalesce(summary,'') AS summary,
+                coalesce(published_at,'') AS published_at,
+                coalesce(created_at,'')   AS created_at
+            FROM news
+            {where}
+            ORDER BY
+                CASE WHEN published_at='' THEN created_at ELSE published_at END DESC,
+                id DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        cur = conn.execute(q, tuple(params))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def bbs_read_news(news_id: int) -> dict | None:
+    """
+    Lee una noticia por id.
+    """
+    try:
+        news_id = int(news_id)
+    except Exception:
+        return None
+
+    with _bbs_db_connect() as conn:
+        if not _bbs_table_exists(conn, "news"):
+            return None
+        cur = conn.execute("""
+            SELECT
+                id,
+                coalesce(title,'')   AS title,
+                coalesce(source,'')  AS source,
+                coalesce(tags,'')    AS tags,
+                coalesce(url,'')     AS url,
+                coalesce(summary,'') AS summary,
+                coalesce(content,'') AS content,
+                coalesce(published_at,'') AS published_at,
+                coalesce(created_at,'')   AS created_at
+            FROM news
+            WHERE id=?
+            LIMIT 1
+        """, (news_id,))
+        row = cur.fetchone()
+        return (dict(row) if row else None)
+
+def bbs_list_boletines(tag: str | None, page: int, page_size: int) -> list[dict]:
+    """
+    Lista boletines desde la tabla 'boletines'.
+    """
+    page = max(1, int(page or 1))
+    page_size = max(1, int(page_size or 6))
+    off = (page - 1) * page_size
+
+    with _bbs_db_connect() as conn:
+        if not _bbs_table_exists(conn, "boletines"):
+            return []
+
+        where = ""
+        params: list = []
+        if tag:
+            # en boletines suele haber category/tags; probamos ambos campos defensivamente
+            where = "WHERE lower(coalesce(tags,'')) LIKE ? OR lower(coalesce(category,'')) LIKE ?"
+            t = f"%{_bbs_norm_tag(tag)}%"
+            params.extend([t, t])
+
+        q = f"""
+            SELECT
+                id,
+                coalesce(title,'')    AS title,
+                coalesce(author,'')   AS author,
+                coalesce(tags,'')     AS tags,
+                coalesce(category,'') AS category,
+                coalesce(created_at,'') AS created_at,
+                coalesce(text,'')     AS text
+            FROM boletines
+            {where}
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+        """
+        params.extend([page_size, off])
+        cur = conn.execute(q, tuple(params))
+        return [dict(r) for r in cur.fetchall()]
+
+def bbs_read_boletin(bid: int) -> dict | None:
+    """
+    Lee un boletín por id.
+    """
+    try:
+        bid = int(bid)
+    except Exception:
+        return None
+
+    with _bbs_db_connect() as conn:
+        if not _bbs_table_exists(conn, "boletines"):
+            return None
+        cur = conn.execute("""
+            SELECT
+                id,
+                coalesce(title,'')    AS title,
+                coalesce(author,'')   AS author,
+                coalesce(tags,'')     AS tags,
+                coalesce(category,'') AS category,
+                coalesce(created_at,'') AS created_at,
+                coalesce(text,'')     AS text
+            FROM boletines
+            WHERE id=?
+            LIMIT 1
+        """, (bid,))
+        row = cur.fetchone()
+        return (dict(row) if row else None)
+
+
+# ========= FIN Helpers =======
+
+
 
 # ========= Helpers de ubicación compartidos (DISTANCIA + PROVINCIA/CIUDAD) =========
 
@@ -964,7 +1265,9 @@ def _explain_winerror(e: BaseException) -> str:
         return f"{type(e).__name__}: {e}"
 
 def _ts() -> str:
-    return datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    # datetime aquí es la clase (importada como "from datetime import datetime")
+    return datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+
 
 def _print(msg: str, force: bool = False):
     if TELEGRAM_BROKER_VERBOSE or force:
@@ -1559,112 +1862,6 @@ async def _safe_reply_html(message, html_text: str, max_retries: int = 2):
             await asyncio.sleep(0.8 * attempt)
     logging.error(f"[safe_reply] no se pudo responder al usuario tras {max_retries} intentos: {last_err}")
     return False
-
-
-# --- Helper: detectar "canal <n>" ---
-def _is_broadcast_to_channel(args: list[str]) -> Tuple[bool, Optional[int]]:
-    if not args:
-        return False, None
-    if args[0].lower() == "canal":
-        if len(args) >= 2 and (args[1].lstrip("-").isdigit()):
-            return True, int(args[1])
-        return True, None
-    return False, None
-
-# ----- STUB NO BLOQUENATE, SIEMPRE 0
-async def _collect_replies_nonblocking(seconds: float) -> int:
-    try:
-        secs = float(seconds if seconds is not None else 10.0)
-    except Exception:
-        secs = 10.0
-    t0 = time.time()
-    while time.time() - t0 < secs:
-        await asyncio.sleep(0.25)
-        # TODO: sumar respuestas reales si tienes backlog/broker integrado
-    return 0
-
-# --- [ACTUALIZADA] Helper: colectar respuestas usando el backlog del broker ---
-async def _collect_replies_nonblocking_old_old(seconds: float) -> int:
-    """
-    Cuenta cuántos nodos distintos han enviado mensajes de texto en la ventana
-    de 'seconds' inmediatamente posterior al envío.
-
-    Implementación:
-      1) Espera asíncrona 'seconds' sin bloquear el loop del bot.
-      2) Pide al BacklogServer del broker (puerto BACKLOG_PORT) los TEXT_MESSAGE_APP
-         recibidos desde (ahora - seconds).
-      3) Devuelve el número de emisores únicos ('from') con texto no vacío.
-
-    Requisitos:
-      - El broker debe estar corriendo con BacklogServer activado (v4.5+).
-      - La función fetch_backlog_from_broker(...) ya existe en este bot.
-    """
-    # 1) Espera no bloqueante
-    try:
-        secs = float(seconds if seconds is not None else 10.0)
-    except Exception:
-        secs = 10.0
-
-    # Dormimos sin bloquear el event loop (no usar time.sleep aquí)
-    await asyncio.sleep(secs)
-
-    # 2) Consultar backlog al broker en la ventana [now-secs, now]
-    try:
-        since_ts = int(time.time() - secs)
-
-        # Opcional: si quieres limitar al canal por defecto del bot, usa BROKER_CHANNEL.
-        # Dejamos 'channel=None' para contar cualquier canal donde lleguen respuestas.
-        resp = fetch_backlog_from_broker(
-            host=BROKER_HOST,
-            backlog_port=BACKLOG_PORT,
-            since_ts=since_ts,
-            channel=None,           # <- pon BROKER_CHANNEL si deseas limitar
-            limit=2000,             # ventana razonable
-            timeout=7.0
-        )
-
-        if not isinstance(resp, dict) or not resp.get("ok"):
-            # Si no hay backlog disponible o el broker no responde, no rompemos
-            return 0
-
-        data = resp.get("data") or []
-        if not isinstance(data, list):
-            return 0
-
-        # 3) Contar emisores únicos con texto no vacío
-        #    El broker ya guarda TEXT_MESSAGE_APP, pero filtramos defensivamente.
-        senders = set()
-        for obj in data:
-            try:
-                # Solo mensajes de texto
-                if str(obj.get("portnum") or "").upper() != "TEXT_MESSAGE_APP":
-                    continue
-
-                # Texto con contenido
-                txt = obj.get("text")
-                if not isinstance(txt, str) or not txt.strip():
-                    continue
-
-                # Emisor válido
-                from_id = obj.get("from")
-                if not isinstance(from_id, str) or not from_id:
-                    continue
-
-                # (Opcional) excluir eco del nodo local si detectas su '!id'
-                # local_id = context.bot_data.get("local_node_id")  # si en el futuro lo guardas
-                # if local_id and from_id == local_id:
-                #     continue
-
-                senders.add(from_id)
-            except Exception:
-                # Ignoramos filas malformadas sin romper el cómputo
-                continue
-
-        return len(senders)
-
-    except Exception:
-        # Seguridad total: ante cualquier error, devolvemos 0 para no romper /enviar
-        return 0
 
 
 # --- [NUEVO] Helper mínimo: ¿es envío a canal/broadcast? ---
@@ -5554,9 +5751,7 @@ def _is_listen_active(context) -> bool:
     st = context.chat_data.get("listen_state") or {}
     return bool(st.get("active"))
 
-# =========================
-# ver_nodos_cmd — COMPLETA (km + ciudad/provincia)
-# =========================
+
 
 # =========================
 # ver_nodos_cmd — wrapper sobre /vecinos (sin filtro de hops)
@@ -8555,6 +8750,240 @@ async def ver_nodos_b_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.args = [str(max_n), str(timeout), "all"]
 
     return await vecinos_b_cmd(update, context)
+
+async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Clon de comandos BBS para Telegram leyendo la BD local:
+      /bbs noticias [cat <tag>] [page]
+      /bbs noticias ver <id>
+      /bbs noticias 10
+      /bbs noticias ham 10   (tag + last)
+      /bbs noticias cat ham 10
+      /bbs boletines [cat <tag>] [page]
+      /bbs boletines ver <id>
+      /bbs link <code>   (si usas shortlinks)
+    """
+    args = context.args or []
+    if not args:
+        txt = (
+            "BBS (Telegram)\n"
+            "• /bbs noticias [cat <tag>] [page]\n"
+            "• /bbs noticias ver <id>\n"
+            "• /bbs noticias 10\n"
+            "• /bbs noticias ham 10\n"
+            "• /bbs noticias cat ham 10\n"
+            "• /bbs boletines [cat <tag>] [page]\n"
+            "• /bbs boletines ver <id>\n"
+            "• /bbs link <code>\n"
+            f"DB: {BBS_DB_PATH}"
+        )
+        for ch in chunk_text(txt):
+            await send_pre(update.effective_message, ch)
+        return
+
+    area = (args[0] or "").lower()
+    rest = args[1:]
+
+    # --- /bbs link <code> ---
+    if area == "link":
+        code = (rest[0] if rest else "").strip()
+        if not code:
+            await send_pre(update.effective_message, "Falta el code. Ej: /bbs link ab12cd34ef56")
+            return
+        with _bbs_db_connect() as conn:
+            _bbs_init_shortlinks(conn)
+            url = _bbs_get_shortlink(conn, code)
+        await send_pre(update.effective_message, (url or "No existe ese code."))
+        return
+
+    # --- parse: cat <tag> y page ---
+    tag = None
+    page = 1
+    if rest:
+        # admite: cat ham 2  | ham 2 | 2
+        if len(rest) >= 2 and rest[0].lower() == "cat":
+            tag = rest[1]
+            if len(rest) >= 3:
+                try: page = int(rest[2])
+                except Exception: page = 1
+        else:
+            # si el primer token no es numérico → tag
+            if rest[0].isdigit():
+                page = int(rest[0])
+            else:
+                tag = rest[0]
+                if len(rest) >= 2 and rest[1].isdigit():
+                    page = int(rest[1])
+
+    # --- noticias ---
+    if area == "noticias":
+        # submodo ver
+        if rest and rest[0].lower() == "ver":
+            nid = (rest[1] if len(rest) >= 2 else "")
+            row = bbs_read_news(nid)
+            if not row:
+                await send_pre(update.effective_message, "No existe esa noticia.")
+                return
+
+            url = (row.get("url") or "").strip()
+            summary = (row.get("summary") or "").strip()
+            content = (row.get("content") or "").strip()
+            body = summary or content or "(sin resumen/contenido)"
+
+            # opcional: shortlink también en Telegram
+            more = ""
+            if url:
+                with _bbs_db_connect() as conn:
+                    _bbs_init_shortlinks(conn)
+                    code = _bbs_put_shortlink(conn, url)
+                dom = _bbs_domain(url)
+                more = f"\nMás: [{dom}] {code}  (ver: /bbs link {code})"
+
+            txt = (
+                f"[{row.get('id')}] {row.get('title','')}\n"
+                f"{row.get('source','')}  {row.get('published_at') or row.get('created_at')}\n"
+                f"{body}{more}"
+            )
+            for ch in chunk_text(txt):
+                await send_pre(update.effective_message, ch)
+            return
+
+        # modo "últimas": NO romper paginación existente con "cat <tag> <page>"
+        # Nuevos formatos:
+        #   /bbs noticias 10
+        #   /bbs noticias last 10
+        #   /bbs noticias ham last 10
+        #   /bbs noticias cat ham last 10
+        # Paginación explícita (existente):
+        #   /bbs noticias [cat <tag>] [page]
+        #   /bbs noticias page 2
+
+        last_n = None
+
+        if rest:
+            r0 = rest[0].lower()
+
+            # Paginación explícita sin tocar compatibilidad
+            if r0 == "page":
+                # /bbs noticias page 2
+                if len(rest) >= 2 and rest[1].isdigit():
+                    page = max(1, int(rest[1]))
+
+            # /bbs noticias 10  -> últimas 10 (sin tag)
+            elif len(rest) == 1 and rest[0].isdigit():
+                last_n = int(rest[0])
+                tag = None
+
+            # /bbs noticias last 10
+            elif len(rest) == 2 and rest[0].lower() in {"last", "ult", "ultimas", "últimas"} and rest[1].isdigit():
+                last_n = int(rest[1])
+                tag = None
+
+            # /bbs noticias ham last 10
+            elif (
+                len(rest) == 3
+                and (not rest[0].isdigit())
+                and rest[1].lower() in {"last", "ult", "ultimas", "últimas"}
+                and rest[2].isdigit()
+            ):
+                tag = rest[0]
+                last_n = int(rest[2])
+
+            # /bbs noticias cat ham last 10
+            elif (
+                len(rest) >= 4
+                and rest[0].lower() == "cat"
+                and rest[2].lower() in {"last", "ult", "ultimas", "últimas"}
+                and rest[3].isdigit()
+            ):
+                tag = rest[1]
+                last_n = int(rest[3])
+
+        # Límite duro (24/7): evita peticiones excesivas
+        BBS_LAST_MAX = int(os.getenv("BBS_LAST_MAX", "25"))
+        if last_n is not None:
+            last_n = max(1, min(int(last_n), max(1, BBS_LAST_MAX)))
+
+        if last_n is not None:
+            rows = bbs_list_news_last(tag=tag, limit=last_n)
+        else:
+            rows = bbs_list_news(tag=tag, page=page, page_size=BBS_PAGE_SIZE)
+
+
+        if not rows:
+            await send_pre(update.effective_message, "No hay noticias para ese filtro.")
+            return
+
+        # Encabezado correcto según modo
+        if last_n is not None:
+            out_lines = [f"NOTICIAS (últimas {last_n})" + (f"  cat={tag}" if tag else "")]
+        else:
+            out_lines = [f"NOTICIAS  (página {page})" + (f"  cat={tag}" if tag else "")]
+
+        
+        with _bbs_db_connect() as conn:
+            _bbs_init_shortlinks(conn)
+            for r in rows:
+                nid = r.get("id")
+                title = (r.get("title") or "").strip()
+                src = (r.get("source") or "").strip()
+                dt = (r.get("published_at") or r.get("created_at") or "").strip()
+                url = (r.get("url") or "").strip()
+
+                more = ""
+                if url:
+                    code = _bbs_put_shortlink(conn, url)
+                    dom = _bbs_domain(url)
+                    more = f"  Más: [{dom}] {code}"
+
+                out_lines.append(f"[{nid}] {title} ({src}) {dt}{more}")
+
+        out_lines.append("Ver: /bbs noticias ver <id>")
+        txt = "\n".join(out_lines)
+        for ch in chunk_text(txt):
+            await send_pre(update.effective_message, ch)
+        return
+
+    # --- boletines ---
+    if area == "boletines":
+        # submodo ver
+        if rest and rest[0].lower() == "ver":
+            bid = (rest[1] if len(rest) >= 2 else "")
+            row = bbs_read_boletin(bid)
+            if not row:
+                await send_pre(update.effective_message, "No existe ese boletín.")
+                return
+            txt = (
+                f"[{row.get('id')}] {row.get('title','')}\n"
+                f"{row.get('author','')}  {row.get('created_at','')}\n"
+                f"{row.get('text','') or '(sin texto)'}"
+            )
+            for ch in chunk_text(txt):
+                await send_pre(update.effective_message, ch)
+            return
+
+        rows = bbs_list_boletines(tag=tag, page=page, page_size=BBS_PAGE_SIZE)
+        if not rows:
+            await send_pre(update.effective_message, "No hay boletines para ese filtro.")
+            return
+
+        out_lines = [f"BOLETINES  (página {page})" + (f"  cat={tag}" if tag else "")]
+        for r in rows:
+            bid = r.get("id")
+            title = (r.get("title") or "").strip()
+            who = (r.get("author") or "").strip()
+            dt = (r.get("created_at") or "").strip()
+            out_lines.append(f"[{bid}] {title} ({who}) {dt}")
+
+        out_lines.append("Ver: /bbs boletines ver <id>")
+        txt = "\n".join(out_lines)
+        for ch in chunk_text(txt):
+            await send_pre(update.effective_message, ch)
+        return
+
+    await send_pre(update.effective_message, "Uso: /bbs noticias|boletines|link ...")
+
+
 
 
 # === NUEVO: helpers de paginación para Telegram (inline keyboard) ===
@@ -13788,6 +14217,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("auditoria_red", auditoria_red_cmd))
     app.add_handler(CommandHandler("auditoria_integral", auditoria_integral_cmd))
     app.add_handler(CommandHandler("auditoria_impacto", auditoria_impacto_cmd))
+
+    app.add_handler(CommandHandler("bbs", cmd_bbs))
 
 # ...
   

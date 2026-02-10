@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.5.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v6.2.6.py Incluye servidor BBS Meshtastic server corregiso por DM
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 
@@ -1272,6 +1272,18 @@ def _tasks_send_adapter(
     except Exception:
         timeout_s = None
 
+
+    # [NUEVO] Flag para impedir espejo hacia bridge (BBS / control interno).
+    # Se propaga desde SENDQ como no_bridge=True.
+    no_bridge = bool(kwargs.get("no_bridge", False))
+
+    # [NUEVO] Seguridad extra: comandos BBS (#BBS/#bbs) nunca deben cruzar B/C.
+    try:
+        if (message is not None) and str(message).lstrip().upper().startswith("#BBS"):
+            no_bridge = True
+    except Exception:
+        pass
+
     # Normalización final
     try:
         channel_i = int(channel or 0)
@@ -1322,16 +1334,21 @@ def _tasks_send_adapter(
                     # metadatos para evitar ambigüedad aguas abajo
                     "direction": "tx",
                     "origin": "broker_local",
+                    "no_bridge": bool(no_bridge),
                 }
                 append_offline_log(rec_tx)
             except Exception as _e:
                 print(f"⚠️ offline_log TX mirror failed: {type(_e).__name__}: {_e}", flush=True)
 
-            # [NUEVO] espejo hacia B si la pasarela embebida está activa (firma correcta)
-            try:
-                bridge_mirror_outgoing_from_broker(int(channel_i), message_s)
-            except Exception as _e:
-                print(f"[bridge] mirror hook ERROR: {type(_e).__name__}: {_e}", flush=True)
+            # [NUEVO] espejo hacia B si la pasarela embebida está activa
+            # IMPORTANTE: usar wrapper tolerante a firma para no romper 24/7 si cambia el hook
+            if not no_bridge:
+                _bridge_mirror_safe(
+                    channel=int(channel_i),
+                    message=message_s,
+                    dest_id=(dest_id if dest_id else None),
+                    require_ack=bool(require_ack),
+                )
 
 
             print(
@@ -3525,7 +3542,9 @@ class MeshReceiver:
                                                 "En DM puedes iniciar con: #BBS"
                                             )
                                             q.offer(
-                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
+                                                "no_bridge": True
+                                            },
                                                 coalesce=False
                                             )
                                         raise StopIteration
@@ -3552,7 +3571,9 @@ class MeshReceiver:
                                                 "En DM puedes iniciar con: #BBS"
                                             )
                                             q.offer(
-                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
+                                                "no_bridge": True
+                                            },
                                                 coalesce=False
                                             )
                                         raise StopIteration
@@ -3612,12 +3633,16 @@ class MeshReceiver:
                                         # Responder por DM cuando sea DM o cuando dm_only esté activo
                                         if is_dm or dm_only:
                                             q.offer(
-                                                {"channel": int(dm_ch), "text": c, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                                {"channel": int(dm_ch), "text": c, "destination": str(who_from), "require_ack": False, "type": "text",
+                                                "no_bridge": True
+                                            },
                                                 coalesce=False
                                             )
                                         else:
                                             q.offer(
-                                                {"channel": int(canal), "text": c, "destination": None, "require_ack": False, "type": "text"},
+                                                {"channel": int(canal), "text": c, "destination": None, "require_ack": False, "type": "text",
+                                                "no_bridge": True
+                                            },
                                                 coalesce=False
                                             )
 
@@ -3670,7 +3695,9 @@ class MeshReceiver:
                                     q = globals().get("SENDQ")
                                     if q is not None and hasattr(q, "offer"):
                                         q.offer(
-                                                {"channel": ch_out, "text": clean_txt, "destination": None, "require_ack": False, "type": "text"},
+                                                {"channel": ch_out, "text": clean_txt, "destination": None, "require_ack": False, "type": "text",
+                                                "no_bridge": True
+                                            },
                                                 coalesce=False
                                         )
                                         if self.verbose:

@@ -1,4 +1,4 @@
-# bbs_server.py v6.2.4
+# bbs_server.py v6.2.6
 # Motor BBS para MeshNet v6.2.1 (broker-side), desacoplado del transporte.
 # El broker llama a handle_text(from_id, ch, text) y envía los chunks devueltos.
 #
