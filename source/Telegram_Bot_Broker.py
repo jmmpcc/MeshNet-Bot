@@ -307,6 +307,7 @@ from urllib.parse import urlparse
 # BBS (lectura directa DB) - 24/7 safe
 # ==========================
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -316,20 +317,29 @@ def _bbs_resolve_db_path() -> Path:
     """
     Resuelve la ruta real del fichero SQLite de la BBS.
 
-    Reglas:
-    - Si BBS_DB_PATH apunta a un fichero → se respeta.
-    - Si apunta a un directorio → se usa <dir>/bbs_data.db
+    Reglas (24/7 y coherente con el broker):
+    - Si BBS_DB_PATH es absoluta → se respeta.
+    - Si BBS_DB_PATH es relativa → se ancla a DATA_DIR (p.ej. /app/bot_data).
+    - Si BBS_DB_PATH apunta a un directorio → se usa <dir>/bbs_data.db
     - Si no existe BBS_DB_PATH → usa DATA_DIR/bbs/bbs_data.db
     """
-    raw = os.getenv("BBS_DB_PATH", "").strip()
+    raw = (os.getenv("BBS_DB_PATH", "") or "").strip()
 
     if raw:
-        p = Path(raw).expanduser().resolve()
+        p = Path(raw).expanduser()
+        # CLAVE: si es relativa, anclarla a DATA_DIR (igual que broker)
+        if not p.is_absolute():
+            p = (DATA_DIR / p)
+        p = p.resolve()
     else:
-        p = (DATA_DIR / "bbs").resolve()
+        p = (DATA_DIR / "bbs" / "bbs_data.db").resolve()
 
-    if p.is_dir():
-        p = p / "bbs_data.db"
+    # Si apuntan a directorio, completar con bbs_data.db
+    if p.exists() and p.is_dir():
+        p = (p / "bbs_data.db").resolve()
+    elif str(p).endswith(("/", "\\")):
+        # por si llega con barra final aunque aún no exista
+        p = (p / "bbs_data.db").resolve()
 
     return p
 
@@ -339,31 +349,23 @@ BBS_DB_PATH = _bbs_resolve_db_path()
 def _bbs_db_connect() -> sqlite3.Connection:
     """
     Abre SQLite en modo SOLO LECTURA, robusto para convivencia con escritores (WAL).
-    Objetivo 24/7:
-      - Evitar 'database is locked' en ráfagas de escritura/checkpoint.
-      - No romper lecturas recientes (compatible con -wal).
-      - Blindar contra escrituras accidentales desde el bot.
     """
     db_file = str(BBS_DB_PATH)
 
-    # URI SQLite: solo lectura + cache compartida (mejor para múltiples conexiones lectoras)
-    # IMPORTANTE: NO usar immutable=1 con WAL si quieres leer cambios recientes del -wal.
     uri = f"file:{db_file}?mode=ro&cache=shared"
 
     conn = sqlite3.connect(
         uri,
         uri=True,
-        timeout=30,              # timeout del driver (segundos)
+        timeout=30,
         check_same_thread=False
     )
     conn.row_factory = sqlite3.Row
 
     try:
-        conn.execute("PRAGMA busy_timeout=5000;")  # tolera locks transitorios por escritura/checkpoint
-        conn.execute("PRAGMA query_only=ON;")      # blinda contra writes
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.execute("PRAGMA query_only=ON;")
         conn.execute("PRAGMA foreign_keys=ON;")
-        # Opcional: reduce contención en lectores (no siempre necesario)
-        # conn.execute("PRAGMA read_uncommitted=1;")
     except Exception:
         pass
 
