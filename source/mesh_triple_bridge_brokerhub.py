@@ -475,6 +475,10 @@ class TripleBridge:
         # --- Backoff reintentos ---
         self._retry_schedule = [2.0, 5.0, 10.0, 20.0, 40.0, 75.0]
 
+        self.post_connect_grace_sec = float(os.getenv("TRIPLE_POST_CONNECT_GRACE_SEC", "20") or "20")
+        self._b_connected_at = 0.0
+
+
     # ---------------------- Helpers (peers online/offline) ----------------------
     def _safe_close_iface(self, iface, label: str) -> None:
         """
@@ -601,7 +605,8 @@ class TripleBridge:
 
             # [FIX 24/7] Armado de stale_rx desde el momento de conexión
             self._last_rx_b_ts = time.time()
-
+            self._b_connected_at = time.time()
+            
             self.local_id_b = self._discover_local_id(self.iface_b, "B")
             self._b_offline_until = 0.0
             print("[triple-bridge] reconexión a B OK", flush=True)
