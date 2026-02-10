@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-mesh_triple_bridge.py  v6.2.4 — Pasarela externa A↔B y A↔C usando TCP Meshtastic.
+mesh_triple_bridge.py  v6.2.6 — Pasarela externa A↔B y A↔C usando TCP Meshtastic.
 
 Modo tcp:
 - Abre TCP directo a A, B y C.
@@ -459,8 +459,14 @@ class TripleBridge:
         # --- Estados de peers ---
         self._b_offline_until = 0.0
         self._c_offline_until = 0.0
+      
         self._last_rx_b_ts = 0.0
         self._last_rx_c_ts = 0.0
+      
+        # --- Heartbeat/keepalive hacia peers (evita timeout remoto por inactividad) ---
+        self._last_hb_b_ts = 0.0
+        self._last_hb_c_ts = 0.0
+
 
         # --- TX spool (cola prioritaria por "due") ---
         self._pq: list[tuple[float, int, dict]] = []
@@ -607,6 +613,8 @@ class TripleBridge:
             # [FIX 24/7] Armado de stale_rx desde el momento de conexión
             self._last_rx_b_ts = time.time()
             self._b_connected_at = time.time()
+            self._last_hb_b_ts = time.time()
+
             
             self.local_id_b = self._discover_local_id(self.iface_b, "B")
             self._b_offline_until = 0.0
@@ -626,6 +634,8 @@ class TripleBridge:
             # [FIX 24/7] Armado de stale_rx desde el momento de conexión
             self._last_rx_c_ts = time.time()
             self._c_connected_at = time.time()
+            self._last_hb_c_ts = time.time()
+
 
             self.local_id_c = self._discover_local_id(self.iface_c, "C")
             self._c_offline_until = 0.0
@@ -835,6 +845,47 @@ class TripleBridge:
 
                 if self.enable_c and self.c_host and self.iface_c is None and not self._is_c_suppressed():
                     self._connect_c(tcp_timeout_s)
+
+                # ---------------------- Heartbeat/keepalive (evita idle-timeout remoto) ----------------------
+                try:
+                    hb_b = float(os.getenv("TRIPLE_B_HEARTBEAT_SEC", "120") or "120")
+                except Exception:
+                    hb_b = 120.0
+
+                try:
+                    hb_c = float(os.getenv("TRIPLE_C_HEARTBEAT_SEC", "120") or "120")
+                except Exception:
+                    hb_c = 120.0
+
+                # B
+                if hb_b > 0 and self.enable_b and self.iface_b is not None:
+                    if (now - float(getattr(self, "_last_hb_b_ts", 0.0) or 0.0)) >= hb_b:
+                        try:
+                            fn = getattr(self.iface_b, "sendHeartbeat", None)
+                            if callable(fn):
+                                fn()
+                                self._last_hb_b_ts = now
+                        except Exception as e:
+                            # Si el socket ya cayó, forzamos caída limpia para reconectar
+                            msg_l = (str(e) or "").lower()
+                            if ("broken pipe" in msg_l) or ("bad file descriptor" in msg_l) or ("timed out" in msg_l) or ("timeout" in msg_l):
+                                self._mark_b_down(f"heartbeat_fail: {type(e).__name__}: {e}")
+
+                # C
+                if hb_c > 0 and self.enable_c and self.iface_c is not None:
+                    if (now - float(getattr(self, "_last_hb_c_ts", 0.0) or 0.0)) >= hb_c:
+                        try:
+                            fn = getattr(self.iface_c, "sendHeartbeat", None)
+                            if callable(fn):
+                                fn()
+                                self._last_hb_c_ts = now
+                        except Exception as e:
+                            msg_l = (str(e) or "").lower()
+                            if ("broken pipe" in msg_l) or ("bad file descriptor" in msg_l) or ("timed out" in msg_l) or ("timeout" in msg_l):
+                                self._mark_c_down(f"heartbeat_fail: {type(e).__name__}: {e}")
+                # ------------------------------------------------------------------------------------------------
+
+
 
                 # Stale RX (si está configurado)
                 if self.enable_b:
