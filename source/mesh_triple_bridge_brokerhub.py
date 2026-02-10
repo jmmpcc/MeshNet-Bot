@@ -477,6 +477,7 @@ class TripleBridge:
 
         self.post_connect_grace_sec = float(os.getenv("TRIPLE_POST_CONNECT_GRACE_SEC", "20") or "20")
         self._b_connected_at = 0.0
+        self._c_connected_at = 0.0
 
 
     # ---------------------- Helpers (peers online/offline) ----------------------
@@ -624,6 +625,7 @@ class TripleBridge:
 
             # [FIX 24/7] Armado de stale_rx desde el momento de conexión
             self._last_rx_c_ts = time.time()
+            self._c_connected_at = time.time()
 
             self.local_id_c = self._discover_local_id(self.iface_c, "C")
             self._c_offline_until = 0.0
@@ -840,16 +842,26 @@ class TripleBridge:
                         stale_b = float(os.getenv("TRIPLE_B_STALE_SEC", "0") or "0")
                     except Exception:
                         stale_b = 0.0
-                    if stale_b > 0 and self.iface_b is not None and self._last_rx_b_ts > 0 and (now - self._last_rx_b_ts) > stale_b:
-                        self._mark_b_down(f"stale_rx>{int(stale_b)}s")
+                    if stale_b > 0 and self.iface_b is not None and self._last_rx_b_ts > 0:
+                        # [FIX 24/7] Gracia tras conexión/reconexión: no marcar stale demasiado pronto
+                        if self._b_connected_at and (now - self._b_connected_at) < float(self.post_connect_grace_sec or 0.0):
+                            pass
+                        elif (now - self._last_rx_b_ts) > stale_b:
+                            self._mark_b_down(f"stale_rx>{int(stale_b)}s")
+
 
                 if self.enable_c:
                     try:
                         stale_c = float(os.getenv("TRIPLE_C_STALE_SEC", "0") or "0")
                     except Exception:
                         stale_c = 0.0
-                    if stale_c > 0 and self.iface_c is not None and self._last_rx_c_ts > 0 and (now - self._last_rx_c_ts) > stale_c:
-                        self._mark_c_down(f"stale_rx>{int(stale_c)}s")
+                    if stale_c > 0 and self.iface_c is not None and self._last_rx_c_ts > 0:
+                        # [FIX 24/7] Gracia tras conexión/reconexión: no marcar stale demasiado pronto
+                        if self._c_connected_at and (now - self._c_connected_at) < float(self.post_connect_grace_sec or 0.0):
+                            pass
+                        elif (now - self._last_rx_c_ts) > stale_c:
+                            self._mark_c_down(f"stale_rx>{int(stale_c)}s")
+
 
                 time.sleep(max(1.0, tick))
 
@@ -1090,7 +1102,15 @@ class TripleBridge:
 
             port = str(obj.get("portnum") or "").upper()
             ch = int(obj.get("channel") or 0)
-            frm = str(obj.get("fromId") or "")
+            frm = str(
+                obj.get("fromId")
+                or obj.get("from")
+                or obj.get("from_id")
+                or obj.get("fromIdStr")
+                or obj.get("fromNode")
+                or ""
+            )
+
 
             want_text = self.forward_text and ("TEXT_MESSAGE_APP" in port or port == "TEXT")
             want_pos = self.forward_position and (("POSITION_APP" in port) or ("TELEMETRY_APP" in port) or (port in {"POSITION", "TELEMETRY"}))
