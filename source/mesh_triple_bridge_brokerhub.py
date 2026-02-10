@@ -989,10 +989,14 @@ class TripleBridge:
     def connect(self):
         """
         Conecta interfaces:
-          - HUB_MODE=broker: NO abre TCP a A. Usa BacklogServer del broker.
-          - HUB_MODE=tcp   : abre TCP a A, y además B/C.
+        - HUB_MODE=broker: NO abre TCP a A. Usa BacklogServer del broker.
+        - HUB_MODE=tcp   : abre TCP a A, y además B/C.
 
         NOTA: B/C se conectan aunque HUB_MODE=broker, porque son los peers TCP.
+
+        24/7:
+        - Si B/C no están disponibles al arranque (No route to host), NO se debe abortar el proceso.
+            Se arranca watchdog + threads y se reintenta en background.
         """
         # Timeout TCP para handshakes lentos (WiFi justo, CPU baja, etc.)
         try:
@@ -1027,23 +1031,29 @@ class TripleBridge:
         else:
             print("[triple-bridge] C deshabilitado por BRIDGE_PEERS", flush=True)
 
-        if self.iface_b is None and self.iface_c is None:
-            raise SystemExit("No hay peers activos tras connect() (BRIDGE_PEERS)")
-
         # Subscripción RX (solo B/C y A en tcp-mode)
-        pub.subscribe(self._on_rx, "meshtastic.receive")
+        # Se puede dejar activa aunque B/C estén temporalmente OFFLINE: no rompe nada.
+        try:
+            pub.subscribe(self._on_rx, "meshtastic.receive")
+        except Exception:
+            pass
 
         # Poll del backlog (solo broker-mode)
         if self.hub_mode == "broker":
             self._poll_thread = threading.Thread(target=self._hub_poll_loop, name="hub-poll", daemon=True)
             self._poll_thread.start()
 
-        # TX spool
+        # TX spool (arranca siempre; ya maneja offline/reintentos internamente)
         self._tx_thread = threading.Thread(target=self._tx_worker, name="tx-spool", daemon=True)
         self._tx_thread.start()
 
-        # Watchdog de reconexión/stale
+        # Watchdog de reconexión/stale (arranca siempre)
         self._start_watchdog()
+
+        # Si no hay peers al arranque, NO abortar (modo 24/7): el watchdog reintentará.
+        if self.iface_b is None and self.iface_c is None:
+            print("[triple-bridge] Sin peers activos tras connect(): se mantiene vivo y reintentará por watchdog.", flush=True)
+            return
 
         print(
             f"[triple-bridge] Conectado. hub_mode={self.hub_mode} "
