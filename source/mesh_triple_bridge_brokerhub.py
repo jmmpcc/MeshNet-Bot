@@ -596,8 +596,12 @@ class TripleBridge:
     def _connect_b(self, tcp_timeout_s: float) -> None:
         print(f"[triple-bridge] Conectando B: {self.b_host}:{self.b_port}", flush=True)
         try:
-            self._safe_close_iface(self.iface_b, "B")  # en _connect_b
+            self._safe_close_iface(self.iface_b, "B")
             self.iface_b = _TCPI(hostname=self.b_host, portNumber=self.b_port, timeout=tcp_timeout_s)
+
+            # [FIX 24/7] Armado de stale_rx desde el momento de conexión
+            self._last_rx_b_ts = time.time()
+
             self.local_id_b = self._discover_local_id(self.iface_b, "B")
             self._b_offline_until = 0.0
             print("[triple-bridge] reconexión a B OK", flush=True)
@@ -610,8 +614,12 @@ class TripleBridge:
     def _connect_c(self, tcp_timeout_s: float) -> None:
         print(f"[triple-bridge] Conectando C: {self.c_host}:{self.c_port}", flush=True)
         try:
-            self._safe_close_iface(self.iface_c, "C")  # en _connect_c
+            self._safe_close_iface(self.iface_c, "C")
             self.iface_c = _TCPI(hostname=self.c_host, portNumber=self.c_port, timeout=tcp_timeout_s)
+
+            # [FIX 24/7] Armado de stale_rx desde el momento de conexión
+            self._last_rx_c_ts = time.time()
+
             self.local_id_c = self._discover_local_id(self.iface_c, "C")
             self._c_offline_until = 0.0
             print("[triple-bridge] reconexión a C OK", flush=True)
@@ -620,6 +628,7 @@ class TripleBridge:
             self.local_id_c = None
             self._c_offline_until = time.time() + 75.0
             print(f"[triple-bridge] C OFFLINE: {type(e).__name__}: {e}", flush=True)
+
 
     # ---------------------- TX spool ----------------------
 
