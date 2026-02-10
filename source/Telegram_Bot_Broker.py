@@ -316,14 +316,23 @@ def _bbs_resolve_db_path() -> Path:
     """
     Resuelve la ruta real del fichero SQLite de la BBS.
 
-    En este proyecto, BBS_DB_PATH suele ser un DIRECTORIO (ej: bot_data/bbs).
-    Si llega un fichero, se respeta.
+    Reglas:
+    - Si BBS_DB_PATH apunta a un fichero → se respeta.
+    - Si apunta a un directorio → se usa <dir>/bbs_data.db
+    - Si no existe BBS_DB_PATH → usa DATA_DIR/bbs/bbs_data.db
     """
-    raw = os.getenv("BBS_DB_PATH", str(DATA_DIR / "bbs")).strip() or str(DATA_DIR / "bbs")
-    p = Path(raw).expanduser().resolve()
+    raw = os.getenv("BBS_DB_PATH", "").strip()
+
+    if raw:
+        p = Path(raw).expanduser().resolve()
+    else:
+        p = (DATA_DIR / "bbs").resolve()
+
     if p.is_dir():
         p = p / "bbs_data.db"
+
     return p
+
 
 BBS_DB_PATH = _bbs_resolve_db_path()
 
