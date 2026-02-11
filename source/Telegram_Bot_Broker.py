@@ -385,6 +385,98 @@ def _bbs_db_connect() -> sqlite3.Connection:
 
     return conn
 
+# === NUEVO: SQLite RW para publicar boletines desde Telegram (sin romper RO) ===
+
+BBS_BOT_CALLSIGN = os.environ.get("BBS_BOT_CALLSIGN", "TELEGRAM").strip() or "TELEGRAM"
+
+
+def _bbs_db_connect_rw() -> sqlite3.Connection:
+    """
+    Abre SQLite en modo LECTURA/ESCRITURA para operaciones puntuales (INSERT).
+    - Mantiene busy_timeout para convivir con el servidor BBS (posible concurrencia).
+    - Intenta asegurar WAL para mejorar convivencia (si la DB lo permite).
+    """
+    db_file = str(BBS_DB_PATH)
+
+    conn = sqlite3.connect(
+        db_file,
+        timeout=30,
+        check_same_thread=False
+    )
+    conn.row_factory = sqlite3.Row
+
+    try:
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        # WAL ayuda mucho con concurrencia lectura/escritura (siempre que el filesystem lo soporte)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+    except Exception:
+        pass
+
+    return conn
+
+
+def _bbs_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """
+    Devuelve el set de columnas reales de una tabla.
+    Si la tabla no existe o falla, devuelve set vacío.
+    """
+    try:
+        cur = conn.execute(f"PRAGMA table_info({table});")
+        return {str(r["name"]).strip() for r in cur.fetchall() if r and r["name"]}
+    except Exception:
+        return set()
+
+
+def bbs_add_boletin_from_telegram(subject: str, body: str, author: str) -> int | None:
+    """
+    Inserta un boletín en la tabla 'boletines' de la BBS.
+
+    Compatibilidad:
+    - Esquema A (bbs_server.py): autor/asunto/cuerpo/timestamp
+    - Esquema B (si existiese): author/title/text/created_at (+ tags/category opcionales)
+
+    Devuelve el ID (lastrowid) o None si no se pudo insertar.
+    """
+    subject = (subject or "").strip()
+    body = (body or "").strip()
+    author = (author or "").strip()
+
+    if not subject or not body:
+        return None
+
+    with _bbs_db_connect_rw() as conn:
+        if not _bbs_table_exists(conn, "boletines"):
+            return None
+
+        cols = _bbs_table_columns(conn, "boletines")
+        if not cols:
+            return None
+
+        # Mapeo tolerante de nombres de columna
+        col_subject = "asunto" if "asunto" in cols else ("title" if "title" in cols else None)
+        col_author  = "autor"  if "autor"  in cols else ("author" if "author" in cols else None)
+        col_body    = "cuerpo" if "cuerpo" in cols else ("text" if "text" in cols else None)
+        col_ts      = "timestamp" if "timestamp" in cols else ("created_at" if "created_at" in cols else None)
+
+        if not (col_subject and col_author and col_body):
+            return None
+
+        ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        fields = [col_author, col_subject, col_body]
+        values = [author, subject, body]
+
+        if col_ts:
+            fields.append(col_ts)
+            values.append(ts)
+
+        sql = f"INSERT INTO boletines ({', '.join(fields)}) VALUES ({', '.join(['?'] * len(fields))});"
+        cur = conn.execute(sql, tuple(values))
+        conn.commit()
+        return int(cur.lastrowid)
+
 
 def _bbs_table_exists(conn: sqlite3.Connection, name: str) -> bool:
     cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (name,))
@@ -584,7 +676,16 @@ def bbs_read_news(news_id: int) -> dict | None:
 
 def bbs_list_boletines(tag: str | None, page: int, page_size: int) -> list[dict]:
     """
-    Lista boletines desde la tabla 'boletines'.
+    Lista boletines desde la tabla 'boletines' con compatibilidad de esquemas:
+
+    Esquema A (bbs_server.py):
+      - autor, asunto, cuerpo, timestamp
+
+    Esquema B (si existiera en alguna variante):
+      - author, title, text, created_at, tags, category
+
+    Devuelve dicts normalizados con claves:
+      id, title, author, created_at, text, tags, category
     """
     page = max(1, int(page or 1))
     page_size = max(1, int(page_size or 6))
@@ -594,23 +695,55 @@ def bbs_list_boletines(tag: str | None, page: int, page_size: int) -> list[dict]
         if not _bbs_table_exists(conn, "boletines"):
             return []
 
+        cols = _bbs_table_columns(conn, "boletines")
+        if not cols:
+            return []
+
+        # --- mapping tolerante ---
+        title_col = "title" if "title" in cols else ("asunto" if "asunto" in cols else None)
+        author_col = "author" if "author" in cols else ("autor" if "autor" in cols else None)
+        text_col = "text" if "text" in cols else ("cuerpo" if "cuerpo" in cols else None)
+        created_col = "created_at" if "created_at" in cols else ("timestamp" if "timestamp" in cols else None)
+
+        tags_col = "tags" if "tags" in cols else None
+        cat_col = "category" if "category" in cols else None
+
+        if not (title_col and author_col and text_col):
+            return []
+
+        # --- filtro por tag (si no hay tags/category en DB, cae a buscar en asunto/cuerpo) ---
         where = ""
         params: list = []
         if tag:
-            # en boletines suele haber category/tags; probamos ambos campos defensivamente
-            where = "WHERE lower(coalesce(tags,'')) LIKE ? OR lower(coalesce(category,'')) LIKE ?"
             t = f"%{_bbs_norm_tag(tag)}%"
-            params.extend([t, t])
+            if tags_col or cat_col:
+                conds = []
+                if tags_col:
+                    conds.append(f"lower(coalesce({tags_col},'')) LIKE ?")
+                    params.append(t)
+                if cat_col:
+                    conds.append(f"lower(coalesce({cat_col},'')) LIKE ?")
+                    params.append(t)
+                where = "WHERE " + " OR ".join(conds)
+            else:
+                # compat: DB “clásica” sin tags/category
+                where = f"WHERE lower(coalesce({title_col},'')) LIKE ? OR lower(coalesce({text_col},'')) LIKE ?"
+                params.extend([t, t])
+
+        # --- SELECT normalizado, sin referenciar columnas inexistentes ---
+        sel_tags = f"coalesce({tags_col},'')" if tags_col else "''"
+        sel_cat = f"coalesce({cat_col},'')" if cat_col else "''"
+        sel_created = f"coalesce({created_col},'')" if created_col else "''"
 
         q = f"""
             SELECT
                 id,
-                coalesce(title,'')    AS title,
-                coalesce(author,'')   AS author,
-                coalesce(tags,'')     AS tags,
-                coalesce(category,'') AS category,
-                coalesce(created_at,'') AS created_at,
-                coalesce(text,'')     AS text
+                coalesce({title_col},'')   AS title,
+                coalesce({author_col},'')  AS author,
+                {sel_tags}                 AS tags,
+                {sel_cat}                  AS category,
+                {sel_created}              AS created_at,
+                coalesce({text_col},'')    AS text
             FROM boletines
             {where}
             ORDER BY id DESC
@@ -622,7 +755,10 @@ def bbs_list_boletines(tag: str | None, page: int, page_size: int) -> list[dict]
 
 def bbs_read_boletin(bid: int) -> dict | None:
     """
-    Lee un boletín por id.
+    Lee un boletín por id con compatibilidad de esquemas.
+
+    Devuelve dict normalizado:
+      id, title, author, created_at, text, tags, category
     """
     try:
         bid = int(bid)
@@ -632,19 +768,40 @@ def bbs_read_boletin(bid: int) -> dict | None:
     with _bbs_db_connect() as conn:
         if not _bbs_table_exists(conn, "boletines"):
             return None
-        cur = conn.execute("""
+
+        cols = _bbs_table_columns(conn, "boletines")
+        if not cols:
+            return None
+
+        title_col = "title" if "title" in cols else ("asunto" if "asunto" in cols else None)
+        author_col = "author" if "author" in cols else ("autor" if "autor" in cols else None)
+        text_col = "text" if "text" in cols else ("cuerpo" if "cuerpo" in cols else None)
+        created_col = "created_at" if "created_at" in cols else ("timestamp" if "timestamp" in cols else None)
+
+        tags_col = "tags" if "tags" in cols else None
+        cat_col = "category" if "category" in cols else None
+
+        if not (title_col and author_col and text_col):
+            return None
+
+        sel_tags = f"coalesce({tags_col},'')" if tags_col else "''"
+        sel_cat = f"coalesce({cat_col},'')" if cat_col else "''"
+        sel_created = f"coalesce({created_col},'')" if created_col else "''"
+
+        q = f"""
             SELECT
                 id,
-                coalesce(title,'')    AS title,
-                coalesce(author,'')   AS author,
-                coalesce(tags,'')     AS tags,
-                coalesce(category,'') AS category,
-                coalesce(created_at,'') AS created_at,
-                coalesce(text,'')     AS text
+                coalesce({title_col},'')   AS title,
+                coalesce({author_col},'')  AS author,
+                {sel_tags}                 AS tags,
+                {sel_cat}                  AS category,
+                {sel_created}              AS created_at,
+                coalesce({text_col},'')    AS text
             FROM boletines
             WHERE id=?
             LIMIT 1
-        """, (bid,))
+        """
+        cur = conn.execute(q, (bid,))
         row = cur.fetchone()
         return (dict(row) if row else None)
 
@@ -9003,7 +9160,42 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # --- boletines ---
+    # --- boletines ---
     if area == "boletines":
+
+        # submodo add (SOLO admin)
+        # Formato:
+        #   /bbs boletines add ASUNTO | TEXTO
+        if rest and rest[0].lower() == "add":
+            uid = int(getattr(update.effective_user, "id", 0) or 0)
+            if not is_admin(uid):
+                await send_pre(update.effective_message, "No autorizado.")
+                return
+
+            payload = " ".join(rest[1:]).strip()
+            if "|" not in payload:
+                await send_pre(update.effective_message, "Uso: /bbs boletines add ASUNTO | TEXTO")
+                return
+
+            subject, body = [p.strip() for p in payload.split("|", 1)]
+            if not subject or not body:
+                await send_pre(update.effective_message, "Uso: /bbs boletines add ASUNTO | TEXTO")
+                return
+
+            # Autor: callsign configurable + trazabilidad del usuario Telegram
+            tg_user = (getattr(update.effective_user, "username", "") or "").strip()
+            author = BBS_BOT_CALLSIGN
+            if tg_user:
+                author = f"{BBS_BOT_CALLSIGN}/{tg_user}"
+
+            bid = bbs_add_boletin_from_telegram(subject=subject, body=body, author=author)
+            if not bid:
+                await send_pre(update.effective_message, "No se pudo publicar el boletín (DB/tabla/esquema).")
+                return
+
+            await send_pre(update.effective_message, f"Boletín publicado: [{bid}] {subject}")
+            return
+
         # submodo ver
         if rest and rest[0].lower() == "ver":
             bid = (rest[1] if len(rest) >= 2 else "")
@@ -9034,6 +9226,7 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             out_lines.append(f"[{bid}] {title} ({who}) {dt}")
 
         out_lines.append("Ver: /bbs boletines ver <id>")
+        out_lines.append("Publicar (admin): /bbs boletines add ASUNTO | TEXTO")
         txt = "\n".join(out_lines)
         for ch in chunk_text(txt):
             await send_pre(update.effective_message, ch)
