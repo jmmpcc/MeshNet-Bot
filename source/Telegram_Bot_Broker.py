@@ -110,18 +110,28 @@ from meshtastic_api_adapter import (
 
 from tcpinterface_persistent import TCPInterfacePool
 
+# --- PRINT con timestamp (idempotente: evita doble prefijo) ---
 import builtins, sys, time
-_builtin_print = builtins.print
 
-def _print_with_ts(*args, **kwargs):
-    file = kwargs.pop("file", sys.stdout)
-    end = kwargs.pop("end", "\n")
-    sep = kwargs.pop("sep", " ")
-    flush = kwargs.pop("flush", True)
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    _builtin_print(f"[{ts}]", *args, sep=sep, end=end, file=file, flush=flush, **kwargs)
+if not getattr(builtins, "_meshnet_ts_print_patched", False):
+    builtins._meshnet_ts_print_patched = True
+    _builtin_print = builtins.print
 
-builtins.print = _print_with_ts
+    def _print_with_ts(*args, **kwargs):
+        """
+        print() global con timestamp, pero aplicado una sola vez.
+        Evita el síntoma: "[ts] [ts] mensaje" si el bloque aparece duplicado en el fichero.
+        """
+        file = kwargs.pop("file", sys.stdout)
+        end = kwargs.pop("end", "\n")
+        sep = kwargs.pop("sep", " ")
+        flush = kwargs.pop("flush", True)
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        _builtin_print(f"[{ts}]", *args, sep=sep, end=end, file=file, flush=flush, **kwargs)
+
+    builtins.print = _print_with_ts
+# -------------------------------------------------------------
+
 
 
 # --- Compat shim para Meshtastic TCPInterface (host -> hostname) ---
@@ -326,6 +336,8 @@ import sqlite3
 from pathlib import Path
 
 BBS_PAGE_SIZE = int(os.getenv("BBS_LIST_PAGE_SIZE", "6"))
+BBS_LAST_MAX = int(os.getenv("BBS_LAST_MAX", "25"))  # límite duro anti-flood para comandos "last"
+
 
 def _bbs_resolve_db_path() -> Path:
     """
@@ -609,8 +621,9 @@ def bbs_list_news_last(tag: str | None, limit: int) -> list[dict]:
     Devuelve las últimas 'limit' noticias (opcionalmente filtradas por tag).
     """
     limit = max(1, int(limit or 1))
-    # límite duro para evitar floods en Telegram
-    limit = BBS_LAST_MAX
+    # límite duro para evitar floods en Telegram (mantiene lo pedido, pero capado)
+    limit = min(limit, max(1, int(BBS_LAST_MAX)))
+
 
     with _bbs_db_connect() as conn:
         if not _bbs_table_exists(conn, "news"):
