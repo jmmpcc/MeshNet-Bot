@@ -47,6 +47,18 @@ except Exception:
 #  Helpers básicos (mapeos, texto, hash)
 # ============================================================
 
+import builtins, sys, time
+_builtin_print = builtins.print
+
+def _print_with_ts(*args, **kwargs):
+    file = kwargs.pop("file", sys.stdout)
+    end = kwargs.pop("end", "\n")
+    sep = kwargs.pop("sep", " ")
+    flush = kwargs.pop("flush", True)
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    _builtin_print(f"[{ts}]", *args, sep=sep, end=end, file=file, flush=flush, **kwargs)
+
+builtins.print = _print_with_ts
 
 def _truthy(s: str | None, default: bool = False) -> bool:
     if s is None:
@@ -485,6 +497,9 @@ class TripleBridge:
         self._b_connected_at = 0.0
         self._c_connected_at = 0.0
 
+        # --- Throttle de logs cuando un peer está suprimido/offline ---
+        self._last_suppressed_log_b = 0.0
+        self._last_suppressed_log_c = 0.0
 
     # ---------------------- Helpers (peers online/offline) ----------------------
     def _safe_close_iface(self, iface, label: str) -> None:
@@ -717,28 +732,41 @@ class TripleBridge:
         if peer == "B":
             if self._is_b_suppressed():
                 remaining = max(0, int(self._b_offline_until - time.time()))
-                print(
-                    f"[brokerhub TX] {direction} → {peer} ch={ch} "
-                    f"len={len(msg)} txt='{msg[:120]}'",
-                    flush=True
-                )
+                attempt = int(item.get("attempt", 0))
+                now_ts = time.time()
 
-              
+                # Log solo al primer intento o cada 30s para evitar spam
+                if attempt == 0 or (now_ts - float(getattr(self, "_last_suppressed_log_b", 0.0) or 0.0)) >= 30.0:
+                    self._last_suppressed_log_b = now_ts
+                    print(
+                        f"[brokerhub TX] {direction} → {peer} DEFER(suppressed) ch={ch} "
+                        f"rem={remaining}s len={len(msg)} txt='{msg[:120]}'",
+                        flush=True
+                    )
+
                 self._enqueue(item, due=float(self._b_offline_until))
                 return
+                              
             iface = self.iface_b
         elif peer == "C":
             if self._is_c_suppressed():
                 remaining = max(0, int(self._c_offline_until - time.time()))
-                print(
-                    f"[brokerhub TX] {direction} → {peer} ch={ch} "
-                    f"len={len(msg)} txt='{msg[:120]}'",
-                    flush=True
-                )
+                attempt = int(item.get("attempt", 0))
+                now_ts = time.time()
 
-              
+                # Log solo al primer intento o cada 30s para evitar spam
+                if attempt == 0 or (now_ts - float(getattr(self, "_last_suppressed_log_c", 0.0) or 0.0)) >= 30.0:
+                    self._last_suppressed_log_c = now_ts
+                    print(
+                        f"[brokerhub TX] {direction} → {peer} DEFER(suppressed) ch={ch} "
+                        f"rem={remaining}s len={len(msg)} txt='{msg[:120]}'",
+                        flush=True
+                    )
+
                 self._enqueue(item, due=float(self._c_offline_until))
                 return
+             
+                
             iface = self.iface_c
         else:
             return

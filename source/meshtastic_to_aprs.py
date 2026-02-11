@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-meshtastic_to_aprs.py (v6.2.3)
+meshtastic_to_aprs.py (v6.2.6)
 Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
 - /aprs (bot) -> UDP local -> TX APRS (troceo automático).
@@ -52,6 +52,20 @@ APRS_ALLOWED_SOURCES = {
     for s in os.getenv("APRS_ALLOWED_SOURCES", "").split(",")
     if s.strip()
 }
+
+import builtins, sys, time
+_builtin_print = builtins.print
+
+def _print_with_ts(*args, **kwargs):
+    file = kwargs.pop("file", sys.stdout)
+    end = kwargs.pop("end", "\n")
+    sep = kwargs.pop("sep", " ")
+    flush = kwargs.pop("flush", True)
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    _builtin_print(f"[{ts}]", *args, sep=sep, end=end, file=file, flush=flush, **kwargs)
+
+builtins.print = _print_with_ts
+
 
 def _aprs_source_allowed(src: str) -> bool:
     """

@@ -110,6 +110,20 @@ from meshtastic_api_adapter import (
 
 from tcpinterface_persistent import TCPInterfacePool
 
+import builtins, sys, time
+_builtin_print = builtins.print
+
+def _print_with_ts(*args, **kwargs):
+    file = kwargs.pop("file", sys.stdout)
+    end = kwargs.pop("end", "\n")
+    sep = kwargs.pop("sep", " ")
+    flush = kwargs.pop("flush", True)
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    _builtin_print(f"[{ts}]", *args, sep=sep, end=end, file=file, flush=flush, **kwargs)
+
+builtins.print = _print_with_ts
+
+
 # --- Compat shim para Meshtastic TCPInterface (host -> hostname) ---
 try:
     import meshtastic.tcp_interface as _tcp_mod
@@ -386,35 +400,68 @@ def _bbs_make_shortcode(url: str) -> str:
     h = hashlib.sha1((url or "").encode("utf-8", errors="ignore")).hexdigest()
     return h[:12]
 
+
 def _bbs_init_shortlinks(conn: sqlite3.Connection) -> None:
     """
-    Tabla auxiliar para acortar enlaces (solo si decides usar /bbs link).
+    SOLO LECTURA.
+    En el bot NO se crea ni se modifica la tabla de shortlinks.
+    La tabla la crea y mantiene el ingestor (o el servidor BBS).
+    Se deja la función como NO-OP para compatibilidad con el código existente.
     """
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS shortlinks (
-            code TEXT PRIMARY KEY,
-            url  TEXT NOT NULL,
-            ts   INTEGER NOT NULL
-        )
-    """)
-    conn.commit()
+    return
 
-def _bbs_put_shortlink(conn: sqlite3.Connection, url: str) -> str:
-    """
-    Inserta/actualiza shortlink y devuelve code.
-    """
-    code = _bbs_make_shortcode(url)
-    conn.execute(
-        "INSERT OR REPLACE INTO shortlinks(code,url,ts) VALUES(?,?,strftime('%s','now'))",
-        (code, url)
-    )
-    conn.commit()
-    return code
 
 def _bbs_get_shortlink(conn: sqlite3.Connection, code: str) -> str | None:
+    """
+    SOLO LECTURA: resuelve un code -> url usando la tabla shortlinks (si existe).
+    """
+    if not code:
+        return None
+
+    # Si el ingestor no creó la tabla, simplemente no hay resolución.
+    if not _bbs_table_exists(conn, "shortlinks"):
+        return None
+
     cur = conn.execute("SELECT url FROM shortlinks WHERE code=? LIMIT 1", (code,))
     row = cur.fetchone()
     return (row["url"] if row else None)
+
+
+def _bbs_get_code_for_url(conn: sqlite3.Connection, url: str) -> str | None:
+    """
+    SOLO LECTURA: intenta obtener el code existente para una url desde la tabla shortlinks.
+    (Asumiendo que el ingestor la rellena.)
+    """
+    u = (url or "").strip()
+    if not u:
+        return None
+
+    if not _bbs_table_exists(conn, "shortlinks"):
+        return None
+
+    cur = conn.execute("SELECT code FROM shortlinks WHERE url=? LIMIT 1", (u,))
+    row = cur.fetchone()
+    return (row["code"] if row else None)
+
+
+def _bbs_put_shortlink(conn: sqlite3.Connection, url: str) -> str:
+    """
+    COMPAT (SOLO LECTURA):
+    Antes escribía (INSERT/REPLACE). Ahora:
+      - si existe un code en tabla shortlinks para esa url -> lo devuelve
+      - si no existe -> devuelve un code determinístico (sha1[:12]) SIN escribir.
+    """
+    # 1) Preferir el code real creado por el ingestor (si está)
+    existing = _bbs_get_code_for_url(conn, url)
+    if existing:
+        return existing
+
+    # 2) Fallback determinístico (no rompe y no escribe)
+    return _bbs_make_shortcode(url)
+
+
+
+
 
 def _bbs_domain(url: str) -> str:
     try:
@@ -8802,8 +8849,8 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await send_pre(update.effective_message, "Falta el code. Ej: /bbs link ab12cd34ef56")
             return
         with _bbs_db_connect() as conn:
-            _bbs_init_shortlinks(conn)
             url = _bbs_get_shortlink(conn, code)
+
         await send_pre(update.effective_message, (url or "No existe ese code."))
         return
 
@@ -8845,7 +8892,7 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             more = ""
             if url:
                 with _bbs_db_connect() as conn:
-                    _bbs_init_shortlinks(conn)
+                    
                     code = _bbs_put_shortlink(conn, url)
                 dom = _bbs_domain(url)
                 more = f"\nMás: [{dom}] {code}  (ver: /bbs link {code})"
@@ -8933,7 +8980,7 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         
         with _bbs_db_connect() as conn:
-            _bbs_init_shortlinks(conn)
+            
             for r in rows:
                 nid = r.get("id")
                 title = (r.get("title") or "").strip()
