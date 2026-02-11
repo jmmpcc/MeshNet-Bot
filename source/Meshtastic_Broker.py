@@ -545,6 +545,41 @@ def _print_with_ts(*args, **kwargs):
 
 builtins.print = _print_with_ts
 
+# === [FIX 24/7] Anti-duplicado para SEND_TEXT recibido por CTRL =================
+import hashlib
+
+_CTRL_SENDTEXT_DEDUP: dict[str, float] = {}
+
+def _ctrl_sendtext_fingerprint(ch: int, dest: str | None, text: str) -> str:
+    """
+    Huella estable del comando SEND_TEXT (CTRL) para suprimir reintentos idénticos.
+    """
+    base = f"{int(ch)}|{dest or 'broadcast'}|{text}"
+    return hashlib.sha1(base.encode("utf-8", errors="ignore")).hexdigest()
+
+def _ctrl_sendtext_should_suppress(fp: str, now_ts: float, window_sec: int) -> bool:
+    """
+    Devuelve True si ya vimos esa huella dentro de la ventana.
+    Limpia entradas antiguas para evitar crecimiento infinito.
+    """
+    last = _CTRL_SENDTEXT_DEDUP.get(fp)
+    if last is not None and (now_ts - float(last)) <= float(window_sec):
+        return True
+
+    # registra y GC básico
+    _CTRL_SENDTEXT_DEDUP[fp] = float(now_ts)
+
+    # GC: purga entradas fuera de ventana * 2 (margen)
+    try:
+        cutoff = now_ts - float(window_sec) * 2.0
+        dead = [k for k, v in _CTRL_SENDTEXT_DEDUP.items() if float(v) < cutoff]
+        for k in dead:
+            _CTRL_SENDTEXT_DEDUP.pop(k, None)
+    except Exception:
+        pass
+
+    return False
+# ===============================================================================
 
 
 
@@ -1909,7 +1944,6 @@ class _BacklogServer(threading.Thread):
                     conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                     return
         
-
                 text = params.get("text") or ""
                 if not isinstance(text, str) or not text:
                     resp = {"ok": False, "error": "missing text"}
@@ -1927,6 +1961,36 @@ class _BacklogServer(threading.Thread):
                     dest = raw_dest.strip()
 
                 ack_flag = bool(params.get("ack")) and bool(dest)
+
+                # === [FIX 24/7] Suprimir reintentos idénticos por CTRL (típico en respuestas BBS largas) ===
+                try:
+                    dedup_window = int(os.getenv("CTRL_SENDTEXT_DEDUP_SEC", "20"))
+                except Exception:
+                    dedup_window = 20
+
+                try:
+                    dedup_minlen = int(os.getenv("CTRL_SENDTEXT_DEDUP_MINLEN", "200"))
+                except Exception:
+                    dedup_minlen = 200
+
+                # Solo aplicamos a UNICAST largos (DM) para minimizar falsos positivos
+                if dest and isinstance(text, str) and len(text.encode("utf-8", errors="ignore")) >= dedup_minlen:
+                    now_ts = time.time()
+                    fp = _ctrl_sendtext_fingerprint(ch=int(ch), dest=str(dest), text=text)
+                    if _ctrl_sendtext_should_suppress(fp, now_ts, window_sec=dedup_window):
+                        # Respondemos OK para que el cliente deje de reintentar, pero NO encolamos.
+                        try:
+                            _ctrl_log(
+                                "send_text_dedup",
+                                f"[ctrl] SEND_TEXT dedup SUPPRESS ch={int(ch)} dest={dest} len={len(text.encode('utf-8'))}",
+                                interval=5.0
+                            )
+                        except Exception:
+                            pass
+                        resp = {"ok": True, "queued": False, "duplicate_suppressed": True}
+                        conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                        return
+
 
                 # === [LOG] controlar recepción (antes de encolar) ===
                 try:
