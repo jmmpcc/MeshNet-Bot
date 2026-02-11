@@ -87,6 +87,51 @@ BBS_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
 RUNTIME_MESH_HOST = None   # se fija en main()
 RUNTIME_MESH_PORT = 4403   # puerto TCP del nodo Meshtastic
 
+
+
+import hashlib
+import time
+from collections import OrderedDict
+
+class _DedupTTL:
+    def __init__(self, ttl_sec: float = 8.0, max_items: int = 2048):
+        self.ttl = float(max(1.0, ttl_sec))
+        self.max_items = int(max(128, max_items))
+        self._store = OrderedDict()  # key -> ts
+
+    def seen_recent(self, key: str) -> bool:
+        now = time.time()
+
+        # purge por TTL
+        dead = []
+        for k, ts in self._store.items():
+            if (now - ts) > self.ttl:
+                dead.append(k)
+            else:
+                break
+        for k in dead:
+            self._store.pop(k, None)
+
+        if key in self._store:
+            self._store.move_to_end(key)
+            self._store[key] = now
+            return True
+
+        self._store[key] = now
+        self._store.move_to_end(key)
+
+        while len(self._store) > self.max_items:
+            self._store.popitem(last=False)
+
+        return False
+
+CTRL_SEND_DEDUP = _DedupTTL(
+    ttl_sec=float(os.getenv("CTRL_SEND_TEXT_DEDUP_SEC", "8")),
+    max_items=int(os.getenv("CTRL_SEND_TEXT_DEDUP_MAX", "2048"))
+)
+
+
+
 # --- Compat shim para Meshtastic TCPInterface (host -> hostname) + pool único ---
 try:
     import os
@@ -1893,8 +1938,36 @@ class _BacklogServer(threading.Thread):
                 try:
 
                     
-                    SENDQ.offer({"channel": ch, "text": text, "destination": dest, "require_ack": ack_flag, "type": "text"},
-                                coalesce=False)
+                    # === [FIX] Permitir metadatos en SEND_TEXT (no_bridge/origin) para BBS/privado ===
+                    params = req.get("params") or {}
+
+                    no_bridge_flag = bool(params.get("no_bridge", False))
+                    origin = (params.get("origin") or params.get("source") or "").strip().lower() or None
+                    meta = params.get("meta")
+                    if meta is not None and not isinstance(meta, dict):
+                        meta = None
+
+                    payload = {
+                        "channel": ch,
+                        "text": text,
+                        "destination": dest,
+                        "require_ack": ack_flag,
+                        "type": "text",
+                    }
+
+                    # Propaga flags si existen (no rompe nada si no se usan)
+                    if no_bridge_flag:
+                        payload["no_bridge"] = True
+                    if origin:
+                        payload["origin"] = origin
+                    if meta:
+                        payload["meta"] = meta
+
+                    SENDQ.offer(payload, coalesce=False)
+                    resp = {"ok": True, "queued": True, "path": "broker-queue"}
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                    return
+
                     resp = {"ok": True, "queued": True, "path": "broker-queue"}
                 except Exception as e:
                     resp = {"ok": False, "error": f"queue_error: {e}"}

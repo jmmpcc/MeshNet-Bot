@@ -110,28 +110,18 @@ from meshtastic_api_adapter import (
 
 from tcpinterface_persistent import TCPInterfacePool
 
-# --- PRINT con timestamp (idempotente: evita doble prefijo) ---
 import builtins, sys, time
+_builtin_print = builtins.print
 
-if not getattr(builtins, "_meshnet_ts_print_patched", False):
-    builtins._meshnet_ts_print_patched = True
-    _builtin_print = builtins.print
+def _print_with_ts(*args, **kwargs):
+    file = kwargs.pop("file", sys.stdout)
+    end = kwargs.pop("end", "\n")
+    sep = kwargs.pop("sep", " ")
+    flush = kwargs.pop("flush", True)
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    _builtin_print(f"[{ts}]", *args, sep=sep, end=end, file=file, flush=flush, **kwargs)
 
-    def _print_with_ts(*args, **kwargs):
-        """
-        print() global con timestamp, pero aplicado una sola vez.
-        Evita el síntoma: "[ts] [ts] mensaje" si el bloque aparece duplicado en el fichero.
-        """
-        file = kwargs.pop("file", sys.stdout)
-        end = kwargs.pop("end", "\n")
-        sep = kwargs.pop("sep", " ")
-        flush = kwargs.pop("flush", True)
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        _builtin_print(f"[{ts}]", *args, sep=sep, end=end, file=file, flush=flush, **kwargs)
-
-    builtins.print = _print_with_ts
-# -------------------------------------------------------------
-
+builtins.print = _print_with_ts
 
 
 # --- Compat shim para Meshtastic TCPInterface (host -> hostname) ---
@@ -336,7 +326,10 @@ import sqlite3
 from pathlib import Path
 
 BBS_PAGE_SIZE = int(os.getenv("BBS_LIST_PAGE_SIZE", "6"))
-BBS_LAST_MAX = int(os.getenv("BBS_LAST_MAX", "25"))  # límite duro anti-flood para comandos "last"
+
+# Límite duro para /bbs noticias last N (evita peticiones excesivas).
+# Se define a nivel global para evitar NameError por ramas/indentación.
+BBS_LAST_MAX = int(os.getenv("BBS_LAST_MAX", "25"))
 
 
 def _bbs_resolve_db_path() -> Path:
@@ -441,6 +434,95 @@ def _bbs_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
         return set()
 
 
+
+# --------------------------
+# Crypto compatible con bbs_server.py (Fernet + prefijo ENC:)
+# Solo se usa para DESCIFRAR contenido ya guardado por la BBS.
+# --------------------------
+ENC_PREFIX = 'ENC:'
+
+try:
+    from cryptography.fernet import Fernet
+except Exception:  # pragma: no cover
+    Fernet = None  # type: ignore
+
+_BBS_FERNET = None
+
+def _bbs_resolve_key_path() -> Path:
+    """
+    Resuelve la ruta real del fichero de clave Fernet de la BBS.
+
+    - Si BBS_KEY_PATH es absoluta → se respeta.
+    - Si BBS_KEY_PATH es relativa → se ancla a DATA_DIR.
+    - Si apunta a un directorio → se usa <dir>/.bbs_key
+    - Si no está definida → DATA_DIR/bbs/.bbs_key (igual que el broker).
+    """
+    raw = (os.getenv('BBS_KEY_PATH', '') or '').strip()
+    if raw:
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            p = (DATA_DIR / p)
+        p = p.resolve()
+    else:
+        p = (DATA_DIR / 'bbs' / '.bbs_key').resolve()
+
+    if p.exists() and p.is_dir():
+        p = (p / '.bbs_key').resolve()
+    elif str(p).endswith(('/', '\\')):
+        p = (p / '.bbs_key').resolve()
+
+    return p
+
+
+BBS_KEY_PATH = _bbs_resolve_key_path()
+
+def _bbs_get_fernet() -> 'Fernet | None':
+    """Carga (y cachea) Fernet usando la misma clave que bbs_server.py."""
+    global _BBS_FERNET
+    if _BBS_FERNET is not None:
+        return _BBS_FERNET
+    if Fernet is None:
+        return None
+    try:
+        if not BBS_KEY_PATH.exists():
+            # No creamos claves nuevas desde el bot: si no existe, no podemos descifrar.
+            return None
+        key = BBS_KEY_PATH.read_bytes()
+        _BBS_FERNET = Fernet(key)
+        return _BBS_FERNET
+    except Exception:
+        return None
+
+
+def _bbs_dec_text(s: str) -> str:
+    """Descifra strings con prefijo ENC:. Si no puede, devuelve un placeholder."""
+    s = (s or '')
+    if not s.startswith(ENC_PREFIX):
+        return s
+    f = _bbs_get_fernet()
+    if f is None:
+        return '[CONTENIDO CIFRADO]'
+    token = s[len(ENC_PREFIX):]
+    try:
+        return f.decrypt(token.encode('utf-8')).decode('utf-8', errors='replace')
+    except Exception:
+        return '[CONTENIDO CIFRADO NO LEGIBLE]'
+
+
+def _bbs_enc_text(s: str) -> str | None:
+    """
+    Cifra un texto usando Fernet y añade prefijo ENC: (formato de bbs_server.py).
+    Devuelve None si no puede cifrar (p.ej. falta clave).
+    """
+    f = _bbs_get_fernet()
+    if f is None:
+        return None
+    try:
+        token = f.encrypt((s or '').encode('utf-8')).decode('utf-8')
+        return ENC_PREFIX + token
+    except Exception:
+        return None
+
 def bbs_add_boletin_from_telegram(subject: str, body: str, author: str) -> int | None:
     """
     Inserta un boletín en la tabla 'boletines' de la BBS.
@@ -477,8 +559,14 @@ def bbs_add_boletin_from_telegram(subject: str, body: str, author: str) -> int |
 
         ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        # Cuerpo cifrado (coherente con bbs_server.py).
+        enc_body = _bbs_enc_text(body)
+        if enc_body is None:
+            # Si la DB está en modo cifrado y no tenemos clave, no insertamos para no mezclar formatos.
+            return None
+
         fields = [col_author, col_subject, col_body]
-        values = [author, subject, body]
+        values = [author, subject, enc_body]
 
         if col_ts:
             fields.append(col_ts)
@@ -621,9 +709,8 @@ def bbs_list_news_last(tag: str | None, limit: int) -> list[dict]:
     Devuelve las últimas 'limit' noticias (opcionalmente filtradas por tag).
     """
     limit = max(1, int(limit or 1))
-    # límite duro para evitar floods en Telegram (mantiene lo pedido, pero capado)
+    # límite duro para evitar floods en Telegram
     limit = min(limit, max(1, int(BBS_LAST_MAX)))
-
 
     with _bbs_db_connect() as conn:
         if not _bbs_table_exists(conn, "news"):
@@ -659,7 +746,9 @@ def bbs_list_news_last(tag: str | None, limit: int) -> list[dict]:
 
 def bbs_read_news(news_id: int) -> dict | None:
     """
-    Lee una noticia por id.
+    Lee una noticia por id (tabla 'news').
+    Compatible con esquemas donde NO existe la columna 'content'.
+    Además, descifra summary/content si vienen con prefijo ENC: (migración transparente).
     """
     try:
         news_id = int(news_id)
@@ -669,36 +758,77 @@ def bbs_read_news(news_id: int) -> dict | None:
     with _bbs_db_connect() as conn:
         if not _bbs_table_exists(conn, "news"):
             return None
-        cur = conn.execute("""
+
+        cols = _bbs_table_columns(conn, "news")
+
+        # Campos base
+        fields = [
+            "id",
+            "coalesce(title,'')   AS title",
+            "coalesce(source,'')  AS source",
+            "coalesce(tags,'')    AS tags",
+            "coalesce(url,'')     AS url",
+            ("coalesce(summary,'') AS summary" if "summary" in cols else "'' AS summary"),
+            ("coalesce(published_at,'') AS published_at" if "published_at" in cols else "'' AS published_at"),
+            ("coalesce(created_at,'')   AS created_at" if "created_at" in cols else "'' AS created_at"),
+        ]
+
+        # Columna opcional 'content' (no siempre existe)
+        if "content" in cols:
+            fields.insert(6, "coalesce(content,'') AS content")
+        else:
+            fields.insert(6, "'' AS content")
+
+        q = f"""
             SELECT
-                id,
-                coalesce(title,'')   AS title,
-                coalesce(source,'')  AS source,
-                coalesce(tags,'')    AS tags,
-                coalesce(url,'')     AS url,
-                coalesce(summary,'') AS summary,
-                coalesce(content,'') AS content,
-                coalesce(published_at,'') AS published_at,
-                coalesce(created_at,'')   AS created_at
+                {', '.join(fields)}
             FROM news
             WHERE id=?
             LIMIT 1
-        """, (news_id,))
-        row = cur.fetchone()
-        return (dict(row) if row else None)
+        """
+
+        try:
+            row = conn.execute(q, (news_id,)).fetchone()
+        except sqlite3.OperationalError as e:
+            # Robustez 24/7: si el esquema real no tiene 'content' pero el PRAGMA devolvió algo raro,
+            # reintenta sin tocar la columna 'content' (evita: "no such column: content").
+            if "no such column" in str(e).lower() and "content" in str(e).lower():
+                q2 = """
+                    SELECT
+                        id,
+                        coalesce(title,'')   AS title,
+                        coalesce(source,'')  AS source,
+                        coalesce(tags,'')    AS tags,
+                        coalesce(url,'')     AS url,
+                        (coalesce(summary,'') AS summary),
+                        (coalesce(published_at,'') AS published_at),
+                        (coalesce(created_at,'')   AS created_at),
+                        '' AS content
+                    FROM news
+                    WHERE id=?
+                    LIMIT 1
+                """
+                row = conn.execute(q2, (news_id,)).fetchone()
+            else:
+                raise
+
+        if not row:
+            return None
+        d = dict(row)
+
+        # Descifrado transparente (summary/content pueden venir en ENC:)
+        d["summary"] = _bbs_dec_text(d.get("summary") or "")
+        d["content"] = _bbs_dec_text(d.get("content") or "")
+        return d
+
 
 def bbs_list_boletines(tag: str | None, page: int, page_size: int) -> list[dict]:
     """
-    Lista boletines desde la tabla 'boletines' con compatibilidad de esquemas:
+    Lista boletines desde la tabla 'boletines' (schema del motor BBS).
 
-    Esquema A (bbs_server.py):
-      - autor, asunto, cuerpo, timestamp
-
-    Esquema B (si existiera en alguna variante):
-      - author, title, text, created_at, tags, category
-
-    Devuelve dicts normalizados con claves:
-      id, title, author, created_at, text, tags, category
+    Soporta 2 esquemas:
+    - Nuevo (bbs_server.py): id, autor, asunto, cuerpo, timestamp
+    - Antiguo/externo (defensivo): title/author/text/tags/category/created_at
     """
     page = max(1, int(page or 1))
     page_size = max(1, int(page_size or 6))
@@ -709,69 +839,66 @@ def bbs_list_boletines(tag: str | None, page: int, page_size: int) -> list[dict]
             return []
 
         cols = _bbs_table_columns(conn, "boletines")
-        if not cols:
-            return []
 
-        # --- mapping tolerante ---
-        title_col = "title" if "title" in cols else ("asunto" if "asunto" in cols else None)
-        author_col = "author" if "author" in cols else ("autor" if "autor" in cols else None)
-        text_col = "text" if "text" in cols else ("cuerpo" if "cuerpo" in cols else None)
-        created_col = "created_at" if "created_at" in cols else ("timestamp" if "timestamp" in cols else None)
-
-        tags_col = "tags" if "tags" in cols else None
-        cat_col = "category" if "category" in cols else None
-
-        if not (title_col and author_col and text_col):
-            return []
-
-        # --- filtro por tag (si no hay tags/category en DB, cae a buscar en asunto/cuerpo) ---
-        where = ""
-        params: list = []
-        if tag:
-            t = f"%{_bbs_norm_tag(tag)}%"
-            if tags_col or cat_col:
-                conds = []
-                if tags_col:
-                    conds.append(f"lower(coalesce({tags_col},'')) LIKE ?")
-                    params.append(t)
-                if cat_col:
-                    conds.append(f"lower(coalesce({cat_col},'')) LIKE ?")
-                    params.append(t)
-                where = "WHERE " + " OR ".join(conds)
-            else:
-                # compat: DB “clásica” sin tags/category
-                where = f"WHERE lower(coalesce({title_col},'')) LIKE ? OR lower(coalesce({text_col},'')) LIKE ?"
+        # --- seleccionar campos según esquema ---
+        if {"autor", "asunto", "cuerpo"}.issubset(cols):
+            # Esquema BBS
+            sel = [
+                "id",
+                "coalesce(autor,'') AS author",
+                "coalesce(asunto,'') AS title",
+                "coalesce(timestamp,'') AS created_at",
+                "coalesce(cuerpo,'') AS text",
+                "'' AS tags",
+                "'' AS category",
+            ]
+            order_by = "ORDER BY id DESC"
+            where = ""
+            params: list = []
+            # No hay tags en este esquema; si se pide tag, filtramos por asunto/cuerpo como aproximación.
+            if tag:
+                t = f"%{_bbs_norm_tag(tag)}%"
+                where = "WHERE lower(coalesce(asunto,'')) LIKE ? OR lower(coalesce(cuerpo,'')) LIKE ?"
+                params.extend([t, t])
+        else:
+            # Esquema defensivo
+            sel = [
+                "id",
+                "coalesce(title,'')    AS title",
+                "coalesce(author,'')   AS author",
+                "coalesce(tags,'')     AS tags",
+                "coalesce(category,'') AS category",
+                "coalesce(created_at,'') AS created_at",
+                "coalesce(text,'')     AS text",
+            ]
+            order_by = "ORDER BY id DESC"
+            where = ""
+            params = []
+            if tag:
+                where = "WHERE lower(coalesce(tags,'')) LIKE ? OR lower(coalesce(category,'')) LIKE ?"
+                t = f"%{_bbs_norm_tag(tag)}%"
                 params.extend([t, t])
 
-        # --- SELECT normalizado, sin referenciar columnas inexistentes ---
-        sel_tags = f"coalesce({tags_col},'')" if tags_col else "''"
-        sel_cat = f"coalesce({cat_col},'')" if cat_col else "''"
-        sel_created = f"coalesce({created_col},'')" if created_col else "''"
-
         q = f"""
-            SELECT
-                id,
-                coalesce({title_col},'')   AS title,
-                coalesce({author_col},'')  AS author,
-                {sel_tags}                 AS tags,
-                {sel_cat}                  AS category,
-                {sel_created}              AS created_at,
-                coalesce({text_col},'')    AS text
+            SELECT {', '.join(sel)}
             FROM boletines
             {where}
-            ORDER BY id DESC
+            {order_by}
             LIMIT ? OFFSET ?
         """
         params.extend([page_size, off])
         cur = conn.execute(q, tuple(params))
-        return [dict(r) for r in cur.fetchall()]
+        out = [dict(r) for r in cur.fetchall()]
+
+        # Descifrado transparente del cuerpo/texto si viene ENC:
+        for r in out:
+            r["text"] = _bbs_dec_text(r.get("text") or "")
+        return out
 
 def bbs_read_boletin(bid: int) -> dict | None:
     """
-    Lee un boletín por id con compatibilidad de esquemas.
-
-    Devuelve dict normalizado:
-      id, title, author, created_at, text, tags, category
+    Lee un boletín por id (tabla 'boletines'), soportando esquemas.
+    Descifra el cuerpo/texto si viene con prefijo ENC: (migración transparente).
     """
     try:
         bid = int(bid)
@@ -783,47 +910,40 @@ def bbs_read_boletin(bid: int) -> dict | None:
             return None
 
         cols = _bbs_table_columns(conn, "boletines")
-        if not cols:
+
+        if {"autor", "asunto", "cuerpo"}.issubset(cols):
+            q = """
+                SELECT
+                    id,
+                    coalesce(autor,'') AS author,
+                    coalesce(asunto,'') AS title,
+                    coalesce(cuerpo,'') AS text,
+                    coalesce(timestamp,'') AS created_at
+                FROM boletines
+                WHERE id=?
+                LIMIT 1
+            """
+        else:
+            q = """
+                SELECT
+                    id,
+                    coalesce(title,'')    AS title,
+                    coalesce(author,'')   AS author,
+                    coalesce(tags,'')     AS tags,
+                    coalesce(category,'') AS category,
+                    coalesce(created_at,'') AS created_at,
+                    coalesce(text,'')     AS text
+                FROM boletines
+                WHERE id=?
+                LIMIT 1
+            """
+
+        row = conn.execute(q, (bid,)).fetchone()
+        if not row:
             return None
-
-        title_col = "title" if "title" in cols else ("asunto" if "asunto" in cols else None)
-        author_col = "author" if "author" in cols else ("autor" if "autor" in cols else None)
-        text_col = "text" if "text" in cols else ("cuerpo" if "cuerpo" in cols else None)
-        created_col = "created_at" if "created_at" in cols else ("timestamp" if "timestamp" in cols else None)
-
-        tags_col = "tags" if "tags" in cols else None
-        cat_col = "category" if "category" in cols else None
-
-        if not (title_col and author_col and text_col):
-            return None
-
-        sel_tags = f"coalesce({tags_col},'')" if tags_col else "''"
-        sel_cat = f"coalesce({cat_col},'')" if cat_col else "''"
-        sel_created = f"coalesce({created_col},'')" if created_col else "''"
-
-        q = f"""
-            SELECT
-                id,
-                coalesce({title_col},'')   AS title,
-                coalesce({author_col},'')  AS author,
-                {sel_tags}                 AS tags,
-                {sel_cat}                  AS category,
-                {sel_created}              AS created_at,
-                coalesce({text_col},'')    AS text
-            FROM boletines
-            WHERE id=?
-            LIMIT 1
-        """
-        cur = conn.execute(q, (bid,))
-        row = cur.fetchone()
-        return (dict(row) if row else None)
-
-
-# ========= FIN Helpers =======
-
-
-
-# ========= Helpers de ubicación compartidos (DISTANCIA + PROVINCIA/CIUDAD) =========
+        d = dict(row)
+        d["text"] = _bbs_dec_text(d.get("text") or "")
+        return d
 
 def _parse_channel_names_env(raw: str) -> dict[int, str]:
     out: dict[int, str] = {}
@@ -3587,14 +3707,34 @@ def _link_quality(rssi_dbm, snr_db):
     return "🔴", "Mala"
 
 def log(msg: str) -> None:
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] {msg}"
+    """
+    Log robusto a stdout + fichero.
+
+    Reglas anti-duplicados (caso visto en Docker):
+    - Si el mensaje YA empieza por "[YYYY-MM-DD HH:MM:SS]" no añadimos otro.
+    - Si empieza por dos timestamps idénticos, colapsamos a uno.
+    """
+    s = str(msg or "")
+
+    # Colapsa el patrón: "[ts] [ts] ..." -> "[ts] ..."
+    m = re.match(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s+\[\1\]\s+(.*)$", s)
+    if m:
+        s = f"[{m.group(1)}] {m.group(2)}"
+
+    # Si ya está prefijado, no duplicar
+    if re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]", s):
+        line = s
+    else:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] {s}"
+
     print(line, flush=True)
     try:
         with LOG_FILE.open("a", encoding="utf-8", errors="ignore") as f:
             f.write(line + "\n")
     except Exception:
         pass
+
 
 def chunk_text(s: str, limit: int = TELEGRAM_MAX_CHARS) -> List[str]:
     if len(s) <= limit:
@@ -9058,19 +9198,26 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             content = (row.get("content") or "").strip()
             body = summary or content or "(sin resumen/contenido)"
 
-            # opcional: shortlink también en Telegram
-            more = ""
+            extra = ""
+
             if url:
                 with _bbs_db_connect() as conn:
-                    
                     code = _bbs_put_shortlink(conn, url)
+                    resolves = bool(_bbs_get_shortlink(conn, code))  # solo True si hay tabla+fila real
+
                 dom = _bbs_domain(url)
-                more = f"\nMás: [{dom}] {code}  (ver: /bbs link {code})"
+
+                extra = f"\n\nURL: {url}"
+                if code:
+                    if resolves:
+                        extra += f"\nMás: [{dom}] {code}  (ver: /bbs link {code})"
+                    else:
+                        extra += f"\nMás: [{dom}] {code}"
 
             txt = (
                 f"[{row.get('id')}] {row.get('title','')}\n"
-                f"{row.get('source','')}  {row.get('published_at') or row.get('created_at')}\n"
-                f"{body}{more}"
+                f"{row.get('source','')}  {row.get('published_at') or row.get('created_at')}\n\n"
+                f"{body}{extra}"
             )
             for ch in chunk_text(txt):
                 await send_pre(update.effective_message, ch)
@@ -9162,7 +9309,8 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 if url:
                     code = _bbs_put_shortlink(conn, url)
                     dom = _bbs_domain(url)
-                    more = f"  Más: [{dom}] {code}"
+                    resolves = bool(_bbs_get_shortlink(conn, code))
+                    more = f"  Más: [{dom}] {code}" + (f" (ver: /bbs link {code})" if resolves else "")
 
                 out_lines.append(f"[{nid}] {title} ({src}) {dt}{more}")
 
