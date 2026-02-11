@@ -1266,15 +1266,41 @@ class BbsServer:
         Cambio quirúrgico:
         - Mostrar URL en el listado sin saturar tramas LoRa.
         - Se añade un "Más: <url>" recortado (single-line) por cada noticia.
+        - NUEVO: mostrar total de páginas (pág X/Y) en cabecera y mensajes vacíos.
         """
         per = max(1, int(self.list_page_size))
         page = max(1, int(page))
         offset = (page - 1) * per
 
         cur = self._conn.cursor()
-        if tag:
-            tag_n = (tag or "").strip().lower()
-            # match flexible en string de tags
+
+        # ─────────────────────────────────────────────────────────────
+        # [NUEVO] total + total_pages (mismos filtros que el listado)
+        # ─────────────────────────────────────────────────────────────
+        tag_n = (tag or "").strip().lower() if tag else ""
+        if tag_n:
+            total = cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM news
+                WHERE LOWER(tags) LIKE ?
+                """,
+                (f"%{tag_n}%",),
+            ).fetchone()[0]
+        else:
+            total = cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM news
+                """,
+            ).fetchone()[0]
+
+        total_pages = max(1, (int(total) + int(per) - 1) // int(per))
+
+        # ─────────────────────────────────────────────────────────────
+        # Listado paginado (tu lógica actual)
+        # ─────────────────────────────────────────────────────────────
+        if tag_n:
             rows = cur.execute(
                 """
                 SELECT id, title, source, published_at, url, tags
@@ -1297,11 +1323,11 @@ class BbsServer:
             ).fetchall()
 
         if not rows:
-            if tag:
-                return f"NOTICIAS: sin resultados para categoría: {tag} (pág {page})"
-            return f"NOTICIAS: sin noticias (pág {page})"
+            if tag_n:
+                return f"NOTICIAS: sin resultados para categoría: {tag} (pág {page}/{total_pages})"
+            return f"NOTICIAS: sin noticias (pág {page}/{total_pages})"
 
-        hdr = f"NOTICIAS (pág {page})" + (f" — categoría: {tag}" if tag else "")
+        hdr = f"NOTICIAS (pág {page}/{total_pages})" + (f" — categoría: {tag}" if tag_n else "")
         out = [hdr]
 
         # IMPORTANTE: dos líneas por noticia (título + URL) para que el enlace sea visible siempre.
@@ -1318,7 +1344,7 @@ class BbsServer:
                 out.append("Más: (sin enlace)")
 
         out.append("Ver: #BBS NOTICIAS VER <id>")
-        out.append("Más: #BBS NOTICIAS" + (f" CAT {tag} {page + 1}" if tag else f" {page + 1}"))
+        out.append("Más: #BBS NOTICIAS" + (f" CAT {tag} {page + 1}" if tag_n else f" {page + 1}"))
         return "\n".join(out)
 
     # =========================
