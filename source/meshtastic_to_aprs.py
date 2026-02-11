@@ -327,18 +327,6 @@ def _aprs_dbg(msg: str) -> None:
 import builtins, time, sys
 _original_print = builtins.print
 
-def _print_with_ts(*args, **kwargs):
-    file = kwargs.pop("file", sys.stdout)
-    end = kwargs.pop("end", "\n")
-    sep = kwargs.pop("sep", " ")
-    flush = kwargs.pop("flush", True)
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    _original_print(f"[{ts}]", *args, sep=sep, end=end, file=file, flush=flush)
-
-# Reemplazar print global
-builtins.print = _print_with_ts
-
-
 # --- Gate APRS→Mesh: 1=ON (por defecto), 0=OFF ---
 APRS_GATE_ENABLED = int(os.getenv("APRS_GATE_ENABLED", "1"))
 
