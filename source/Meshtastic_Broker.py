@@ -3814,26 +3814,36 @@ class MeshReceiver:
                                         # Responder por DM cuando sea DM o cuando dm_only esté activo
                                         if is_dm or dm_only:
                                             q.offer(
-                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
-                                                "no_bridge": True, "origin": "bbs", "meta": {"bbs": 1}
-                                            },
-                                                coalesce=False
+                                                {
+                                                    "channel": int(dm_ch),
+                                                    "text": c,
+                                                    "destination": str(who_from),
+                                                    "require_ack": False,
+                                                    "type": "text",
+                                                    "no_bridge": True,
+                                                    "origin": "bbs",
+                                                    "meta": {"bbs": 1},
+                                                },
+                                                coalesce=False,
                                             )
                                         else:
                                             q.offer(
-                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
-                                                "no_bridge": True, "origin": "bbs", "meta": {"bbs": 1}
-                                            },
-                                                coalesce=False
+                                                {
+                                                    "channel": int(canal),
+                                                    "text": c,
+                                                    "destination": None,
+                                                    "require_ack": False,
+                                                    "type": "text",
+                                                    "no_bridge": True,
+                                                    "origin": "bbs",
+                                                    "meta": {"bbs": 1},
+                                                },
+                                                coalesce=False,
                                             )
 
                                 # Si era BBS, no continuar con el bloque /aprs (evita interferencias)
                                 raise StopIteration
-                          
-                        
-
-
-                        
+                                           
 
                     except StopIteration:
                         return
@@ -3875,14 +3885,28 @@ class MeshReceiver:
                                 if clean_txt:
                                     q = globals().get("SENDQ")
                                     if q is not None and hasattr(q, "offer"):
+                                        # Reinyecta SOLO el texto limpio al canal Mesh indicado (broadcast) y evita bridge.
                                         q.offer(
-                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
-                                                "no_bridge": True, "origin": "bbs", "meta": {"bbs": 1}
-                                        },
-                                                coalesce=False
+                                            {
+                                                "channel": int(ch_out),
+                                                "text": clean_txt,
+                                                "destination": None,
+                                                "require_ack": False,
+                                                "type": "text",
+                                                "no_bridge": True,
+                                                "origin": "aprs",
+                                                "meta": {"aprs": 1},
+                                            },
+                                            coalesce=False,
                                         )
+
                                         if self.verbose:
-                                            print(f"[dm→mesh] Reinyectado CH{ch_out} len={len(clean_txt.encode('utf-8'))}", flush=True)
+                                            print(
+                                                f"[dm→mesh] Reinyectado CH{ch_out} len={len(clean_txt.encode('utf-8'))}",
+                                                flush=True,
+                                            )
+                   
+                   
                     except StopIteration:
                         pass           
                     except Exception as _e_dm:
