@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Version v6.2.6
+# Version v6.2.6.4
 
 from __future__ import annotations
 """
@@ -520,6 +520,43 @@ HEARTBEAT_SILENT = False       # Si True, no imprime ningún heartbeat
 
 # === [NUEVO] Cooldown broker tras caída de conexión ===
 COOLDOWN_SECS = int(os.getenv("BROKER_COOLDOWN_SECS", "90"))
+
+# === BLOQUEO FORZADO BBS (Bridge / Triple-Bridge) ===
+# Si TRIPLE_BLOCK_BBS_FORCE=1:
+#  - Cualquier tráfico originado por la BBS NO cruzará el bridge.
+#  - Se fuerza no_bridge=True aunque el texto no empiece por '#BBS'.
+#
+# Activar en .env:
+#   TRIPLE_BLOCK_BBS_FORCE=1
+
+def _env_truthy(raw: str) -> bool:
+    v = (raw or "").strip().lower()
+    return v in {"1", "true", "yes", "y", "on", "si", "sí"}
+
+TRIPLE_BLOCK_BBS_FORCE = _env_truthy(os.getenv("TRIPLE_BLOCK_BBS_FORCE", "0"))
+
+def _is_bbs_origin(kwargs: dict) -> bool:
+    """
+    Detecta si el envío proviene del motor BBS.
+    Se basa en flags explícitos añadidos al payload.
+    """
+    try:
+        if not isinstance(kwargs, dict):
+            return False
+
+        origin = (kwargs.get("origin") or "").strip().lower()
+        if origin in {"bbs", "bbs_engine", "bbs_local"}:
+            return True
+
+        meta = kwargs.get("meta")
+        if isinstance(meta, dict) and bool(meta.get("bbs")):
+            return True
+
+    except Exception:
+        return False
+
+    return False
+
 
 # === Nodo B del bridge (usado por /ver_nodos_b y /vecinos_b) ===
 B_HOST = (
@@ -1357,12 +1394,19 @@ def _tasks_send_adapter(
     # Se propaga desde SENDQ como no_bridge=True.
     no_bridge = bool(kwargs.get("no_bridge", False))
 
-    # [NUEVO] Seguridad extra: comandos BBS (#BBS/#bbs) nunca deben cruzar B/C.
+    # Seguridad BBS: bloqueo de tráfico hacia bridge
     try:
+        # 1) Comandos directos '#BBS'
         if (message is not None) and str(message).lstrip().upper().startswith("#BBS"):
             no_bridge = True
+
+        # 2) Respuestas generadas por la BBS (aunque no empiecen por '#BBS')
+        if (not no_bridge) and TRIPLE_BLOCK_BBS_FORCE and _is_bbs_origin(kwargs):
+            no_bridge = True
+
     except Exception:
         pass
+
 
     # Normalización final
     try:
@@ -3680,7 +3724,7 @@ class MeshReceiver:
                                             )
                                             q.offer(
                                                 {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
-                                                "no_bridge": True
+                                                "no_bridge": True, "origin": "bbs", "meta": {"bbs": 1}
                                             },
                                                 coalesce=False
                                             )
@@ -3709,7 +3753,7 @@ class MeshReceiver:
                                             )
                                             q.offer(
                                                 {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
-                                                "no_bridge": True
+                                                "no_bridge": True, "origin": "bbs", "meta": {"bbs": 1}
                                             },
                                                 coalesce=False
                                             )
@@ -3770,15 +3814,15 @@ class MeshReceiver:
                                         # Responder por DM cuando sea DM o cuando dm_only esté activo
                                         if is_dm or dm_only:
                                             q.offer(
-                                                {"channel": int(dm_ch), "text": c, "destination": str(who_from), "require_ack": False, "type": "text",
-                                                "no_bridge": True
+                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
+                                                "no_bridge": True, "origin": "bbs", "meta": {"bbs": 1}
                                             },
                                                 coalesce=False
                                             )
                                         else:
                                             q.offer(
-                                                {"channel": int(canal), "text": c, "destination": None, "require_ack": False, "type": "text",
-                                                "no_bridge": True
+                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
+                                                "no_bridge": True, "origin": "bbs", "meta": {"bbs": 1}
                                             },
                                                 coalesce=False
                                             )
@@ -3832,9 +3876,9 @@ class MeshReceiver:
                                     q = globals().get("SENDQ")
                                     if q is not None and hasattr(q, "offer"):
                                         q.offer(
-                                                {"channel": ch_out, "text": clean_txt, "destination": None, "require_ack": False, "type": "text",
-                                                "no_bridge": True
-                                            },
+                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
+                                                "no_bridge": True, "origin": "bbs", "meta": {"bbs": 1}
+                                        },
                                                 coalesce=False
                                         )
                                         if self.verbose:
