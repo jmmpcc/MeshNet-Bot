@@ -110,18 +110,39 @@ from meshtastic_api_adapter import (
 
 from tcpinterface_persistent import TCPInterfacePool
 
-import builtins, sys, time
+import builtins, sys, time, re
 _builtin_print = builtins.print
 
+_TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]")
+
 def _print_with_ts(*args, **kwargs):
+    """
+    print() con timestamp, pero sin duplicar:
+    - Si el texto ya empieza por "[YYYY-MM-DD HH:MM:SS]" NO añade otro.
+    - Si empieza por "[ts] [ts] ..." lo colapsa a uno.
+    """
     file = kwargs.pop("file", sys.stdout)
     end = kwargs.pop("end", "\n")
     sep = kwargs.pop("sep", " ")
     flush = kwargs.pop("flush", True)
+
+    msg = sep.join("" if a is None else str(a) for a in args)
+
+    # Colapsa patrón: "[ts] [ts] ..." -> "[ts] ..."
+    m = re.match(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s+\[\1\]\s+(.*)$", msg)
+    if m:
+        msg = f"[{m.group(1)}] {m.group(2)}"
+
+    # Si ya viene prefijado, no duplicar
+    if _TS_RE.match(msg):
+        _builtin_print(msg, end=end, file=file, flush=flush)
+        return
+
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    _builtin_print(f"[{ts}]", *args, sep=sep, end=end, file=file, flush=flush, **kwargs)
+    _builtin_print(f"[{ts}] {msg}", end=end, file=file, flush=flush)
 
 builtins.print = _print_with_ts
+
 
 
 # --- Compat shim para Meshtastic TCPInterface (host -> hostname) ---
@@ -3728,7 +3749,7 @@ def log(msg: str) -> None:
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {s}"
 
-    print(line, flush=True)
+    _builtin_print(line, flush=True)
     try:
         with LOG_FILE.open("a", encoding="utf-8", errors="ignore") as f:
             f.write(line + "\n")
