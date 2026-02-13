@@ -540,10 +540,10 @@ class BbsServer:
         Menú principal de la BBS.
 
         Regla de diseño (canal público / multi-BBS):
-            #BBS <BBS_CALLSIGN> <COMANDO> [parámetros]
+            #BBS <BBS_CALLSIGN> <cmd> [parámetros]
 
         Regla de diseño (DM al nodo BBS):
-            #BBS <COMANDO> [parámetros]
+            #BBS <cmd> [parámetros]
         (y para iniciar sesión basta con enviar: "#BBS")
 
         Ejemplos:
@@ -556,62 +556,62 @@ class BbsServer:
             f"BBS {cs}\n"
             "\n"
             "Sintaxis:\n"
-            f"  Canal (multi-BBS): #BBS {cs} <COMANDO>\n"
-            "  DM (al nodo BBS):   #BBS <COMANDO>\n"
-            "  Inicio por DM:      #BBS\n"
+            f" Canal (multi-BBS): #BBS {cs} <cmd>\n"
+            "  DM (al nodo BBS):  #BBS <cmd>\n"
+            "  Incio por DM:      #BBS\n"
             "\n"
             f"MENU: #BBS {cs} MENU  (canal) | #BBS MENU (DM)\n"
             "\n"
             "Boletines (usuarios):\n"
-            f"  Canal: #BBS {cs} NEWS [p] | #BBS {cs} LISTA [p]\n"
+            f" Canal: #BBS {cs} NEWS [p] | #BBS {cs} LISTA [p]\n"
             "  DM:    #BBS NEWS [p] | #BBS LISTA [p]\n"
-            f"  Canal: #BBS {cs} LEER <id> | #BBS {cs} VER <id> | #BBS {cs} CUERPO <id>\n"
+            f" Canal: #BBS {cs} LEER <id> | #BBS {cs} VER <id> | #BBS {cs} CUERPO <id>\n"
             "  DM:    #BBS LEER <id> | #BBS VER <id> | #BBS CUERPO <id>\n"
-            f"  Canal: #BBS {cs} LEIDOS [p]\n"
+            f" Canal: #BBS {cs} LEIDOS [p]\n"
             "  DM:    #BBS LEIDOS [p]\n"
             "\n"
             "Noticias automáticas:\n"
-            f"  Canal: #BBS {cs} NOTICIAS [p]\n"
+            f" Canal: #BBS {cs} NOTICIAS [p]\n"
             "  DM:    #BBS NOTICIAS [p]\n"
-            f"  Canal: #BBS {cs} NOTICIAS CAT\n"
+            f" Canal: #BBS {cs} NOTICIAS CAT\n"
             "  DM:    #BBS NOTICIAS CAT\n"
-            f"  Canal: #BBS {cs} NOTICIAS CAT <categoria> [p]\n"
+            f" Canal: #BBS {cs} NOTICIAS CAT <categoria> [p]\n"
             "  DM:    #BBS NOTICIAS CAT <categoria> [p]\n"
-            f"  Canal: #BBS {cs} NOTICIAS VER <id>\n"
+            f" Canal: #BBS {cs} NOTICIAS VER <id>\n"
             "  DM:    #BBS NOTICIAS VER <id>\n"
             "\n"
             "Publicar:\n"
-            f"  Canal: #BBS {cs} NUEVA\n"
+            f" Canal: #BBS {cs} NUEVA\n"
             "  DM:    #BBS NUEVA\n"
-            f"  Canal: #BBS {cs} ASUNTO <texto>\n"
+            f" Canal: #BBS {cs} ASUNTO <texto>\n"
             "  DM:    #BBS ASUNTO <texto>\n"
-            f"  Canal: #BBS {cs} TEXTO <cuerpo>\n"
+            f" Canal: #BBS {cs} TEXTO <cuerpo>\n"
             "  DM:    #BBS TEXTO <cuerpo>\n"
             "\n"
             "Buscar:\n"
-            f"  Canal: #BBS {cs} BUSCAR <palabra/frase> [p]\n"
+            f" Canal: #BBS {cs} BUSCAR <palabra/frase> [p]\n"
             "  DM:    #BBS BUSCAR <palabra/frase> [p]\n"
             "\n"
             "Privados:\n"
-            f"  Canal: #BBS {cs} MP DEST:Mensaje | #BBS {cs} BANDEJA [p]\n"
+            f" Canal: #BBS {cs} MP DEST:Mensaje | #BBS {cs} BANDEJA [p]\n"
             "  DM:    #BBS MP DEST:Mensaje | #BBS BANDEJA [p]\n"
             "\n"
             "Encuestas:\n"
-            f"  Canal: #BBS {cs} ENCUESTA Pregunta?|Op1|Op2|...\n"
+            f" Canal: #BBS {cs} ENCUESTA Pregunta?|Op1|Op2|...\n"
             "  DM:    #BBS ENCUESTA Pregunta?|Op1|Op2|...\n"
-            f"  Canal: #BBS {cs} ENCUESTAS | #BBS {cs} VOTO <id> <op>\n"
+            f" Canal: #BBS {cs} ENCUESTAS | #BBS {cs} VOTO <id> <op>\n"
             "  DM:    #BBS ENCUESTAS | #BBS VOTO <id> <op>\n"
             "\n"
             "Resultados:\n"
-            f"  Canal: #BBS {cs} RESULT <id>\n"
+            f" Canal: #BBS {cs} RESULT <id>\n"
             "  DM:    #BBS RESULT <id>\n"
             "\n"
             "Estadísticas:\n"
-            f"  Canal: #BBS {cs} ESTADISTICAS\n"
+            f" Canal: #BBS {cs} ESTADISTICAS\n"
             "  DM:    #BBS ESTADISTICAS\n"
             "\n"
             "Salir:\n"
-            f"  Canal: #BBS {cs} SALIR\n"
+            f" Canal: #BBS {cs} SALIR\n"
             "  DM:    #BBS SALIR"
         )
 
@@ -1390,7 +1390,7 @@ class BbsServer:
 
             after = text.strip()[4:].strip()
 
-            # --- NUEVO: soportar "#BBS <BBS_CALLSIGN> <COMANDO> ..." ---
+            # --- NUEVO: soportar "#BBS <BBS_CALLSIGN> <cmd> ..." ---
             # Si el primer token tras #BBS es el callsign de esta BBS, lo retiramos para interpretar el comando.
             # Mantiene compatibilidad con el formato corto "#BBS LOGIN ..." durante la sesión.
             tokens = after.split()
@@ -1412,7 +1412,7 @@ class BbsServer:
                     from_id,
                     (
                         "Para conectarte por canal (multi-BBS), todos los comandos deben ir precedidos por el indicativo de la BBS.\n"
-                        f"Formato: #BBS {self.bbs_callsign} <COMANDO>\n"
+                        f"Formato: #BBS {self.bbs_callsign} <cmd>\n"
                         f"Ejemplo: #BBS {self.bbs_callsign} LOGIN TU_INDICATIVO\n"
                         "\n"
                         "Si puedes abrir DM al nodo BBS, inicia con: #BBS"
@@ -1473,7 +1473,7 @@ class BbsServer:
                 # - formato direccionado: "#BBS <CALLSIGN> <COMANDO...>" → conecta y ejecuta el comando en el mismo mensaje
                 #
                 # Compatibilidad:
-                # En DM permitimos "#BBS <COMANDO>" sin necesidad de "#BBS <CALLSIGN>" ni "#BBS" previo.
+                # En DM permitimos "#BBS <cmd>" sin necesidad de "#BBS <CALLSIGN>" ni "#BBS" previo.
                 # En canal público, si no viene direccionado, seguimos exigiendo el callsign de la BBS.
                 if (not is_dm) and (not addressed) and (not wants_dm_bootstrap) and (_norm_callsign(after) != self.bbs_callsign):
                     return None

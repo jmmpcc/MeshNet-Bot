@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v6.2.6 py
+Telegram_Bot_Broker_v6.2.6.5 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -682,6 +682,81 @@ def _bbs_domain(url: str) -> str:
         return (p.netloc or "").lower()
     except Exception:
         return ""
+
+
+# --- BBS UX formatting helpers (Telegram) ---
+from datetime import datetime
+from textwrap import fill as _tw_fill
+
+def _bbs_fmt_dt_human(iso: str) -> str:
+    """Convierte ISO/UTC a fecha legible dd/mm/YYYY HH:MM (Europe/Madrid si hay tz)."""
+    s = (iso or "").strip()
+    if not s:
+        return ""
+    try:
+        # tolera "Z"
+        s2 = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s2)
+        # Si trae zona, pásalo a Europe/Madrid para lectura humana
+        try:
+            if getattr(dt, "tzinfo", None) is not None:
+                from zoneinfo import ZoneInfo
+                dt = dt.astimezone(ZoneInfo("Europe/Madrid"))
+        except Exception:
+            pass
+        return dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return s
+
+def _bbs_wrap(text: str, width: int = 52) -> str:
+    """Envuelve texto a width sin romper palabras (pensado para Telegram)."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    # Normaliza espacios
+    t = " ".join(t.split())
+    return _tw_fill(t, width=width)
+
+def _news_extract_fields(text: str) -> dict:
+    """Extrae campos ligeros (CWE, CVSS score/version, impactos) sin depender de formato exacto."""
+    t = (text or "")
+    out = {"cwe": "", "cvss_score": "", "cvss_ver": "", "impacts": []}
+
+    # CWE-xxx
+    m = re.search(r"(CWE-\d{1,5})", t, flags=re.IGNORECASE)
+    if m:
+        out["cwe"] = m.group(1).upper()
+
+    # CVSS: score + versión (si aparece)
+    # Ejemplos comunes: "CVSS 3.1: 4.0", "CVSS v3.1 4.0", "CVSS: 7.5"
+    m = re.search(r"CVSS\s*(?:v)?\s*(?P<ver>\d(?:\.\d)?)?[^0-9]{0,10}(?P<score>\d{1,2}(?:\.\d)?)", t, flags=re.IGNORECASE)
+    if m:
+        out["cvss_score"] = m.group("score") or ""
+        v = (m.group("ver") or "").strip()
+        out["cvss_ver"] = v
+
+    # Impactos (muy simplificado)
+    low = t.lower()
+    impacts = []
+    if any(w in low for w in ["confidencial", "confidentiality"]):
+        impacts.append("Confidencialidad")
+    if any(w in low for w in ["integridad", "integrity"]):
+        impacts.append("Integridad")
+    if any(w in low for w in ["disponibilidad", "availability"]):
+        impacts.append("Disponibilidad")
+    out["impacts"] = impacts
+    return out
+
+def _short_url_from_dom_code(dom: str, code: str, *, with_scheme: bool = False) -> str:
+    """Construye 'is.gd/<code>' o 'https://is.gd/<code>' para Telegram."""
+    d = (dom or "").strip()
+    c = (code or "").strip()
+    if not d or not c:
+        return ""
+    if with_scheme:
+        return f"https://{d}/{c}"
+    return f"{d}/{c}"
+
 
 def bbs_list_news(tag: str | None, page: int, page_size: int) -> list[dict]:
     """
@@ -9214,33 +9289,91 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await send_pre(update.effective_message, "No existe esa noticia.")
                 return
 
+            title = (row.get("title") or "").strip()
+            source = (row.get("source") or "").strip()
+            dt_raw = (row.get("published_at") or row.get("created_at") or "").strip()
+            dt_h = _bbs_fmt_dt_human(dt_raw) if dt_raw else ""
+
             url = (row.get("url") or "").strip()
             summary = (row.get("summary") or "").strip()
             content = (row.get("content") or "").strip()
-            body = summary or content or "(sin resumen/contenido)"
+            body_raw = summary or content or "(sin resumen/contenido)"
 
-            extra = ""
+            # Limpieza ligera para evitar ruido en la vista
+            body_clean_lines = []
+            for ln in body_raw.splitlines():
+                lns = ln.strip()
+                if not lns:
+                    continue
+                # Quita marcadores poco útiles
+                if "txt pendiente de análisis" in lns.lower():
+                    continue
+                # Evita mostrar vector CVSS completo si viene en línea
+                if "/AV:" in lns or "CVSS:" in lns and "/AV:" in lns:
+                    continue
+                body_clean_lines.append(lns)
+            body_clean = "\n".join(body_clean_lines).strip() or body_raw
 
+            fields = _news_extract_fields(body_raw)
+
+            # Shortlink (solo lectura; si no existe en tabla, cae a code determinístico)
+            short_final = ""
             if url:
                 with _bbs_db_connect() as conn:
                     code = _bbs_put_shortlink(conn, url)
-                    resolves = bool(_bbs_get_shortlink(conn, code))  # solo True si hay tabla+fila real
-
+                    resolves = bool(_bbs_get_shortlink(conn, code))  # True si hay fila real
                 dom = _bbs_domain(url)
+                # En VER mostramos enlace clicable con esquema
+                if code and dom:
+                    short_final = _short_url_from_dom_code(dom, code, with_scheme=True) if resolves else url
+                else:
+                    short_final = url
 
-                extra = f"\n\nURL: {url}"
-                if code:
-                    if resolves:
-                        extra += f"\nMás: [{dom}] {code}  (ver: /bbs link {code})"
-                    else:
-                        extra += f"\nMás: [{dom}] {code}"
+            # Montaje de salida "bonita"
+            out = []
+            out.append(f"📄 [{row.get('id')}] {title}".strip())
+            if source:
+                out.append(f"📍 {source}")
+            if dt_h:
+                out.append(f"🗓 {dt_h}")
+            elif dt_raw:
+                out.append(f"🗓 {dt_raw}")
 
-            txt = (
-                f"[{row.get('id')}] {row.get('title','')}\n"
-                f"{row.get('source','')}  {row.get('published_at') or row.get('created_at')}\n\n"
-                f"{body}{extra}"
-            )
-            for ch in chunk_text(txt):
+            # Bloque CVE (si se puede inferir)
+            cwe = fields.get("cwe") or ""
+            cvss_score = fields.get("cvss_score") or ""
+            cvss_ver = fields.get("cvss_ver") or ""
+
+            if cwe or cvss_score:
+                out.append("")
+                if cwe:
+                    out.append(f"🔎 Tipo: {cwe}")
+                if cvss_score:
+                    ver_txt = f" (CVSS {cvss_ver})" if cvss_ver else " (CVSS)"
+                    out.append(f"⚠ Gravedad: {cvss_score}{ver_txt}")
+
+            out.append("")
+            out.append("──────────────────")
+            out.append("")
+            out.append("Descripción:")
+            out.append(_bbs_wrap(body_clean, width=52) or "(sin descripción)")
+
+            # Impactos (si aparecen)
+            impacts = fields.get("impacts") or []
+            if impacts:
+                out.append("")
+                out.append("Impacto:")
+                for it in impacts:
+                    out.append(f"• {it}")
+
+            if short_final:
+                out.append("")
+                out.append("──────────────────")
+                out.append("")
+                out.append(f"🔗 {short_final}")
+
+            txt2 = "\n".join(out).strip()
+            for ch in chunk_text(txt2):
                 await send_pre(update.effective_message, ch)
             return
 
@@ -9312,28 +9445,39 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Encabezado correcto según modo
         if last_n is not None:
-            out_lines = [f"NOTICIAS (últimas {last_n})" + (f"  cat={tag}" if tag else "")]
+            out_lines = [f"📰 NOTICIAS — Últimas {last_n}" + (f"  cat={tag}" if tag else ""), ""]
         else:
-            out_lines = [f"NOTICIAS  (página {page})" + (f"  cat={tag}" if tag else "")]
+            out_lines = [f"📰 NOTICIAS — Página {page}" + (f"  cat={tag}" if tag else ""), ""]
 
         
         with _bbs_db_connect() as conn:
-            
+
             for r in rows:
                 nid = r.get("id")
-                title = (r.get("title") or "").strip()
-                src = (r.get("source") or "").strip()
-                dt = (r.get("published_at") or r.get("created_at") or "").strip()
+                title = (r.get("title") or "").strip() or "(sin título)"
+                src = (r.get("source") or "").strip() or "-"
+                dt_raw = (r.get("published_at") or r.get("created_at") or "").strip()
+                dt_h = _bbs_fmt_dt_human(dt_raw) if dt_raw else ""
                 url = (r.get("url") or "").strip()
 
-                more = ""
+                short_line = ""
                 if url:
                     code = _bbs_put_shortlink(conn, url)
                     dom = _bbs_domain(url)
-                    resolves = bool(_bbs_get_shortlink(conn, code))
-                    more = f"  Más: [{dom}] {code}" + (f" (ver: /bbs link {code})" if resolves else "")
+                    if code and dom:
+                        short_line = _short_url_from_dom_code(dom, code, with_scheme=False)
 
-                out_lines.append(f"[{nid}] {title} ({src}) {dt}{more}")
+                # Formato limpio, legible en Telegram
+                out_lines.append(f"[{nid}] {title}")
+                out_lines.append(f"📍 {src}")
+                if dt_h:
+                    out_lines.append(f"🗓 {dt_h}")
+                elif dt_raw:
+                    out_lines.append(f"🗓 {dt_raw}")
+                if short_line:
+                    out_lines.append(f"🔗 {short_line}")
+
+                out_lines.append("")
 
         out_lines.append("Ver: /bbs noticias ver <id>")
         txt = "\n".join(out_lines)
