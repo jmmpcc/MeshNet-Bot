@@ -9374,7 +9374,8 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
             txt2 = "\n".join(out).strip()
             for ch in chunk_text(txt2):
-                await send_pre(update.effective_message, ch)
+                await update.effective_message.reply_text(ch, disable_web_page_preview=True)
+
             return
 
         # modo "últimas": NO romper paginación existente con "cat <tag> <page>"
@@ -9440,7 +9441,9 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
         if not rows:
-            await send_pre(update.effective_message, "No hay noticias para ese filtro.")
+            
+            await update.effective_message.reply_text("No hay noticias para ese filtro.", disable_web_page_preview=True)
+
             return
 
         # Encabezado correcto según modo
