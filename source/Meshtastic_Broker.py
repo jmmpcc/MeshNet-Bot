@@ -1041,11 +1041,8 @@ COOLDOWN_SECS = int(os.getenv("BROKER_COOLDOWN_SECS", "90"))
 # Activar en .env:
 #   TRIPLE_BLOCK_BBS_FORCE=1
 
-def _env_truthy(raw: str) -> bool:
-    v = (raw or "").strip().lower()
-    return v in {"1", "true", "yes", "y", "on", "si", "sí"}
+TRIPLE_BLOCK_BBS_FORCE = _env_truthy("TRIPLE_BLOCK_BBS_FORCE", "0")
 
-TRIPLE_BLOCK_BBS_FORCE = _env_truthy(os.getenv("TRIPLE_BLOCK_BBS_FORCE", "0"))
 
 def _is_bbs_origin(kwargs: dict) -> bool:
     """
