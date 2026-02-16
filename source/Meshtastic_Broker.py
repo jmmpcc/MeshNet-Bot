@@ -58,6 +58,518 @@ from bridge_in_broker import (
     bridge_mirror_outgoing_from_broker,   # ← NUEVO
 )
 
+# === [NUEVO] MeshCore embebido en broker (opcional, 24/7) =========================
+import asyncio
+import hashlib
+_MESHCORE_AVAILABLE = False
+_MESHCORE_IMPORT_ERROR = None
+try:
+    from meshcore import MeshCore as _MeshCore  # type: ignore
+    from meshcore import EventType as _MCEventType  # type: ignore
+    _MESHCORE_AVAILABLE = True
+except Exception as _e_mc:
+    _MESHCORE_AVAILABLE = False
+    _MESHCORE_IMPORT_ERROR = f"{type(_e_mc).__name__}: {_e_mc}"
+
+MESHCORE_ENGINE = None  # instancia global (si se habilita)
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    v = (os.getenv(name, default) or default).strip().lower()
+    return v in {"1", "true", "on", "si", "sí", "y", "yes"}
+
+def _mc_parse_ch_map() -> dict[int, dict]:
+    """
+    Mapa Meshtastic CH -> destino MeshCore.
+
+    Prioridad:
+      1) MESHCORE_CHANNEL_MAP (texto, recomendado):
+         - Contacto: "0:AB12CD34:PUBLIC,2:EE99AA00:ZGZ"
+         - Canal MeshCore: "0:chan:0:PUBLIC,2:chan:1:ZGZ"
+           (forma: <ch_meshtastic>:chan:<channel_idx_meshcore>[:tag])
+
+         TAG es opcional. Si no hay TAG:
+           - se usa el nombre del canal si existe, o
+           - CHx como fallback.
+
+      2) MESHCORE_CH2CONTACT (compat simple): "0:AB12CD34,2:EE99AA00"
+      3) MESHCORE_MAP_CH_TO_CONTACT (JSON):
+         {"0":"AB12CD34","2":{"contact":"EE99AA00","tag":"ZGZ"}}
+
+    Devuelve:
+      { ch: {"kind":"contact","contact":"<prefix>","tag":"<tag opcional>"} }
+      { ch: {"kind":"chan","channel_idx":<int>,"tag":"<tag opcional>"} }
+    """
+    out: dict[int, dict] = {}
+
+    def _add_contact(ch: int, contact: str, tag: str | None = None):
+        c = (contact or "").strip()
+        if not c:
+            return
+        out[int(ch)] = {"kind": "contact", "contact": c, "tag": (tag or "").strip() or None}
+
+    def _add_chan(ch: int, chan_idx: int, tag: str | None = None):
+        try:
+            ci = int(chan_idx)
+        except Exception:
+            return
+        out[int(ch)] = {"kind": "chan", "channel_idx": int(ci), "tag": (tag or "").strip() or None}
+
+    raw = (os.getenv("MESHCORE_CHANNEL_MAP") or "").strip()
+    if raw:
+        for part in raw.split(","):
+            p = (part or "").strip()
+            if not p:
+                continue
+            # formatos soportados:
+            #   ch:contact
+            #   ch:contact:tag
+            #   ch:chan:idx
+            #   ch:chan:idx:tag
+            toks = [t.strip() for t in p.split(":")]
+            if len(toks) < 2:
+                continue
+            try:
+                ch = int(toks[0])
+            except Exception:
+                continue
+
+            mode = (toks[1] or "").strip().lower()
+            if mode in ("chan", "channel"):
+                if len(toks) < 3:
+                    continue
+                try:
+                    idx = int(toks[2])
+                except Exception:
+                    continue
+                tag = toks[3] if len(toks) >= 4 else None
+                _add_chan(ch, idx, tag)
+            else:
+                contact = toks[1]
+                tag = toks[2] if len(toks) >= 3 else None
+                _add_contact(ch, contact, tag)
+
+    if out:
+        return out
+
+    raw2 = (os.getenv("MESHCORE_CH2CONTACT") or "").strip()
+    if raw2:
+        for part in raw2.split(","):
+            p = (part or "").strip()
+            if not p:
+                continue
+            toks = [t.strip() for t in p.split(":")]
+            if len(toks) < 2:
+                continue
+            try:
+                ch = int(toks[0])
+            except Exception:
+                continue
+            _add_contact(ch, toks[1], None)
+
+    rawj = (os.getenv("MESHCORE_MAP_CH_TO_CONTACT") or "").strip()
+    if rawj:
+        try:
+            obj = json.loads(rawj)
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    try:
+                        ch = int(k)
+                    except Exception:
+                        continue
+                    if isinstance(v, str):
+                        _add_contact(ch, v, None)
+                    elif isinstance(v, dict):
+                        _add_contact(ch, str(v.get("contact") or ""), (v.get("tag") or None))
+        except Exception:
+            pass
+
+    return out
+def _mc_parse_contact_to_ch() -> dict[str, int]:
+    """
+    Mapa MeshCore contacto(prefix) -> Meshtastic CH.
+
+    Soporta:
+      - MESHCORE_CONTACT_TO_CH: "ABCDEF:0,112233:2"
+      - MESHCORE_CONTACT_DEFAULT_CH: int (fallback)
+    """
+    out: dict[str, int] = {}
+    raw = (os.getenv("MESHCORE_CONTACT_TO_CH") or "").strip()
+    if raw:
+        for part in raw.split(","):
+            p = (part or "").strip()
+            if not p:
+                continue
+            toks = [t.strip() for t in p.split(":")]
+            if len(toks) < 2:
+                continue
+            pref = toks[0]
+            try:
+                ch = int(toks[1])
+            except Exception:
+                continue
+            if pref:
+                out[pref] = int(ch)
+    return out
+
+def _mc_parse_chanidx_to_ch() -> dict[int, int]:
+    """
+    Mapa MeshCore channel_idx -> Meshtastic CH.
+    - MESHCORE_CHANIDX_TO_CH: "0:0,1:2"
+    """
+    out: dict[int, int] = {}
+    raw = (os.getenv("MESHCORE_CHANIDX_TO_CH") or "").strip()
+    if not raw:
+        return out
+    for part in raw.split(","):
+        p = (part or "").strip()
+        if not p:
+            continue
+        toks = [t.strip() for t in p.split(":")]
+        if len(toks) < 2:
+            continue
+        try:
+            a = int(toks[0]); b = int(toks[1])
+        except Exception:
+            continue
+        out[a] = b
+    return out
+
+
+class MeshCoreEmbeddedBridge:
+    """
+    Pasarela MeshCore embebida en el broker.
+
+    - RX Meshtastic -> TX MeshCore (por mapeo CH->contacto).
+    - RX MeshCore   -> TX Meshtastic (por mapeo contacto->CH o chan_idx->CH).
+
+    Diseñado para 24/7:
+    - Hilo dedicado + asyncio con supervisor de reconexión.
+    - Cola de envío hacia MeshCore para no bloquear el broker.
+    - Dedup simple para evitar eco/loops cuando reinyectamos a Meshtastic.
+    """
+
+    def __init__(self):
+        self.enable = _env_truthy("MESHCORE_ENABLE", "0") and _MESHCORE_AVAILABLE
+        self.mode = (os.getenv("MESHCORE_MODE", "serial") or "serial").strip().lower()
+        self.serial_port = (os.getenv("MESHCORE_SERIAL_PORT") or "").strip() or None
+        self.serial_baud = int((os.getenv("MESHCORE_SERIAL_BAUD", "115200") or "115200").strip() or 115200)
+
+        self.tcp_host = (os.getenv("MESHCORE_TCP_HOST") or "").strip() or None
+        self.tcp_port = int((os.getenv("MESHCORE_TCP_PORT", "4000") or "4000").strip() or 4000)
+
+        self.ble_addr = (os.getenv("MESHCORE_BLE_ADDR") or "").strip() or None
+        self.ble_pin = (os.getenv("MESHCORE_BLE_PIN") or "").strip() or None
+
+        self.default_contact_prefix = (os.getenv("MESHCORE_DEFAULT_CONTACT_PREFIX") or "").strip() or None
+        self.default_contact_ch = int((os.getenv("MESHCORE_CONTACT_DEFAULT_CH", "0") or "0").strip() or 0)
+
+        self.ch_map = _mc_parse_ch_map()  # Meshtastic CH -> MeshCore contact
+        self.contact_to_ch = _mc_parse_contact_to_ch()  # MeshCore contact -> Meshtastic CH
+        self.chanidx_to_ch = _mc_parse_chanidx_to_ch()  # MeshCore channel_idx -> Meshtastic CH
+
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._loop = None
+        self._tx_q = None
+        self._mc = None
+
+        # anti-eco: fingerprints de mensajes que hemos inyectado a Meshtastic
+        self._inject_lock = threading.Lock()
+        self._inject_recent: dict[str, float] = {}
+        self._inject_ttl = float((os.getenv("MESHCORE_INJECT_DEDUP_SEC", "12") or "12").strip() or 12.0)
+
+        # métricas básicas
+        self._last_ok = 0.0
+        self._last_err = ""
+        self._connected = False
+
+    def status(self) -> dict:
+        return {
+            "enabled": bool(self.enable),
+            "available": bool(_MESHCORE_AVAILABLE),
+            "import_error": _MESHCORE_IMPORT_ERROR if not _MESHCORE_AVAILABLE else None,
+            "mode": self.mode,
+            "connected": bool(self._connected),
+            "last_ok": int(self._last_ok) if self._last_ok else None,
+            "last_err": self._last_err or None,
+            "ch_map": self.ch_map,
+            "default_contact_prefix": self.default_contact_prefix,
+            "default_contact_ch": self.default_contact_ch,
+        }
+
+    def start(self) -> None:
+        if not self.enable:
+            if _env_truthy("MESHCORE_ENABLE", "0") and not _MESHCORE_AVAILABLE:
+                print(f"[meshcore] ⚠️ MESHCORE_ENABLE=1 pero falta dependencia: {_MESHCORE_IMPORT_ERROR}", flush=True)
+            return
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._runner, name="meshcore-embedded", daemon=True)
+        self._thread.start()
+        print(f"[meshcore] embebido habilitado mode={self.mode}", flush=True)
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            loop = self._loop
+            if loop and loop.is_running():
+                loop.call_soon_threadsafe(lambda: None)
+        except Exception:
+            pass
+        th = self._thread
+        if th and th.is_alive():
+            try:
+                th.join(timeout=2.0)
+            except Exception:
+                pass
+
+    def _runner(self) -> None:
+        try:
+            asyncio.run(self._supervisor())
+        except Exception as e:
+            self._last_err = f"{type(e).__name__}: {e}"
+            print(f"[meshcore] runner fatal: {self._last_err}", flush=True)
+
+    async def _supervisor(self) -> None:
+        backoff = [2, 5, 10, 20, 40, 60, 120]
+        attempt = 0
+        while not self._stop.is_set():
+            try:
+                await self._amain_once()
+                attempt = 0
+            except Exception as e:
+                self._connected = False
+                self._last_err = f"{type(e).__name__}: {e}"
+                delay = backoff[min(attempt, len(backoff) - 1)]
+                attempt += 1
+                print(f"[meshcore] supervisor: {self._last_err} (reintento en {delay}s)", flush=True)
+                for _ in range(int(delay * 10)):
+                    if self._stop.is_set():
+                        return
+                    await asyncio.sleep(0.1)
+
+    async def _connect(self):
+        if self.mode == "tcp":
+            if not self.tcp_host:
+                raise RuntimeError("MESHCORE_TCP_HOST vacío")
+            return await _MeshCore.create_tcp(self.tcp_host, int(self.tcp_port), auto_reconnect=True)  # type: ignore[attr-defined]
+        if self.mode == "ble":
+            if not self.ble_addr:
+                raise RuntimeError("MESHCORE_BLE_ADDR vacío")
+            if self.ble_pin:
+                return await _MeshCore.create_ble(self.ble_addr, pin=str(self.ble_pin))  # type: ignore[attr-defined]
+            return await _MeshCore.create_ble(self.ble_addr)  # type: ignore[attr-defined]
+        # serial
+        if not self.serial_port:
+            raise RuntimeError("MESHCORE_SERIAL_PORT vacío")
+        return await _MeshCore.create_serial(self.serial_port, int(self.serial_baud), debug=False)  # type: ignore[attr-defined]
+
+    async def _amain_once(self) -> None:
+        import asyncio as _aio
+        self._loop = _aio.get_running_loop()
+        self._tx_q = _aio.Queue()
+        self._mc = await self._connect()
+        self._connected = True
+        self._last_ok = time.time()
+        self._last_err = ""
+
+        mc = self._mc
+
+        async def _on_msg(event):
+            try:
+                et = getattr(event, "type", None)
+                data = dict(getattr(event, "payload", None) or {})
+                kind = "contact"
+                chan_idx = None
+                if et == _MCEventType.CHANNEL_MSG_RECV:  # type: ignore[union-attr]
+                    kind = "chan"
+                    try:
+                        chan_idx = int(data.get("channel_idx"))
+                    except Exception:
+                        chan_idx = None
+
+                text_msg = str(data.get("text") or "").strip()
+                if not text_msg:
+                    return
+
+                # Decide canal Meshtastic destino
+                ch_out = None
+                if kind == "chan" and chan_idx is not None:
+                    ch_out = self.chanidx_to_ch.get(int(chan_idx))
+                if ch_out is None:
+                    pref = str(data.get("pubkey_prefix") or "").strip()
+                    ch_out = self.contact_to_ch.get(pref)
+                if ch_out is None:
+                    ch_out = int(self.default_contact_ch)
+
+                # Prefijo corto para identificar origen MeshCore
+                pref = str(data.get("pubkey_prefix") or "").strip()
+                head = f"[MC:{pref}]" if pref else "[MC]"
+                out_txt = f"{head} {text_msg}"
+
+                # Inyectar a Meshtastic vía cola del broker (SENDQ)
+                q = globals().get("SENDQ")
+                if q is not None and hasattr(q, "offer"):
+                    self._remember_injected(int(ch_out), out_txt)
+                    q.offer(
+                        {
+                            "channel": int(ch_out),
+                            "text": out_txt,
+                            "destination": None,
+                            "require_ack": False,
+                            "type": "text",
+                            "no_bridge": True,
+                            "origin": "meshcore",
+                            "meta": {"meshcore": 1, "pubkey_prefix": pref, "kind": kind, "channel_idx": chan_idx},
+                        },
+                        coalesce=False,
+                    )
+                    self._last_ok = time.time()
+            except Exception as e:
+                self._last_err = f"{type(e).__name__}: {e}"
+                # No spamear; dejamos el último error en status.
+
+        try:
+            mc.subscribe(_MCEventType.CONTACT_MSG_RECV, _on_msg)  # type: ignore[union-attr]
+            mc.subscribe(_MCEventType.CHANNEL_MSG_RECV, _on_msg)  # type: ignore[union-attr]
+        except Exception as e:
+            self._last_err = f"subscribe: {type(e).__name__}: {e}"
+            print(f"[meshcore] {self._last_err}", flush=True)
+
+        # bucle TX
+        while not self._stop.is_set():
+            try:
+                dst, msg = await _aio.wait_for(self._tx_q.get(), timeout=0.5)
+            except _aio.TimeoutError:
+                continue
+
+            try:
+                # dst puede ser prefix (str) o {"kind":"chan","channel_idx":int}
+                if isinstance(dst, dict) and str(dst.get("kind") or "").lower() in ("chan", "channel"):
+                    chan_idx = int(dst.get("channel_idx"))
+                    await mc.commands.send_chan_msg(int(chan_idx), msg)  # type: ignore[union-attr]
+                else:
+                    send_dst = dst
+                    if isinstance(send_dst, str):
+                        try:
+                            c = mc.get_contact_by_key_prefix(send_dst)  # type: ignore[union-attr]
+                            if c:
+                                send_dst = c
+                        except Exception:
+                            pass
+                    await mc.commands.send_msg(send_dst, msg)  # type: ignore[union-attr]
+                self._last_ok = time.time()
+            except Exception as e:
+                self._last_err = f"tx: {type(e).__name__}: {e}"
+
+        try:
+            await mc.disconnect()  # type: ignore[union-attr]
+        except Exception:
+            pass
+        self._connected = False
+
+    def enqueue_send_contact(self, contact_prefix: str, text: str) -> None:
+        if not self.enable or not self._loop or not self._tx_q:
+            return
+        msg = (text or "").strip()
+        if not msg:
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._tx_q.put_nowait, (str(contact_prefix), msg))
+        except Exception:
+            pass
+
+    def enqueue_send_channel(self, channel_idx: int, text: str) -> None:
+        if not self.enable or not self._loop or not self._tx_q:
+            return
+        msg = (text or "").strip()
+        if not msg:
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._tx_q.put_nowait, ({"kind": "chan", "channel_idx": int(channel_idx)}, msg))
+        except Exception:
+            pass
+
+    def _fingerprint(self, ch: int, text: str) -> str:
+        return f"{int(ch)}|{hashlib.sha1(text.encode('utf-8', errors='ignore')).hexdigest()}"
+
+    def _remember_injected(self, ch: int, text: str) -> None:
+        fp = self._fingerprint(ch, text)
+        now = time.time()
+        with self._inject_lock:
+            self._inject_recent[fp] = now
+            # purge opportunista
+            for k, ts in list(self._inject_recent.items()):
+                if now - ts > self._inject_ttl:
+                    self._inject_recent.pop(k, None)
+
+    def was_recently_injected(self, ch: int, text: str) -> bool:
+        fp = self._fingerprint(ch, text)
+        now = time.time()
+        with self._inject_lock:
+            ts = self._inject_recent.get(fp)
+            return bool(ts) and (now - ts <= self._inject_ttl)
+
+    def forward_from_meshtastic(self, *, ch: int, text: str, from_id: str, from_alias: str | None, channel_name: str | None, hop_real: int | None) -> None:
+        """
+        Llamar desde MeshReceiver._on_rx para reenviar mensajes Meshtastic -> MeshCore.
+
+        Soporta ruteo por:
+          - contacto (pubkey_prefix)
+          - canal MeshCore (channel_idx) vía MESHCORE_CHANNEL_MAP con 'chan'
+        """
+        if not self.enable:
+            return
+        msg = (text or "").strip()
+        if not msg:
+            return
+
+        # Evitar bucles: si este texto lo acabamos de inyectar desde MeshCore, no lo reenvíes.
+        if self.was_recently_injected(int(ch), msg):
+            return
+
+        # filtros: BBS y comandos /aprs (no deben salir a MeshCore)
+        up = msg.upper()
+        if up.startswith("#BBS"):
+            return
+        if msg.lstrip().lower().startswith("/aprs"):
+            return
+
+        mapping = self.ch_map.get(int(ch)) or {}
+        kind = (mapping.get("kind") or "contact").strip().lower()
+        tag = mapping.get("tag")
+
+        # Prefijo corto: tag -> nombre canal -> CHx
+        if tag:
+            prefix = f"[{tag}]"
+        elif channel_name:
+            prefix = f"[{channel_name}]"
+        else:
+            prefix = f"[CH{int(ch)}]"
+
+        sender = (from_alias or "").strip() or str(from_id)
+        hops = f" h{int(hop_real)}" if isinstance(hop_real, int) and hop_real >= 0 else ""
+        payload = f"{prefix} {sender}{hops}: {msg}"
+
+        if kind in ("chan", "channel"):
+            try:
+                chan_idx = int(mapping.get("channel_idx"))
+            except Exception:
+                chan_idx = None
+            if chan_idx is None:
+                return
+            self.enqueue_send_channel(int(chan_idx), payload)
+            return
+
+        # default: contacto (pubkey_prefix)
+        contact_prefix = mapping.get("contact") or self.default_contact_prefix
+        if not contact_prefix:
+            return  # sin destino
+        self.enqueue_send_contact(str(contact_prefix), payload)
+# ================================================================================
+
+
 
 # Directorio base único (igual que en el bot)
 DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "/app/bot_data")).resolve()
@@ -2093,6 +2605,15 @@ class _BacklogServer(threading.Thread):
                 except Exception as e:
                     resp = {"ok": False, "error": f"bridge_status_failed: {type(e).__name__}: {e}"}
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); 
+                return            # --- NUEVO: estado MeshCore embebido ---
+            elif cmd == "MESHCORE_STATUS":
+                try:
+                    mc = globals().get("MESHCORE_ENGINE")
+                    st = mc.status() if mc else {"enabled": False, "available": bool(_MESHCORE_AVAILABLE)}
+                    resp = {"ok": True, **st}
+                except Exception as e:
+                    resp = {"ok": False, "error": f"meshcore_status_failed: {type(e).__name__}: {e}"}
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"));
                 return
 
             # --- NUEVO: envío de texto vía lado B del bridge ---
@@ -3850,6 +4371,32 @@ class MeshReceiver:
                     except Exception as _e_bbs:
                         if self.verbose:
                             print(f"⚠️ bbs: {_e_bbs}", flush=True)
+                    # === [NUEVO] MeshCore embebido: reenviar TEXT_MESSAGE_APP Meshtastic -> MeshCore ===
+                    try:
+                        mc = globals().get("MESHCORE_ENGINE")
+                        if mc and str(portnum) == "TEXT_MESSAGE_APP":
+                            # hops reales (si están disponibles)
+                            hop_real = None
+                            try:
+                                hs = pkt.get("hop_start")
+                                hl = pkt.get("hop_limit")
+                                if isinstance(hs, (int, float)) and isinstance(hl, (int, float)):
+                                    hop_real = int(hs) - int(hl)
+                            except Exception:
+                                hop_real = None
+
+                            mc.forward_from_meshtastic(
+                                ch=int(canal),
+                                text=str(text or ""),
+                                from_id=str(who_from),
+                                from_alias=(from_alias or None),
+                                channel_name=(channel_name or None),
+                                hop_real=hop_real,
+                            )
+                    except Exception as _e_mc_fw:
+                        if self.verbose:
+                            print(f"⚠️ meshcore→fw: {_e_mc_fw}", flush=True)
+
                   
                     # === [NUEVO] DM /aprs canal N ... -> reinyectar SOLO el texto limpio en canal N ===
                     # Motivo: permitir mandar una orden por privado (no visible en canales públicos)
@@ -5051,28 +5598,56 @@ def main():
     pub.subscribe(receiver._on_disconnect, "meshtastic.connection.lost")
     
     # === [NUEVO] Arranque condicional de la pasarela embebida al establecer conexión ===
+    
     def _start_bridge_on_first_connection(interface=None, **kwargs):
+        """
+        Arranca servicios embebidos al primer 'connection.established'.
+
+        Reglas (mutua exclusión):
+          - BRIDGE_ENABLED=1  -> pasarela Meshtastic embebida (bridge_in_broker)
+          - MESHCORE_ENABLE=1 -> pasarela MeshCore embebida (este broker)
+          - Si ambas están activas, BRIDGE_ENABLED tiene prioridad y MeshCore se deshabilita.
+
+        Motivo:
+          - Evitar que el broker intente actuar como 2 "pasarelas" simultáneas.
+          - Mantener arranque idempotente y estable 24/7.
+        """
         try:
             import os
-            enabled = (os.getenv("BRIDGE_ENABLED", "0").strip().lower() in {"1","true","on","si","sí","y","yes"})
-            if not enabled:
-                print("[bridge] embebida desactivada (BRIDGE_ENABLED=0)", flush=True)
-                # ya no necesitamos este hook si está desactivada
-                try: pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
-                except Exception: pass
-                return
 
-            # Usa la interface que entrega el evento; si no viene, pide la actual al gestor
-            iface_for_bridge = interface or iface_mgr.get_iface()
-            if not iface_for_bridge:
-                print("[bridge] ⚠️ sin interface todavía; espero al próximo established…", flush=True)
-                return
+            bridge_enabled = (os.getenv("BRIDGE_ENABLED", "0").strip().lower() in {"1","true","on","si","sí","y","yes"})
+            meshcore_enabled = (os.getenv("MESHCORE_ENABLE", "0").strip().lower() in {"1","true","on","si","sí","y","yes"})
 
-            st = bridge_start_in_broker(iface_for_bridge)
-            print("[bridge] embebida habilitada:", st, flush=True)
+            if bridge_enabled and meshcore_enabled:
+                print("[bridge] ⚠️ BRIDGE_ENABLED=1 y MESHCORE_ENABLE=1: se prioriza BRIDGE_ENABLED (MeshCore OFF).", flush=True)
+                meshcore_enabled = False
 
-        except Exception as e:
-            print(f"[bridge] ⚠️ no se pudo iniciar la pasarela embebida: {type(e).__name__}: {e}", flush=True)
+            # ---- MeshCore embebido ----
+            if meshcore_enabled:
+                try:
+                    global MESHCORE_ENGINE
+                    if MESHCORE_ENGINE is None:
+                        MESHCORE_ENGINE = MeshCoreEmbeddedBridge()
+                    MESHCORE_ENGINE.start()
+                    print("[meshcore] embebido status:", (MESHCORE_ENGINE.status() if MESHCORE_ENGINE else {}), flush=True)
+                except Exception as e:
+                    print(f"[meshcore] ⚠️ no se pudo iniciar embebido: {type(e).__name__}: {e}", flush=True)
+
+            # ---- Bridge Meshtastic embebido (existente) ----
+            if bridge_enabled:
+                try:
+                    iface_for_bridge = interface or iface_mgr.get_iface()
+                    if not iface_for_bridge:
+                        print("[bridge] ⚠️ sin interface todavía; espero al próximo established…", flush=True)
+                        return
+                    st = bridge_start_in_broker(iface_for_bridge)
+                    print("[bridge] embebida habilitada:", st, flush=True)
+                except Exception as e:
+                    print(f"[bridge] ⚠️ no se pudo iniciar la pasarela embebida: {type(e).__name__}: {e}", flush=True)
+            else:
+                if not meshcore_enabled:
+                    print("[bridge] embebida desactivada (BRIDGE_ENABLED=0, MESHCORE_ENABLE=0)", flush=True)
+
         finally:
             # Ejecutarlo solo una vez; si necesitas rearmarla en reconexiones, quita esta desuscripción
             try: pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
@@ -5099,6 +5674,16 @@ def main():
         hb.stop()
         srv.stop()
         iface_mgr.stop()
+        try:
+            bridge_stop_in_broker()
+        except Exception:
+            pass
+        try:
+            mc = globals().get("MESHCORE_ENGINE")
+            if mc:
+                mc.stop()
+        except Exception:
+            pass
 
 
 # === NUEVO: CLI para gestionar tareas programadas desde el broker ===
