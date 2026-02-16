@@ -2316,6 +2316,160 @@ async def task_aprsis_uplink_keepalive():
             # Nunca romper el bucle por el keepalive
             pass
 
+# =========================
+# === Helpers: alias / canal / hops (para APRS-IS push)
+# =========================
+
+def _parse_channel_name_by_index_env() -> dict[int, str]:
+    """
+    Parse robusto de nombres de canal desde .env.
+
+    Formatos admitidos (cualquiera de ellos):
+      - CHANNEL_NAME_BY_INDEX="0:ZAR,1:EMERG,2:HAM"
+      - CHANNEL_NAME_BY_INDEX="0=ZAR;1=EMERG;2=HAM"
+      - CHANNEL_NAME_BY_INDEX="0|ZAR,1|EMERG"
+    Devuelve: {0:"ZAR", 1:"EMERG", ...}
+    """
+    raw = (os.getenv("CHANNEL_NAME_BY_INDEX", "") or "").strip()
+    out: dict[int, str] = {}
+    if not raw:
+        return out
+
+    # Normaliza separadores de pares a coma
+    raw_norm = raw.replace(";", ",").strip()
+    for part in raw_norm.split(","):
+        p = (part or "").strip()
+        if not p:
+            continue
+
+        # separador key/value
+        if ":" in p:
+            k, v = p.split(":", 1)
+        elif "=" in p:
+            k, v = p.split("=", 1)
+        elif "|" in p:
+            k, v = p.split("|", 1)
+        else:
+            continue
+
+        k = (k or "").strip()
+        v = (v or "").strip()
+        if not k or not v:
+            continue
+        try:
+            idx = int(k)
+        except Exception:
+            continue
+        if 0 <= idx <= 15:
+            out[idx] = v
+    return out
+
+
+_CHANNEL_NAME_BY_INDEX = _parse_channel_name_by_index_env()
+
+
+def _evt_first(d: dict, keys: list[str]) -> str:
+    """
+    Busca el primer valor string no vacío en varias “capas” típicas del broker:
+      - root
+      - summary
+      - packet
+      - decoded
+      - payload
+    """
+    if not isinstance(d, dict):
+        return ""
+    layers = [d]
+    for k in ("summary", "packet", "decoded", "payload"):
+        obj = d.get(k)
+        if isinstance(obj, dict):
+            layers.append(obj)
+
+    for layer in layers:
+        for kk in keys:
+            v = layer.get(kk)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return ""
+
+
+def _evt_first_int(d: dict, keys: list[str]) -> int | None:
+    """Idem _evt_first pero para ints."""
+    if not isinstance(d, dict):
+        return None
+    layers = [d]
+    for k in ("summary", "packet", "decoded", "payload"):
+        obj = d.get(k)
+        if isinstance(obj, dict):
+            layers.append(obj)
+
+    for layer in layers:
+        for kk in keys:
+            v = layer.get(kk)
+            if v is None:
+                continue
+            try:
+                return int(v)
+            except Exception:
+                continue
+    return None
+
+
+def _compute_hops_real_from_event(evt: dict) -> int | None:
+    """
+    Hops reales (consistente con el bot):
+      hops_real = max(0, hop_start - hop_limit)
+    """
+    hl = _evt_first_int(evt, ["hop_limit", "hopLimit"])
+    hs = _evt_first_int(evt, ["hop_start", "hopStart"])
+    if hl is None or hs is None:
+        return None
+    try:
+        return max(0, int(hs) - int(hl))
+    except Exception:
+        return None
+
+
+def _short(s: str, n: int) -> str:
+    s = (s or "").strip()
+    if len(s) <= n:
+        return s
+    return s[:n].rstrip()
+
+
+def _build_aprsis_push_prefix(evt: dict, ch: int) -> str:
+    """
+    Prefijo compacto para APRS-IS push (si APRSIS_PUSH_PREFIX=1).
+    Ejemplo:
+      [ch0/ZAR h2 EB2EAS-5]
+    """
+    # alias del emisor (si el broker lo aporta)
+    alias = _evt_first(evt, ["from_alias", "sender", "fromAlias"])
+    alias = _short(alias, 10)
+
+    # nombre de canal: primero en evento, luego por .env
+    ch_name_evt = _evt_first(evt, ["channel_name", "channelName"])
+    ch_name = ch_name_evt or _CHANNEL_NAME_BY_INDEX.get(int(ch), "")
+    ch_name = _short(ch_name, 8)
+
+    # hops reales
+    hops_real = _compute_hops_real_from_event(evt)
+    hops_txt = f"h{hops_real}" if isinstance(hops_real, int) else ""
+
+    # etiqueta canal
+    ch_label = f"ch{ch}"
+    if ch_name:
+        ch_label = f"{ch_label}/{ch_name}"
+
+    parts = [ch_label]
+    if hops_txt:
+        parts.append(hops_txt)
+    if alias:
+        parts.append(alias)
+
+    return "[" + " ".join(parts) + "] "
+
+
 
 async def task_mesh_channels_to_aprsis():
     """
@@ -2486,8 +2640,10 @@ async def task_mesh_channels_to_aprsis():
                 if (now - float(_APRSIS_PUSH_LAST_TS or 0.0)) < float(APRSIS_PUSH_MIN_GAP_S):
                     continue
 
-                prefix = f"[CH{ch}] " if APRSIS_PUSH_PREFIX else ""
+                # Prefijo enriquecido (ch + nombre canal + hops reales + alias) si APRSIS_PUSH_PREFIX=1
+                prefix = _build_aprsis_push_prefix(obj, ch) if APRSIS_PUSH_PREFIX else ""
                 line2 = _aprsis_tnc2_message_line(APRSIS_PUSH_TO, prefix + tnorm)
+
                 if not line2:
                     continue
 
