@@ -2330,7 +2330,13 @@ def _parse_channel_name_by_index_env() -> dict[int, str]:
       - CHANNEL_NAME_BY_INDEX="0|ZAR,1|EMERG"
     Devuelve: {0:"ZAR", 1:"EMERG", ...}
     """
-    raw = (os.getenv("CHANNEL_NAME_BY_INDEX", "") or "").strip()
+    raw = (
+        os.getenv("BROKER_CHANNEL_NAMES", "")
+        or os.getenv("MESH_CHANNEL_NAMES", "")
+        or os.getenv("CHANNEL_NAMES", "")
+        or os.getenv("CHANNEL_NAME_BY_INDEX", "")
+    ).strip()
+
     out: dict[int, str] = {}
     if not raw:
         return out
