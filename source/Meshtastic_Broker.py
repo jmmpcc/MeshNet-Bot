@@ -5,6 +5,7 @@
 from __future__ import annotations
 """
 Meshtastic_Broker_v6.2.6.py Incluye servidor BBS Meshtastic server corregiso por DM
+Modo añadido: Meshcore embebido
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 

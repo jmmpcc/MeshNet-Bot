@@ -2022,16 +2022,27 @@ class TripleBridge:
         payload = f"{prefix} {msg}"
 
         # Log de encolado (recorta para no saturar)
+        # - Por defecto: throttle (cada 2s) para 24/7.
+        # - Si MESHCORE_LOG_EVERY_TX=1: log por cada mensaje encolado.
         try:
-            last_tx = float(getattr(self, "_mc_diag_last_tx_ts", 0.0) or 0.0)
-            if (now - last_tx) >= 2.0:
-                setattr(self, "_mc_diag_last_tx_ts", now)
+            log_every = (os.getenv("MESHCORE_LOG_EVERY_TX", "0") or "0").strip().lower() in {"1","true","yes","on","si","sí"}
+
+            if log_every:
                 if dst.get("kind") == "chan":
-                    print(f"[meshcore] enqueue -> chan_idx={dst.get('channel_idx')} payload='{payload[:140]}'", flush=True)
+                    print(f"[meshcore] enqueue -> chan_idx={dst.get('channel_idx')} payload='{payload[:200]}'", flush=True)
                 else:
-                    print(f"[meshcore] enqueue -> contact={dst.get('contact_prefix')} payload='{payload[:140]}'", flush=True)
+                    print(f"[meshcore] enqueue -> contact={dst.get('contact_prefix')} payload='{payload[:200]}'", flush=True)
+            else:
+                last_tx = float(getattr(self, "_mc_diag_last_tx_ts", 0.0) or 0.0)
+                if (now - last_tx) >= 2.0:
+                    setattr(self, "_mc_diag_last_tx_ts", now)
+                    if dst.get("kind") == "chan":
+                        print(f"[meshcore] enqueue -> chan_idx={dst.get('channel_idx')} payload='{payload[:140]}'", flush=True)
+                    else:
+                        print(f"[meshcore] enqueue -> contact={dst.get('contact_prefix')} payload='{payload[:140]}'", flush=True)
         except Exception:
             pass
+
 
         # Envío asíncrono
         self._meshcore_client.enqueue_send(dst, payload)
