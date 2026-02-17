@@ -1695,6 +1695,22 @@ class TripleBridge:
         self._start_watchdog()
 
         # MeshCore opcional
+        # --- DIAGNÓSTICO arranque MeshCore (no afecta a RX/TX) ---
+        try:
+            print(
+                "[meshcore] boot "
+                f"enable={self.meshcore_enable} "
+                f"available={_MESHCORE_AVAILABLE} "
+                f"mode={self.meshcore_mode} "
+                f"tcp={self.meshcore_tcp_host}:{self.meshcore_tcp_port} "
+                f"serial={self.meshcore_serial_port}@{self.meshcore_serial_baud} "
+                f"seen={self.meshcore_seen_path}",
+                flush=True,
+            )
+        except Exception:
+            pass
+
+
         if self.meshcore_enable and _MESHCORE_AVAILABLE:
             self._meshcore_client = MeshCoreClient(
                 enable=True,
