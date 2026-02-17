@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import time
+import sys
 import json
 import asyncio
 import threading
@@ -63,7 +64,7 @@ except Exception:
 #  Helpers básicos (mapeos, texto, hash)
 # ============================================================
 
-import builtins, sys, time
+import builtins
 _builtin_print = builtins.print
 
 def _parse_meshcore_contact_to_ch(raw: str | None) -> dict[str, int]:
@@ -700,11 +701,36 @@ class MeshCoreClient:
 
         self._meshcore = mc
 
+        # --- ACTIVAR AUTO FETCH (CRÍTICO) ---
+        # Sin esto, los eventos CONTACT_MSG_RECV / CHANNEL_MSG_RECV
+        # pueden no dispararse aunque estemos suscritos.
+        try:
+            await mc.start_auto_message_fetching()
+            print(f"[{self.log_prefix}] auto_message_fetching ON", flush=True)
+        except Exception as e:
+            print(f"[{self.log_prefix}] start_auto_message_fetching ERROR: {type(e).__name__}: {e}", flush=True)
+
+
         # --- handlers (DEBEN vivir dentro de _amain_once para capturar self/mc) ---
         async def _handle_msg(event):
             try:
                 et = getattr(event, "type", None)
                 data = dict(getattr(event, "payload", None) or {})
+
+                # Diagnóstico (no rompe aunque falten campos)
+                try:
+                    _kind_dbg = "chan" if et == _MCEventType.CHANNEL_MSG_RECV else "contact"  # type: ignore[union-attr]
+                except Exception:
+                    _kind_dbg = "contact"
+
+                print(
+                    f"[meshcore RX] type={et} "
+                    f"kind={_kind_dbg} "
+                    f"channel_idx={data.get('channel_idx')} "
+                    f"pubkey_prefix={data.get('pubkey_prefix')} "
+                    f"text='{str(data.get('text') or '')[:120]}'",
+                    flush=True
+                )
 
                 kind = "contact"
                 channel_idx = None
@@ -727,6 +753,7 @@ class MeshCoreClient:
                     "raw": data,
                 }
                 self.on_message(out)
+
             except Exception as e:
                 print(f"[{self.log_prefix}] msg handler error: {type(e).__name__}: {e}", flush=True)
 
@@ -744,6 +771,27 @@ class MeshCoreClient:
             mc.subscribe(_MCEventType.CONTACT_MSG_RECV, _handle_msg)  # type: ignore[union-attr]
             mc.subscribe(_MCEventType.CHANNEL_MSG_RECV, _handle_msg)  # type: ignore[union-attr]
             mc.subscribe(_MCEventType.ADVERTISEMENT, _handle_adv)      # type: ignore[union-attr]
+            # --- ACK handler (estabiliza sesiones largas) ---
+            async def _handle_ack(event):
+                try:
+                    data = dict(getattr(event, "payload", None) or {})
+                    msg_id = data.get("id") or data.get("msg_id")
+                    status = data.get("status")
+
+                    print(
+                        f"[meshcore ACK] id={msg_id} status={status}",
+                        flush=True
+                    )
+                except Exception:
+                    pass
+
+            try:
+                
+                mc.subscribe(_MCEventType.ACK, _handle_ack)
+            except Exception:
+                pass
+
+
         except Exception as e:
             print(f"[{self.log_prefix}] subscribe error: {type(e).__name__}: {e}", flush=True)
 
@@ -796,6 +844,12 @@ class MeshCoreClient:
 
         # --- desconexión ---
         try:
+            # --- STOP AUTO FETCH ---
+            try:
+                await mc.stop_auto_message_fetching()
+            except Exception:
+                pass
+
             await mc.disconnect()  # type: ignore[union-attr]
         except Exception:
             pass
@@ -1761,7 +1815,7 @@ class TripleBridge:
                 # Persistir cursor si avanzó
                 self._save_hub_cursor(force=False)
 
-                # === [NUEVO] si el fetch viene vacío, avanza ligeramente el cursor para evitar bordes pegajosos ===
+               
 
             except Exception as e:
                 print(f"[triple-bridge] HUB poll error: {type(e).__name__}: {e}", flush=True)
@@ -1914,6 +1968,11 @@ class TripleBridge:
             tagged = f"[MESHCORE {who}] {text}".strip()
 
             # MeshCore -> A (hub)
+            print(
+                f"[meshcore→hub] routed_to_ch={ch} text='{tagged[:120]}'",
+                flush=True
+            )
+
             self._send_text_to_hub(tagged, ch=int(ch))
         except Exception as e:
             print(f"[triple-bridge] meshcore on_message error: {type(e).__name__}: {e}", flush=True)
@@ -2046,10 +2105,7 @@ class TripleBridge:
 
         # Envío asíncrono
         self._meshcore_client.enqueue_send(dst, payload)
-
-
-
-
+        
     # ---------------------- RX handler (B/C y A en tcp-mode) ----------------------
 
     def _on_rx(self, interface=None, packet=None, **kwargs):
