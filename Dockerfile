@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11.8-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -20,12 +20,24 @@ WORKDIR /app
 
 # Instala dependencias por capas (mejor caché)
 # Capa GEO independiente (solo se recompila si cambias este archivo)
+# Instala dependencias por capas (mejor caché)
+ARG INSTALL_GEO=0
+
 COPY requirements/ /app/requirements/
+
+# 1) Base (rápido y estable)
 RUN python -m pip install --no-cache-dir \
     -r /app/requirements/requirements.txt \
-    -r /app/requirements/requirements.geo.txt \
     -r /app/requirements/requirements.base.txt \
     -r /app/requirements/requirements.bot.txt
+
+# 2) GEO (lento, opcional)
+RUN if [ "$INSTALL_GEO" = "1" ]; then \
+      python -m pip install --no-cache-dir -r /app/requirements/requirements.geo.txt ; \
+    else \
+      echo "Skipping GEO requirements (INSTALL_GEO=0)" ; \
+    fi
+
 
 # Código
 COPY source/*.py /app/source/
