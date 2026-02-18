@@ -1493,12 +1493,19 @@ class _NoHeartbeatLogs(logging.Filter):
         "Heartbeat",             # genérico
         "HEARTBEAT_APP",         # nombre de port
         "portnum: HEARTBEAT",    # dumps de paquetes
+        "Reprogramada (daily)",   # ← añadido
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+
+        # Ocultar siempre la reprogramación daily
+        if "Reprogramada (daily)" in msg:
+            return False
+
         if SHOW_HEARTBEATS:
             return True
-        msg = record.getMessage()
+
         return not any(k in msg for k in self.HB_MARKERS)
 
 # === [NUEVO] Guardas anti-10053/10054 en hilos internos de meshtastic ===
@@ -1678,6 +1685,7 @@ def install_heartbeat_log_filter() -> None:
     f = _NoHeartbeatLogs()
     logging.getLogger("meshtastic").addFilter(f)
     logging.getLogger("meshtastic.mesh_interface").addFilter(f)
+    logging.getLogger("broker.tasks").addFilter(f)   # ← importante
     logging.getLogger().addFilter(f)
 
 # === [NUEVO] Modo sin heartbeat: anula el envío del SDK de meshtastic ===
