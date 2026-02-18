@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.6.py Incluye servidor BBS Meshtastic server corregiso por DM
-Modo añadido: Meshcore embebido y modo bridge
+Meshtastic_Broker_v6.2.6.8.py Incluye servidor BBS Meshtastic server corregiso por DM
+Modo añadido: Meshcore embebido
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 
@@ -335,20 +335,45 @@ class MeshCoreEmbeddedBridge:
     async def _supervisor(self) -> None:
         backoff = [2, 5, 10, 20, 40, 60, 120]
         attempt = 0
+        # === [FIX CRÍTICO] Lanzar TX como tarea independiente ===
+        async def _tx_loop():
+            while not self._stop.is_set():
+                try:
+                    dst, msg = await self._tx_q.get()
+                except Exception:
+                    continue
+
+                try:
+                    # LOG TX
+                    print(
+                        f"[meshcore-embedded TX] dst={dst} text='{msg[:120]}'",
+                        flush=True
+                    )
+
+                    if isinstance(dst, dict) and str(dst.get("kind") or "").lower() in ("chan", "channel"):
+                        chan_idx = int(dst.get("channel_idx"))
+                        await mc.commands.send_chan_msg(int(chan_idx), msg)
+                    else:
+                        send_dst = dst
+                        if isinstance(send_dst, str):
+                            try:
+                                c = mc.get_contact_by_key_prefix(send_dst)
+                                if c:
+                                    send_dst = c
+                            except Exception:
+                                pass
+                        await mc.commands.send_msg(send_dst, msg)
+
+                except Exception as e:
+                    print(f"[meshcore-embedded TX ERROR] {type(e).__name__}: {e}", flush=True)
+
+        # Crear la task sin bloquear el loop principal
+        asyncio.create_task(_tx_loop())
+
+        # Mantener vivo el loop principal
         while not self._stop.is_set():
-            try:
-                await self._amain_once()
-                attempt = 0
-            except Exception as e:
-                self._connected = False
-                self._last_err = f"{type(e).__name__}: {e}"
-                delay = backoff[min(attempt, len(backoff) - 1)]
-                attempt += 1
-                print(f"[meshcore] supervisor: {self._last_err} (reintento en {delay}s)", flush=True)
-                for _ in range(int(delay * 10)):
-                    if self._stop.is_set():
-                        return
-                    await asyncio.sleep(0.1)
+            await asyncio.sleep(1)
+
 
     async def _connect(self):
         if self.mode == "tcp":
@@ -368,11 +393,23 @@ class MeshCoreEmbeddedBridge:
 
     async def _amain_once(self) -> None:
         import asyncio as _aio
+
+        # === [FIX 24/7] Activar auto-fetch obligatorio ===
+        try:
+            await self._mc.start_auto_message_fetching()
+            print("[meshcore-embedded] auto_message_fetching ON", flush=True)
+        except Exception as e:
+            print(f"[meshcore-embedded] auto_message_fetching ERROR: {type(e).__name__}: {e}", flush=True)
+
+
         self._loop = _aio.get_running_loop()
         self._tx_q = _aio.Queue()
         self._mc = await self._connect()
         self._connected = True
         self._last_ok = time.time()
+
+        print("[meshcore-embedded] CONNECTED", flush=True)
+
         self._last_err = ""
 
         mc = self._mc
@@ -393,6 +430,20 @@ class MeshCoreEmbeddedBridge:
                 text_msg = str(data.get("text") or "").strip()
                 if not text_msg:
                     return
+
+                # === [LOG RX MeshCore] ===
+                try:
+                    print(
+                        f"[meshcore-embedded RX] "
+                        f"type={et} "
+                        f"kind={kind} "
+                        f"chan_idx={chan_idx} "
+                        f"prefix={data.get('pubkey_prefix')} "
+                        f"text='{text_msg[:120]}'",
+                        flush=True
+                    )
+                except Exception:
+                    pass
 
                 # Decide canal Meshtastic destino
                 ch_out = None
@@ -445,6 +496,17 @@ class MeshCoreEmbeddedBridge:
             except _aio.TimeoutError:
                 continue
 
+            # === [LOG TX MeshCore] ===
+            try:
+                print(
+                    f"[meshcore-embedded TX] "
+                    f"dst={dst} "
+                    f"text='{msg[:120]}'",
+                    flush=True
+                )
+            except Exception:
+                pass
+
             try:
                 # dst puede ser prefix (str) o {"kind":"chan","channel_idx":int}
                 if isinstance(dst, dict) and str(dst.get("kind") or "").lower() in ("chan", "channel"):
@@ -469,6 +531,8 @@ class MeshCoreEmbeddedBridge:
         except Exception:
             pass
         self._connected = False
+        print("[meshcore-embedded] DISCONNECTED", flush=True)
+
 
     def enqueue_send_contact(self, contact_prefix: str, text: str) -> None:
         if not self.enable or not self._loop or not self._tx_q:
