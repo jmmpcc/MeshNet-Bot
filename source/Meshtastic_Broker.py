@@ -531,6 +531,17 @@ class MeshCoreEmbeddedBridge:
                         coalesce=False,
                     )
 
+                    # MeshCore->BOT: emitir también al bus JSONL/backlog para que el bot lo vea
+                    emit_meshcore_rx_to_hub_and_log(
+                        ch=int(ch_out),
+                        text=out_txt,
+                        pubkey_prefix=pref,
+                        kind=kind,
+                        chan_idx=chan_idx,
+                        from_alias=(alias or None),
+                    )
+
+
                     # === [IMPORTANTE] Replicar también a HOME_NODE_ID (nodo A) si se pide.
                     # Motivo: cuando el bot está conectado, quieres ver igualmente los mensajes inyectados
                     # como DM en tu nodo A (HOME).
@@ -2545,6 +2556,86 @@ def append_offline_log(rec: dict):
     except Exception as e:
         _log_ex("append_offline_log failed", e)
 
+def emit_meshcore_rx_to_hub_and_log(
+    *,
+    ch: int,
+    text: str,
+    pubkey_prefix: str = "",
+    kind: str = "contact",
+    chan_idx: int | None = None,
+    from_alias: str | None = None,
+) -> None:
+    """
+    Emite un evento al JsonLineHub (para que el BOT lo vea en vivo)
+    y lo persiste en OFFLINE_LOG (para FETCH_BACKLOG / replay).
+
+    Motivo:
+    - MeshCore->Meshtastic se inyecta por SENDQ (TX interno).
+    - El BOT normalmente "ve" lo que entra por el bus JSONL (hub/backlog).
+    """
+
+    # Canal / nombre de canal
+    try:
+        ch_i = int(ch)
+    except Exception:
+        ch_i = 0
+
+    channel_name = None
+    try:
+        channel_name = CHANNEL_NAME_BY_INDEX.get(int(ch_i))
+    except Exception:
+        channel_name = None
+
+    # 1) Emitir en vivo al HUB (BOT)
+    try:
+        hub = globals().get("BROKER_HUB")
+        if hub is not None and hasattr(hub, "broadcast_line"):
+            ev = {
+                "type": "packet",
+                "from": (f"meshcore:{(pubkey_prefix or '').strip()}" if (pubkey_prefix or '').strip() else "meshcore"),
+                "to": "broadcast",
+                "from_alias": (from_alias or None),
+                "to_alias": None,
+                "channel_name": channel_name,
+                "summary": {
+                    "portnum": "TEXT_MESSAGE_APP",
+                    "text": text,
+                    "canal": ch_i,
+                    "channel_name": channel_name,
+                    "meshcore": 1,
+                    "meshcore_kind": kind,
+                    "meshcore_chan_idx": chan_idx,
+                    "meshcore_pubkey_prefix": (pubkey_prefix or "").strip() or None,
+                },
+                "ts": _now_s(),
+            }
+            hub.broadcast_line(_json_dumps(ev) + "\n")
+    except Exception:
+        pass
+
+    # 2) Persistir en OFFLINE_LOG para backlog
+    try:
+        append_offline_log(
+            {
+                "ts": int(_now_s()),
+                "channel": ch_i,
+                "channel_name": channel_name,
+                "portnum": "TEXT_MESSAGE_APP",
+                "from": (f"meshcore:{(pubkey_prefix or '').strip()}" if (pubkey_prefix or '').strip() else "meshcore"),
+                "to": "broadcast",
+                "from_alias": (from_alias or None),
+                "to_alias": None,
+                "text": text,
+                "rx_rssi": None,
+                "rx_snr": None,
+                "meshcore": 1,
+                "meshcore_kind": kind,
+                "meshcore_chan_idx": chan_idx,
+                "meshcore_pubkey_prefix": (pubkey_prefix or "").strip() or None,
+            }
+        )
+    except Exception:
+        pass
 
 def _iter_backlog_jsonl(since_ts: int | None, until_ts: int | None, channel: int | None, portnums: list[str] | None, limit: int | None):
     """
@@ -5691,6 +5782,8 @@ def main():
 
 
     hub = JsonLineHub()
+    globals()["BROKER_HUB"] = hub  # MeshCore->BOT: acceso global al hub
+
     stats = BrokerStats()
 
     srv = JsonLineServer(args.bind, args.port, hub, verbose=args.verbose)
