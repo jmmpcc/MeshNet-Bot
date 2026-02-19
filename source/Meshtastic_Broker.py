@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Version v6.2.6.4
+
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.6.11.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v6.2.6.12.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -2915,6 +2915,44 @@ class _BacklogServer(threading.Thread):
                     resp = {"ok": False, "error": f"meshcore_status_failed: {type(e).__name__}: {e}"}
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"));
                 return
+            
+                        # --- NUEVO: enviar a MeshCore (canal_idx) desde clientes (BOT) ---
+            elif cmd == "MESHCORE_SEND":
+                params = req.get("params") or {}
+                text = (params.get("text") or "").strip()
+
+                # Aceptamos channel_idx (preferido) y también "ch" por compat/atajo.
+                ch_raw = params.get("channel_idx", params.get("ch", None))
+                try:
+                    channel_idx = int(ch_raw)
+                except Exception:
+                    channel_idx = None
+
+                if channel_idx is None:
+                    resp = {"ok": False, "error": "missing channel_idx"}
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                    return
+
+                if not text:
+                    resp = {"ok": False, "error": "missing text"}
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                    return
+
+                try:
+                    mc = globals().get("MESHCORE_ENGINE")
+                    if not mc or not getattr(mc, "enable", False):
+                        resp = {"ok": False, "error": "meshcore_not_enabled"}
+                        conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                        return
+
+                    mc.enqueue_send_channel(int(channel_idx), text)
+                    resp = {"ok": True, "queued": True, "channel_idx": int(channel_idx)}
+                except Exception as e:
+                    resp = {"ok": False, "error": f"meshcore_send_failed: {type(e).__name__}: {e}"}
+
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                return
+
 
             # --- NUEVO: envío de texto vía lado B del bridge ---
             elif cmd == "SEND_TEXT_VIA":

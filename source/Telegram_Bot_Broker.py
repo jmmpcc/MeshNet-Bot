@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v6.2.6.5 py
+Telegram_Bot_Broker_v6.2.6.6.py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -1380,6 +1380,38 @@ def _send_via_broker_wait(text: str, ch: int, dest: str | None = None, ack: bool
 
     try:
         with socket.create_connection((host, port), timeout=float(timeout)) as s:
+            s.sendall(data)
+            s.settimeout(float(timeout))
+            buf = b""
+            while True:
+                b = s.recv(65536)
+                if not b:
+                    break
+                buf += b
+                if b"\n" in b:
+                    break
+        raw = buf.decode("utf-8", "ignore").strip()
+        if not raw:
+            return {"ok": False, "error": "empty response"}
+        return json.loads(raw)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+def _send_via_broker_meshcore(channel_idx: int, text: str, timeout: float = 3.0) -> dict:
+    """
+    Envía una orden al broker para que haga TX hacia MeshCore por channel_idx.
+    Devuelve dict con {"ok": bool, ...}
+    """
+    payload = {
+        "cmd": "MESHCORE_SEND",
+        "params": {
+            "channel_idx": int(channel_idx),
+            "text": str(text),
+        }
+    }
+    data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+    try:
+        with socket.create_connection((BROKER_CTRL_HOST or "127.0.0.1", int(BROKER_CTRL_PORT)), timeout=float(timeout)) as s:
             s.sendall(data)
             s.settimeout(float(timeout))
             buf = b""
@@ -5437,6 +5469,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("menu", "Abrir menú principal"),
         BotCommand("enviar", "Enviar a nodo/broadcast (canal, alias, forzado)"),
         BotCommand("enviar_ack", "Enviar con ACK (reintentos)"),
+        BotCommand("enviar_mc", "Enviar a MeshCore (channel_idx): /enviar_mc ch2 <texto>"),
         BotCommand("escuchar", "Escuchar broker (canal/all)"),
         BotCommand("parar_escucha", "Detener la escucha del broker"),
         BotCommand("traceroute", "Traceroute a un nodo (!id|número|alias) [Timeout] sg. espera"),
@@ -7641,6 +7674,102 @@ async def aprs_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try: s.close()
         except Exception: pass
 
+def _parse_mc_channel_token(tok: str) -> int | None:
+    """
+    Admite: ch2 | CH2 | [ch2] | 2
+    Devuelve int o None.
+    """
+    try:
+        s = (tok or "").strip()
+        if not s:
+            return None
+        if s.startswith("[") and s.endswith("]"):
+            s = s[1:-1].strip()
+        s_low = s.lower()
+        if s_low.startswith("ch") and s_low[2:].lstrip("-").isdigit():
+            return int(s_low[2:])
+        if s_low.lstrip("-").isdigit():
+            return int(s_low)
+    except Exception:
+        return None
+    return None
+
+
+async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /enviar_mc [chX] <texto...>
+    /enviar_mc chX <texto...>
+    /enviar_mc X <texto...>
+    /enviar_mc canal X <texto...>
+
+    Envia hacia MeshCore (channel_idx) usando el broker como ejecutor (24/7).
+    No toca nada del envío Meshtastic (/enviar).
+    """
+    # Respeta el mismo “cooldown guard” que /enviar (si lo tienes activo)
+    if await _abort_if_cooldown(update, context):
+        return
+
+    bump_stat(update.effective_user.id, update.effective_user.username or "", "enviar_mc")
+    msg = update.effective_message
+    args = context.args or []
+
+    if not args or len(args) < 2:
+        await msg.reply_text(
+            "Uso:\n"
+            "• /enviar_mc ch2 texto\n"
+            "• /enviar_mc [ch2] texto\n"
+            "• /enviar_mc 2 texto\n"
+            "• /enviar_mc canal 2 texto"
+        )
+        return
+
+    channel_idx = None
+    text = ""
+
+    # Sintaxis: "canal X ..."
+    if len(args) >= 3 and str(args[0]).lower() == "canal":
+        channel_idx = _parse_mc_channel_token(str(args[1]))
+        text = " ".join(args[2:]).strip()
+    else:
+        # Sintaxis: "chX ..." | "[chX] ..." | "X ..."
+        channel_idx = _parse_mc_channel_token(str(args[0]))
+        text = " ".join(args[1:]).strip()
+
+    if channel_idx is None or not text:
+        await msg.reply_text(
+            "Parámetros no válidos.\n"
+            "Ejemplos:\n"
+            "• /enviar_mc ch2 hola\n"
+            "• /enviar_mc canal 2 hola"
+        )
+        return
+
+    # Ejecución (broker ctrl)
+    try:
+        res = await asyncio.to_thread(_send_via_broker_meshcore, int(channel_idx), text, 3.0)
+        ok = bool(res.get("ok"))
+        if ok:
+            await _safe_reply_html(
+                msg,
+                f"Envío MeshCore\n"
+                f"Canal (channel_idx): <b>{escape(str(int(channel_idx)))}</b>\n"
+                f"Resultado: <b>OK</b>"
+            )
+        else:
+            err = res.get("error") or "desconocido"
+            await _safe_reply_html(
+                msg,
+                f"Envío MeshCore\n"
+                f"Canal (channel_idx): <b>{escape(str(int(channel_idx)))}</b>\n"
+                f"Resultado: <b>KO</b>: {escape(str(err))}"
+            )
+    except Exception as e:
+        await _safe_reply_html(
+            msg,
+            f"Envío MeshCore\n"
+            f"Canal (channel_idx): <b>{escape(str(int(channel_idx)))}</b>\n"
+            f"Resultado: <b>KO</b>: {escape(type(e).__name__)}: {escape(str(e))}"
+        )
 
 
 async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -14733,6 +14862,8 @@ def build_application() -> Application:
 # (El resto ya lo tienes: ver_nodos, traceroute, telemetria, enviar, enviar_ack, escuchar, parar_escucha, vecinos, estado, ayuda…)
 
     app.add_handler(CommandHandler("enviar", enviar_cmd))
+    app.add_handler(CommandHandler("enviar_mc", enviar_mc_cmd))
+
     app.add_handler(CommandHandler("enviar_ack", enviar_ack_cmd))
     app.add_handler(CommandHandler("escuchar", escuchar_cmd))
     app.add_handler(CommandHandler("parar_escucha", parar_escucha_cmd))
