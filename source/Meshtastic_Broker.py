@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.6.9.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v6.2.6.11.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
+19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
+    [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 
@@ -268,11 +270,51 @@ class MeshCoreEmbeddedBridge:
         self.contact_to_ch = _mc_parse_contact_to_ch()  # MeshCore contact -> Meshtastic CH
         self.chanidx_to_ch = _mc_parse_chanidx_to_ch()  # MeshCore channel_idx -> Meshtastic CH
 
+        # Reverse map (MeshCore channel_idx -> tag lógico) para prefijos RX.
+        # Se alimenta desde MESHCORE_CHANNEL_MAP (mismos tags que usas en TX).
+        self.chanidx_to_tag: dict[int, str] = {}
+        try:
+            for _ch, m in (self.ch_map or {}).items():
+                if (m or {}).get("kind") == "chan":
+                    ci = m.get("channel_idx")
+                    tg = (m.get("tag") or "").strip()
+                    if ci is not None and tg:
+                        self.chanidx_to_tag[int(ci)] = tg
+        except Exception:
+            self.chanidx_to_tag = {}
+
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._loop = None
         self._tx_q = None
         self._mc = None
+
+        # === Prefijo RX MeshCore -> Meshtastic ===
+        # Estilos:
+        #   tech    -> [MC:<prefix>] (debug)
+        #   alias   -> [MC:<alias>] (usa MESHCORE_CONTACT_ALIASES)
+        #   compact -> [MC]
+        #   channel -> canales: [MC-<TAG>] ; contactos: tech
+        self.rx_prefix_style = (os.getenv("MESHCORE_RX_PREFIX_STYLE", "tech") or "tech").strip().lower()
+
+        # Mapa opcional prefix->alias para contactos MeshCore (solo si rx_prefix_style=alias o quieres fallback)
+        # Formato: "6a18cb3d125b:EA2FBO_V4,ab12cd34:EB2EAS-7"
+        self.contact_aliases = {}
+        raw_alias = (os.getenv("MESHCORE_CONTACT_ALIASES", "") or "").strip()
+        if raw_alias:
+            for part in raw_alias.split(","):
+                part = (part or "").strip()
+                if not part or ":" not in part:
+                    continue
+                k, v = part.split(":", 1)
+                k = (k or "").strip()
+                v = (v or "").strip()
+                if k and v:
+                    self.contact_aliases[k] = v
+
+        # Log de encolado TX hacia MeshCore (útil para debug)
+        self.log_enqueue = _env_truthy("MESHCORE_LOG_ENQUEUE", "0")
+
 
         # anti-eco: fingerprints de mensajes que hemos inyectado a Meshtastic
         self._inject_lock = threading.Lock()
@@ -442,8 +484,34 @@ class MeshCoreEmbeddedBridge:
 
                 # Prefijo corto para identificar origen MeshCore
                 pref = str(data.get("pubkey_prefix") or "").strip()
-                head = f"[MC:{pref}]" if pref else "[MC]"
+
+                # Alias: 1) si viene en payload (no siempre), 2) mapping por pubkey_prefix,
+                # 3) heurística: si el texto viene como "EA2FBO_V4: ..." usarlo.
+                alias = str(data.get("alias") or data.get("name") or "").strip()
+                if not alias and pref:
+                    alias = str(self.contact_aliases.get(pref) or "").strip()
+
+                # Si el texto lleva "ALIAS: ...", extrae alias y limpia cuerpo (evita duplicar)
+                try:
+                    m = re.match(r"^([A-Za-z0-9_\-/]{3,24})\s*:\s+(.+)$", text_msg)
+                    if m:
+                        extracted = (m.group(1) or "").strip()
+                        rest = (m.group(2) or "").strip()
+                        if extracted and not alias:
+                            alias = extracted
+                            text_msg = rest
+                except Exception:
+                    pass
+
+                head = self._meshcore_rx_head(
+                    kind=kind,
+                    chan_idx=chan_idx,
+                    pubkey_prefix=pref,
+                    alias=alias
+                )
+
                 out_txt = f"{head} {text_msg}"
+
 
                 # Inyectar a Meshtastic vía cola del broker (SENDQ)
                 q = globals().get("SENDQ")
@@ -462,6 +530,28 @@ class MeshCoreEmbeddedBridge:
                         },
                         coalesce=False,
                     )
+
+                    # === [IMPORTANTE] Replicar también a HOME_NODE_ID (nodo A) si se pide.
+                    # Motivo: cuando el bot está conectado, quieres ver igualmente los mensajes inyectados
+                    # como DM en tu nodo A (HOME).
+                    try:
+                        if _env_truthy("MESHCORE_ECHO_TO_HOME", "0") and HOME_NODE_ID:
+                            self._remember_injected(int(ch_out), out_txt)
+                            q.offer(
+                                {
+                                    "channel": int(ch_out),
+                                    "text": out_txt,
+                                    "destination": str(HOME_NODE_ID),
+                                    "require_ack": False,
+                                    "type": "text",
+                                    "no_bridge": True,
+                                    "origin": "meshcore",
+                                    "meta": {"meshcore": 1, "echo_home": 1, "pubkey_prefix": pref, "kind": kind, "channel_idx": chan_idx},
+                                },
+                                coalesce=False,
+                            )
+                    except Exception:
+                        pass
                     self._last_ok = time.time()
 
             except Exception as e:
@@ -514,6 +604,62 @@ class MeshCoreEmbeddedBridge:
         self._connected = False
         print("[meshcore-embedded] DISCONNECTED", flush=True)
 
+    def _meshcore_rx_head(
+        self,
+        *,
+        kind: str,
+        chan_idx: Optional[int],
+        pubkey_prefix: str,
+        alias: str
+    ) -> str:
+        """
+        Prefijo para mensajes RX desde MeshCore.
+        Prioriza alias recibido en la trama.
+        """
+
+        style = (self.rx_prefix_style or "tech").strip().lower()
+        prefix = (pubkey_prefix or "").strip()
+        alias = (alias or "").strip()
+
+        # Resolver canal lógico
+        logical_tag = None
+        if kind == "chan" and chan_idx is not None:
+            try:
+                logical_tag = (self.chanidx_to_tag or {}).get(int(chan_idx))
+            except Exception:
+                logical_tag = None
+
+        # Compacto
+        if style == "compact":
+            return "[MC]"
+
+        # Canal puro
+        if style == "channel":
+            if logical_tag:
+                return f"[MC-{logical_tag}]"
+            if kind == "contact":
+                return "[MC-DM]"
+            return f"[MC-CHAN{chan_idx}]" if chan_idx is not None else "[MC]"
+
+        # Alias estructurado
+        if style == "alias":
+
+            # Si MeshCore envía alias, usarlo
+            display = alias if alias else (prefix if prefix else "UNKNOWN")
+
+            if logical_tag:
+                return f"[MC:{logical_tag}:{display}]"
+
+            if kind == "contact":
+                return f"[MC:DM:{display}]"
+
+            return f"[MC:{display}]"
+
+        # Técnico (default)
+        if prefix:
+            return f"[MC:{prefix}]"
+        return "[MC]"
+
 
     def enqueue_send_contact(self, contact_prefix: str, text: str) -> None:
         if not self.enable or not self._loop or not self._tx_q:
@@ -522,6 +668,12 @@ class MeshCoreEmbeddedBridge:
         if not msg:
             return
         try:
+            if self.log_enqueue:
+                try:
+                    n = len(msg.encode('utf-8', errors='ignore'))
+                except Exception:
+                    n = len(msg)
+                print(f"[meshcore] enqueue -> contact={str(contact_prefix)} len={n}", flush=True)
             self._loop.call_soon_threadsafe(self._tx_q.put_nowait, (str(contact_prefix), msg))
         except Exception:
             pass
@@ -533,6 +685,12 @@ class MeshCoreEmbeddedBridge:
         if not msg:
             return
         try:
+            if self.log_enqueue:
+                try:
+                    n = len(msg.encode('utf-8', errors='ignore'))
+                except Exception:
+                    n = len(msg)
+                print(f"[meshcore] enqueue -> chan_idx={int(channel_idx)} len={n}", flush=True)
             self._loop.call_soon_threadsafe(self._tx_q.put_nowait, ({"kind": "chan", "channel_idx": int(channel_idx)}, msg))
         except Exception:
             pass
