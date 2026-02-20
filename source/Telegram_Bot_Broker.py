@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v6.2.6.6.py
+Telegram_Bot_Broker_v6.2.6.7 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -13424,9 +13424,13 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 if obj.get("type") != "packet":
                     continue
 
+                # Puede venir como paquete real (packet.decoded) o como evento sintético (solo summary)
                 pkt = obj.get("packet", {}) or {}
-                dec = pkt.get("decoded", {}) or {}
-                if dec.get("portnum") != "TEXT_MESSAGE_APP":
+                dec = (pkt.get("decoded", {}) or {}) if isinstance(pkt, dict) else {}
+                summary = obj.get("summary", {}) or {}
+
+                port = dec.get("portnum") or summary.get("portnum")
+                if port != "TEXT_MESSAGE_APP":
                     continue
 
                 # Filtro por canal lógico si procede
@@ -13434,6 +13438,14 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                     ch = _extract_channel_index_from_packet(pkt)
                 except Exception:
                     ch = None
+
+                # Fallback: eventos sintéticos (MeshCore) traen el canal en summary
+                if ch is None:
+                    try:
+                        ch = summary.get("canal")
+                    except Exception:
+                        ch = None
+
                 if listen_chan is not None and isinstance(ch, int) and ch != listen_chan:
                     continue
 
@@ -13447,8 +13459,18 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
 
                 # Origen (ID) y alias (prioriza el que venga del broker; si no, fichero de nodos)
                 try:
-                    origen = _extract_from_id(pkt) or "(desconocido)"
+                    origen = _extract_from_id(pkt) or ""
                 except Exception:
+                    origen = ""
+
+                # Fallback para MeshCore (eventos sintéticos): obj["from"] = "meshcore" o "meshcore:<prefix>"
+                if not origen:
+                    try:
+                        origen = str(obj.get("from") or "").strip()
+                    except Exception:
+                        origen = ""
+
+                if not origen:
                     origen = "(desconocido)"
 
                 # 1) Si el broker ya adjunta alias, úsalo

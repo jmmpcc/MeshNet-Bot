@@ -2592,16 +2592,22 @@ def emit_meshcore_rx_to_hub_and_log(
         if hub is not None and hasattr(hub, "broadcast_line"):
             ev = {
                 "type": "packet",
-                "from": (f"meshcore:{(pubkey_prefix or '').strip()}" if (pubkey_prefix or '').strip() else "meshcore"),
-                "to": "broadcast",
-                "from_alias": (from_alias or None),
-                "to_alias": None,
-                "channel_name": channel_name,
-                "summary": {
-                    "portnum": "TEXT_MESSAGE_APP",
-                    "text": text,
-                    "canal": ch_i,
+                "packet": {
+                    "fromId": (f"meshcore:{(pubkey_prefix or '').strip()}" if (pubkey_prefix or '').strip() else "meshcore"),
+                    "toId": "^all",
+                    "rxTime": int(_now_s()),
+                    "decoded": {
+                        "portnum": "TEXT_MESSAGE_APP",
+                        "text": text,
+                        # cabecera compatible para extractores que miran header/fromId
+                        "header": {
+                            "fromId": (f"meshcore:{(pubkey_prefix or '').strip()}" if (pubkey_prefix or '').strip() else "meshcore"),
+                        },
+                    },
+                    # extras útiles (no rompen a quien no los use)
+                    "channel": int(ch_i),
                     "channel_name": channel_name,
+                    "from_alias": (from_alias or None),
                     "meshcore": 1,
                     "meshcore_kind": kind,
                     "meshcore_chan_idx": chan_idx,
