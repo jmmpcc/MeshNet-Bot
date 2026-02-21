@@ -951,7 +951,51 @@ def _bridge_mirror_safe(channel: int, message: str, dest_id: str = None, require
 
     except Exception as _e:
         print(f"[bridge] mirror hook ERROR: {type(_e).__name__}: {_e}", flush=True)
+# === NUEVO: Delay opcional para espejo hacia nodo embebido (A -> B) ===
+import random
+import threading
 
+# Segundos de retardo antes de espejar al nodo embebido.
+# 0 = desactivado (comportamiento actual).
+BROKER_EMBEDDED_MIRROR_DELAY_SEC = float(os.getenv("BROKER_EMBEDDED_MIRROR_DELAY_SEC", "0") or "0")
+
+# Jitter opcional para evitar colisiones repetidas (0 = sin jitter).
+BROKER_EMBEDDED_MIRROR_JITTER_SEC = float(os.getenv("BROKER_EMBEDDED_MIRROR_JITTER_SEC", "0") or "0")
+
+
+def _bridge_mirror_delayed(channel: int, message: str, dest_id: str = None, require_ack: bool = False) -> None:
+    """
+    Programa el espejo hacia el bridge embebido con un retardo opcional.
+    - No bloquea el hilo principal del broker.
+    - Mantiene el comportamiento anterior si el delay es 0.
+    """
+    try:
+        delay = float(BROKER_EMBEDDED_MIRROR_DELAY_SEC or 0.0)
+        jitter = float(BROKER_EMBEDDED_MIRROR_JITTER_SEC or 0.0)
+        if jitter > 0:
+            delay += random.uniform(0.0, jitter)
+
+        # Sin delay -> comportamiento actual
+        if delay <= 0:
+            _bridge_mirror_safe(channel=channel, message=message, dest_id=dest_id, require_ack=require_ack)
+            return
+
+        t = threading.Timer(
+            delay,
+            _bridge_mirror_safe,
+            kwargs={
+                "channel": int(channel),
+                "message": str(message),
+                "dest_id": (dest_id if dest_id else None),
+                "require_ack": bool(require_ack),
+            },
+        )
+        t.daemon = True
+        t.start()
+
+    except Exception as _e:
+        # Nunca romper TX por el delay
+        print(f"[bridge] delayed mirror ERROR: {type(_e).__name__}: {_e}", flush=True)
 
 def _safe_first_int(raw: str, default: int = 0) -> int:
     """
@@ -2198,8 +2242,9 @@ def _tasks_send_adapter(
 
             # [NUEVO] espejo hacia B si la pasarela embebida está activa
             # IMPORTANTE: usar wrapper tolerante a firma para no romper 24/7 si cambia el hook
+            # Incorporamos DELAYED entre envios: cambio de _bridge_mirror_safe a _bridge_mirror_delayed
             if not no_bridge:
-                _bridge_mirror_safe(
+                _bridge_mirror_delayed(
                     channel=int(channel_i),
                     message=message_s,
                     dest_id=(dest_id if dest_id else None),
