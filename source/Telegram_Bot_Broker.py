@@ -7865,7 +7865,7 @@ def _meshcore_delay_should_apply(used_path: str | None = None) -> bool:
     if mode in ("0", "off", "false", "no", "disabled"):
         return False
 
-    if _MESHCORE_TG_MIRROR_DELAY_SEC <= 0:
+    if MESHCORE_TG_MIRROR_DELAY_SEC <= 0:
         return False
 
     if mode in ("fixed", "always", "1", "on", "true", "yes", "enabled"):
