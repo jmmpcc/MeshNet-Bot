@@ -7707,6 +7707,113 @@ def _parse_mc_channel_token(tok: str) -> int | None:
 #
 # Resultado: /enviar canal 6 "hola" → Meshtastic ch=6 + MeshCore channel_idx=3
 
+# -------------------------
+# MeshCore: mapping Meshtastic CH -> MeshCore (para mirror /enviar)
+# -------------------------
+
+def _parse_meshcore_channel_map(raw: str | None) -> dict[int, dict]:
+    """
+    Parsea MESHCORE_CHANNEL_MAP desde .env.
+
+    Formatos soportados:
+
+    1) NUEVO (recomendado):
+        ch:kind:target[:tag]
+        - kind = "chan" | "channel" | "ch"  -> target = channel_idx (int) en MeshCore
+        - kind = "contact" | "dm"           -> target = public_key prefix (str) de un contacto
+
+        Ejemplo:
+            0:chan:0:PUBLIC,6:chan:2:Mesh2Core
+            1:contact:a1b2c3d4e5f6:DM
+
+    2) COMPAT (antiguo):
+        ch:contact_prefix[:tag]
+        (se interpreta como kind=contact)
+
+    Devuelve:
+        { ch: {"kind": "chan"|"contact", "target": (int|str), "tag": str|None} }
+    """
+    result: dict[int, dict] = {}
+    if not raw:
+        return result
+
+    s = str(raw).strip().strip('"').strip("'")
+    if not s:
+        return result
+
+    for item in s.split(","):
+        item = (item or "").strip()
+        if not item:
+            continue
+
+        parts = [p.strip() for p in item.split(":")]
+        if len(parts) < 2:
+            continue
+
+        # COMPAT: ch:contact[:tag]
+        if len(parts) in (2, 3):
+            try:
+                ch = int(parts[0])
+            except Exception:
+                continue
+            contact = (parts[1] or "").strip()
+            tag = (parts[2] or "").strip() if len(parts) == 3 else ""
+            tag = tag or None
+            if not contact:
+                continue
+            result[ch] = {"kind": "contact", "target": contact, "tag": tag}
+            continue
+
+        # NUEVO: ch:kind:target[:tag]
+        try:
+            ch = int(parts[0])
+        except Exception:
+            continue
+
+        kind_raw = (parts[1] or "").strip().lower()
+        target_raw = (parts[2] or "").strip()
+        tag = (parts[3] or "").strip() if len(parts) >= 4 else ""
+        tag = tag or None
+
+        if kind_raw in ("chan", "channel", "ch"):
+            try:
+                channel_idx = int(target_raw)
+            except Exception:
+                continue
+            result[ch] = {"kind": "chan", "target": channel_idx, "tag": tag}
+        elif kind_raw in ("contact", "dm"):
+            contact = target_raw
+            if not contact:
+                continue
+            result[ch] = {"kind": "contact", "target": contact, "tag": tag}
+
+    return result
+
+
+_MESHCORE_CHANNEL_MAP_RAW = os.getenv("MESHCORE_CHANNEL_MAP", "").strip()
+_MESHCORE_CHANNEL_MAP = _parse_meshcore_channel_map(_MESHCORE_CHANNEL_MAP_RAW)
+
+# Solo lo que interesa al mirror: Meshtastic ch -> MeshCore channel_idx
+_MESHCORE_CHANIDX_BY_CH: dict[int, int] = {}
+for _ch, _m in (_MESHCORE_CHANNEL_MAP or {}).items():
+    try:
+        if (_m or {}).get("kind") == "chan":
+            _t = (_m or {}).get("target")
+            if isinstance(_t, int):
+                _MESHCORE_CHANIDX_BY_CH[int(_ch)] = int(_t)
+    except Exception:
+        pass
+
+
+def _meshcore_chanidx_for_meshtastic_ch(ch: int) -> int | None:
+    """
+    Devuelve channel_idx MeshCore para un canal Meshtastic, o None si no hay mapping.
+    """
+    try:
+        return _MESHCORE_CHANIDX_BY_CH.get(int(ch))
+    except Exception:
+        return None
+
 _MESHCORE_TG_MIRROR_CHANNELS_RAW = os.getenv("MESHCORE_TG_MIRROR_CHANNELS", "").strip()
 
 def _parse_int_set_csv(s: str) -> set[int]:
