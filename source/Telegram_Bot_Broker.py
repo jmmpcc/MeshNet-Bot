@@ -7804,16 +7804,6 @@ for _ch, _m in (_MESHCORE_CHANNEL_MAP or {}).items():
     except Exception:
         pass
 
-
-def _meshcore_chanidx_for_meshtastic_ch(ch: int) -> int | None:
-    """
-    Devuelve channel_idx MeshCore para un canal Meshtastic, o None si no hay mapping.
-    """
-    try:
-        return _MESHCORE_CHANIDX_BY_CH.get(int(ch))
-    except Exception:
-        return None
-
 _MESHCORE_TG_MIRROR_CHANNELS_RAW = os.getenv("MESHCORE_TG_MIRROR_CHANNELS", "").strip()
 
 def _parse_int_set_csv(s: str) -> set[int]:
