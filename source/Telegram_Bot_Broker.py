@@ -8114,7 +8114,7 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             send_ok = False
             send_error = f"{type(e).__name__}: {e}"
 
-    # --- NUEVO: espejo a MeshCore para canales designados (broadcast/canal) ---
+    ## --- NUEVO: espejo a MeshCore para canales designados ---
     mc_mirrored = False
     mc_ok = None
     mc_err = None
@@ -8123,25 +8123,21 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         ch = int(canal)
 
-        if ch in _MESHCORE_TG_MIRROR_CHANNELS:
+        if send_ok and is_broadcast and (ch in _MESHCORE_TG_MIRROR_CHANNELS):
             mc_mirrored = True
+            mc_chanidx = _meshcore_chanidx_for_meshtastic_ch(ch)
 
-            if out and str(out).startswith("OK"):
-                mc_chanidx = _meshcore_chanidx_for_meshtastic_ch(ch)
-                if mc_chanidx is not None:
-                    # Delay inteligente (smart/fixed/off) antes del envío a MeshCore
-                    if _meshcore_delay_should_apply(used_path):
-                        await asyncio.sleep(_MESHCORE_TG_MIRROR_DELAY_SEC)
-
-                    r_mc = await asyncio.to_thread(_send_via_broker_meshcore, int(mc_chanidx), texto)
-                    mc_ok = bool((r_mc or {}).get("ok"))
-                    mc_err = (None if mc_ok else ((r_mc or {}).get("error") or "meshcore_send_failed"))
-                else:
-                    mc_ok = False
-                    mc_err = "no_meshcore_mapping_for_channel"
-            else:
+            if mc_chanidx is None:
                 mc_ok = False
-                mc_err = "skip_meshcore_mirror_meshtastic_failed"
+                mc_err = "no_meshcore_mapping_for_channel"
+            else:
+                # Delay inteligente (smart/fixed/off) antes del envío a MeshCore
+                if _meshcore_delay_should_apply(used_path):
+                    await asyncio.sleep(MESHCORE_TG_MIRROR_DELAY_SEC)
+
+                r_mc = await asyncio.to_thread(_send_via_broker_meshcore, int(mc_chanidx), texto)
+                mc_ok = bool((r_mc or {}).get("ok"))
+                mc_err = (None if mc_ok else ((r_mc or {}).get("error") or "meshcore_send_failed"))
 
     except Exception as e:
         mc_mirrored = True
