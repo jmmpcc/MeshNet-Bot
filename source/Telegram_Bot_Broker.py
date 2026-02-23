@@ -7845,6 +7845,11 @@ if MESHCORE_TG_MIRROR_DELAY_SEC < 0:
 elif MESHCORE_TG_MIRROR_DELAY_SEC > 10:
     MESHCORE_TG_MIRROR_DELAY_SEC = 10.0
 
+def _meshcore_chanidx_for_meshtastic_ch(ch: int) -> int | None:
+    try:
+        return _MESHCORE_CHANIDX_BY_CH.get(int(ch))
+    except Exception:
+        return None
 
 def _meshcore_delay_should_apply(used_path: str | None = None) -> bool:
     """
@@ -7872,14 +7877,6 @@ def _meshcore_delay_should_apply(used_path: str | None = None) -> bool:
     return str(used_path).startswith("broker")
 
 
-def _meshcore_chanidx_for_meshtastic_ch(ch: int) -> int | None:
-    """
-    Devuelve el channel_idx de MeshCore para un canal Meshtastic, si existe en MESHCORE_CHANNEL_MAP.
-    """
-    try:
-        return _MESHCORE_CH_MAP.get(int(ch))
-    except Exception:
-        return None
 
 async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
