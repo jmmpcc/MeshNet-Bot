@@ -7774,45 +7774,47 @@ def _meshcore_delay_should_apply(used_path: str | None = None) -> bool:
         return False
     return str(used_path).startswith("broker")
 
-# cache del mapping (raw → dict) para no reparsear en cada /enviar
-_MC_MAP_CACHE_RAW: str | None = None
-_MC_MAP_CACHE: dict[int, int] = {}
+# -------------------------
+# MeshCore: mapping Meshtastic CH -> MeshCore channel_idx (parsing una sola vez al arranque)
+# -------------------------
+# Se lee de MESHCORE_CHANNEL_MAP (env) al inicio del proceso del BOT.
+# Formato:
+#   MESHCORE_CHANNEL_MAP=6:chan:3:Mesh2Core,2:chan:1:ZARAGOZA
+# Solo se procesan entradas kind=chan con target numérico (channel_idx MeshCore).
+#
+# Nota 24/7: si cambias MESHCORE_CHANNEL_MAP, reinicia el contenedor del BOT para aplicar cambios.
+
+_MESHCORE_CHANNEL_MAP_RAW = (os.getenv("MESHCORE_CHANNEL_MAP", "") or "").strip()
+_MESHCORE_CH_MAP: dict[int, int] = {}
+
+if _MESHCORE_CHANNEL_MAP_RAW:
+    for _item in _MESHCORE_CHANNEL_MAP_RAW.split(","):
+        _item = (_item or "").strip()
+        if not _item:
+            continue
+        _parts = [p.strip() for p in _item.split(":") if p.strip() != ""]
+        # mínimo: ch:kind:target
+        if len(_parts) < 3:
+            continue
+        _ch_s, _kind, _target_s = _parts[0], _parts[1].lower(), _parts[2]
+        if _kind != "chan":
+            continue
+        if not (_ch_s.lstrip("-").isdigit() and _target_s.lstrip("-").isdigit()):
+            continue
+        try:
+            _MESHCORE_CH_MAP[int(_ch_s)] = int(_target_s)
+        except Exception:
+            pass
+
 
 def _meshcore_chanidx_for_meshtastic_ch(ch: int) -> int | None:
     """
     Devuelve el channel_idx de MeshCore para un canal Meshtastic, si existe en MESHCORE_CHANNEL_MAP.
-    Solo procesa entradas kind=chan. Formato esperado:
-      MESHCORE_CHANNEL_MAP=6:chan:3:Mesh2Core,2:chan:1:ZARAGOZA
     """
-    global _MC_MAP_CACHE_RAW, _MC_MAP_CACHE
-    raw = (os.getenv("MESHCORE_CHANNEL_MAP", "") or "").strip()
-
-    if raw != (_MC_MAP_CACHE_RAW or ""):
-        _MC_MAP_CACHE_RAW = raw
-        _MC_MAP_CACHE = {}
-
-        if raw:
-            for item in raw.split(","):
-                item = (item or "").strip()
-                if not item:
-                    continue
-                parts = [p.strip() for p in item.split(":") if p.strip() != ""]
-                # mínimo: ch:kind:target
-                if len(parts) < 3:
-                    continue
-
-                ch_s, kind, target_s = parts[0], parts[1].lower(), parts[2]
-                if not (ch_s.lstrip("-").isdigit() and target_s.lstrip("-").isdigit()):
-                    continue
-                if kind != "chan":
-                    continue
-
-                try:
-                    _MC_MAP_CACHE[int(ch_s)] = int(target_s)
-                except Exception:
-                    pass
-
-    return _MC_MAP_CACHE.get(int(ch))
+    try:
+        return _MESHCORE_CH_MAP.get(int(ch))
+    except Exception:
+        return None
 
 async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -8199,6 +8201,8 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 txt+=f"\nMeshCore: OK (chan_idx={mc_chanidx})"
             else:
                 txt+=f"\nMeshCore: KO (chan_idx={mc_chanidx})"
+                if mc_err:
+                    txt+=f" • {escape(str(mc_err))}"
 
 
         await _safe_reply_html(msg, txt)
@@ -8218,6 +8222,8 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 txt+=f"\nMeshCore: OK (chan_idx={mc_chanidx})"
             else:
                 txt+=f"\nMeshCore: KO (chan_idx={mc_chanidx})"
+                if mc_err:
+                    txt+=f" • {escape(str(mc_err))}"
 
         await _safe_reply_html(msg, txt)
 
@@ -8439,6 +8445,40 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             mc_ok = False
             mc_err = f"{type(e).__name__}: {e}"
 
+        # --- NUEVO: espejo a MeshCore para canales designados (broadcast/canal) ---
+        mc_mirrored = False
+        mc_ok = None
+        mc_err = None
+        mc_chanidx = None
+
+        try:
+            ch = int(canal)
+            if ch in _MESHCORE_TG_MIRROR_CHANNELS:
+                mc_mirrored = True
+
+                # Para no romper nada: solo espejar si el envío Meshtastic fue OK
+                if out and str(out).startswith("OK"):
+                    mc_chanidx = _meshcore_chanidx_for_meshtastic_ch(ch)
+                    if mc_chanidx is not None:
+                        # Delay inteligente (smart/fixed/off) antes del envío a MeshCore
+                        if _meshcore_delay_should_apply(used_path):
+                            await asyncio.sleep(_MESHCORE_TG_MIRROR_DELAY_SEC)
+
+                        r_mc = await asyncio.to_thread(_send_via_broker_meshcore, int(mc_chanidx), texto)
+                        mc_ok = bool((r_mc or {}).get("ok"))
+                        mc_err = (None if mc_ok else ((r_mc or {}).get("error") or "meshcore_send_failed"))
+                    else:
+                        mc_ok = False
+                        mc_err = "no_meshcore_mapping_for_channel"
+                else:
+                    mc_ok = False
+                    mc_err = "skip_meshcore_mirror_meshtastic_failed"
+
+        except Exception as e:
+            mc_mirrored = True
+            mc_ok = False
+            mc_err = f"{type(e).__name__}: {e}"
+
         respuestas = await quick_broker_listen(None, canal, SEND_LISTEN_SEC)
 
         resumen = (
@@ -8446,6 +8486,13 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Resultado: {out or 'KO'} • vía {used_path}{ack_cloud}\n"
             f"Respuestas en {SEND_LISTEN_SEC}s: {respuestas}"
         )
+        if 'mc_mirrored' in locals() and mc_mirrored:
+            if mc_ok:
+                resumen += f"\nMeshCore: OK (chan_idx={mc_chanidx})"
+            else:
+                resumen += f"\nMeshCore: KO (chan_idx={mc_chanidx})"
+                if mc_err:
+                    resumen += f" • {mc_err}"
 
         if mc_mirrored:
             if mc_ok:
