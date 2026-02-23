@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v6.2.6.7 py
+Telegram_Bot_Broker_v6.2.6.8 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -7694,6 +7694,125 @@ def _parse_mc_channel_token(tok: str) -> int | None:
         return None
     return None
 
+# -------------------------
+# MeshCore: mirror opcional para /enviar (Meshtastic → MeshCore)
+# -------------------------
+# Si MESHCORE_TG_MIRROR_CHANNELS incluye un canal Meshtastic (ej. "6"),
+# entonces /enviar canal 6 ... también emitirá el mismo texto por MeshCore,
+# usando el mapping de MESHCORE_CHANNEL_MAP (formato: ch:chan:channel_idx[:tag]).
+#
+# Ejemplo:
+#   MESHCORE_CHANNEL_MAP=6:chan:3:Mesh2Core
+#   MESHCORE_TG_MIRROR_CHANNELS=6
+#
+# Resultado: /enviar canal 6 "hola" → Meshtastic ch=6 + MeshCore channel_idx=3
+
+_MESHCORE_TG_MIRROR_CHANNELS_RAW = os.getenv("MESHCORE_TG_MIRROR_CHANNELS", "").strip()
+
+def _parse_int_set_csv(s: str) -> set[int]:
+    """
+    Convierte "6, 7 8" → {6, 7, 8}. Ignora tokens inválidos.
+    """
+    out: set[int] = set()
+    for tok in re.split(r"[,\s;]+", (s or "").strip()):
+        if not tok:
+            continue
+        if tok.lstrip("-").isdigit():
+            try:
+                out.add(int(tok))
+            except Exception:
+                pass
+    return out
+
+_MESHCORE_TG_MIRROR_CHANNELS: set[int] = _parse_int_set_csv(_MESHCORE_TG_MIRROR_CHANNELS_RAW)
+
+# -------------------------
+# MeshCore: delay opcional (smart/fixed/off) antes del espejo Meshtastic→MeshCore
+# -------------------------
+# Env:
+#   MESHCORE_TG_MIRROR_DELAY_MODE = off | fixed | smart   (default: smart)
+#   MESHCORE_TG_MIRROR_DELAY_SEC  = segundos (default: 2.0)
+#
+# smart: aplica delay SOLO cuando el envío a Meshtastic se hizo vía broker-queue,
+#        porque ese camino suele disparar el bridge A→B, y queremos desincronizar
+#        el “doble TX” respecto al envío a MeshCore.
+_MESHCORE_TG_MIRROR_DELAY_MODE = (os.getenv("MESHCORE_TG_MIRROR_DELAY_MODE", "smart") or "smart").strip().lower()
+try:
+    _MESHCORE_TG_MIRROR_DELAY_SEC = float(os.getenv("MESHCORE_TG_MIRROR_DELAY_SEC", "2.0") or "2.0")
+except Exception:
+    _MESHCORE_TG_MIRROR_DELAY_SEC = 2.0
+
+# clamp defensivo (evita valores absurdos)
+if _MESHCORE_TG_MIRROR_DELAY_SEC < 0:
+    _MESHCORE_TG_MIRROR_DELAY_SEC = 0.0
+elif _MESHCORE_TG_MIRROR_DELAY_SEC > 10:
+    _MESHCORE_TG_MIRROR_DELAY_SEC = 10.0
+
+
+def _meshcore_delay_should_apply(used_path: str | None = None) -> bool:
+    """
+    Decide si se aplica un delay antes de espejar a MeshCore.
+
+    - off: nunca
+    - fixed: siempre (si delay_sec > 0)
+    - smart: solo si el envío a Meshtastic fue por broker-queue (used_path empieza por 'broker'),
+             para desincronizar con el bridge A→B (si existe) y evitar TX “a la vez”.
+    """
+    mode = (_MESHCORE_TG_MIRROR_DELAY_MODE or "smart").strip().lower()
+
+    if mode in ("0", "off", "false", "no", "disabled"):
+        return False
+
+    if _MESHCORE_TG_MIRROR_DELAY_SEC <= 0:
+        return False
+
+    if mode in ("fixed", "always", "1", "on", "true", "yes", "enabled"):
+        return True
+
+    # smart (default)
+    if not used_path:
+        return False
+    return str(used_path).startswith("broker")
+
+# cache del mapping (raw → dict) para no reparsear en cada /enviar
+_MC_MAP_CACHE_RAW: str | None = None
+_MC_MAP_CACHE: dict[int, int] = {}
+
+def _meshcore_chanidx_for_meshtastic_ch(ch: int) -> int | None:
+    """
+    Devuelve el channel_idx de MeshCore para un canal Meshtastic, si existe en MESHCORE_CHANNEL_MAP.
+    Solo procesa entradas kind=chan. Formato esperado:
+      MESHCORE_CHANNEL_MAP=6:chan:3:Mesh2Core,2:chan:1:ZARAGOZA
+    """
+    global _MC_MAP_CACHE_RAW, _MC_MAP_CACHE
+    raw = (os.getenv("MESHCORE_CHANNEL_MAP", "") or "").strip()
+
+    if raw != (_MC_MAP_CACHE_RAW or ""):
+        _MC_MAP_CACHE_RAW = raw
+        _MC_MAP_CACHE = {}
+
+        if raw:
+            for item in raw.split(","):
+                item = (item or "").strip()
+                if not item:
+                    continue
+                parts = [p.strip() for p in item.split(":") if p.strip() != ""]
+                # mínimo: ch:kind:target
+                if len(parts) < 3:
+                    continue
+
+                ch_s, kind, target_s = parts[0], parts[1].lower(), parts[2]
+                if not (ch_s.lstrip("-").isdigit() and target_s.lstrip("-").isdigit()):
+                    continue
+                if kind != "chan":
+                    continue
+
+                try:
+                    _MC_MAP_CACHE[int(ch_s)] = int(target_s)
+                except Exception:
+                    pass
+
+    return _MC_MAP_CACHE.get(int(ch))
 
 async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -7993,6 +8112,41 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             send_ok = False
             send_error = f"{type(e).__name__}: {e}"
 
+    # --- NUEVO: espejo a MeshCore para canales designados (broadcast/canal) ---
+    mc_mirrored = False
+    mc_ok = None
+    mc_err = None
+    mc_chanidx = None
+
+    try:
+        ch = int(canal)
+
+        if ch in _MESHCORE_TG_MIRROR_CHANNELS:
+            mc_mirrored = True
+
+            if out and str(out).startswith("OK"):
+                mc_chanidx = _meshcore_chanidx_for_meshtastic_ch(ch)
+                if mc_chanidx is not None:
+                    # Delay inteligente (smart/fixed/off) antes del envío a MeshCore
+                    if _meshcore_delay_should_apply(used_path):
+                        await asyncio.sleep(_MESHCORE_TG_MIRROR_DELAY_SEC)
+
+                    r_mc = await asyncio.to_thread(_send_via_broker_meshcore, int(mc_chanidx), texto)
+                    mc_ok = bool((r_mc or {}).get("ok"))
+                    mc_err = (None if mc_ok else ((r_mc or {}).get("error") or "meshcore_send_failed"))
+                else:
+                    mc_ok = False
+                    mc_err = "no_meshcore_mapping_for_channel"
+            else:
+                mc_ok = False
+                mc_err = "skip_meshcore_mirror_meshtastic_failed"
+
+    except Exception as e:
+        mc_mirrored = True
+        mc_ok = False
+        mc_err = f"{type(e).__name__}: {e}"
+ 
+
     # --- Log CSV (igual que antes) ---
     try:
         SEND_LOG_CSV.parent.mkdir(parents=True, exist_ok=True)
@@ -8039,6 +8193,14 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         if is_broadcast:
             txt += f"Respuestas en {SEND_LISTEN_SEC}s: <b>{replies}</b>"
+
+        if mc_mirrored:
+            if mc_ok:
+                txt+=f"\nMeshCore: OK (chan_idx={mc_chanidx})"
+            else:
+                txt+=f"\nMeshCore: KO (chan_idx={mc_chanidx})"
+
+
         await _safe_reply_html(msg, txt)
     else:
         txt = (
@@ -8050,6 +8212,13 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         if is_broadcast:
             txt += f"Respuestas en {SEND_LISTEN_SEC}s: <b>{replies}</b>"
+
+        if mc_mirrored:
+            if mc_ok:
+                txt+=f"\nMeshCore: OK (chan_idx={mc_chanidx})"
+            else:
+                txt+=f"\nMeshCore: KO (chan_idx={mc_chanidx})"
+
         await _safe_reply_html(msg, txt)
 
     return ConversationHandler.END
@@ -8064,7 +8233,7 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
       - Broadcast/canal: si BROKER_ALLOW_BROADCAST_ACK=1 en el broker, permite "any-ack" (marca tipo app).
         Si no está habilitado, el broker ignorará ack_flag en broadcast y el bot mostrará "sin confirmación".
     """
-    # === [NUEVO] bloquear si el broker está en cooldown ===
+    # === bloquear si el broker está en cooldown ===
     if await _abort_if_cooldown(update, context):
         return ConversationHandler.END
 
@@ -8086,32 +8255,89 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return ConversationHandler.END
 
-    # Parse target
-    target = str(rest[0]).strip()
-    text = " ".join(str(x) for x in rest[1:]).strip()
-    if not text:
+    # ----------------------------
+    # Parse robusto: destino/canal/texto
+    # ----------------------------
+    raw0 = str(rest[0]).strip()
+    node_id = None
+    canal = 0
+    texto = ""
+
+    # Forma: /enviar_ack ... canal N <texto...>
+    if raw0.lower() == "canal":
+        if len(rest) < 3:
+            await update.effective_message.reply_text(
+                "Uso: /enviar_ack [reintentos=N espera=S backoff=X] canal <N> <texto…>"
+            )
+            return ConversationHandler.END
+        try:
+            canal = int(str(rest[1]).strip())
+        except Exception:
+            canal = 0
+        texto = " ".join(str(x) for x in rest[2:]).strip()
+        node_id = None  # broadcast por canal
+
+    else:
+        # Forma: broadcast[:canal] <texto...>
+        # o unicast: <dest>[:canal] <texto...>
+        target = raw0
+        if ":" in target:
+            left, right = target.split(":", 1)
+            left = left.strip()
+            right = right.strip()
+            target = left or target
+            if right.isdigit():
+                try:
+                    canal = int(right)
+                except Exception:
+                    canal = 0
+
+        texto = " ".join(str(x) for x in rest[1:]).strip()
+        if target.lower().startswith("broadcast"):
+            node_id = None
+        else:
+            # Resolver nodo (acepta !id / número / alias)
+            t = target.strip()
+            if t.startswith("!"):
+                node_id = t
+            elif t.isdigit():
+                try:
+                    node_id = f"!{int(t):08x}"
+                except Exception:
+                    node_id = t
+            else:
+                node_id = nodes_map.get(t.lower()) or t
+
+    if not texto:
         await update.effective_message.reply_text("Texto vacío.")
         return ConversationHandler.END
+
+    # ----------------------------
+    # BROADCAST / CANAL (sin ACK de app)
+    # ----------------------------
+    if node_id is None:
+        out = None
+        pid = None
 
         # PRIORIDAD 1: broker-queue (dispara bridge A→B)
         used_path = "broker-queue"
         try:
             res = await asyncio.to_thread(
                 _send_via_broker_queue,
-                texto,                 # text
-                int(canal),            # ch
-                None,                  # broadcast
-                False                  # ack=False, no hay ACK de app en broadcast
+                texto,          # text
+                int(canal),     # ch
+                None,           # broadcast
+                False           # ack=False (no ACK de app en broadcast)
             )
             if bool(res.get("ok", False)):
                 out = "OK (broker-queue)"
-                pid = None  # el broker-queue no devuelve packet_id
+                pid = None  # broker-queue no devuelve packet_id
             else:
                 out = None
         except Exception:
             out = None
 
-        # PRIORIDAD 2: pool persistente (como antes) si broker-queue no está
+        # PRIORIDAD 2: pool persistente si broker-queue no está
         if out is None:
             used_path = "pool-persistente"
             try:
@@ -8132,8 +8358,9 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             if iface is not None:
                                 break
                             _t.sleep(0.3)
+
                 if iface is not None:
-                    # 🛠️ Broadcast correcto: destinationId=None (NO '^all')
+                    # Broadcast correcto: destinationId=None (NO '^all')
                     pkt = iface.sendText(
                         texto,
                         destinationId=None,
@@ -8154,7 +8381,7 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 out = None
                 pid = None
 
-        # PRIORIDAD 3: adapter resiliente si tampoco hubo pool
+        # PRIORIDAD 3: adapter resiliente
         if out is None:
             used_path = "api-pool+retry"
             out, pid = send_text_message(None, texto, canal=canal)
@@ -8178,6 +8405,40 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 ack_cloud = "\nConfirmación de red: ⚠️ (sin confirmación en tiempo)"
                 reason = reason_b or "TIMEOUT"
 
+        # --- NUEVO: espejo a MeshCore para canales designados (broadcast/canal) ---
+        mc_mirrored = False
+        mc_ok = None
+        mc_err = None
+        mc_chanidx = None
+
+        try:
+            ch = int(canal)
+
+            if ch in _MESHCORE_TG_MIRROR_CHANNELS:
+                mc_mirrored = True
+
+                if out and str(out).startswith("OK"):
+                    mc_chanidx = _meshcore_chanidx_for_meshtastic_ch(ch)
+                    if mc_chanidx is not None:
+                        # Delay inteligente (smart/fixed/off) antes del envío a MeshCore
+                        if _meshcore_delay_should_apply(used_path):
+                            await asyncio.sleep(_MESHCORE_TG_MIRROR_DELAY_SEC)
+
+                        r_mc = await asyncio.to_thread(_send_via_broker_meshcore, int(mc_chanidx), texto)
+                        mc_ok = bool((r_mc or {}).get("ok"))
+                        mc_err = (None if mc_ok else ((r_mc or {}).get("error") or "meshcore_send_failed"))
+                    else:
+                        mc_ok = False
+                        mc_err = "no_meshcore_mapping_for_channel"
+                else:
+                    mc_ok = False
+                    mc_err = "skip_meshcore_mirror_meshtastic_failed"
+
+        except Exception as e:
+            mc_mirrored = True
+            mc_ok = False
+            mc_err = f"{type(e).__name__}: {e}"
+
         respuestas = await quick_broker_listen(None, canal, SEND_LISTEN_SEC)
 
         resumen = (
@@ -8185,6 +8446,14 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Resultado: {out or 'KO'} • vía {used_path}{ack_cloud}\n"
             f"Respuestas en {SEND_LISTEN_SEC}s: {respuestas}"
         )
+
+        if mc_mirrored:
+            if mc_ok:
+                resumen += f"\nMeshCore: OK (chan_idx={mc_chanidx})"
+            else:
+                resumen += f"\nMeshCore: KO (chan_idx={mc_chanidx})"
+                if mc_err:
+                    resumen += f" • {mc_err}"
         for ch in chunk_text(resumen):
             await send_pre(update.effective_message, ch)
 
@@ -8199,7 +8468,9 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ])
         return ConversationHandler.END
 
-    # ===== UNICAST con ACK y reintentos =====
+    # ----------------------------
+    # UNICAST con ACK y reintentos
+    # ----------------------------
     traceroute_ok = None
     hops = 0
     if TRACEROUTE_CHECK:
@@ -8211,8 +8482,7 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             traceroute_ok = None
             hops = 0
 
-    # PRIORIDAD 1: broker-queue con ack=True (dispara bridge A→B)
-    #   Nota: el broker-queue no devuelve packet_id; por tanto aquí reportamos "queued".
+    # PRIORIDAD 1: broker-queue con ack=True
     used_path = "broker-queue"
     result = None
     try:
@@ -8221,19 +8491,19 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             texto,
             int(canal),
             node_id,     # unicast
-            True         # wantAck=True (el broker pedirá ACK al nodo destino)
+            True         # wantAck=True
         )
         if bool(res.get("ok", False)):
             result = {
-                "ok": True,              # marcado OK por encolado y solicitud con ACK
+                "ok": True,
                 "attempts": 1,
-                "reason": "BROKER_QUEUED",  # no hay packet_id aquí
+                "reason": "BROKER_QUEUED",
                 "packet_id": None,
             }
     except Exception:
         result = None
 
-    # PRIORIDAD 2: pool persistente con waitForAck si broker-queue no está
+    # PRIORIDAD 2: pool persistente con waitForAck
     if result is None:
         used_path = "pool-persistente"
         try:
@@ -8254,10 +8524,11 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         if iface is not None:
                             break
                         _t.sleep(0.3)
+
             if iface is not None:
                 pkt = iface.sendText(
                     texto,
-                    destinationId=node_id,   # unicast
+                    destinationId=node_id,
                     wantAck=True,
                     wantResponse=False,
                     channelIndex=int(canal),
@@ -8288,7 +8559,7 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             result = None
 
-    # PRIORIDAD 3: reintentos/backoff por adapter resiliente
+    # PRIORIDAD 3: adapter resiliente con reintentos/backoff
     if result is None:
         used_path = "api-pool+retry"
         result = await send_with_ack_retry(node_id, texto, canal, attempts, wait_s, backoff)
@@ -8321,7 +8592,6 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         result.get("packet_id", ""),
     ])
     return ConversationHandler.END
-
 
 def _is_admin(user_id: int) -> bool:
     admins = os.getenv("ADMIN_IDS", "")
