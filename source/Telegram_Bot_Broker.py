@@ -7738,15 +7738,15 @@ _MESHCORE_TG_MIRROR_CHANNELS: set[int] = _parse_int_set_csv(_MESHCORE_TG_MIRROR_
 #        el “doble TX” respecto al envío a MeshCore.
 _MESHCORE_TG_MIRROR_DELAY_MODE = (os.getenv("MESHCORE_TG_MIRROR_DELAY_MODE", "smart") or "smart").strip().lower()
 try:
-    _MESHCORE_TG_MIRROR_DELAY_SEC = float(os.getenv("MESHCORE_TG_MIRROR_DELAY_SEC", "2.0") or "2.0")
+    MESHCORE_TG_MIRROR_DELAY_SEC = float(os.getenv("MESHCORE_TG_MIRROR_DELAY_SEC", "2.0") or "2.0")
 except Exception:
-    _MESHCORE_TG_MIRROR_DELAY_SEC = 2.0
+    MESHCORE_TG_MIRROR_DELAY_SEC = 2.0
 
 # clamp defensivo (evita valores absurdos)
-if _MESHCORE_TG_MIRROR_DELAY_SEC < 0:
-    _MESHCORE_TG_MIRROR_DELAY_SEC = 0.0
-elif _MESHCORE_TG_MIRROR_DELAY_SEC > 10:
-    _MESHCORE_TG_MIRROR_DELAY_SEC = 10.0
+if MESHCORE_TG_MIRROR_DELAY_SEC < 0:
+    MESHCORE_TG_MIRROR_DELAY_SEC = 0.0
+elif MESHCORE_TG_MIRROR_DELAY_SEC > 10:
+    MESHCORE_TG_MIRROR_DELAY_SEC = 10.0
 
 
 def _meshcore_delay_should_apply(used_path: str | None = None) -> bool:
@@ -7773,38 +7773,6 @@ def _meshcore_delay_should_apply(used_path: str | None = None) -> bool:
     if not used_path:
         return False
     return str(used_path).startswith("broker")
-
-# -------------------------
-# MeshCore: mapping Meshtastic CH -> MeshCore channel_idx (parsing una sola vez al arranque)
-# -------------------------
-# Se lee de MESHCORE_CHANNEL_MAP (env) al inicio del proceso del BOT.
-# Formato:
-#   MESHCORE_CHANNEL_MAP=6:chan:3:Mesh2Core,2:chan:1:ZARAGOZA
-# Solo se procesan entradas kind=chan con target numérico (channel_idx MeshCore).
-#
-# Nota 24/7: si cambias MESHCORE_CHANNEL_MAP, reinicia el contenedor del BOT para aplicar cambios.
-
-_MESHCORE_CHANNEL_MAP_RAW = (os.getenv("MESHCORE_CHANNEL_MAP", "") or "").strip()
-_MESHCORE_CH_MAP: dict[int, int] = {}
-
-if _MESHCORE_CHANNEL_MAP_RAW:
-    for _item in _MESHCORE_CHANNEL_MAP_RAW.split(","):
-        _item = (_item or "").strip()
-        if not _item:
-            continue
-        _parts = [p.strip() for p in _item.split(":") if p.strip() != ""]
-        # mínimo: ch:kind:target
-        if len(_parts) < 3:
-            continue
-        _ch_s, _kind, _target_s = _parts[0], _parts[1].lower(), _parts[2]
-        if _kind != "chan":
-            continue
-        if not (_ch_s.lstrip("-").isdigit() and _target_s.lstrip("-").isdigit()):
-            continue
-        try:
-            _MESHCORE_CH_MAP[int(_ch_s)] = int(_target_s)
-        except Exception:
-            pass
 
 
 def _meshcore_chanidx_for_meshtastic_ch(ch: int) -> int | None:
@@ -8424,7 +8392,7 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     if mc_chanidx is not None:
                         # Delay inteligente (smart/fixed/off) antes del envío a MeshCore
                         if _meshcore_delay_should_apply(used_path):
-                            await asyncio.sleep(_MESHCORE_TG_MIRROR_DELAY_SEC)
+                            await asyncio.sleep(MESHCORE_TG_MIRROR_DELAY_SEC)
 
                         r_mc = await asyncio.to_thread(_send_via_broker_meshcore, int(mc_chanidx), texto)
                         mc_ok = bool((r_mc or {}).get("ok"))
@@ -8458,7 +8426,7 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     if mc_chanidx is not None:
                         # Delay inteligente (smart/fixed/off) antes del envío a MeshCore
                         if _meshcore_delay_should_apply(used_path):
-                            await asyncio.sleep(_MESHCORE_TG_MIRROR_DELAY_SEC)
+                            await asyncio.sleep(MESHCORE_TG_MIRROR_DELAY_SEC)
 
                         r_mc = await asyncio.to_thread(_send_via_broker_meshcore, int(mc_chanidx), texto)
                         mc_ok = bool((r_mc or {}).get("ok"))
