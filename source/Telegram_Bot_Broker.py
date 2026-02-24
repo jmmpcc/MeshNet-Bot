@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v6.2.6.8 py
+Telegram_Bot_Broker_v6.2.6.9 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -6199,6 +6199,48 @@ def  load_nodes_file_safe(max_n: int = 50) -> list[dict]:
 
 # ---- Ver nodos
 
+def _nodes_recent_from_file(max_n: int, max_mins: int | None, hops_max: int | None) -> list[tuple[str, str, int, int | None]]:
+    """
+    Fallback fuerte: obtiene nodos desde NODES_FILE (refrescado por refrescar_nodos)
+    y devuelve tuplas (nid, alias, mins, hops) ordenadas por recencia.
+
+    - max_mins: si se indica, filtra por "visto hace <= max_mins"
+    - hops_max: si se indica, filtra por hops <= hops_max (si el dato existe)
+    """
+    def _to_int(v, default=None):
+        try:
+            return int(v)
+        except Exception:
+            return default
+
+    out: list[tuple[str, str, int, int | None]] = []
+    try:
+        rows = _parse_nodes_table(NODES_FILE)
+    except Exception as e:
+        log(f"⚠️ _nodes_recent_from_file/_parse_nodes_table: {e}")
+        return out
+
+    for r in rows or []:
+        nid = (r.get("id") or "").strip()
+        alias = (r.get("alias") or "").strip()
+        mins = parse_minutes(r.get("last_seen_text", "") or "")
+        hops = _to_int(r.get("hops"), None)
+
+        if not nid or mins is None:
+            continue
+
+        if max_mins is not None and mins > int(max_mins):
+            continue
+
+        if hops_max is not None and hops is not None and hops > int(hops_max):
+            continue
+
+        out.append((nid, alias, int(mins), hops))
+
+    out.sort(key=lambda x: x[2])  # menor mins = más reciente
+    return out[:max_n]
+
+
 def format_nodes_list(nodes: List[Tuple[str, str, int, Optional[int]]]) -> Tuple[List[str], Dict[str, str]]:
     alias_fallback: Dict[str, str] = {}
     try:
@@ -8742,9 +8784,6 @@ async def notificaciones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parse_mode="Markdown"
         )
 
-
-
-
 # === NUEVO: render de vecinos directos (broker) con SNR/RSSI/last_seen ===
 from html import escape as _esc
 
@@ -9050,7 +9089,9 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         r = _broker_ctrl("LIST_NODES", {"limit": max(50, max_n * 2)}, timeout=min(10.0, max(2.0, timeout + 1.0)))
         if r and r.get("ok"):
             data = r.get("data") or []
-
+            if not data:
+                raise RuntimeError("LIST_NODES ok pero vacío; usar fallback nodos.txt")
+            
             norm = []
             for n in data:
                 nid   = _norm_id(n.get("nodeId") or n.get("id") or n.get("fromId"))
@@ -9077,6 +9118,10 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     hops = 0
 
                 norm.append({"id": nid, "alias": alias, "snr": snr, "rssi": rssi, "last": last, "hops": hops})
+               
+                # ... después de norm.append(...) y del filtro inicial hops_max
+                if not norm:
+                    raise RuntimeError("LIST_NODES ok pero norm vacío tras normalización/filtros; usar fallback nodos.txt")
 
             # Filtro inicial
             if hops_max is not None:
@@ -10173,12 +10218,26 @@ async def vecinos_pager_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     /traceroute <!id|alias>  [timeout_s]
-      - Prefiere ejecutar el traceroute vía broker (BacklogServer) y leer los TRACEROUTE_APP del backlog.
-      - Si el broker no puede lanzarlo, fallback CLI con: PAUSAR → ejecutar CLI → REANUDAR.
-    """
-    import asyncio, time, json as _j, socket as _s, os
 
-    # 1) cooldown
+    Estrategia (en orden):
+      1) Intentar lanzar traceroute usando iface ya abierta del pool (adapter API si existe).
+      2) Pedir al broker RUN_TRACEROUTE (BacklogServer) y luego leer TRACEROUTE_APP del backlog.
+      3) Si no hay iface, intentar acquire efímero (best-effort).
+      4) Fallback CLI: PAUSAR → ejecutar CLI → REANUDAR.
+
+    Mejoras 24/7:
+      - Correlación más estricta de frames del backlog al destino y ventana temporal.
+      - Parser del CLI más estricto para evitar líneas “basura” tipo A-->A.
+      - Indentación/flujo de timeout saneados.
+    """
+    import asyncio
+    import time
+    import json as _j
+    import socket as _s
+    import os
+    import sys
+
+    # 1) cooldown (best-effort)
     try:
         if await _abort_if_cooldown(update, context):
             return ConversationHandler.END
@@ -10191,14 +10250,14 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         pass
 
     # 2) args
-    args = (context.args or []) + [None]
-    target = (args[0] or "").strip()
+    args = list(context.args or [])
+    target = (args[0] if len(args) >= 1 else "").strip()
     if not target:
         await update.effective_message.reply_text("Uso: /traceroute <!id|alias> [timeout_s]")
         return ConversationHandler.END
 
-        # --- timeout opcional (UNIFICADO) ---
-    raw_t = (args[1] or "")
+    # --- timeout opcional (UNIFICADO) ---
+    raw_t = (args[1] if len(args) >= 2 else "")
     txt = str(raw_t).strip().lower()
 
     # alias rápidos
@@ -10214,7 +10273,6 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             return False
 
-    # Defaults y límites configurables por .env
     def _get_float_env(name: str, default: float) -> float:
         try:
             v = (os.getenv(name, "") or "").strip()
@@ -10223,18 +10281,14 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return float(default)
 
     default_timeout = _get_float_env("TRACEROUTE_DEFAULT_TIMEOUT", 90.0)
-    max_timeout = _get_float_env("TRACEROUTE_MAX_TIMEOUT", 700.0)  # permite 700s sin tocar código
+    max_timeout = _get_float_env("TRACEROUTE_MAX_TIMEOUT", 700.0)
     min_timeout = _get_float_env("TRACEROUTE_MIN_TIMEOUT", 4.0)
 
-    # valor base: si el usuario pasa número, úsalo; si no, usa default
     try:
         timeout = float(txt) if _isnum(txt) else float(default_timeout)
     except Exception:
         timeout = float(default_timeout)
-
-    # saneado: mínimo y máximo configurables
     timeout = max(float(min_timeout), min(float(max_timeout), float(timeout)))
-
 
     # --- resolver alias seguro ---
     def _alias_for(node_id: str) -> str:
@@ -10261,10 +10315,9 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     def _canon_node_id(x) -> str:
         """
-        Normaliza un ID de nodo para que sea una cadena aceptable por el CLI:
-        - Acepta strings, tuplas/listas/dicts con candidatos.
-        - Prefiere forma con '!' + hex; si recibe hex pelado, añade '!'.
-        - Limpia comillas/residuos y fuerza minúsculas.
+        Normaliza un ID de nodo para que sea aceptable por el CLI:
+          - Prefiere '!'+hex (si llega hex pelado → añade '!').
+          - Limpia comillas/paréntesis/comas y fuerza minúsculas.
         """
         import string
         hexd = set(string.hexdigits)
@@ -10273,7 +10326,6 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             s = (s or "").strip()
             return bool(s) and all(ch in hexd for ch in s)
 
-        # a) aplanar candidatos
         cands: list[str] = []
         if isinstance(x, (list, tuple, set)):
             for v in x:
@@ -10288,7 +10340,7 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             cands.append(str(x).strip())
 
-        # b) preferir los que ya empiezan por '!' y sean hex válidos
+        # preferir ya con '!'
         for c in cands:
             s = c.strip().strip("'\"")
             if s.startswith("!"):
@@ -10297,13 +10349,13 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if _is_hex(body):
                     return "!" + body.lower()
 
-        # c) sino, si hay hex pelado, prepender '!'
+        # hex pelado
         for c in cands:
             s = c.strip().strip("'\"").replace(")", "").replace("(", "").replace(",", " ").split()[0]
             if _is_hex(s):
                 return "!" + s.lower()
 
-        # d) fallback: primer token limpio
+        # fallback primer token
         for c in cands:
             s = c.strip().strip("'\"").replace(")", "").replace("(", "").replace(",", " ").split()[0]
             if s:
@@ -10322,18 +10374,10 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     backlog_host = bd.get("backlog_host") or "127.0.0.1"
     backlog_port = int(bd.get("backlog_port") or 8766)
 
-    # Feedback inmediato
-    try:
-        await update.effective_message.reply_text(
-            f"🔎 Iniciando traceroute hacia <code>{target}</code> (timeout {int(timeout)} s)…",
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
     def _norm(s: str) -> str:
         return (s or "").strip().lower()
 
+    # resolver target -> !id
     raw_id = None
     try:
         if 'resolver_alias_o_id' in globals() and callable(globals()['resolver_alias_o_id']):
@@ -10343,10 +10387,17 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     node_id = _canon_node_id(raw_id or target)
     if not node_id or not node_id.startswith("!"):
-        await update.effective_message.reply_text(
-            f"⚠️ No pude normalizar el destino '{target}' a un !id válido."
-        )
+        await update.effective_message.reply_text(f"⚠️ No pude normalizar el destino '{target}' a un !id válido.")
         return ConversationHandler.END
+
+    # Feedback inmediato
+    try:
+        await update.effective_message.reply_text(
+            f"🔎 Iniciando traceroute hacia <code>{node_id}</code> (timeout {int(timeout)} s)…",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
     # 4) util cierre iface efímero
     def _force_close_iface(iface) -> None:
@@ -10392,7 +10443,11 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             return None
 
-    async def _fetch_traceroute_frames(since_ts: int, limit=300) -> list[dict]:
+    async def _fetch_traceroute_frames(since_ts: int, limit: int = 300) -> list[dict]:
+        """
+        Devuelve frames candidatos, ordenados por ts asc.
+        Importante: conserva decoded y portnum para filtrar mejor.
+        """
         portnums = ["TRACEROUTE_APP", "ROUTING_APP", "ADMIN_APP:TRACEROUTE", "ADMIN_TRACEROUTE"]
         res = await _broker_cmd("FETCH_BACKLOG", {
             "since_ts": int(since_ts),
@@ -10406,27 +10461,30 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         for r in rows:
             ts = r.get("ts") or r.get("rxTime") or r.get("timestamp") or r.get("time")
             fr = r.get("from") or r.get("fromId") or r.get("from_id")
-            dec = (r.get("decoded") or {})
+            dec = (r.get("decoded") or {}) if isinstance(r.get("decoded"), dict) else {}
             hop = r.get("hop") or dec.get("hop") or dec.get("hop_index")
             via = r.get("via") or dec.get("viaNode") or r.get("relay_node")
-            out.append({"ts": ts, "from": fr, "hop": hop if isinstance(hop, int) else None, "via": via, "raw": r})
+            pn = dec.get("portnum") or r.get("portnum") or r.get("portNum")
+            out.append({
+                "ts": ts,
+                "from": fr,
+                "hop": hop if isinstance(hop, int) else None,
+                "via": via,
+                "portnum": pn,
+                "decoded": dec,
+                "raw": r
+            })
         out.sort(key=lambda x: (x["ts"] if isinstance(x["ts"], (int, float)) else 0))
         return out
 
-    # 5.1) helpers de pausa/reanudación para CLI (idéntico espíritu a /vecinos)
+    # 5.1) pausa/reanuda para CLI
     async def _pause_broker_for_cli(reason: str, secs: int) -> None:
-        """
-        Intenta pausar el broker (y/o el pool local) para liberar el socket 4403
-        antes de llamar al CLI. Best-effort, no falla si no existe.
-        """
-        # a) pedir al broker que pause
         try:
             r = await _broker_cmd("BROKER_PAUSE", {"reason": reason, "secs": int(secs)})
             if not (isinstance(r, dict) and (r.get("ok") or r.get("status") == "ok")):
                 await _broker_cmd("CTRL", {"action": "pause", "reason": reason, "secs": int(secs)})
         except Exception:
             pass
-        # b) pausar pool local si expone API
         try:
             if hasattr(pool, "pause_mgr"):
                 pool.pause_mgr()
@@ -10442,7 +10500,6 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await asyncio.sleep(1.5)
 
     async def _resume_broker_after_cli() -> None:
-        """Intenta reanudar broker/pool tras el CLI."""
         try:
             r = await _broker_cmd("BROKER_RESUME", {})
             if not (isinstance(r, dict) and (r.get("ok") or r.get("status") == "ok")):
@@ -10458,49 +10515,50 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pass
         await asyncio.sleep(0.4)
 
-    # 6) === Lanzado ===
-    since_ts = int(time.time())
+    # 6) Lanzado
     launched = False
     used_adapter = False
     used_cli_fallback = False
+    broker_err = ""
 
-    # Intento 0: interfaz del pool ya abierta (sin efímeros)
+    # Ventana temporal: usamos marca justo antes de lanzar y un pequeño margen hacia atrás
+    launch_mark = time.time()
+    since_ts = int(launch_mark) - 2  # margen para clock skew/cola
+
+    # Intento 0: iface del pool
     iface = None
     try:
         if hasattr(pool, "get_iface_wait"):
-            iface = pool.get_iface_wait(timeout=min(4.0, timeout/2), interval=0.25)
+            iface = pool.get_iface_wait(timeout=min(4.0, timeout / 2), interval=0.25)
         elif hasattr(pool, "get_iface"):
             iface = pool.get_iface()
     except Exception:
         iface = None
 
-    # Intento 1: adaptador API si existe (no abre sockets nuevos)
+    # Intento 1: adapter API
     if iface:
         try:
             from meshtastic_api_adapter import traceroute as adapter_traceroute  # type: ignore
             adapter_traceroute(iface, node_id, channel=None, timeout=timeout)
             launched = True
             used_adapter = True
+            launch_mark = time.time()
+            since_ts = int(launch_mark) - 2
         except Exception:
             pass
-        
-    broker_err = ""
 
-    # Intento 2 (solo si aún no se lanzó)
+    # Intento 2: broker RUN_TRACEROUTE
     if not launched:
-        resA = await _broker_cmd(
-            "RUN_TRACEROUTE",
-            {"target": node_id, "hop_limit": 5, "ch_index": 0},
-        )
+        resA = await _broker_cmd("RUN_TRACEROUTE", {"target": node_id, "hop_limit": 5, "ch_index": 0})
         if isinstance(resA, dict) and (resA.get("ok") or resA.get("status") == "ok"):
             launched = True
+            launch_mark = time.time()
+            since_ts = int(launch_mark) - 2
         else:
-            launched = False
             broker_err = ((resA or {}).get("error") if isinstance(resA, dict) else "") or ""
             broker_err = broker_err.strip()
-               
 
-    # Intento 3: efímero con acquire (permitimos crear si no hay)
+    # Intento 3: efímero acquire
     if not launched and hasattr(pool, "acquire") and callable(pool.acquire):
         temp_iface = None
         try:
@@ -10520,7 +10578,8 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         except TypeError:
                             fn(dest_u32, 5)
                     launched = True
-
+                    launch_mark = time.time()
+                    since_ts = int(launch_mark) - 2
         except Exception:
             pass
         finally:
@@ -10532,12 +10591,10 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     pass
                 _force_close_iface(temp_iface)
 
-    # Intento 4: CLI (último recurso) — PAUSAR (await) → CLI (hilo) → REANUDAR (await)
+    # Intento 4: CLI
     if not launched:
-        pass
-    
-        import sys
-      
+        used_cli_fallback = True
+
         def _build_cli_variants(host_str: str, node: str) -> list[list[str]]:
             py = sys.executable or "python"
             return [
@@ -10545,75 +10602,77 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 ["meshtastic", "--host", host_str, "--traceroute", str(node)],
             ]
 
-        def _parse_cli_hops(output: str) -> list[str]:
-            # Normaliza a texto por si 'output' llegó como bytes en un caso extremo
+        def _parse_cli_hops(output: str, target_id: str) -> list[str]:
+            """
+            Parser más estricto:
+              - Acepta líneas 'hop ...' y formatos numerados típicos.
+              - Acepta líneas con '->' SOLO si mencionan el destino o si no son un eco A->A.
+            """
             if isinstance(output, (bytes, bytearray)):
                 try:
                     output = output.decode("utf-8", "ignore")
                 except Exception:
                     output = output.decode(errors="ignore")
 
-            lines = []
+            tgt = (target_id or "").lower().strip()
+            lines: list[str] = []
             for raw in (output or "").splitlines():
                 s = raw.strip()
                 if not s:
                     continue
                 low = s.lower()
+
                 if low.startswith("hop ") or low.startswith("hop\t") or low.startswith("hop:"):
                     lines.append(s)
                     continue
-                if "->" in s:
-                    lines.append(s)
-                    continue
+
+                # formato "1: ..." / "1) ..."
                 if (s[:1].isdigit() and (":" in s or ")" in s)):
                     lines.append(s)
+                    continue
+
+                # líneas con flechas: filtrar eco A->A y exigir relación con target cuando sea posible
+                if "->" in s:
+                    # intentar detectar A->B
+                    parts = [p.strip() for p in s.split("->", 1)]
+                    if len(parts) == 2:
+                        a = parts[0].replace("-", "").replace(">", "").strip()
+                        b = parts[1].replace("-", "").replace(">", "").strip()
+                        # si es eco (A==B) lo descartamos
+                        if a and b and a == b:
+                            continue
+                    # si tenemos target, exigimos que aparezca en la línea para evitar “basura”
+                    if tgt and tgt in low:
+                        lines.append(s)
+                    continue
+
             return lines
 
-        launched = False
-        cli_hops_lines: list[str] = []
-
-        # 1) Pausa en el LOOP principal (no pasamos corutinas al hilo)
         try:
             await update.effective_message.reply_text("⏸️ Pausando conexión para ejecutar CLI…")
         except Exception:
             pass
+
         await _pause_broker_for_cli(reason="cli_traceroute", secs=int(timeout) + 10)
 
+        cli_hops_lines: list[str] = []
         try:
-            # Pequeña espera extra en Windows para soltar el socket (evita reconexión inmediata)
             await asyncio.sleep(1.5)
 
             for cmd in _build_cli_variants(host, node_id):
-                try:
-                    await update.effective_message.reply_text(
-                        f"💻 Ejecutando: <code>{' '.join(cmd)}</code>",
-                        parse_mode="HTML"
-                    )
-                except Exception:
-                    pass
-
                 rc, out, err, was_to = await asyncio.to_thread(run_cli_exclusive, cmd, float(timeout))
                 combined = (out or "") + ("\n" + err if err else "")
-                parsed = _parse_cli_hops(combined)
+                parsed = _parse_cli_hops(combined, node_id)
 
                 if was_to or rc == 124:
                     await update.effective_message.reply_text("⏰ Traceroute sin respuesta en el tiempo límite.")
                     continue
 
-                ok = (rc == 0) or bool(parsed)
+                ok = (rc == 0) and bool(parsed)
                 if ok:
-                    launched = True
-                    used_cli_fallback = True
-                    if parsed:
-                        cli_hops_lines = parsed
+                    cli_hops_lines = parsed
                     break
 
-                show = combined.strip()
-                if len(show) > 1500:
-                    show = show[:1500] + "\n…(truncado)…"
-                await update.effective_message.reply_text(
-                    f"⚠️ CLI código {rc}. Salida:\n<pre>{show}</pre>", parse_mode="HTML"
-                )
         finally:
             try:
                 await update.effective_message.reply_text("▶️ Reanudando conexión…")
@@ -10621,50 +10680,68 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 pass
             await _resume_broker_after_cli()
 
-        if launched and cli_hops_lines:
+        if cli_hops_lines:
             header = f"🛰️ <b>Traceroute (CLI)</b> → <code>{node_id}</code>\n"
             body = "\n".join(cli_hops_lines)
             await update.effective_message.reply_text(header + body, parse_mode="HTML")
             return ConversationHandler.END
 
-    # margen para que lleguen los frames al backlog
+        # Si CLI tampoco dio nada
+        if broker_err:
+            try:
+                await _safe_reply_html(update.effective_message, f"Motivo broker: <code>{broker_err}</code>")
+            except Exception:
+                pass
+        return ConversationHandler.END
+
+    # margen para que entren frames
     await asyncio.sleep(0.9)
 
-    # 7) === Espera respuestas TRACEROUTE_APP en backlog ===
+    # 7) Espera de frames correlados
     deadline = time.time() + timeout
-    hops = []
+    hops: list[dict] = []
+
+    nnorm = _norm(node_id)
+    nnorm_no_bang = nnorm[1:] if nnorm.startswith("!") else nnorm
+
     while time.time() < deadline:
-        frames = await _fetch_traceroute_frames(since_ts=since_ts, limit=400)
-        new = []
+        frames = await _fetch_traceroute_frames(since_ts=since_ts, limit=500)
+        cand: list[dict] = []
+
         for f in frames:
-            dec = (f.get("raw") or {}).get("decoded") or {}
-            dst = dec.get("dst") or dec.get("dstId") or dec.get("to") or None
+            dec = f.get("decoded") or {}
+            # destino en distintas claves posibles
+            dst = dec.get("dst") or dec.get("dstId") or dec.get("to") or dec.get("toId") or None
             if dst:
                 dnorm = _norm(str(dst))
-                nnorm = _norm(str(node_id))
-                if dnorm != nnorm and (dnorm[1:] if dnorm.startswith("!") else dnorm) != (nnorm[1:] if nnorm.startswith("!") else nnorm):
+                dnorm_no_bang = dnorm[1:] if dnorm.startswith("!") else dnorm
+                if dnorm != nnorm and dnorm_no_bang != nnorm_no_bang:
                     continue
-            new.append(f)
-        if new:
-            hops = new
-            break
-        await asyncio.sleep(0.8)
+            else:
+                # Si no hay dst, evitamos “capturas cruzadas”:
+                # exigimos que el frame sea TRACEROUTE* y que esté cerca temporalmente de launch_mark.
+                pn = _norm(str(f.get("portnum") or ""))
+                if "traceroute" not in pn:
+                    continue
+                ts = f.get("ts")
+                if isinstance(ts, (int, float)):
+                    # solo si está razonablemente cerca de este traceroute
+                    if ts < (launch_mark - 2) or ts > (launch_mark + timeout + 2):
+                        continue
 
-    # 8) Salidas
-    if not launched and not hops:
-        try:
-            if broker_err:
-                await _safe_reply_html(update.effective_message, f"Motivo broker: <code>{broker_err}</code>")
-        except Exception:
-            pass
-        
-        return ConversationHandler.END
+            cand.append(f)
+
+        if cand:
+            hops = cand
+            break
+
+        await asyncio.sleep(0.8)
 
     if not hops:
         await update.effective_message.reply_text("⏳ Traceroute lanzado, pero sin respuestas dentro del tiempo de espera.")
         return ConversationHandler.END
 
-    # Orden por hop si existe, si no por ts
+    # Ordenación por hop si existe, si no por ts
     def _key_sort(f):
         hop = f.get("hop")
         ts = f.get("ts")
@@ -10698,7 +10775,7 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if x is None:
             return "—"
         if x < 1.0:
-            return f"{x*1000:.0f} ms"
+            return f"{x * 1000:.0f} ms"
         return f"{x:.1f} s"
 
     lines = []
@@ -10749,8 +10826,6 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     return ConversationHandler.END
 
-
-
 # === NUEVO HANDLER: alias corto /rt que reutiliza /traceroute ===
 async def rt_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
@@ -10760,98 +10835,6 @@ async def rt_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return await traceroute_cmd(update, context)
 
 
-# === NUEVO: /traceroute_status [N] | /traceroute_status <!id|alias> ===
-async def traceroute_status_cmd_anterior(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    /traceroute_status [N]
-    /traceroute_status <!id|alias>
-      - Sin args: muestra el último registro.
-      - Con N: muestra los últimos N (máx 10).
-      - Con !id|alias: muestra el último para ese destino.
-    """
-    import os, json, time
-    from html import escape
-
-    LOG_PATH = os.path.join("bot_data", "broker_traceroute_log.jsonl")
-    args = context.args or []
-
-    # Intento de parseo de argumento
-    count = 1
-    filter_dest = None
-    if args:
-        tok = args[0].strip()
-        # ¿!id o alias?
-        if tok.startswith("!") or (len(tok) >= 3 and not tok.isdigit()):
-            filter_dest = tok
-        else:
-            try:
-                count = max(1, min(10, int(tok)))
-            except Exception:
-                count = 1
-
-    # Leer JSONL (si no existe, responder amable)
-    if not os.path.isfile(LOG_PATH):
-        await update.effective_message.reply_text(
-            "ℹ️ Aún no hay registros de traceroute en el bot."
-        )
-        return ConversationHandler.END
-
-    rows = []
-    try:
-        with open(LOG_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    rows.append(obj)
-                except Exception:
-                    continue
-    except Exception as e:
-        await update.effective_message.reply_text(f"❌ No se pudo leer el log: {e}")
-        return ConversationHandler.END
-
-    if not rows:
-        await update.effective_message.reply_text("ℹ️ Log vacío por ahora.")
-        return ConversationHandler.END
-
-    # Filtrar por destino (si se pidió). Admitimos alias parcial (best-effort).
-    def _matches(r):
-        if not filter_dest:
-            return True
-        d = (r.get("dest") or "")
-        a = (r.get("dest_alias") or "")
-        tok = filter_dest.lower()
-        return tok in d.lower() or tok in a.lower()
-
-    rows = [r for r in rows if _matches(r)]
-    if not rows:
-        await update.effective_message.reply_text("ℹ️ No hay registros que coincidan con ese destino.")
-        return ConversationHandler.END
-
-    # Ordenar por ts desc y cortar a N
-    rows.sort(key=lambda x: int(x.get("ts", 0)), reverse=True)
-    rows = rows[:count]
-
-    # Formateo
-    def _fmt_row(r):
-        ts = int(r.get("ts", 0))
-        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts else "¿?"
-        dest = r.get("dest") or "¿?"
-        alias = r.get("alias") or ""
-        hops = r.get("hops")
-        ok = "✅" if r.get("ok") else "❌"
-        src = r.get("source") or "?"
-        ruta = r.get("route") or []
-        head = f"{ok} <b>{escape(dest)}</b>" + (f" ({escape(alias)})" if alias else "")
-        hops_s = f"<b>Hops</b>: {int(hops) if hops is not None else '¿?'} • <i>fuente</i>: {escape(src)} • {escape(when)}"
-        path_s = "  " + "  →  ".join(escape(x) for x in ruta) if ruta else "  (sin detalle de ruta)"
-        return f"{head}\n{hops_s}\n{path_s}"
-
-    body = "\n\n".join(_fmt_row(r) for r in rows)
-    await _safe_reply_html(update.effective_message, body)
-    return ConversationHandler.END
 
 # === [ACTUALIZADA] /traceroute_status [N] | /traceroute_status <!id|alias> ===
 async def traceroute_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
