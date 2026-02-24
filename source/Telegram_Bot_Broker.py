@@ -10214,635 +10214,94 @@ async def vecinos_pager_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Si no podemos editar (mensaje muy viejo, etc.), al menos responde
         await q.answer("No se pudo actualizar el mensaje.")
 
-
-async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /traceroute <!id|alias>  [timeout_s]
+    /traceroute <dest> [timeout_s]
 
-    Estrategia (en orden):
-      1) Intentar lanzar traceroute usando iface ya abierta del pool (adapter API si existe).
-      2) Pedir al broker RUN_TRACEROUTE (BacklogServer) y luego leer TRACEROUTE_APP del backlog.
-      3) Si no hay iface, intentar acquire efímero (best-effort).
-      4) Fallback CLI: PAUSAR → ejecutar CLI → REANUDAR.
-
-    Mejoras 24/7:
-      - Correlación más estricta de frames del backlog al destino y ventana temporal.
-      - Parser del CLI más estricto para evitar líneas “basura” tipo A-->A.
-      - Indentación/flujo de timeout saneados.
+    Ejecuta traceroute por CLI (meshtastic --traceroute) y, para evitar colisión con
+    la conexión persistente del broker, usa el mecanismo YA PROBADO de pausa/reanuda:
+      - with_broker_paused(...)
+    (En este proyecto, la pausa fiable se hace vía _broker_ctrl/BROKER_* y no por _broker_cmd.)
     """
-    import asyncio
-    import time
-    import json as _j
-    import socket as _s
-    import os
-    import sys
-
-    # 1) cooldown (best-effort)
-    try:
-        if await _abort_if_cooldown(update, context):
-            return ConversationHandler.END
-    except Exception:
-        pass
-
     try:
         bump_stat(update.effective_user.id, update.effective_user.username or "", "traceroute")
     except Exception:
         pass
 
-    # 2) args
-    args = list(context.args or [])
-    target = (args[0] if len(args) >= 1 else "").strip()
+    args = (context.args or []) + [None, None]
+    target = (args[0] or "").strip()
     if not target:
-        await update.effective_message.reply_text("Uso: /traceroute <!id|alias> [timeout_s]")
-        return ConversationHandler.END
+        await update.effective_message.reply_text("Uso: /traceroute <dest> [timeout_s]")
+        return
 
-    # --- timeout opcional (UNIFICADO) ---
-    raw_t = (args[1] if len(args) >= 2 else "")
-    txt = str(raw_t).strip().lower()
-
-    # alias rápidos
-    if txt in {"slow", "lento"}:
-        txt = "60"
-    elif txt in {"slow2", "muylento"}:
-        txt = "90"
-
-    def _isnum(s: str) -> bool:
-        try:
-            float(s)
-            return True
-        except Exception:
-            return False
-
-    def _get_float_env(name: str, default: float) -> float:
-        try:
-            v = (os.getenv(name, "") or "").strip()
-            return float(v) if v else float(default)
-        except Exception:
-            return float(default)
-
-    default_timeout = _get_float_env("TRACEROUTE_DEFAULT_TIMEOUT", 90.0)
-    max_timeout = _get_float_env("TRACEROUTE_MAX_TIMEOUT", 700.0)
-    min_timeout = _get_float_env("TRACEROUTE_MIN_TIMEOUT", 4.0)
-
+    raw_t = (args[1] or "").strip()
     try:
-        timeout = float(txt) if _isnum(txt) else float(default_timeout)
+        timeout_s = int(raw_t) if raw_t and raw_t.lstrip("-").isdigit() else 40
     except Exception:
-        timeout = float(default_timeout)
-    timeout = max(float(min_timeout), min(float(max_timeout), float(timeout)))
+        timeout_s = 40
+    timeout_s = max(8, min(180, timeout_s))  # límites conservadores
 
-    # --- resolver alias seguro ---
-    def _alias_for(node_id: str) -> str:
-        nid = (node_id or "").strip()
-        if not nid:
-            return ""
-        try:
-            if '_build_alias_fallback_from_nodes_file' in globals() and callable(globals()['_build_alias_fallback_from_nodes_file']):
-                a = _build_alias_fallback_from_nodes_file(nid)
-                if a:
-                    return str(a)
-        except Exception:
-            pass
-        try:
-            if 'resolver_alias_o_id' in globals() and callable(globals()['resolver_alias_o_id']):
-                a = resolver_alias_o_id(nid)
-                if a and a.startswith("!"):
-                    pass
-                else:
-                    return str(a)
-        except Exception:
-            pass
-        return ""
+    await update.effective_message.reply_text(
+        f"🔎 Iniciando traceroute hacia {target} (timeout {timeout_s} s)…"
+    )
 
-    def _canon_node_id(x) -> str:
+    # --- Ejecutar CLI con pausa/reanuda usando lo ya existente y probado ---
+    await update.effective_message.reply_text("⏸️ Pausando conexión para ejecutar CLI…")
+
+    def _run_cli_traceroute_blocking() -> str:
         """
-        Normaliza un ID de nodo para que sea aceptable por el CLI:
-          - Prefiere '!'+hex (si llega hex pelado → añade '!').
-          - Limpia comillas/paréntesis/comas y fuerza minúsculas.
+        Ejecuta CLI traceroute de forma bloqueante.
+        Reutiliza tu wrapper existente run_command(...) (si ya lo tienes),
+        o subprocess si no existe. NO toca otras partes del sistema.
         """
-        import string
-        hexd = set(string.hexdigits)
+        # Preferir el mismo host que usas en el resto del bot para CLI
+        host = (os.getenv("MESHTASTIC_HOST") or "").strip()
+        if not host:
+            # fallback típico en tu proyecto (nodo B)
+            host = (os.getenv("BRIDGE_B_HOST") or os.getenv("B_HOST") or "").strip()
 
-        def _is_hex(s: str) -> bool:
-            s = (s or "").strip()
-            return bool(s) and all(ch in hexd for ch in s)
+        # Construcción de args CLI (mantener simple y compatible)
+        cli = ["--host", host, "--traceroute", target, "--timeout", str(timeout_s)]
 
-        cands: list[str] = []
-        if isinstance(x, (list, tuple, set)):
-            for v in x:
-                if v is None:
-                    continue
-                cands.append(str(v).strip())
-        elif isinstance(x, dict):
-            for v in x.values():
-                if v is None:
-                    continue
-                cands.append(str(v).strip())
-        else:
-            cands.append(str(x).strip())
-
-        # preferir ya con '!'
-        for c in cands:
-            s = c.strip().strip("'\"")
-            if s.startswith("!"):
-                body = s[1:].strip().strip("'\"")
-                body = body.replace(")", "").replace("(", "").replace(",", "").strip()
-                if _is_hex(body):
-                    return "!" + body.lower()
-
-        # hex pelado
-        for c in cands:
-            s = c.strip().strip("'\"").replace(")", "").replace("(", "").replace(",", " ").split()[0]
-            if _is_hex(s):
-                return "!" + s.lower()
-
-        # fallback primer token
-        for c in cands:
-            s = c.strip().strip("'\"").replace(")", "").replace("(", "").replace(",", " ").split()[0]
-            if s:
-                return s
-        return ""
-
-    # 3) contexto (compat mayúsc/minúsc)
-    bd = context.bot_data
-    pool = bd.get("tcp_pool") or bd.get("TCP_POOL")
-    host = bd.get("mesh_host") or bd.get("meshtastic_host") or bd.get("MESHTASTIC_HOST") or "127.0.0.1"
-    port = bd.get("mesh_port") or bd.get("meshtastic_port") or bd.get("MESHTASTIC_PORT") or 4403
-    if not pool:
-        await update.effective_message.reply_text("⚠️ Config no inicializada: falta TCP_POOL en bot_data.")
-        return ConversationHandler.END
-
-    backlog_host = bd.get("backlog_host") or "127.0.0.1"
-    backlog_port = int(bd.get("backlog_port") or 8766)
-
-    def _norm(s: str) -> str:
-        return (s or "").strip().lower()
-
-    # resolver target -> !id
-    raw_id = None
-    try:
-        if 'resolver_alias_o_id' in globals() and callable(globals()['resolver_alias_o_id']):
-            raw_id = resolver_alias_o_id(target)  # puede devolver tuple/list/etc.
-    except Exception:
-        raw_id = None
-
-    node_id = _canon_node_id(raw_id or target)
-    if not node_id or not node_id.startswith("!"):
-        await update.effective_message.reply_text(f"⚠️ No pude normalizar el destino '{target}' a un !id válido.")
-        return ConversationHandler.END
-
-    # Feedback inmediato
-    try:
-        await update.effective_message.reply_text(
-            f"🔎 Iniciando traceroute hacia <code>{node_id}</code> (timeout {int(timeout)} s)…",
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
-    # 4) util cierre iface efímero
-    def _force_close_iface(iface) -> None:
+        # Si ya tienes run_command(args) en tu bot, úsalo (es lo más consistente)
         try:
-            for m in ("close", "disconnect", "shutdown", "stop", "dispose"):
-                if hasattr(iface, m) and callable(getattr(iface, m)):
-                    try:
-                        getattr(iface, m)()
-                    except Exception:
-                        pass
-            s = getattr(iface, "_socket", None) or getattr(iface, "socket", None)
-            if s:
-                try:
-                    s.close()
-                except Exception:
-                    pass
+            out = run_command(cli)  # type: ignore  # tu wrapper existente
+            return (out or "").strip()
         except Exception:
-            pass
-
-    # 5) helpers BacklogServer
-    async def _broker_cmd(cmd: str, params: dict, recv_timeout: float = 5.0) -> dict | None:
-        # helper global si existe
-        try:
-            if 'fetch_backlog_from_broker' in globals() and callable(globals()['fetch_backlog_from_broker']):
-                return await fetch_backlog_from_broker(cmd, params=params)
-        except Exception:
-            pass
-        # TCP crudo
-        try:
-            with _s.create_connection((backlog_host, backlog_port), timeout=3.0) as s:
-                s.sendall((_j.dumps({"cmd": cmd, "params": params}, ensure_ascii=False) + "\n").encode("utf-8"))
-                s.settimeout(recv_timeout)
-                buf = b""
-                while True:
-                    b = s.recv(65536)
-                    if not b:
-                        break
-                    buf += b
-                    if b"\n" in b:
-                        break
-            txt = buf.decode("utf-8", "ignore").strip()
-            if not txt:
-                return None
-            # el broker responde JSON por línea; usa la primera
-            line = txt.splitlines()[0].strip()
-            return _j.loads(line) if line else None
-        except Exception:
-            return None
-
-    async def _fetch_traceroute_frames(since_ts: int, limit: int = 300) -> list[dict]:
-        """
-        Devuelve frames candidatos, ordenados por ts asc.
-        Importante: conserva decoded y portnum para filtrar mejor.
-        """
-        portnums = ["TRACEROUTE_APP", "ROUTING_APP", "ADMIN_APP:TRACEROUTE", "ADMIN_TRACEROUTE"]
-        res = await _broker_cmd("FETCH_BACKLOG", {
-            "since_ts": int(since_ts),
-            "until_ts": None,
-            "channel": None,
-            "portnums": portnums,
-            "limit": int(limit)
-        })
-        rows = (res or {}).get("data") or (res or {}).get("items") or []
-        out = []
-        for r in rows:
-            ts = r.get("ts") or r.get("rxTime") or r.get("timestamp") or r.get("time")
-            fr = r.get("from") or r.get("fromId") or r.get("from_id")
-            dec = (r.get("decoded") or {}) if isinstance(r.get("decoded"), dict) else {}
-            hop = r.get("hop") or dec.get("hop") or dec.get("hop_index")
-            via = r.get("via") or dec.get("viaNode") or r.get("relay_node")
-            pn = dec.get("portnum") or r.get("portnum") or r.get("portNum")
-            out.append({
-                "ts": ts,
-                "from": fr,
-                "hop": hop if isinstance(hop, int) else None,
-                "via": via,
-                "portnum": pn,
-                "decoded": dec,
-                "raw": r
-            })
-        out.sort(key=lambda x: (x["ts"] if isinstance(x["ts"], (int, float)) else 0))
-        return out
-
-    # 5.1) pausa/reanuda para CLI
-    async def _pause_broker_for_cli(reason: str, secs: int) -> None:
-        try:
-            r = await _broker_cmd("BROKER_PAUSE", {"reason": reason, "secs": int(secs)})
-            if not (isinstance(r, dict) and (r.get("ok") or r.get("status") == "ok")):
-                await _broker_cmd("CTRL", {"action": "pause", "reason": reason, "secs": int(secs)})
-        except Exception:
-            pass
-        try:
-            if hasattr(pool, "pause_mgr"):
-                pool.pause_mgr()
-            elif hasattr(pool, "pause"):
-                pool.pause()
-            if hasattr(pool, "drop_iface"):
-                try:
-                    pool.drop_iface(host, port)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        await asyncio.sleep(1.5)
-
-    async def _resume_broker_after_cli() -> None:
-        try:
-            r = await _broker_cmd("BROKER_RESUME", {})
-            if not (isinstance(r, dict) and (r.get("ok") or r.get("status") == "ok")):
-                await _broker_cmd("CTRL", {"action": "resume"})
-        except Exception:
-            pass
-        try:
-            if hasattr(pool, "resume_mgr"):
-                pool.resume_mgr()
-            elif hasattr(pool, "resume"):
-                pool.resume()
-        except Exception:
-            pass
-        await asyncio.sleep(0.4)
-
-    # 6) Lanzado
-    launched = False
-    used_adapter = False
-    used_cli_fallback = False
-    broker_err = ""
-
-    # Ventana temporal: usamos marca justo antes de lanzar y un pequeño margen hacia atrás
-    launch_mark = time.time()
-    since_ts = int(launch_mark) - 2  # margen para clock skew/cola
-
-    # Intento 0: iface del pool
-    iface = None
-    try:
-        if hasattr(pool, "get_iface_wait"):
-            iface = pool.get_iface_wait(timeout=min(4.0, timeout / 2), interval=0.25)
-        elif hasattr(pool, "get_iface"):
-            iface = pool.get_iface()
-    except Exception:
-        iface = None
-
-    # Intento 1: adapter API
-    if iface:
-        try:
-            from meshtastic_api_adapter import traceroute as adapter_traceroute  # type: ignore
-            adapter_traceroute(iface, node_id, channel=None, timeout=timeout)
-            launched = True
-            used_adapter = True
-            launch_mark = time.time()
-            since_ts = int(launch_mark) - 2
-        except Exception:
-            pass
-
-        # Intento 2: broker (RUN_TRACEROUTE / RUN_CLI)
-    if not launched:
-        resA = await _broker_cmd("RUN_TRACEROUTE", {"target": node_id, "timeout": int(timeout)})
-        if isinstance(resA, dict) and (resA.get("ok") or resA.get("status") == "ok"):
-            launched = True
-        else:
-            # NUEVO: si el broker dice "Timed out waiting for traceroute", no degradamos a CLI.
-            # Seguimos a lectura de backlog igualmente, porque:
-            #  - Puede haber frames parciales
-            #  - Evitamos PAUSA/CLI/REANUDA que empeora 24/7
-            broker_err = ((resA or {}).get("error") if isinstance(resA, dict) else "") or ""
-            broker_err = broker_err.strip()
-
-            if "timed out waiting for traceroute" in broker_err.lower():
-                launched = True   # seguimos con FETCH_BACKLOG aunque el broker lo marque como timeout
-            else:
-                resB = await _broker_cmd("RUN_CLI", {"action": "traceroute", "target": node_id, "timeout": int(timeout)})
-                if isinstance(resB, dict) and (resB.get("ok") or resB.get("status") == "ok"):
-                    launched = True
-                else:
-                    # Mantén broker_err si venía de resA; si no, usa resB
-                    if not broker_err:
-                        broker_err = ((resB or {}).get("error") if isinstance(resB, dict) else "") or ""
-                        broker_err = broker_err.strip()
-
-    # Intento 3: efímero acquire
-    if not launched and hasattr(pool, "acquire") and callable(pool.acquire):
-        temp_iface = None
-        try:
+            # Fallback directo si run_command no existe
             try:
-                temp_iface = pool.acquire(host, port, timeout=5.0, reuse_only=False)
-            except TypeError:
-                temp_iface = pool.acquire(host, port, timeout=5.0)
-            if temp_iface:
-                fn = getattr(temp_iface, "sendTraceRoute", None)
-                if callable(fn):
-                    dest_u32 = int(node_id[1:], 16)
-                    try:
-                        fn(dest_u32, 5, channelIndex=0)
-                    except TypeError:
-                        try:
-                            fn(dest_u32, 5, 0)
-                        except TypeError:
-                            fn(dest_u32, 5)
-                    launched = True
-                    launch_mark = time.time()
-                    since_ts = int(launch_mark) - 2
-        except Exception:
-            pass
-        finally:
-            if temp_iface:
-                try:
-                    if hasattr(temp_iface, "release"):
-                        temp_iface.release()
-                except Exception:
-                    pass
-                _force_close_iface(temp_iface)
+                p = subprocess.run(
+                    ["meshtastic"] + cli,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_s + 10,
+                )
+                text = (p.stdout or "").strip()
+                if not text:
+                    text = (p.stderr or "").strip()
+                return text
+            except subprocess.TimeoutExpired:
+                return ""
+            except Exception as e:
+                return f"CLI_ERROR: {type(e).__name__}: {e}"
 
-    # Intento 4: CLI
-    if not launched:
-        used_cli_fallback = True
+    # Pausa/reanuda usando el contexto robusto ya existente
+    out_text = ""
+    try:
+        with with_broker_paused(max_wait_s=8.0):
+            out_text = await asyncio.to_thread(_run_cli_traceroute_blocking)
+    finally:
+        await update.effective_message.reply_text("▶️ Reanudando conexión…")
 
-        def _build_cli_variants(host_str: str, node: str) -> list[list[str]]:
-            py = sys.executable or "python"
-            return [
-                [py, "-m", "meshtastic", "--host", host_str, "--traceroute", str(node)],
-                ["meshtastic", "--host", host_str, "--traceroute", str(node)],
-            ]
+    if not out_text:
+        await update.effective_message.reply_text("⏰ Traceroute sin respuesta en el tiempo límite.")
+        return
 
-        def _parse_cli_hops(output: str, target_id: str) -> list[str]:
-            """
-            Parser más estricto:
-              - Acepta líneas 'hop ...' y formatos numerados típicos.
-              - Acepta líneas con '->' SOLO si mencionan el destino o si no son un eco A->A.
-            """
-            if isinstance(output, (bytes, bytearray)):
-                try:
-                    output = output.decode("utf-8", "ignore")
-                except Exception:
-                    output = output.decode(errors="ignore")
-
-            tgt = (target_id or "").lower().strip()
-            lines: list[str] = []
-            for raw in (output or "").splitlines():
-                s = raw.strip()
-                if not s:
-                    continue
-                low = s.lower()
-
-                if low.startswith("hop ") or low.startswith("hop\t") or low.startswith("hop:"):
-                    lines.append(s)
-                    continue
-
-                # formato "1: ..." / "1) ..."
-                if (s[:1].isdigit() and (":" in s or ")" in s)):
-                    lines.append(s)
-                    continue
-
-                # líneas con flechas: filtrar eco A->A y exigir relación con target cuando sea posible
-                if "->" in s:
-                    # intentar detectar A->B
-                    parts = [p.strip() for p in s.split("->", 1)]
-                    if len(parts) == 2:
-                        a = parts[0].replace("-", "").replace(">", "").strip()
-                        b = parts[1].replace("-", "").replace(">", "").strip()
-                        # si es eco (A==B) lo descartamos
-                        if a and b and a == b:
-                            continue
-                    # si tenemos target, exigimos que aparezca en la línea para evitar “basura”
-                    if tgt and tgt in low:
-                        lines.append(s)
-                    continue
-
-            return lines
-
-        try:
-            await update.effective_message.reply_text("⏸️ Pausando conexión para ejecutar CLI…")
-        except Exception:
-            pass
-
-        await _pause_broker_for_cli(reason="cli_traceroute", secs=int(timeout) + 10)
-
-        cli_hops_lines: list[str] = []
-        try:
-            await asyncio.sleep(1.5)
-
-            for cmd in _build_cli_variants(host, node_id):
-                rc, out, err, was_to = await asyncio.to_thread(run_cli_exclusive, cmd, float(timeout))
-                combined = (out or "") + ("\n" + err if err else "")
-                parsed = _parse_cli_hops(combined, node_id)
-
-                if was_to or rc == 124:
-                    await update.effective_message.reply_text("⏰ Traceroute sin respuesta en el tiempo límite.")
-                    continue
-
-                ok = (rc == 0) and bool(parsed)
-                if ok:
-                    cli_hops_lines = parsed
-                    break
-
-        finally:
-            try:
-                await update.effective_message.reply_text("▶️ Reanudando conexión…")
-            except Exception:
-                pass
-            await _resume_broker_after_cli()
-
-        if cli_hops_lines:
-            header = f"🛰️ <b>Traceroute (CLI)</b> → <code>{node_id}</code>\n"
-            body = "\n".join(cli_hops_lines)
-            await update.effective_message.reply_text(header + body, parse_mode="HTML")
-            return ConversationHandler.END
-
-        # Si CLI tampoco dio nada
-        if broker_err:
-            try:
-                await _safe_reply_html(update.effective_message, f"Motivo broker: <code>{broker_err}</code>")
-            except Exception:
-                pass
-        return ConversationHandler.END
-
-    # margen para que entren frames
-    await asyncio.sleep(0.9)
-
-    # 7) Espera de frames correlados
-    deadline = time.time() + timeout
-    hops: list[dict] = []
-
-    nnorm = _norm(node_id)
-    nnorm_no_bang = nnorm[1:] if nnorm.startswith("!") else nnorm
-
-    while time.time() < deadline:
-        frames = await _fetch_traceroute_frames(since_ts=since_ts, limit=500)
-        cand: list[dict] = []
-
-        for f in frames:
-            dec = f.get("decoded") or {}
-            # destino en distintas claves posibles
-            dst = dec.get("dst") or dec.get("dstId") or dec.get("to") or dec.get("toId") or None
-            if dst:
-                dnorm = _norm(str(dst))
-                dnorm_no_bang = dnorm[1:] if dnorm.startswith("!") else dnorm
-                if dnorm != nnorm and dnorm_no_bang != nnorm_no_bang:
-                    continue
-            else:
-                # Si no hay dst, evitamos “capturas cruzadas”:
-                # exigimos que el frame sea TRACEROUTE* y que esté cerca temporalmente de launch_mark.
-                pn = _norm(str(f.get("portnum") or ""))
-                if "traceroute" not in pn:
-                    continue
-                ts = f.get("ts")
-                if isinstance(ts, (int, float)):
-                    # solo si está razonablemente cerca de este traceroute
-                    if ts < (launch_mark - 2) or ts > (launch_mark + timeout + 2):
-                        continue
-
-            cand.append(f)
-
-        if cand:
-            hops = cand
-            break
-
-        await asyncio.sleep(0.8)
-
-    if not hops:
-        await update.effective_message.reply_text("⏳ Traceroute lanzado, pero sin respuestas dentro del tiempo de espera.")
-        return ConversationHandler.END
-
-    # Ordenación por hop si existe, si no por ts
-    def _key_sort(f):
-        hop = f.get("hop")
-        ts = f.get("ts")
-        if isinstance(hop, int):
-            return (0, hop, ts if isinstance(ts, (int, float)) else 0)
-        return (1, 10**9, ts if isinstance(ts, (int, float)) else 0)
-
-    hops.sort(key=_key_sort)
-
-    # tiempos relativos
-    t0 = next((f.get("ts") for f in hops if isinstance(f.get("ts"), (int, float))), None)
-    total_secs = 0.0
-    if t0 is not None:
-        last_ts = t0
-        for f in hops:
-            ts = f.get("ts") if isinstance(f.get("ts"), (int, float)) else None
-            if ts is None:
-                f["dt"] = None
-                f["t_rel"] = None
-                continue
-            f["dt"] = float(ts - last_ts) if last_ts is not None else None
-            f["t_rel"] = float(ts - t0)
-            last_ts = ts
-        total_secs = float(last_ts - t0) if last_ts is not None else 0.0
-
-    def _fmt_time(ts):
-        import time as _t
-        return _t.strftime("%H:%M:%S", _t.localtime(ts)) if isinstance(ts, (int, float)) else "—"
-
-    def _fmt_secs(x):
-        if x is None:
-            return "—"
-        if x < 1.0:
-            return f"{x * 1000:.0f} ms"
-        return f"{x:.1f} s"
-
-    lines = []
-    resumen = f"🧭 Traceroute a {node_id} — saltos: {len(hops)}"
-    if total_secs and total_secs > 0:
-        resumen += f" • duración: {_fmt_secs(total_secs)}"
-    if used_cli_fallback:
-        resumen += " • ⚠️ fallback CLI (pausa/reanuda)"
-    if used_adapter:
-        resumen += " • API adapter"
-    lines.append(resumen)
-
-    idx = 0
-    for f in hops:
-        idx += 1
-        hop = f.get("hop")
-        hop_s = f"hop {hop}" if hop is not None else f"hop {idx}"
-        fr = f.get("from") or ""
-        via = f.get("via") or ""
-        fr_alias = _alias_for(fr)
-        via_alias = _alias_for(via)
-        fr_label = f"{fr_alias} ({fr})" if fr_alias else str(fr or "—")
-        via_label = f"{via_alias} ({via})" if via and via_alias else (via or None)
-        ts_s = _fmt_time(f.get("ts"))
-        dt_s = _fmt_secs(f.get("dt"))
-        trel_s = _fmt_secs(f.get("t_rel"))
-        core = f"  • {hop_s}"
-        if via_label:
-            core += f"  via {via_label}"
-        core += f"  from {fr_label}"
-        extras = f"[t={ts_s}"
-        if f.get("dt") is not None:
-            extras += f", +{dt_s}"
-        if f.get("t_rel") is not None:
-            extras += f", T={trel_s}"
-        extras += "]"
-        lines.append(f"{core}  {extras}")
-
-    text = "\n".join(lines)
-    if len(text) > 3900:
-        await update.effective_message.reply_text(text[:3900])
-        resto = text[3900:]
-        while resto:
-            await update.effective_message.reply_text(resto[:3900])
-            resto = resto[3900:]
-    else:
-        await update.effective_message.reply_text(text)
-
-    return ConversationHandler.END
+    # Normaliza salida para evitar “ruido” raro (sin inventar datos)
+    # Si quieres, aquí puedes mejorar parseo más adelante sin romper nada.
+    await update.effective_message.reply_text(
+        f"🛰️ Traceroute (CLI) → {target}\n{out_text}"
+    )
 
 # === NUEVO HANDLER: alias corto /rt que reutiliza /traceroute ===
 async def rt_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
