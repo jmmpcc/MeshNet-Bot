@@ -10439,7 +10439,11 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     if b"\n" in b:
                         break
             txt = buf.decode("utf-8", "ignore").strip()
-            return _j.loads(txt) if txt else None
+            if not txt:
+                return None
+            # el broker responde JSON por línea; usa la primera
+            line = txt.splitlines()[0].strip()
+            return _j.loads(line) if line else None
         except Exception:
             return None
 
@@ -10547,16 +10551,30 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             pass
 
-    # Intento 2: broker RUN_TRACEROUTE
+        # Intento 2: broker (RUN_TRACEROUTE / RUN_CLI)
     if not launched:
-        resA = await _broker_cmd("RUN_TRACEROUTE", {"target": node_id, "hop_limit": 5, "ch_index": 0})
+        resA = await _broker_cmd("RUN_TRACEROUTE", {"target": node_id, "timeout": int(timeout)})
         if isinstance(resA, dict) and (resA.get("ok") or resA.get("status") == "ok"):
             launched = True
-            launch_mark = time.time()
-            since_ts = int(launch_mark) - 2
         else:
+            # NUEVO: si el broker dice "Timed out waiting for traceroute", no degradamos a CLI.
+            # Seguimos a lectura de backlog igualmente, porque:
+            #  - Puede haber frames parciales
+            #  - Evitamos PAUSA/CLI/REANUDA que empeora 24/7
             broker_err = ((resA or {}).get("error") if isinstance(resA, dict) else "") or ""
             broker_err = broker_err.strip()
+
+            if "timed out waiting for traceroute" in broker_err.lower():
+                launched = True   # seguimos con FETCH_BACKLOG aunque el broker lo marque como timeout
+            else:
+                resB = await _broker_cmd("RUN_CLI", {"action": "traceroute", "target": node_id, "timeout": int(timeout)})
+                if isinstance(resB, dict) and (resB.get("ok") or resB.get("status") == "ok"):
+                    launched = True
+                else:
+                    # Mantén broker_err si venía de resA; si no, usa resB
+                    if not broker_err:
+                        broker_err = ((resB or {}).get("error") if isinstance(resB, dict) else "") or ""
+                        broker_err = broker_err.strip()
 
     # Intento 3: efímero acquire
     if not launched and hasattr(pool, "acquire") and callable(pool.acquire):
