@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.6.12.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v6.2.6.14.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -237,6 +237,104 @@ def _mc_parse_chanidx_to_ch() -> dict[int, int]:
         out[a] = b
     return out
 
+def _safe_meshcore_max_text_bytes() -> int:
+    """
+    Límite conservador (en BYTES UTF-8) para TX hacia MeshCore.
+    Env:
+      MESHCORE_MAX_TEXT_BYTES (default 180)
+    """
+    try:
+        v = int((os.getenv("MESHCORE_MAX_TEXT_BYTES") or "180").strip())
+    except Exception:
+        v = 180
+    return max(80, min(v, 260))
+
+
+def _split_text_chunks_utf8(text: str, max_bytes: int) -> list[str]:
+    """
+    Divide 'text' en trozos cuyo tamaño en bytes UTF-8 sea <= max_bytes.
+    Preferencia por cortar en espacios; fallback a corte duro.
+    """
+    if text is None:
+        return []
+    s = str(text).strip()
+    if not s:
+        return []
+
+    max_bytes = int(max_bytes or 180)
+    if max_bytes < 80:
+        max_bytes = 80
+
+    out: list[str] = []
+
+    def _take_prefix_fit_bytes(s0: str, limit_b: int) -> tuple[str, str]:
+        if not s0:
+            return "", ""
+
+        if len(s0.encode("utf-8", errors="ignore")) <= limit_b:
+            return s0, ""
+
+        # Búsqueda binaria por longitud de caracteres aproximando bytes
+        lo, hi = 1, len(s0)
+        best = 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            cand = s0[:mid]
+            b = len(cand.encode("utf-8", errors="ignore"))
+            if b <= limit_b:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+
+        cut = best
+
+        # intenta no romper palabras
+        sp = s0.rfind(" ", 0, cut + 1)
+        if sp >= max(10, int(cut * 0.6)):
+            cut = sp
+
+        head = s0[:cut].strip()
+        tail = s0[cut:].strip()
+        if not head:
+            head = s0[:1]
+            tail = s0[1:].strip()
+        return head, tail
+
+    rest = s
+    while rest:
+        head, rest = _take_prefix_fit_bytes(rest, max_bytes)
+        if head:
+            out.append(head)
+        else:
+            break
+
+    return out
+
+
+def _add_part_prefix_fit(part: str, idx: int, total: int, max_bytes: int) -> str:
+    """
+    Añade prefijo "(i/n) " y asegura que el resultado cabe en max_bytes (UTF-8).
+    Si no cabe, recorta el cuerpo para que quepa.
+    """
+    prefix = f"({idx}/{total}) "
+    max_bytes = int(max_bytes or 180)
+    p_b = len(prefix.encode("utf-8", errors="ignore"))
+    if p_b >= max_bytes:
+        return prefix[: max(1, max_bytes // 2)]
+
+    body = str(part or "").strip()
+    if not body:
+        return prefix.strip()
+
+    cand = prefix + body
+    if len(cand.encode("utf-8", errors="ignore")) <= max_bytes:
+        return cand
+
+    avail = max_bytes - p_b
+    chunk = _split_text_chunks_utf8(body, avail)
+    body_fit = chunk[0] if chunk else body[:1]
+    return prefix + body_fit
 
 class MeshCoreEmbeddedBridge:
     """
@@ -590,20 +688,39 @@ class MeshCoreEmbeddedBridge:
                 pass
 
             try:
-                if isinstance(dst, dict) and str(dst.get("kind") or "").lower() in ("chan", "channel"):
-                    chan_idx = int(dst.get("channel_idx"))
-                    await mc.commands.send_chan_msg(int(chan_idx), msg)  # type: ignore[union-attr]
+                # --- [PATCH] Split por bytes UTF-8 para no perder / truncar mensajes largos ---
+                max_b = _safe_meshcore_max_text_bytes()
+                parts = _split_text_chunks_utf8(msg, max_b)
+
+                # Si hay más de una parte, añadir (i/n) garantizando que sigue cabiendo en bytes
+                if len(parts) > 1:
+                    send_parts = [_add_part_prefix_fit(p, i + 1, len(parts), max_b) for i, p in enumerate(parts)]
                 else:
-                    send_dst = dst
-                    if isinstance(send_dst, str):
-                        try:
-                            c = mc.get_contact_by_key_prefix(send_dst)  # type: ignore[union-attr]
-                            if c:
-                                send_dst = c
-                        except Exception:
-                            pass
-                    await mc.commands.send_msg(send_dst, msg)  # type: ignore[union-attr]
+                    send_parts = parts
+
+                # Enviar secuencialmente (micro-espaciado para evitar ráfagas)
+                for p in (send_parts or [""]):
+                    if isinstance(dst, dict) and str(dst.get("kind") or "").lower() in ("chan", "channel"):
+                        chan_idx = int(dst.get("channel_idx"))
+                        await mc.commands.send_chan_msg(int(chan_idx), p)  # type: ignore[union-attr]
+                    else:
+                        send_dst = dst
+                        if isinstance(send_dst, str):
+                            try:
+                                c = mc.get_contact_by_key_prefix(send_dst)  # type: ignore[union-attr]
+                                if c:
+                                    send_dst = c
+                            except Exception:
+                                pass
+                        await mc.commands.send_msg(send_dst, p)  # type: ignore[union-attr]
+
+                    try:
+                        await _aio.sleep(0.15)
+                    except Exception:
+                        pass
+
                 self._last_ok = time.time()
+
             except Exception as e:
                 self._last_err = f"tx: {type(e).__name__}: {e}"
 
@@ -3100,79 +3217,77 @@ class _BacklogServer(threading.Thread):
                                 resp = {"ok": True, "scheduled": True, "seconds": int(secs)}
 
                         elif cmd == "FORCE_RECONNECT":
-                                # Reset limpio + preparar ventana de gracia anti-escalado
+                            # Reset limpio + preparar ventana de gracia anti-escalado
+                            try:
+                                import time as _t
+                                from tcpinterface_persistent import TCPInterfacePool
+                            except Exception:
+                                pass
+
+                            try:
+                                # === 0) Cooldown corto para el siguiente _on_disconnect ===
+                                # (se aplica una sola vez; NO tocar COOLDOWN_SECS base)
                                 try:
-                                    import time as _t
-                                    from tcpinterface_persistent import TCPInterfacePool
+                                    with COOLDOWN_FORCE_LOCK:
+                                        globals()["COOLDOWN_FORCE_NEXT"] = 3   # 3s
+                                except Exception:
+                                    globals()["COOLDOWN_FORCE_NEXT"] = 3
+
+                                # === 1) Ventana de gracia anti-escalado tras el reset ===
+                                #   - Tiempo: 45s
+                                #   - Contador: permitir suprimir hasta 2 "caídas tempranas"
+                                try:
+                                    now = _t.time()
+                                    globals()["_SUPPRESS_EARLY_ESC_UNTIL"]  = now + 45.0
+                                    globals()["_SUPPRESS_EARLY_ESC_REMAIN"] = int(globals().get("_SUPPRESS_EARLY_ESC_DEFAULT_REMAIN", 2))
+
                                 except Exception:
                                     pass
 
+                                # === 2) Limpieza de estados globales mínimos (sin romper) ===
                                 try:
-                                    # === 0) Cooldown corto para el siguiente _on_disconnect ===
-                                    # (se aplica una sola vez; NO tocar COOLDOWN_SECS base)
-                                    try:
-                                        with COOLDOWN_FORCE_LOCK:
-                                            globals()["COOLDOWN_FORCE_NEXT"] = 3   # 3s
-                                    except Exception:
-                                        globals()["COOLDOWN_FORCE_NEXT"] = 3
+                                    x = globals().get("TX_BLOCKED")
+                                    if x:
+                                        x.clear()
+                                except Exception:
+                                    pass
+                                try:
+                                    cd = globals().get("COOLDOWN")
+                                    if cd:
+                                        cd.clear()
+                                except Exception:
+                                    pass
 
-                                    # === 1) Ventana de gracia anti-escalado tras el reset ===
-                                    #   - Tiempo: 45s
-                                    #   - Contador: permitir suprimir hasta 2 "caídas tempranas"
-                                    try:
-                                        now = _t.time()
-                                        globals()["_SUPPRESS_EARLY_ESC_UNTIL"]  = now + 45.0
-                                        globals()["_SUPPRESS_EARLY_ESC_REMAIN"] = int(globals().get("_SUPPRESS_EARLY_ESC_DEFAULT_REMAIN", 2))
-
-                                    except Exception:
-                                        pass
-
-                                    # === 2) Limpieza de estados globales mínimos (sin romper) ===
-                                    try:
-                                        x = globals().get("TX_BLOCKED")
-                                        if x:
-                                            x.clear()
-                                    except Exception:
-                                        pass
-                                    try:
-                                        cd = globals().get("COOLDOWN")
-                                        if cd:
-                                            cd.clear()
-                                    except Exception:
-                                        pass
-
-                                    # === 3) Reset de la sesión del pool TCP (cierra y reabrirá perezoso) ===
-                                    try:
-                                        TCPInterfacePool.reset(
-                                            globals().get("RUNTIME_MESH_HOST") or "",
-                                            int(globals().get("RUNTIME_MESH_PORT") or 4403)
-                                        )
-                                        print("[ctrl] FORCE_RECONNECT → TCPInterfacePool.reset() aplicado.", flush=True)
-                                    except Exception as e:
-                                        print(f"[ctrl] FORCE_RECONNECT → aviso: no se pudo resetear pool: {type(e).__name__}: {e}", flush=True)
-
-                                    # === 4) Señal suave al manager: desconecta y reanuda (garantiza no-paused) ===
-                                    try:
-                                        mgr = globals().get("BROKER_IFACE_MGR") or self.iface_mgr
-                                    except Exception:
-                                        mgr = None
-
-                                    try:
-                                        if mgr and hasattr(mgr, "signal_disconnect"):
-                                            mgr.signal_disconnect()
-                                    except Exception:
-                                        pass
-                                    try:
-                                        if mgr and hasattr(mgr, "resume"):
-                                            mgr.resume()   # estado no-pausado
-                                    except Exception:
-                                        pass
-
-                                    resp = {"ok": True, "status": "running", "action": "force_reconnect"}
+                                # === 3) Reset de la sesión del pool TCP (cierra y reabrirá perezoso) ===
+                                try:
+                                    TCPInterfacePool.reset(
+                                        globals().get("RUNTIME_MESH_HOST") or "",
+                                        int(globals().get("RUNTIME_MESH_PORT") or 4403)
+                                    )
+                                    print("[ctrl] FORCE_RECONNECT → TCPInterfacePool.reset() aplicado.", flush=True)
                                 except Exception as e:
-                                    resp = {"ok": False, "error": f"force_reconnect_failed: {type(e).__name__}: {e}"}
+                                    print(f"[ctrl] FORCE_RECONNECT → aviso: no se pudo resetear pool: {type(e).__name__}: {e}", flush=True)
 
+                                # === 4) Señal suave al manager: desconecta y reanuda (garantiza no-paused) ===
+                                try:
+                                    mgr = globals().get("BROKER_IFACE_MGR") or self.iface_mgr
+                                except Exception:
+                                    mgr = None
 
+                                try:
+                                    if mgr and hasattr(mgr, "signal_disconnect"):
+                                        mgr.signal_disconnect()
+                                except Exception:
+                                    pass
+                                try:
+                                    if mgr and hasattr(mgr, "resume"):
+                                        mgr.resume()   # estado no-pausado
+                                except Exception:
+                                    pass
+
+                                resp = {"ok": True, "status": "running", "action": "force_reconnect"}
+                            except Exception as e:
+                                resp = {"ok": False, "error": f"force_reconnect_failed: {type(e).__name__}: {e}"}
 
                         elif cmd == "BRIDGE_STATUS":
                             try:
