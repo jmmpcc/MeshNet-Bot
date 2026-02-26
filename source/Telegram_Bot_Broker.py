@@ -800,6 +800,60 @@ def bbs_list_news(tag: str | None, page: int, page_size: int) -> list[dict]:
         cur = conn.execute(q, tuple(params))
         return [dict(r) for r in cur.fetchall()]
 
+def bbs_news_categories_text() -> str:
+    """
+    Devuelve un texto con las categorías (tags) detectadas en la tabla 'news'
+    y cuántas noticias hay por cada una.
+
+    - Lee el campo news.tags (suele venir como "ham,sdr" o "ham" etc.)
+    - Normaliza a minúsculas y separa por coma.
+    - Cuenta cada tag individual (más útil que agrupar por el string completo).
+
+    Uso (Telegram):
+      /bbs noticias cat
+    """
+    with _bbs_db_connect() as conn:
+        if not _bbs_table_exists(conn, "news"):
+            return "No hay categorías disponibles (tabla 'news' no existe)."
+
+        rows = conn.execute(
+            """
+            SELECT tags
+            FROM news
+            WHERE tags IS NOT NULL AND TRIM(tags) != ''
+            """
+        ).fetchall()
+
+    counts: dict[str, int] = {}
+    for (tags_raw,) in rows:
+        tags_s = (tags_raw or "").strip()
+        if not tags_s:
+            continue
+
+        # Separación robusta por coma: "ham,sdr" -> ["ham","sdr"]
+        for t in tags_s.split(","):
+            t = _bbs_norm_tag(t)
+            if not t:
+                continue
+            counts[t] = counts.get(t, 0) + 1
+
+    if not counts:
+        return "No hay categorías disponibles."
+
+    # Orden: más frecuentes primero, luego alfabético
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    out = ["CATEGORÍAS (noticias):"]
+    for tag, total in ordered:
+        out.append(f"{tag} = {total}")
+
+    out.append("")
+    out.append("Uso:")
+    out.append("  /bbs noticias cat <tag> [page]")
+    out.append("  /bbs noticias <tag> 10   (últimas 10 con tag)")
+    return "\n".join(out)
+
+
 def bbs_list_news_last(tag: str | None, limit: int) -> list[dict]:
     """
     Devuelve las últimas 'limit' noticias (opcionalmente filtradas por tag).
@@ -9772,6 +9826,7 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
       /bbs noticias 10
       /bbs noticias ham 10   (tag + last)
       /bbs noticias cat ham 10
+      /bbs noticias cat
       /bbs boletines [cat <tag>] [page]
       /bbs boletines ver <id>
       /bbs link <code>   (si usas shortlinks)
@@ -9785,6 +9840,7 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "• /bbs noticias 10\n"
             "• /bbs noticias ham 10\n"
             "• /bbs noticias cat ham 10\n"
+            "• /bbs noticias cat\n"
             "• /bbs boletines [cat <tag>] [page]\n"
             "• /bbs boletines ver <id>\n"
             "• /bbs link <code>\n"
@@ -9830,6 +9886,14 @@ async def cmd_bbs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # --- noticias ---
     if area == "noticias":
+
+        # /bbs noticias cat   -> listar categorías + contador
+        if rest and rest[0].lower() == "cat" and len(rest) == 1:
+            txt = bbs_news_categories_text()
+            for ch in chunk_text(txt):
+                await send_pre(update.effective_message, ch)
+            return
+        
         # submodo ver
         if rest and rest[0].lower() == "ver":
             nid = (rest[1] if len(rest) >= 2 else "")
