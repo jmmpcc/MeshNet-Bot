@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.6.14.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v6.2.6.15.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -675,6 +675,7 @@ class MeshCoreEmbeddedBridge:
             print(f"[meshcore-embedded] {self._last_err}", flush=True)
 
         # --- bucle TX ---
+        _retry = {}  # key -> intentos
         while not self._stop.is_set():
             try:
                 dst, msg = await _aio.wait_for(self._tx_q.get(), timeout=0.5)
@@ -723,6 +724,41 @@ class MeshCoreEmbeddedBridge:
 
             except Exception as e:
                 self._last_err = f"tx: {type(e).__name__}: {e}"
+
+                # === [PATCH] Retry conservador en fallos transitorios ===
+                try:
+                    emsg = (str(e) or "").lower()
+                    transient = any(k in emsg for k in (
+                        "not connected",
+                        "connection",
+                        "broken pipe",
+                        "reset",
+                        "timeout",
+                        "timed out",
+                        "closed",
+                        "eof",
+                    ))
+                except Exception:
+                    transient = False
+
+                if transient:
+                    try:
+                        # clave estable por destino + payload (evita bucles)
+                        k = f"{dst}|{msg}"
+                        n = int(_retry.get(k, 0))
+                        if n < 2:
+                            _retry[k] = n + 1
+                            # backoff corto para dar tiempo a que auto_reconnect estabilice
+                            try:
+                                await _aio.sleep(0.8 + (0.6 * n))
+                            except Exception:
+                                pass
+                            try:
+                                self._tx_q.put_nowait((dst, msg))
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
 
         # --- desconexión ---
         try:
