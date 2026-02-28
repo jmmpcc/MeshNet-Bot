@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.6.15.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v6.2.6.15. py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -4064,47 +4064,8 @@ def _mesh_transport_id(host: str, port: int) -> str:
     if t == "bluetooth":
         return f"ble:{(os.getenv('MESH_BT_ADDR','') or '').strip()}"
     if t == "usb":
-        dev = (os.getenv("MESH_USB_PORT", "") or "").strip()
-        if not dev:
-            raise RuntimeError("MESH_TRANSPORT=usb pero falta MESH_USB_PORT (ej. /dev/ttyACM0).")
-
-        # Baud preferido (si existe), pero con fallback automático a baudios habituales de Meshtastic.
-        try:
-            preferred = int((os.getenv("MESH_USB_BAUD", "115200") or "115200").strip())
-        except Exception:
-            preferred = 115200
-
-        # Lista de intento: primero el preferido, luego los típicos.
-        candidates = []
-        for b in (preferred, 921600, 460800, 230400, 115200):
-            if b not in candidates:
-                candidates.append(b)
-
-        try:
-            from meshtastic.serial_interface import SerialInterface
-        except Exception as e:
-            raise RuntimeError(f"No se pudo importar SerialInterface: {e}")
-
-        last_exc: Exception | None = None
-
-        for baud in candidates:
-            if (os.getenv("BROKER_VERBOSE", "0") or "0").strip() == "1":
-                print(f"[receiver] Transporte USB/Serial → {dev} @ {baud}", flush=True)
-            try:
-                # SerialInterface acepta device y (según versión) baudrate/timeout.
-                try:
-                    return SerialInterface(dev, baudrate=baud)
-                except TypeError:
-                    # Compat con versiones antiguas sin baudrate kwarg.
-                    return SerialInterface(dev)
-            except Exception as e:
-                # Si falla el handshake (timeout) o cualquier otro error, probamos siguiente baud.
-                last_exc = e
-                if (os.getenv("BROKER_VERBOSE", "0") or "0").strip() == "1":
-                    print(f"[receiver] USB init falló @ {baud}: {e}", flush=True)
-                continue
-
-        raise RuntimeError(f"No se pudo abrir USB {dev} con baudios {candidates}. Último error: {last_exc}")
+        return f"usb:{(os.getenv('MESH_USB_PORT','') or '').strip()}"
+    return f"tcp:{host}:{port}"
 
 def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
     """
@@ -4126,7 +4087,7 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
             from meshtastic.ble_interface import BLEInterface
         except Exception as e:
             raise RuntimeError(f"No se pudo importar BLEInterface: {e}")
-        if (os.getenv("BROKER_VERBOSE", "0") or "0").strip() == "1":
+        if verbose:
             print(f"[receiver] Transporte BLE → {bt}", flush=True)
         return BLEInterface(bt)
 
@@ -4144,7 +4105,7 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
         except Exception as e:
             raise RuntimeError(f"No se pudo importar SerialInterface: {e}")
 
-        if (os.getenv("BROKER_VERBOSE", "0") or "0").strip() == "1":
+        if verbose:
             print(f"[receiver] Transporte USB/Serial → {dev} @ {baud}", flush=True)
 
         # SerialInterface acepta device y (según versión) baudrate/timeout.
@@ -4160,28 +4121,7 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
         print(f"[receiver] Transporte TCP → {host}:{port}", flush=True)
     return TCPInterface(hostname=host_for_iface)
 
-def _usb_stuck_should_hard_restart(exc: Exception) -> bool:
-    """
-    Detecta el patrón de 'USB atascado' que deja el puerto serie bloqueado dentro del mismo proceso:
-      1) primer intento: timeout de conexión
-      2) siguientes: 'Could not exclusively lock port ... Resource temporarily unavailable'
-    En ese estado, reintentar no sirve porque el lock lo sostiene el propio proceso (fuga en la lib).
-    Solución pragmática 24/7: forzar salida del proceso para que Docker lo reinicie y libere /dev/ttyUSB*.
-    """
-    try:
-        if _mesh_transport() != "usb":
-            return False
-    except Exception:
-        return False
 
-    msg = str(exc) or ""
-    markers = (
-        "Timed out waiting for connection completion",
-        "Could not exclusively lock port",
-        "Resource temporarily unavailable",
-        "Errno 11",
-    )
-    return any(m in msg for m in markers)
 
 class InterfaceManager:
     """
@@ -4484,16 +4424,6 @@ class InterfaceManager:
                     except Exception: pass
                     if getattr(self, "verbose", False):
                         print(f"[receiver] Fallo al crear TCPInterface: {e}", flush=True)
-                    # === [NUEVO] si USB quedó atascado, reinicio duro del proceso (Docker lo relanza) ===
-                    try:
-                        hard = (os.getenv("MESH_USB_HARD_RESTART_ON_STUCK", "1") or "1").strip()
-                        if hard == "1" and _usb_stuck_should_hard_restart(e):
-                            print("[receiver] USB atascado detectado → os._exit(23) para liberar /dev/ttyUSB*", flush=True)
-                            os._exit(23)
-                    except Exception:
-                        pass
-
-
                     time.sleep(backoff[min(idx, len(backoff)-1)])
                     idx += 1
                     self._reconnect_event.set()
