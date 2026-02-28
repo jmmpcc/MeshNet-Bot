@@ -4064,8 +4064,47 @@ def _mesh_transport_id(host: str, port: int) -> str:
     if t == "bluetooth":
         return f"ble:{(os.getenv('MESH_BT_ADDR','') or '').strip()}"
     if t == "usb":
-        return f"usb:{(os.getenv('MESH_USB_PORT','') or '').strip()}"
-    return f"tcp:{host}:{port}"
+        dev = (os.getenv("MESH_USB_PORT", "") or "").strip()
+        if not dev:
+            raise RuntimeError("MESH_TRANSPORT=usb pero falta MESH_USB_PORT (ej. /dev/ttyACM0).")
+
+        # Baud preferido (si existe), pero con fallback automático a baudios habituales de Meshtastic.
+        try:
+            preferred = int((os.getenv("MESH_USB_BAUD", "115200") or "115200").strip())
+        except Exception:
+            preferred = 115200
+
+        # Lista de intento: primero el preferido, luego los típicos.
+        candidates = []
+        for b in (preferred, 921600, 460800, 230400, 115200):
+            if b not in candidates:
+                candidates.append(b)
+
+        try:
+            from meshtastic.serial_interface import SerialInterface
+        except Exception as e:
+            raise RuntimeError(f"No se pudo importar SerialInterface: {e}")
+
+        last_exc: Exception | None = None
+
+        for baud in candidates:
+            if verbose:
+                print(f"[receiver] Transporte USB/Serial → {dev} @ {baud}", flush=True)
+            try:
+                # SerialInterface acepta device y (según versión) baudrate/timeout.
+                try:
+                    return SerialInterface(dev, baudrate=baud)
+                except TypeError:
+                    # Compat con versiones antiguas sin baudrate kwarg.
+                    return SerialInterface(dev)
+            except Exception as e:
+                # Si falla el handshake (timeout) o cualquier otro error, probamos siguiente baud.
+                last_exc = e
+                if verbose:
+                    print(f"[receiver] USB init falló @ {baud}: {e}", flush=True)
+                continue
+
+        raise RuntimeError(f"No se pudo abrir USB {dev} con baudios {candidates}. Último error: {last_exc}")
 
 def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
     """
