@@ -4088,7 +4088,7 @@ def _mesh_transport_id(host: str, port: int) -> str:
         last_exc: Exception | None = None
 
         for baud in candidates:
-            if verbose:
+            if (os.getenv("BROKER_VERBOSE", "0") or "0").strip() == "1":
                 print(f"[receiver] Transporte USB/Serial → {dev} @ {baud}", flush=True)
             try:
                 # SerialInterface acepta device y (según versión) baudrate/timeout.
@@ -4100,7 +4100,7 @@ def _mesh_transport_id(host: str, port: int) -> str:
             except Exception as e:
                 # Si falla el handshake (timeout) o cualquier otro error, probamos siguiente baud.
                 last_exc = e
-                if verbose:
+                if (os.getenv("BROKER_VERBOSE", "0") or "0").strip() == "1":
                     print(f"[receiver] USB init falló @ {baud}: {e}", flush=True)
                 continue
 
@@ -4126,7 +4126,7 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
             from meshtastic.ble_interface import BLEInterface
         except Exception as e:
             raise RuntimeError(f"No se pudo importar BLEInterface: {e}")
-        if verbose:
+        if (os.getenv("BROKER_VERBOSE", "0") or "0").strip() == "1":
             print(f"[receiver] Transporte BLE → {bt}", flush=True)
         return BLEInterface(bt)
 
@@ -4144,7 +4144,7 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
         except Exception as e:
             raise RuntimeError(f"No se pudo importar SerialInterface: {e}")
 
-        if verbose:
+        if (os.getenv("BROKER_VERBOSE", "0") or "0").strip() == "1":
             print(f"[receiver] Transporte USB/Serial → {dev} @ {baud}", flush=True)
 
         # SerialInterface acepta device y (según versión) baudrate/timeout.
