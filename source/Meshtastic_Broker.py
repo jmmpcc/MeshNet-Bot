@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.6.15. py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v6.2.6.15.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -4181,169 +4181,7 @@ class InterfaceManager:
         with self._lock:
             return self.iface
 
-    def _loop_OLD(self):
-        backoff = [2, 4, 8, 12, 20, 30, 45, 60]
-        idx = 0
-
-        while self._want_run:
-
-            self._reconnect_event.wait(timeout=5.0)
-            if not self._reconnect_event.is_set():
-                continue
-            
-            self._reconnect_event.clear()
-            # === [NUEVO] si está en pausa, no conectar
-            # === [TRAZA] si está en pausa, mostrar remaining (si hay cooldown)
-            if self._paused.is_set():
-                try:
-                    if COOLDOWN.is_active():
-                        rem = COOLDOWN.remaining()
-                        # imprime cada ~1s (ajustable); evita spam si quieres subiendo el paso
-                        print(f"[cooldown] ⏳ Pausado. Reintento cuando expire: quedan {rem}s", flush=True)
-                        time.sleep(5.0)
-                    else:
-                        time.sleep(0.2)
-                except Exception:
-                    time.sleep(0.2)
-                continue
-
-            
-            if not self.enable_reconnect and self.iface is not None:
-                continue
-
-            try:
-                with self._lock:
-                    if self.iface:
-                        try: self.iface.close()
-                        except Exception: pass
-                        self.iface = None
-            except Exception:
-                pass
-
-            while self._want_run:
-                
-                # === [NUEVO] Si ya tenemos conexión activa, no abras otra ===
-              
-                try:
-
-                    try:
-                        if bool(globals().get("_IS_CONNECTED", False)) and (self.iface is not None):
-                            # ya estamos conectados; no crear una nueva interfaz
-                            idx = 0
-                            time.sleep(0.2)
-                            break
-                    except Exception:
-                        pass
-
-                    # === [NUEVO] Gate del Circuit Breaker ANTES de abrir socket
-                    if not CIRCUIT_BREAKER.can_attempt():
-                        time.sleep(1.0)
-                        continue
-
-                     # === [SUSTITUIR] Gate COOLDOWN/pausa por el snippet propuesto ===
-                    # respeta cooldown/pausa antes de intentar conectar
-                    try:
-                        c = globals().get("COOLDOWN")
-                        paused = bool(globals().get("MGR_PAUSED") and globals()["MGR_PAUSED"].is_set())
-                        if (c and hasattr(c, "is_active") and c.is_active()) or paused:
-                            # (opcional) log si quieres
-                            if self.verbose and c and hasattr(c, "remaining"):
-                                print(f"[cooldown] ⏳ Pausado. Reintento cuando expire: quedan {c.remaining()}s", flush=True)
-                            time.sleep(0.5)
-                            continue
-                    except Exception:
-                        pass
-                    
-                    # --- REEMPLAZA SOLO ESTA PARTE donde hoy tienes: new_iface = TCPInterface(hostname=self.host) ---
-                    try:
-                        # Si tu CLI permite puerto runtime, úsalo (ya lo guardas en globals en main)
-                        port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
-                    except Exception:
-                        port = 4403
-
-                    # === [NUEVO] Serializar la construcción de la interfaz para evitar dobles sockets ===
-                    with globals()["_CONNECT_LOCK"]:
-                        if globals().get("_CONNECTING"):
-                            # ya hay otro hilo intentando conectar; espera y reintenta el loop exterior
-                            time.sleep(0.3)
-                            continue
-                        globals()["_CONNECTING"] = True
-                        try:
-                            # (opcional) reset duro del pool antes de abrir, si vienes de un error/timeout
-                            try:
-                                from tcpinterface_persistent import TCPInterfacePool
-                                TCPInterfacePool.reset(globals().get("RUNTIME_MESH_HOST") or "", int(globals().get("RUNTIME_MESH_PORT") or 4403))
-                                time.sleep(0.1)
-                            except Exception:
-                                pass
-
-                            new_iface = TCPInterface(hostname=self.host)
-                            with self._lock:
-                                self.iface = new_iface
-                            idx = 0
-                        finally:
-                            globals()["_CONNECTING"] = False
-
-               
-                    CIRCUIT_BREAKER.record_success()
-
-                    # [NUEVO] Gracia post-conexión: deja respirar 1.5–2s antes de tráfico y de limpiar cooldown
-                    time.sleep(2)      
-                                   
-
-                    # ✅ conexión OK → limpiar cooldown si seguía armado
-                    try:
-                        if COOLDOWN.is_active():
-                            COOLDOWN.clear()
-                            if self.verbose:
-                                # NUEVO (mínimo): tras conectar, vuelve a cooldown base
-                                globals()["COOLDOWN_SECS"] = 90
-
-                                print("[cooldown] Limpio tras reconexión exitosa.", flush=True)
-                    except Exception:
-                        pass
-
-                    break
-
-                # === [NUEVO] Captura específica de errores de socket (WinError 10054, etc.) ===
-                except OSError as e:
-                    # Diferenciamos 10054 para un log más claro (peer cerró la conexión)
-
-                    try:
-                        CIRCUIT_BREAKER.record_error()
-                    except Exception:
-                        pass
-
-                    winerr = getattr(e, "winerror", None)
-                    is_10054 = (winerr == 10054) or ("10054" in str(e))
-                    delay = backoff[min(idx, len(backoff) - 1)]
-                    if self.verbose:
-                        if is_10054:
-                            print(f"[receiver] ⚠️ OSError 10054 conectando a {self.host}: "
-                                f"el host remoto cerró la conexión (reintento en {delay}s)",
-                                flush=True)
-                        else:
-                            print(f"[receiver] ⚠️ OSError conectando a {self.host}: {e} "
-                                f"(reintento en {delay}s)",
-                                flush=True)
-                    time.sleep(delay)
-                    idx += 1
-                    continue
-
-                # === EXISTENTE (no lo quites): captura genérica de cualquier otra excepción ===
-                except Exception as e:
-
-                    try:
-                        CIRCUIT_BREAKER.record_error()
-                    except Exception:
-                        pass
-
-                    delay = backoff[min(idx, len(backoff) - 1)]
-                    if self.verbose:
-                        print(f"[receiver] Fallo conectando a {self.host}: {e} (reintento en {delay}s)", flush=True)
-                    time.sleep(delay)
-                    idx += 1
-
+  
 # === MODIFICADA: bucle del pool con anti-reentradas + lock interproceso (sin depender de self.port) ===
     def _loop(self):
         import threading, time
@@ -4416,6 +4254,19 @@ class InterfaceManager:
                         print(f"[receiver] Conectando a Meshtastic en {host}:{port}…", flush=True)
                         host_for_iface = f"{host}:{port}" if port and port != 4403 else host
                         #new_iface = TCPInterface(hostname=host_for_iface)
+                        # Cerrar interfaz anterior si existía
+                        try:
+                            if self._iface:
+                                try:
+                                    if getattr(self, "verbose", False):
+                                        print("[receiver] Cerrando interfaz anterior...", flush=True)
+                                    self._iface.close()
+                                except Exception:
+                                    pass
+                                finally:
+                                    self._iface = None
+                        except Exception:
+                            pass
                         new_iface = _create_meshtastic_interface(host=host, port=port, verbose=getattr(self, "verbose", False))
 
                 except Exception as e:
