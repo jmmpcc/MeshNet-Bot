@@ -4253,21 +4253,27 @@ class InterfaceManager:
                     if getattr(self, "verbose", False):
                         print(f"[receiver] Conectando a Meshtastic en {host}:{port}…", flush=True)
                         host_for_iface = f"{host}:{port}" if port and port != 4403 else host
-                        #new_iface = TCPInterface(hostname=host_for_iface)
+                     
                         # Cerrar interfaz anterior si existía
                         try:
-                            if self._iface:
+                            if getattr(self, "iface", None):
                                 try:
                                     if getattr(self, "verbose", False):
                                         print("[receiver] Cerrando interfaz anterior...", flush=True)
-                                    self._iface.close()
+                                    self.iface.close()
                                 except Exception:
                                     pass
                                 finally:
-                                    self._iface = None
+                                    self.iface = None
                         except Exception:
                             pass
-                        new_iface = _create_meshtastic_interface(host=host, port=port, verbose=getattr(self, "verbose", False))
+
+                        # --- Crear nueva interfaz SIEMPRE ---
+                        new_iface = _create_meshtastic_interface(
+                            host=host,
+                            port=port,
+                            verbose=getattr(self, "verbose", False),
+                        )
 
                 except Exception as e:
                     # liberar lock y backoff
