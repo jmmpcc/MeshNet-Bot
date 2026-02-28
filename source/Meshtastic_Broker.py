@@ -4121,7 +4121,28 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
         print(f"[receiver] Transporte TCP → {host}:{port}", flush=True)
     return TCPInterface(hostname=host_for_iface)
 
+def _usb_stuck_should_hard_restart(exc: Exception) -> bool:
+    """
+    Detecta el patrón de 'USB atascado' que deja el puerto serie bloqueado dentro del mismo proceso:
+      1) primer intento: timeout de conexión
+      2) siguientes: 'Could not exclusively lock port ... Resource temporarily unavailable'
+    En ese estado, reintentar no sirve porque el lock lo sostiene el propio proceso (fuga en la lib).
+    Solución pragmática 24/7: forzar salida del proceso para que Docker lo reinicie y libere /dev/ttyUSB*.
+    """
+    try:
+        if _mesh_transport() != "usb":
+            return False
+    except Exception:
+        return False
 
+    msg = str(exc) or ""
+    markers = (
+        "Timed out waiting for connection completion",
+        "Could not exclusively lock port",
+        "Resource temporarily unavailable",
+        "Errno 11",
+    )
+    return any(m in msg for m in markers)
 
 class InterfaceManager:
     """
@@ -4424,6 +4445,16 @@ class InterfaceManager:
                     except Exception: pass
                     if getattr(self, "verbose", False):
                         print(f"[receiver] Fallo al crear TCPInterface: {e}", flush=True)
+                    # === [NUEVO] si USB quedó atascado, reinicio duro del proceso (Docker lo relanza) ===
+                    try:
+                        hard = (os.getenv("MESH_USB_HARD_RESTART_ON_STUCK", "1") or "1").strip()
+                        if hard == "1" and _usb_stuck_should_hard_restart(e):
+                            print("[receiver] USB atascado detectado → os._exit(23) para liberar /dev/ttyUSB*", flush=True)
+                            os._exit(23)
+                    except Exception:
+                        pass
+
+
                     time.sleep(backoff[min(idx, len(backoff)-1)])
                     idx += 1
                     self._reconnect_event.set()
