@@ -4369,179 +4369,126 @@ class _AnsiFilteredSerial:
 
 def _install_ansi_filter_on_serial(ser, verbose: bool = False):
     """
-    Instala un filtro de re-sincronización de frames Meshtastic sobre un objeto
-    serial.Serial ya abierto, reemplazando su método read().
+    Instala un filtro de resincronización síncrono sobre serial.Serial.
 
-    PROBLEMA RAÍZ:
-    El firmware ESP32 emite logs de texto ANSI mezclados con frames protobuf
-    en el mismo stream serie. stream_interface.py usa un autómata que lee el
-    stream buscando el header mágico 0x94 0xC3 <len_hi> <len_lo>. Cuando
-    aparece texto ANSI en medio de un frame, el autómata pierde la sincronía
-    y parsea payload de un frame como header del siguiente → DecodeError.
+    PROBLEMA RAÍZ CONFIRMADO:
+    El firmware ESP32 emite logs ANSI mezclados con frames protobuf. El autómata
+    de stream_interface busca el header 0x94 0xC3 pero cuando 0x94 0xC3 aparece
+    dentro de datos de texto/ANSI (falso positivo), lee una longitud inválida y
+    parsea basura como payload → DecodeError.
 
-    SOLUCIÓN — filtro a nivel de FRAME (no de byte):
-    Este filtro mantiene su propio buffer raw y opera como un pre-procesador
-    de frames COMPLETOS:
+    SOLUCIÓN — filtro síncrono sin hilo propio:
+    Reemplazamos read() con una versión que mantiene un pequeño buffer interno
+    y, cuando stream_interface pide el primer byte de un frame (ptr==0, buscando
+    START1=0x94), verifica que el byte siguiente sea START2=0xC3 y que la
+    longitud sea válida (≤512). Si no, descarta y sigue buscando.
 
-      1. Lee bytes crudos del puerto en background (hilo lector dedicado).
-      2. Escanea el buffer buscando el magic header 0x94 0xC3.
-      3. Cuando lo encuentra, lee los 2 bytes de longitud y luego exactamente
-         <len> bytes de payload — formando un frame completo.
-      4. Pone el frame completo (header + payload) en una cola de salida.
-      5. Descarta cualquier byte que no forme parte de un frame válido
-         (logs ANSI, texto de debug, basura de sincronía).
+    CLAVE: No usamos hilo propio. El único lector es el __reader de
+    stream_interface. Así no hay competencia por el puerto.
 
-    stream_interface.py recibe bytes perfectamente enmarcados a través de
-    read(), nunca ve los logs ANSI, y el framing nunca se desincroniza.
-
-    Constantes del protocolo Meshtastic serie:
-      START1     = 0x94
-      START2     = 0xC3
-      HEADER_LEN = 4  (START1, START2, len_hi, len_lo)
-      MAX_PAYLOAD = 512
+    El filtro actúa como un buffer lookahead de 1 byte: cuando lee un byte,
+    si parece ser START1, hace peek del siguiente para validar antes de
+    entregarlo. Si no es un header válido, descarta y sigue leyendo.
     """
     _START1 = 0x94
     _START2 = 0xC3
     _MAX_PAYLOAD = 512
-    _HEADER_LEN = 4
 
-    # Cola de bytes limpios (frames completos ya validados)
-    _clean_buf = bytearray()
-    _buf_lock = threading.Lock()
-    _buf_event = threading.Event()  # señal: hay bytes disponibles
-
-    # Métricas para diagnóstico
-    _stats = {"frames_ok": 0, "bytes_discarded": 0, "frames_bad_len": 0}
-
+    # Buffer lookahead: bytes leídos del puerto pero aún no entregados
+    _lookahead = bytearray()
+    _stats = {"frames_ok": 0, "bytes_discarded": 0}
     _orig_read = ser.read
-    _want_stop = threading.Event()
 
-    def _reader_thread():
-        """
-        Hilo dedicado que lee bytes crudos del puerto y extrae frames Meshtastic.
-        Descarta todo lo que no sea un frame válido (logs ANSI, texto, restos).
-        """
-        raw_buf = bytearray()  # buffer de bytes crudos del puerto
-
-        def _read_raw(n: int, timeout: float = 2.0) -> bytes:
-            """Lee exactamente n bytes crudos del puerto (con timeout)."""
-            deadline = time.monotonic() + timeout
-            result = bytearray()
-            while len(result) < n and not _want_stop.is_set():
-                needed = n - len(result)
-                chunk = _orig_read(min(needed, 256))
-                if chunk:
-                    result.extend(chunk)
-                else:
-                    if time.monotonic() >= deadline:
-                        break
-            return bytes(result)
-
-        while not _want_stop.is_set():
-            try:
-                # --- Paso 1: buscar START1 (0x94) ---
-                b1 = _read_raw(1, timeout=1.0)
-                if not b1:
-                    continue
-                if b1[0] != _START1:
-                    _stats["bytes_discarded"] += 1
-                    continue
-
-                # --- Paso 2: verificar START2 (0xC3) ---
-                b2 = _read_raw(1, timeout=0.5)
-                if not b2:
-                    _stats["bytes_discarded"] += 1
-                    continue
-                if b2[0] != _START2:
-                    # No es nuestro header; el 0x94 era parte de texto/basura
-                    _stats["bytes_discarded"] += 2
-                    continue
-
-                # --- Paso 3: leer longitud (2 bytes big-endian) ---
-                len_bytes = _read_raw(2, timeout=0.5)
-                if len(len_bytes) < 2:
-                    _stats["bytes_discarded"] += 2
-                    continue
-                payload_len = (len_bytes[0] << 8) | len_bytes[1]
-
-                if payload_len == 0 or payload_len > _MAX_PAYLOAD:
-                    # Longitud inválida — esto era basura, no un header real
-                    _stats["bytes_discarded"] += 4
-                    _stats["frames_bad_len"] += 1
-                    continue
-
-                # --- Paso 4: leer payload completo ---
-                payload = _read_raw(payload_len, timeout=2.0)
-                if len(payload) < payload_len:
-                    # Timeout leyendo payload — frame truncado, descartar
-                    _stats["bytes_discarded"] += _HEADER_LEN + len(payload)
-                    continue
-
-                # --- Frame completo y válido ---
-                frame = bytes([_START1, _START2, len_bytes[0], len_bytes[1]]) + payload
-                _stats["frames_ok"] += 1
-
-                with _buf_lock:
-                    _clean_buf.extend(frame)
-                _buf_event.set()
-
-            except Exception as e:
-                if not _want_stop.is_set():
-                    if verbose:
-                        print(f"[frame-filter] reader error: {type(e).__name__}: {e}", flush=True)
-                    time.sleep(0.05)
-
-    # Arrancar hilo lector en background
-    _t = threading.Thread(target=_reader_thread, name=f"frame-filter-{ser.port}", daemon=True)
-    _t.start()
+    def _raw_read_one(timeout_s: float = 0.5) -> bytes:
+        """Lee exactamente 1 byte del puerto físico."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            b = _orig_read(1)
+            if b:
+                return b
+            if time.monotonic() >= deadline:
+                return b""
 
     def _filtered_read(size: int = 1) -> bytes:
         """
-        read() filtrada: entrega bytes solo de frames Meshtastic válidos.
-        stream_interface llama a esto — nunca ve logs ANSI ni bytes de basura.
+        Versión filtrada de read(size).
+
+        stream_interface siempre llama con size=1.
+        Cuando detecta que el byte a entregar es START1 (0x94), valida
+        que forme un header legítimo antes de entregarlo. Si no, lo
+        descarta junto con la línea de texto que lo contenía y sigue.
         """
-        timeout = ser.timeout or 0.5
-        deadline = time.monotonic() + timeout
+        result = bytearray()
 
-        while True:
-            with _buf_lock:
-                have = len(_clean_buf)
-            if have >= size:
-                break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            _buf_event.wait(timeout=min(remaining, 0.05))
-            _buf_event.clear()
+        while len(result) < size:
+            # Tomar el siguiente byte (del lookahead o del puerto)
+            if _lookahead:
+                b = _lookahead[:1]
+                del _lookahead[:1]
+            else:
+                b = _raw_read_one(timeout_s=ser.timeout or 0.5)
+                if not b:
+                    # Timeout — devolver lo que tenemos (puede ser vacío)
+                    break
 
-        with _buf_lock:
-            chunk = bytes(_clean_buf[:size])
-            del _clean_buf[:size]
-        return chunk
+            c = b[0]
 
-    def _filtered_close_wrapper():
-        """Cierra el hilo lector y el puerto real."""
-        _want_stop.set()
-        _buf_event.set()  # desbloquear si está esperando
-        try:
-            ser.__class__.close(ser)
-        except Exception:
-            pass
-        if verbose:
-            print(
-                f"[frame-filter] Cerrado {ser.port}. "
-                f"Frames OK: {_stats['frames_ok']}, "
-                f"Bytes descartados: {_stats['bytes_discarded']}, "
-                f"Frames longitud inválida: {_stats['frames_bad_len']}",
-                flush=True
-            )
+            # Si NO es START1, es un byte normal (texto ANSI, protobuf payload,
+            # etc.) — lo entregamos directamente. stream_interface sabrá qué hacer.
+            if c != _START1:
+                result.extend(b)
+                continue
 
-    # Instalar en la instancia (no afecta a otros puertos ni a la clase)
+            # Es START1 (0x94) — necesitamos validar que el siguiente byte sea
+            # START2 (0xC3) Y que la longitud sea válida.
+            # Hacemos peek de los próximos 3 bytes (START2 + len_hi + len_lo).
+            peek = bytearray()
+            ok = True
+            for _ in range(3):
+                nb = _raw_read_one(timeout_s=0.3)
+                if not nb:
+                    ok = False
+                    break
+                peek.extend(nb)
+
+            if not ok or len(peek) < 3:
+                # No pudimos leer suficientes bytes → descartar START1, devolver los peek
+                _stats["bytes_discarded"] += 1 + len(peek)
+                _lookahead.extend(peek)
+                continue
+
+            if peek[0] != _START2:
+                # No es START2 → este 0x94 era parte de datos/texto, no un header
+                # Descartar el 0x94, devolver los bytes del peek al lookahead
+                _stats["bytes_discarded"] += 1
+                _lookahead.extend(peek)
+                continue
+
+            payload_len = (peek[1] << 8) | peek[2]
+
+            if payload_len == 0 or payload_len > _MAX_PAYLOAD:
+                # Longitud fuera de rango → header falso (estaba en texto/ANSI)
+                # Descartar 0x94 + START2, devolver los bytes de longitud al lookahead
+                _stats["bytes_discarded"] += 2
+                _lookahead.extend(peek[1:])  # devolver len_hi, len_lo
+                continue
+
+            # Header válido: 0x94 0xC3 con longitud sensata
+            # Entregar el 0x94 ahora y poner el resto en el lookahead
+            _stats["frames_ok"] += 1
+            result.extend(b)  # entregar 0x94
+            _lookahead.extend(peek)  # stream_interface leerá 0xC3, len_hi, len_lo a continuación
+
+        return bytes(result)
+
+    # Instalar solo en esta instancia
     ser.read = _filtered_read
-    ser.close = _filtered_close_wrapper
 
     if verbose:
-        print(f"[frame-filter] Filtro de frames instalado en {ser.port}", flush=True)
+        print(f"[frame-filter] Filtro síncrono instalado en {ser.port}", flush=True)
+
+    # Registrar función de stats para diagnóstico opcional
+    ser._frame_filter_stats = _stats
 
 
 def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
