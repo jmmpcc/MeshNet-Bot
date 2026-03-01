@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.6.15.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v6.2.6.14.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -675,7 +675,6 @@ class MeshCoreEmbeddedBridge:
             print(f"[meshcore-embedded] {self._last_err}", flush=True)
 
         # --- bucle TX ---
-        _retry = {}  # key -> intentos
         while not self._stop.is_set():
             try:
                 dst, msg = await _aio.wait_for(self._tx_q.get(), timeout=0.5)
@@ -724,41 +723,6 @@ class MeshCoreEmbeddedBridge:
 
             except Exception as e:
                 self._last_err = f"tx: {type(e).__name__}: {e}"
-
-                # === [PATCH] Retry conservador en fallos transitorios ===
-                try:
-                    emsg = (str(e) or "").lower()
-                    transient = any(k in emsg for k in (
-                        "not connected",
-                        "connection",
-                        "broken pipe",
-                        "reset",
-                        "timeout",
-                        "timed out",
-                        "closed",
-                        "eof",
-                    ))
-                except Exception:
-                    transient = False
-
-                if transient:
-                    try:
-                        # clave estable por destino + payload (evita bucles)
-                        k = f"{dst}|{msg}"
-                        n = int(_retry.get(k, 0))
-                        if n < 2:
-                            _retry[k] = n + 1
-                            # backoff corto para dar tiempo a que auto_reconnect estabilice
-                            try:
-                                await _aio.sleep(0.8 + (0.6 * n))
-                            except Exception:
-                                pass
-                            try:
-                                self._tx_q.put_nowait((dst, msg))
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
 
         # --- desconexión ---
         try:
@@ -4055,100 +4019,6 @@ def _mesh_transport() -> str:
     """
     return (os.getenv("MESH_TRANSPORT", "tcp") or "tcp").strip().lower()
 
-def _force_close_own_serial_fds(dev: str) -> int:
-    """
-    [DESACTIVADO por defecto]
-    Antes: cerraba FDs del propio proceso con os.close() para "recuperar" /dev/ttyUSB*.
-
-    Problema: si hay un hilo lector activo (meshtastic.stream_interface), cerrar el FD a bajo nivel
-    provoca 'Bad file descriptor' al desconectar y rompe el framing protobuf (DecodeError).
-
-    Para activar explícitamente (solo debugging puntual):
-      BROKER_USB_FD_RECOVERY=1
-
-    Devuelve siempre 0 cuando está desactivado.
-    """
-    enabled = (os.getenv("BROKER_USB_FD_RECOVERY", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
-    if not enabled:
-        return 0
-
-    try:
-        dev_r = os.path.realpath(dev)
-    except Exception:
-        dev_r = dev
-
-    closed = 0
-    fd_dir = "/proc/self/fd"
-    try:
-        for fd_name in os.listdir(fd_dir):
-            if not fd_name.isdigit():
-                continue
-            fd_path = os.path.join(fd_dir, fd_name)
-            try:
-                link = os.readlink(fd_path)
-            except Exception:
-                continue
-            if not link:
-                continue
-            try:
-                link_r = os.path.realpath(link)
-            except Exception:
-                link_r = link
-
-            if link == dev or link_r == dev_r:
-                try:
-                    os.close(int(fd_name))
-                    closed += 1
-                except Exception:
-                    pass
-    except Exception:
-        return 0
-
-    return closed
-
-def _debug_who_holds_serial(dev: str, max_pids: int = 8) -> str:
-    """
-    Diagnóstico Linux: lista procesos que tienen abierto el dispositivo serie.
-    No modifica estado; solo inspecciona /proc.
-    Devuelve cadena con pid/comm/cmdline.
-    """
-    try:
-        dev = os.path.realpath(dev)
-    except Exception:
-        pass
-
-    holders = []
-    try:
-        for pid in os.listdir("/proc"):
-            if not pid.isdigit():
-                continue
-            fd_dir = f"/proc/{pid}/fd"
-            try:
-                for fd in os.listdir(fd_dir):
-                    try:
-                        link = os.readlink(os.path.join(fd_dir, fd))
-                    except Exception:
-                        continue
-                    if link == dev:
-                        comm = ""
-                        cmd = ""
-                        try:
-                            comm = open(f"/proc/{pid}/comm", "r", encoding="utf-8", errors="ignore").read().strip()
-                        except Exception:
-                            pass
-                        try:
-                            cmd = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\x00", b" ").decode("utf-8", "ignore").strip()
-                        except Exception:
-                            pass
-                        holders.append(f"pid={pid} comm={comm} cmd={cmd}")
-                        break
-            except Exception:
-                continue
-    except Exception:
-        return ""
-
-    return " | ".join(holders[:max_pids])
-
 def _mesh_transport_id(host: str, port: int) -> str:
     """
     Identificador estable para el candado de instancia única según transporte.
@@ -4161,336 +4031,6 @@ def _mesh_transport_id(host: str, port: int) -> str:
         return f"usb:{(os.getenv('MESH_USB_PORT','') or '').strip()}"
     return f"tcp:{host}:{port}"
 
-class _AnsiFilteredSerial:
-    """
-    Wrapper sobre pyserial que filtra en tiempo real los mensajes de log ANSI
-    que el firmware Meshtastic (ESP32 debug builds) emite mezclados con el
-    protocolo protobuf en el mismo stream serie.
-
-    El firmware intercala líneas de texto como:
-        ESC[34mDEBUG ESC[0m| 11:16:05 [RadioIf] Corrected frequency offset...
-    dentro del flujo binario protobuf. stream_interface.py lee el stream
-    esperando frames con header 0x94 0xc3 <len_hi> <len_lo>, pero cuando
-    aparece texto ANSI en medio de un frame, el framing se corrompe y lanza
-    DecodeError.
-
-    Esta clase intercepta read() y filtra cualquier secuencia que parezca
-    texto de log, preservando únicamente los bytes protobuf legítimos.
-
-    Estrategia de filtrado:
-      - Detecta el marcador de escape ANSI: ESC[ (0x1b 0x5b)
-      - Cuando lo detecta, descarta hasta el final de esa línea (\\r\\n o \\n)
-      - También descarta líneas de texto puro que no contengan el header
-        protobuf Meshtastic (0x94 0xc3)
-
-    Compatible con la interfaz que stream_interface espera de pyserial:
-      read(n), read_until(), write(), in_waiting, close(), isOpen(), etc.
-    """
-
-    # Cabecera magic de frames Meshtastic sobre serie
-    _PROTO_MAGIC = bytes([0x94, 0xc3])
-    # Marcador inicio secuencia ANSI escape
-    _ESC = 0x1b
-    _BRACKET = 0x5b  # '['
-
-    def __init__(self, port: str, baudrate: int = 115200, verbose: bool = False):
-        import serial as _serial
-        self._verbose = verbose
-        self._port_name = port
-        # Buffer interno de bytes "limpios" listos para entregar a stream_interface
-        self._clean_buf = bytearray()
-        self._lock = threading.Lock()
-        # Abrimos el puerto real
-        self._serial = _serial.Serial(port, baudrate=baudrate, timeout=0.1)
-        # Estado del autómata de filtrado
-        self._in_ansi = False    # dentro de una secuencia ESC[...
-        self._in_line = False    # dentro de una línea de texto (no proto)
-        self._raw_buf = bytearray()  # buffer de lectura cruda
-        self._discarded = 0
-        if verbose:
-            print(f"[ansi-filter] Iniciado en {port} @ {baudrate}", flush=True)
-
-    # ── Propiedades que stream_interface consulta ──────────────────────────
-
-    @property
-    def port(self):
-        return self._port_name
-
-    @property
-    def baudrate(self):
-        return self._serial.baudrate
-
-    @property
-    def timeout(self):
-        return self._serial.timeout
-
-    @timeout.setter
-    def timeout(self, v):
-        self._serial.timeout = v
-
-    @property
-    def in_waiting(self):
-        # Devuelve los bytes limpios ya filtrados + los pendientes en el puerto
-        with self._lock:
-            return len(self._clean_buf) + self._serial.in_waiting
-
-    def isOpen(self):
-        return self._serial.isOpen()
-
-    def is_open(self):
-        try:
-            return self._serial.is_open
-        except Exception:
-            return self._serial.isOpen()
-
-    # ── Filtrado principal ─────────────────────────────────────────────────
-
-    def _feed(self, raw: bytes):
-        """
-        Procesa 'raw' byte a byte con un autómata de filtrado.
-        Los bytes que NO son log ANSI se acumulan en self._clean_buf.
-        """
-        i = 0
-        n = len(raw)
-        buf = self._raw_buf  # reutilizamos buffer de trabajo
-
-        while i < n:
-            b = raw[i]
-
-            # --- Inicio de secuencia ANSI: ESC[ ---
-            if b == self._ESC and i + 1 < n and raw[i + 1] == self._BRACKET:
-                # Descartar lo que había en buf (era cabeza de línea de texto)
-                if buf:
-                    self._discarded += len(buf)
-                    buf.clear()
-                self._in_ansi = True
-                self._in_line = True
-                i += 2  # consumir ESC y [
-                continue
-
-            if self._in_ansi:
-                # Dentro de la secuencia ESC[...m: descartar hasta 'm' o fin de línea
-                self._discarded += 1
-                if b in (ord('m'), ord('J'), ord('K'), ord('H'), 0x0a, 0x0d):
-                    self._in_ansi = False
-                    # Si era newline, también terminamos la línea de texto
-                    if b in (0x0a, 0x0d):
-                        self._in_line = False
-                i += 1
-                continue
-
-            if self._in_line:
-                # Dentro de una línea de texto (post-ANSI): descartar hasta newline
-                self._discarded += 1
-                if b in (0x0a, 0x0d):
-                    self._in_line = False
-                i += 1
-                continue
-
-            # --- Byte "normal" (posiblemente protobuf) ---
-            buf.append(b)
-            i += 1
-
-        # Vaciar buf al clean_buf
-        if buf:
-            with self._lock:
-                self._clean_buf.extend(buf)
-            buf.clear()
-
-    def _fill(self, min_bytes: int = 1, timeout: float = 0.15):
-        """Lee del puerto real y alimenta el filtro hasta tener min_bytes limpios."""
-        deadline = time.monotonic() + timeout
-        while True:
-            with self._lock:
-                have = len(self._clean_buf)
-            if have >= min_bytes:
-                break
-            waiting = self._serial.in_waiting
-            if waiting > 0:
-                raw = self._serial.read(min(waiting, 4096))
-                if raw:
-                    self._feed(raw)
-            else:
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.005)
-
-    # ── API pública (compatible con pyserial) ──────────────────────────────
-
-    def read(self, size: int = 1) -> bytes:
-        self._fill(min_bytes=size, timeout=self._serial.timeout or 0.15)
-        with self._lock:
-            chunk = bytes(self._clean_buf[:size])
-            del self._clean_buf[:size]
-        return chunk
-
-    def read_until(self, expected: bytes = b'\n', size: int = None) -> bytes:
-        """Lectura hasta encontrar 'expected' o alcanzar 'size' bytes."""
-        result = bytearray()
-        while True:
-            b = self.read(1)
-            if not b:
-                break
-            result.extend(b)
-            if expected in result:
-                break
-            if size and len(result) >= size:
-                break
-        return bytes(result)
-
-    def write(self, data: bytes) -> int:
-        return self._serial.write(data)
-
-    def flush(self):
-        self._serial.flush()
-
-    def reset_input_buffer(self):
-        self._serial.reset_input_buffer()
-        with self._lock:
-            self._clean_buf.clear()
-
-    def reset_output_buffer(self):
-        self._serial.reset_output_buffer()
-
-    def close(self):
-        try:
-            self._serial.close()
-        except Exception:
-            pass
-        if self._verbose and self._discarded:
-            print(f"[ansi-filter] Cerrado. Total descartado: {self._discarded}B de logs ANSI.", flush=True)
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
-
-
-def _install_ansi_filter_on_serial(ser, verbose: bool = False):
-    """
-    Instala un filtro de resincronización síncrono sobre serial.Serial.
-
-    PROBLEMA RAÍZ CONFIRMADO:
-    El firmware ESP32 emite logs ANSI mezclados con frames protobuf. El autómata
-    de stream_interface busca el header 0x94 0xC3 pero cuando 0x94 0xC3 aparece
-    dentro de datos de texto/ANSI (falso positivo), lee una longitud inválida y
-    parsea basura como payload → DecodeError.
-
-    SOLUCIÓN — filtro síncrono sin hilo propio:
-    Reemplazamos read() con una versión que mantiene un pequeño buffer interno
-    y, cuando stream_interface pide el primer byte de un frame (ptr==0, buscando
-    START1=0x94), verifica que el byte siguiente sea START2=0xC3 y que la
-    longitud sea válida (≤512). Si no, descarta y sigue buscando.
-
-    CLAVE: No usamos hilo propio. El único lector es el __reader de
-    stream_interface. Así no hay competencia por el puerto.
-
-    El filtro actúa como un buffer lookahead de 1 byte: cuando lee un byte,
-    si parece ser START1, hace peek del siguiente para validar antes de
-    entregarlo. Si no es un header válido, descarta y sigue leyendo.
-    """
-    _START1 = 0x94
-    _START2 = 0xC3
-    _MAX_PAYLOAD = 512
-
-    # Buffer lookahead: bytes leídos del puerto pero aún no entregados
-    _lookahead = bytearray()
-    _stats = {"frames_ok": 0, "bytes_discarded": 0}
-    _orig_read = ser.read
-
-    def _raw_read_one(timeout_s: float = 0.5) -> bytes:
-        """Lee exactamente 1 byte del puerto físico."""
-        deadline = time.monotonic() + timeout_s
-        while True:
-            b = _orig_read(1)
-            if b:
-                return b
-            if time.monotonic() >= deadline:
-                return b""
-
-    def _filtered_read(size: int = 1) -> bytes:
-        """
-        Versión filtrada de read(size).
-
-        stream_interface siempre llama con size=1.
-        Cuando detecta que el byte a entregar es START1 (0x94), valida
-        que forme un header legítimo antes de entregarlo. Si no, lo
-        descarta junto con la línea de texto que lo contenía y sigue.
-        """
-        result = bytearray()
-
-        while len(result) < size:
-            # Tomar el siguiente byte (del lookahead o del puerto)
-            if _lookahead:
-                b = _lookahead[:1]
-                del _lookahead[:1]
-            else:
-                b = _raw_read_one(timeout_s=ser.timeout or 0.5)
-                if not b:
-                    # Timeout — devolver lo que tenemos (puede ser vacío)
-                    break
-
-            c = b[0]
-
-            # Si NO es START1, es un byte normal (texto ANSI, protobuf payload,
-            # etc.) — lo entregamos directamente. stream_interface sabrá qué hacer.
-            if c != _START1:
-                result.extend(b)
-                continue
-
-            # Es START1 (0x94) — necesitamos validar que el siguiente byte sea
-            # START2 (0xC3) Y que la longitud sea válida.
-            # Hacemos peek de los próximos 3 bytes (START2 + len_hi + len_lo).
-            peek = bytearray()
-            ok = True
-            for _ in range(3):
-                nb = _raw_read_one(timeout_s=0.3)
-                if not nb:
-                    ok = False
-                    break
-                peek.extend(nb)
-
-            if not ok or len(peek) < 3:
-                # No pudimos leer suficientes bytes → descartar START1, devolver los peek
-                _stats["bytes_discarded"] += 1 + len(peek)
-                _lookahead.extend(peek)
-                continue
-
-            if peek[0] != _START2:
-                # No es START2 → este 0x94 era parte de datos/texto, no un header
-                # Descartar el 0x94, devolver los bytes del peek al lookahead
-                _stats["bytes_discarded"] += 1
-                _lookahead.extend(peek)
-                continue
-
-            payload_len = (peek[1] << 8) | peek[2]
-
-            if payload_len == 0 or payload_len > _MAX_PAYLOAD:
-                # Longitud fuera de rango → header falso (estaba en texto/ANSI)
-                # Descartar 0x94 + START2, devolver los bytes de longitud al lookahead
-                _stats["bytes_discarded"] += 2
-                _lookahead.extend(peek[1:])  # devolver len_hi, len_lo
-                continue
-
-            # Header válido: 0x94 0xC3 con longitud sensata
-            # Entregar el 0x94 ahora y poner el resto en el lookahead
-            _stats["frames_ok"] += 1
-            result.extend(b)  # entregar 0x94
-            _lookahead.extend(peek)  # stream_interface leerá 0xC3, len_hi, len_lo a continuación
-
-        return bytes(result)
-
-    # Instalar solo en esta instancia
-    ser.read = _filtered_read
-
-    if verbose:
-        print(f"[frame-filter] Filtro síncrono instalado en {ser.port}", flush=True)
-
-    # Registrar función de stats para diagnóstico opcional
-    ser._frame_filter_stats = _stats
-
-
 def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
     """
     Fábrica única de interface Meshtastic para el broker.
@@ -4499,7 +4039,7 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
     Devuelve:
       - TCPInterface(...) para tcp
       - BLEInterface(...) para bluetooth
-      - SerialInterface(...) para usb  (con filtro ANSI si el firmware emite logs)
+      - SerialInterface(...) para usb
     """
     t = _mesh_transport()
 
@@ -4532,59 +4072,12 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
         if verbose:
             print(f"[receiver] Transporte USB/Serial → {dev} @ {baud}", flush=True)
 
-        # Decidir si usar el filtro ANSI.
-        # Por defecto ON para USB (MESH_USB_ANSI_FILTER=1).
-        # Desactivar con MESH_USB_ANSI_FILTER=0 si el firmware ya no emite logs.
-        use_filter = (os.getenv("MESH_USB_ANSI_FILTER", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
-
-        if use_filter:
-            if verbose:
-                print(f"[receiver] Filtro ANSI activo (MESH_USB_ANSI_FILTER=1). Para desactivar: MESH_USB_ANSI_FILTER=0", flush=True)
-            # Estrategia: monkey-patch de serial.Serial para que cuando SerialInterface
-            # abra el puerto, obtenga nuestro _AnsiFilteredSerial en lugar del Serial puro.
-            # Esto es transparente, no requiere tocar los internos de meshtastic,
-            # y funciona con cualquier versión de la librería.
-            import serial as _serial_mod
-            _orig_Serial = _serial_mod.Serial
-            _filter_dev = dev
-            _filter_baud = baud
-            _filter_verbose = verbose
-
-            class _PatchedSerial(_serial_mod.Serial):
-                """
-                Serial parcheado: si abre nuestro dispositivo USB, aplica filtro ANSI.
-                Para cualquier otro puerto, se comporta exactamente igual que serial.Serial.
-                """
-                def __init__(self_inner, *args, **kwargs):
-                    # Llamamos al Serial original con todos los argumentos tal cual
-                    super().__init__(*args, **kwargs)
-                    # El puerto puede venir como primer arg posicional o como kwarg 'port'
-                    _port = kwargs.get("port") or (args[0] if args else None)
-                    def _norm(p):
-                        try:
-                            return os.path.realpath(str(p)) if p else ""
-                        except Exception:
-                            return str(p) if p else ""
-                    if _port and _norm(_port) == _norm(_filter_dev):
-                        _install_ansi_filter_on_serial(self_inner, verbose=_filter_verbose)
-
-            _serial_mod.Serial = _PatchedSerial
-            try:
-                try:
-                    iface = SerialInterface(dev, baudrate=baud)
-                except TypeError:
-                    iface = SerialInterface(dev)
-                return iface
-            finally:
-                # Restaurar siempre, independientemente del resultado
-                _serial_mod.Serial = _orig_Serial
-        else:
-            if verbose:
-                print(f"[receiver] Filtro ANSI desactivado (MESH_USB_ANSI_FILTER=0).", flush=True)
-            try:
-                return SerialInterface(dev, baudrate=baud)
-            except TypeError:
-                return SerialInterface(dev)
+        # SerialInterface acepta device y (según versión) baudrate/timeout.
+        # Se pasa baudrate de forma compatible vía kwargs; si tu versión no lo soporta, ignora.
+        try:
+            return SerialInterface(dev, baudrate=baud)
+        except TypeError:
+            return SerialInterface(dev)
 
     # Default: tcp (modo actual)
     host_for_iface = f"{host}:{port}" if port and port != 4403 else host
@@ -4652,36 +4145,193 @@ class InterfaceManager:
         with self._lock:
             return self.iface
 
-  
-    def _loop(self):
-        """
-        Bucle de reconexión robusto:
-        - Respeta pause()/resume().
-        - Cierra iface previa antes de reintentar.
-        - Backoff progresivo.
-        - En USB, si hay Errno 11 (lock exclusivo), registra el PID/cmdline del ocupante.
-        """
-        backoff = [1, 1, 2, 3, 5, 8, 13, 21]
+    def _loop_OLD(self):
+        backoff = [2, 4, 8, 12, 20, 30, 45, 60]
         idx = 0
 
-        host = self.host
-        port = 4403
+        while self._want_run:
+
+            self._reconnect_event.wait(timeout=5.0)
+            if not self._reconnect_event.is_set():
+                continue
+            
+            self._reconnect_event.clear()
+            # === [NUEVO] si está en pausa, no conectar
+            # === [TRAZA] si está en pausa, mostrar remaining (si hay cooldown)
+            if self._paused.is_set():
+                try:
+                    if COOLDOWN.is_active():
+                        rem = COOLDOWN.remaining()
+                        # imprime cada ~1s (ajustable); evita spam si quieres subiendo el paso
+                        print(f"[cooldown] ⏳ Pausado. Reintento cuando expire: quedan {rem}s", flush=True)
+                        time.sleep(5.0)
+                    else:
+                        time.sleep(0.2)
+                except Exception:
+                    time.sleep(0.2)
+                continue
+
+            
+            if not self.enable_reconnect and self.iface is not None:
+                continue
+
+            try:
+                with self._lock:
+                    if self.iface:
+                        try: self.iface.close()
+                        except Exception: pass
+                        self.iface = None
+            except Exception:
+                pass
+
+            while self._want_run:
+                
+                # === [NUEVO] Si ya tenemos conexión activa, no abras otra ===
+              
+                try:
+
+                    try:
+                        if bool(globals().get("_IS_CONNECTED", False)) and (self.iface is not None):
+                            # ya estamos conectados; no crear una nueva interfaz
+                            idx = 0
+                            time.sleep(0.2)
+                            break
+                    except Exception:
+                        pass
+
+                    # === [NUEVO] Gate del Circuit Breaker ANTES de abrir socket
+                    if not CIRCUIT_BREAKER.can_attempt():
+                        time.sleep(1.0)
+                        continue
+
+                     # === [SUSTITUIR] Gate COOLDOWN/pausa por el snippet propuesto ===
+                    # respeta cooldown/pausa antes de intentar conectar
+                    try:
+                        c = globals().get("COOLDOWN")
+                        paused = bool(globals().get("MGR_PAUSED") and globals()["MGR_PAUSED"].is_set())
+                        if (c and hasattr(c, "is_active") and c.is_active()) or paused:
+                            # (opcional) log si quieres
+                            if self.verbose and c and hasattr(c, "remaining"):
+                                print(f"[cooldown] ⏳ Pausado. Reintento cuando expire: quedan {c.remaining()}s", flush=True)
+                            time.sleep(0.5)
+                            continue
+                    except Exception:
+                        pass
+                    
+                    # --- REEMPLAZA SOLO ESTA PARTE donde hoy tienes: new_iface = TCPInterface(hostname=self.host) ---
+                    try:
+                        # Si tu CLI permite puerto runtime, úsalo (ya lo guardas en globals en main)
+                        port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
+                    except Exception:
+                        port = 4403
+
+                    # === [NUEVO] Serializar la construcción de la interfaz para evitar dobles sockets ===
+                    with globals()["_CONNECT_LOCK"]:
+                        if globals().get("_CONNECTING"):
+                            # ya hay otro hilo intentando conectar; espera y reintenta el loop exterior
+                            time.sleep(0.3)
+                            continue
+                        globals()["_CONNECTING"] = True
+                        try:
+                            # (opcional) reset duro del pool antes de abrir, si vienes de un error/timeout
+                            try:
+                                from tcpinterface_persistent import TCPInterfacePool
+                                TCPInterfacePool.reset(globals().get("RUNTIME_MESH_HOST") or "", int(globals().get("RUNTIME_MESH_PORT") or 4403))
+                                time.sleep(0.1)
+                            except Exception:
+                                pass
+
+                            new_iface = TCPInterface(hostname=self.host)
+                            with self._lock:
+                                self.iface = new_iface
+                            idx = 0
+                        finally:
+                            globals()["_CONNECTING"] = False
+
+               
+                    CIRCUIT_BREAKER.record_success()
+
+                    # [NUEVO] Gracia post-conexión: deja respirar 1.5–2s antes de tráfico y de limpiar cooldown
+                    time.sleep(2)      
+                                   
+
+                    # ✅ conexión OK → limpiar cooldown si seguía armado
+                    try:
+                        if COOLDOWN.is_active():
+                            COOLDOWN.clear()
+                            if self.verbose:
+                                # NUEVO (mínimo): tras conectar, vuelve a cooldown base
+                                globals()["COOLDOWN_SECS"] = 90
+
+                                print("[cooldown] Limpio tras reconexión exitosa.", flush=True)
+                    except Exception:
+                        pass
+
+                    break
+
+                # === [NUEVO] Captura específica de errores de socket (WinError 10054, etc.) ===
+                except OSError as e:
+                    # Diferenciamos 10054 para un log más claro (peer cerró la conexión)
+
+                    try:
+                        CIRCUIT_BREAKER.record_error()
+                    except Exception:
+                        pass
+
+                    winerr = getattr(e, "winerror", None)
+                    is_10054 = (winerr == 10054) or ("10054" in str(e))
+                    delay = backoff[min(idx, len(backoff) - 1)]
+                    if self.verbose:
+                        if is_10054:
+                            print(f"[receiver] ⚠️ OSError 10054 conectando a {self.host}: "
+                                f"el host remoto cerró la conexión (reintento en {delay}s)",
+                                flush=True)
+                        else:
+                            print(f"[receiver] ⚠️ OSError conectando a {self.host}: {e} "
+                                f"(reintento en {delay}s)",
+                                flush=True)
+                    time.sleep(delay)
+                    idx += 1
+                    continue
+
+                # === EXISTENTE (no lo quites): captura genérica de cualquier otra excepción ===
+                except Exception as e:
+
+                    try:
+                        CIRCUIT_BREAKER.record_error()
+                    except Exception:
+                        pass
+
+                    delay = backoff[min(idx, len(backoff) - 1)]
+                    if self.verbose:
+                        print(f"[receiver] Fallo conectando a {self.host}: {e} (reintento en {delay}s)", flush=True)
+                    time.sleep(delay)
+                    idx += 1
+
+# === MODIFICADA: bucle del pool con anti-reentradas + lock interproceso (sin depender de self.port) ===
+    def _loop(self):
+        import threading, time
+        backoff = [2, 4, 8, 12, 20, 30, 45, 60]
+        idx = 0
+
+        # Anti-reentradas (un solo connect en vuelo)
+        if not hasattr(self, "_connecting"):
+            self._connecting = threading.Event()
+
+        # Resolver host/port de forma robusta
+        host = getattr(self, "host", None) or str(globals().get("RUNTIME_MESH_HOST") or "127.0.0.1")
         try:
-            # Si host viene como "ip:puerto", respétalo (para tcp)
-            if isinstance(host, str) and ":" in host and _mesh_transport() == "tcp":
-                h, p = host.rsplit(":", 1)
-                host = h.strip()
-                port = int(p.strip())
+            port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
         except Exception:
             port = 4403
 
-        # Lock interproceso por transporte
-        lock_name = _mesh_transport_id(str(host), int(port))
+        # Lock interproceso por host:port
+        #lock_name = f"{host}:{port}"
+        lock_name = _mesh_transport_id(host, port)
         if not hasattr(self, "_ip_lock"):
             self._ip_lock = SingleInstanceLock(lock_name)
 
         while self._want_run:
-            # Espera señal de reconexión
             self._reconnect_event.wait(timeout=1.0)
             if not self._reconnect_event.is_set():
                 continue
@@ -4691,42 +4341,31 @@ class InterfaceManager:
                 time.sleep(0.2)
                 continue
 
-            # Evita reconexiones solapadas
-            if getattr(self, "_connecting", threading.Event()).is_set():
+            # Si ya hay un connect en curso, espera
+            if self._connecting.is_set():
                 time.sleep(0.1)
                 continue
 
+            # Consumimos la señal de reconexión
             self._reconnect_event.clear()
 
             # Cierre limpio de iface previa
             try:
                 with self._lock:
                     if getattr(self, "iface", None):
-                        try:
-                            self.iface.close()
-                        except Exception:
-                            pass
+                        try: self.iface.close()
+                        except Exception: pass
                         self.iface = None
             except Exception:
                 pass
 
-            # Cooldown opcional
-            try:
-                if getattr(self, "_cooldown_until", 0) > time.time():
-                    time.sleep(min(1.0, self._cooldown_until - time.time()))
-            except Exception:
-                pass
+            # Respetar cooldown (si lo usas)
+            if getattr(self, "_cooldown_until", 0) > time.time():
+                time.sleep(min(1.0, self._cooldown_until - time.time()))
 
-            # Marca conectando
-            if not hasattr(self, "_connecting"):
-                self._connecting = threading.Event()
             self._connecting.set()
-
-            new_iface = None
-            got_lock = False
-
             try:
-                # Lock global de instancia (interproceso)
+                # Intentar adquirir el lock global
                 got_lock = self._ip_lock.acquire(timeout_s=2.0)
                 if not got_lock:
                     if getattr(self, "verbose", False):
@@ -4735,134 +4374,78 @@ class InterfaceManager:
                     self._reconnect_event.set()
                     continue
 
-                # Log de intento de conexión (siempre correcto)
-                if getattr(self, "verbose", False):
-                    print(f"[receiver] Conectando a Meshtastic en {host}:{port}…", flush=True)
+                # Crear TCPInterface SIEMPRE con host+port resueltos
+                try:
+                    if getattr(self, "verbose", False):
+                        print(f"[receiver] Conectando a Meshtastic en {host}:{port}…", flush=True)
+                        host_for_iface = f"{host}:{port}" if port and port != 4403 else host
+                        #new_iface = TCPInterface(hostname=host_for_iface)
+                        new_iface = _create_meshtastic_interface(host=host, port=port, verbose=getattr(self, "verbose", False))
 
-                # Crear nueva interfaz (SIEMPRE, no dependiente de verbose)
-                new_iface = _create_meshtastic_interface(
-                    host=str(host),
-                    port=int(port),
-                    verbose=getattr(self, "verbose", False),
-                )
+                except Exception as e:
+                    # liberar lock y backoff
+                    try: self._ip_lock.release()
+                    except Exception: pass
+                    if getattr(self, "verbose", False):
+                        print(f"[receiver] Fallo al crear TCPInterface: {e}", flush=True)
+                    time.sleep(backoff[min(idx, len(backoff)-1)])
+                    idx += 1
+                    self._reconnect_event.set()
+                    continue
 
-                # Conexión OK → reset backoff
+                # Conexión OK
                 idx = 0
-
-                # Instala iface y handlers
-                with self._lock:
-                    self.iface = new_iface
-                    try:
-                        self._attach_handlers_locked()
-                    except Exception:
-                        pass
+                try:
+                    with self._lock:
+                        self.iface = new_iface
+                        try:
+                            # engancha tus handlers como ya hacías
+                            self._attach_handlers_locked()
+                        except Exception:
+                            pass
+                except Exception:
+                    # si falló, cerramos iface y liberamos lock
+                    try: new_iface.close()
+                    except Exception: pass
+                    try: self._ip_lock.release()
+                    except Exception: pass
+                    self._reconnect_event.set()
+                    continue
 
                 if getattr(self, "verbose", False):
                     print("ℹ️ Broker: conectado al nodo Meshtastic", flush=True)
 
                 try:
-                    if hasattr(self, "_on_connect_ok"):
-                        self._on_connect_ok()
+                    if hasattr(self, "_on_connect_ok"): self._on_connect_ok()
                 except Exception:
                     pass
 
-                # Mantener conexión hasta reconexión/pausa/parada
-                while (
-                    self._want_run
-                    and getattr(self, "iface", None) is not None
-                    and not getattr(self, "_paused", threading.Event()).is_set()
-                ):
+                # Mantener mientras no haya motivo para reconectar
+                while self._want_run and getattr(self, "iface", None) is not None and not getattr(self, "_paused", threading.Event()).is_set():
                     time.sleep(0.25)
-
-            except Exception as e:
-                # Log correcto
-                if getattr(self, "verbose", False):
-                    print(f"[receiver] Fallo al crear interface ({_mesh_transport()}): {e}", flush=True)
-
-                # Diagnóstico USB si hay lock exclusivo Errno 11
-                try:
-                    if _mesh_transport() == "usb":
-                        dev = (os.getenv("MESH_USB_PORT", "") or "").strip()
-                        emsg = (str(e) or "").lower()
-                        if dev and ("exclusively lock port" in emsg or "resource temporarily unavailable" in emsg):
-                            who = _debug_who_holds_serial(dev)
-                            if who:
-                                print(f"[receiver] USB ocupado: {who}", flush=True)
-
-                                # === RECUPERACIÓN SEGURA: si el ocupante somos nosotros (pid=1 en Docker) ===
-                                try:
-                                    mypid = os.getpid()
-                                    if f"pid={mypid} " in (who or ""):
-                                        # En vez de cerrar FDs a bajo nivel (rompe pyserial), intentamos liberar de forma limpia.
-                                        print(f"[receiver] USB ocupado por ESTE proceso (pid={mypid}). Liberando iface de forma segura...", flush=True)
-                                        try:
-                                            with self._lock:
-                                                old_iface = getattr(self, "iface", None)
-                                                self.iface = None
-                                            if old_iface is not None:
-                                                try:
-                                                    old_iface.close()
-                                                except Exception:
-                                                    pass
-                                        except Exception:
-                                            pass
-
-                                        # Pequeña pausa para que el hilo lector termine y el driver libere el lock
-                                        time.sleep(0.8)
-                                except Exception:
-                                    pass
-
-
-                except Exception:
-                    pass
-
-                # Cierra iface parcial si se llegó a crear
-                try:
-                    if new_iface is not None:
-                        try:
-                            new_iface.close()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-                # Backoff
-                time.sleep(backoff[min(idx, len(backoff) - 1)])
-                idx += 1
-                self._reconnect_event.set()
 
             finally:
                 self._connecting.clear()
-                try:
-                    if got_lock:
-                        self._ip_lock.release()
-                except Exception:
-                    pass
+                try: self._ip_lock.release()
+                except Exception: pass
 
-                # Cierre y callback disconnect
-                try:
-                    with self._lock:
-                        if getattr(self, "iface", None):
-                            try:
-                                self.iface.close()
-                            except Exception:
-                                pass
-                            self.iface = None
-                except Exception:
-                    pass
+            # Cierre y call de _on_disconnect
+            try:
+                with self._lock:
+                    if getattr(self, "iface", None):
+                        try: self.iface.close()
+                        except Exception: pass
+                        self.iface = None
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "_on_disconnect"): self._on_disconnect()
+            except Exception:
+                pass
 
-                try:
-                    if hasattr(self, "_on_disconnect"):
-                        self._on_disconnect()
-                except Exception:
-                    pass
+            # Preparar siguiente intento (otro hilo volverá a setear el evento si procede)
+            self._reconnect_event.set()
 
-                # Forzar siguiente intento si seguimos vivos y no estamos pausados
-                try:
-                    if self._want_run and not getattr(self, "_paused", threading.Event()).is_set():
-                        self._reconnect_event.set()
-                except Exception:
-                    pass
 
     # ===================== Receptor PubSub =====================
 
@@ -6375,34 +5958,6 @@ def main():
     # === [NUEVO] blindaje contra 10053/10054 en hilos internos del SDK
     install_meshtastic_send_guards(verbose=args.verbose)
 
-    # === Patch _handleFromRadio: no relanzar DecodeError ===
-    # El firmware ESP32 puede insertar logs ANSI en medio de un frame protobuf,
-    # corrompiendo el payload. _handleFromRadio lanza la excepción al parser
-    # y la RELANZA (raise ex), lo que hace que __reader de stream_interface
-    # capture el error y llame a _disconnected() → cierra el puerto.
-    # Con este patch, el DecodeError se registra pero NO se relanza,
-    # el __reader descarta el frame corrupto y sigue leyendo el siguiente header.
-    try:
-        from meshtastic.mesh_interface import MeshInterface as _MI
-        _orig_handleFromRadio = _MI._handleFromRadio
-
-        def _patched_handleFromRadio(self, fromRadioBytes):
-            try:
-                _orig_handleFromRadio(self, fromRadioBytes)
-            except Exception as _ex:
-                # Absorber DecodeError y similares: el __reader ya resetea
-                # _rxBuf y busca el siguiente START1. No necesitamos cerrar.
-                import logging as _logging
-                _logging.getLogger("broker.usb").debug(
-                    f"[usb-patch] DecodeError absorbido ({type(_ex).__name__}), resincronizando..."
-                )
-
-        _MI._handleFromRadio = _patched_handleFromRadio
-        if args.verbose:
-            print("🛡️ Patch _handleFromRadio activo (DecodeError no cierra conexión USB).", flush=True)
-    except Exception as _ep:
-        print(f"⚠️ No se pudo instalar patch _handleFromRadio: {_ep}", flush=True)
-
   # === [NUEVO] Aviso de guards activos (y asegurar parche del pool persistente)
     try:
         import tcpinterface_persistent  # asegura guards del pool/reconexión
@@ -6450,7 +6005,7 @@ def main():
     # === NUEVO: iniciar scheduler de tareas ===
     init_broker_tasks()
 
-    print(f"🟢 Broker v6.2.4 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
+    print(f"🟢 Broker v6.2.14 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
     print("   Clientes pueden conectarse por TCP y leer líneas JSONL (una por evento).", flush=True)
 
     # === [NUEVO] Inicializar motor BBS (broker-side) ======================================
