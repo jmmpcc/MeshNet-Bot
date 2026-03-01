@@ -4161,6 +4161,97 @@ def _mesh_transport_id(host: str, port: int) -> str:
         return f"usb:{(os.getenv('MESH_USB_PORT','') or '').strip()}"
     return f"tcp:{host}:{port}"
 
+def _usb_drain_boot_logs(dev: str, baud: int, verbose: bool = False,
+                         silence_s: float = None, max_drain_s: float = None) -> int:
+    """
+    Purga los mensajes de debug/boot ANSI que el firmware Meshtastic envía al inicio
+    por el puerto serie, ANTES de que SerialInterface intente parsearlos como protobuf.
+
+    Sin este paso, el firmware puede enviar líneas como:
+        DEBUG | ??:??:?? 39 [RadioIf] Corrected frequency offset: -306.125000
+    y SerialInterface las interpreta como bytes protobuf → DecodeError.
+
+    Estrategia:
+      1. Abre el puerto serie en modo raw (sin meshtastic de por medio).
+      2. Lee en bucle con timeout corto.
+      3. Si pasan `silence_s` segundos sin recibir nada → puerto estable, salir.
+      4. Límite máximo `max_drain_s` para no bloquearse indefinidamente.
+
+    Variables de entorno:
+      MESH_USB_DRAIN_SILENCE_S  (float, default 1.2)  — silencio requerido
+      MESH_USB_DRAIN_MAX_S      (float, default 12.0) — máximo tiempo de drain
+      MESH_USB_DRAIN_DISABLE=1  — desactiva el drain completamente
+
+    Devuelve el número de bytes descartados.
+    """
+    # Permitir desactivación explícita
+    if (os.getenv("MESH_USB_DRAIN_DISABLE", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}:
+        return 0
+
+    try:
+        if silence_s is None:
+            silence_s = float((os.getenv("MESH_USB_DRAIN_SILENCE_S", "1.2") or "1.2").strip())
+        if max_drain_s is None:
+            max_drain_s = float((os.getenv("MESH_USB_DRAIN_MAX_S", "12.0") or "12.0").strip())
+    except Exception:
+        silence_s = 1.2
+        max_drain_s = 12.0
+
+    silence_s = max(0.3, min(silence_s, 5.0))
+    max_drain_s = max(1.0, min(max_drain_s, 60.0))
+
+    try:
+        import serial as _serial
+    except ImportError:
+        try:
+            import meshtastic.serial_interface
+            import serial as _serial  # second attempt after meshtastic import
+        except Exception:
+            if verbose:
+                print(f"[usb-drain] pyserial no disponible, saltando drain.", flush=True)
+            return 0
+
+    drained = 0
+    raw_port = None
+    try:
+        raw_port = _serial.Serial(dev, baudrate=baud, timeout=0.15)
+        deadline = time.monotonic() + max_drain_s
+        last_rx = time.monotonic()
+
+        if verbose:
+            print(f"[usb-drain] Purgando logs de boot en {dev} (silence={silence_s}s, max={max_drain_s}s)…", flush=True)
+
+        while time.monotonic() < deadline:
+            chunk = raw_port.read(4096)
+            if chunk:
+                drained += len(chunk)
+                last_rx = time.monotonic()
+                if verbose:
+                    preview = chunk[:120].decode("ascii", errors="replace").replace("\r", "").replace("\n", "↵")
+                    print(f"[usb-drain] descartados {len(chunk)}B: {preview!r}", flush=True)
+            else:
+                if (time.monotonic() - last_rx) >= silence_s:
+                    break
+
+        if verbose:
+            elapsed = time.monotonic() - (deadline - max_drain_s)
+            print(f"[usb-drain] Drain completado. {drained}B descartados en {elapsed:.1f}s. Puerto estable.", flush=True)
+
+    except Exception as e:
+        if verbose:
+            print(f"[usb-drain] Error durante drain (no crítico): {type(e).__name__}: {e}", flush=True)
+    finally:
+        if raw_port is not None:
+            try:
+                raw_port.close()
+            except Exception:
+                pass
+        # Pausa extra para que el driver libere el lock antes de que SerialInterface abra el puerto
+        time.sleep(0.3)
+
+    return drained
+
+
 def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
     """
     Fábrica única de interface Meshtastic para el broker.
@@ -4201,6 +4292,13 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
 
         if verbose:
             print(f"[receiver] Transporte USB/Serial → {dev} @ {baud}", flush=True)
+
+        # === DRAIN: purgar logs de boot ANSI que el firmware envía antes del handshake ===
+        # El firmware puede enviar mensajes de debug (texto ANSI) al arrancar.
+        # Si no los purgamos, SerialInterface los lee como protobuf y lanza DecodeError.
+        # Abrimos el puerto raw, leemos hasta que no llegue nada más (silencio ≥ 1s),
+        # y sólo entonces cedemos el control a SerialInterface.
+        _usb_drain_boot_logs(dev, baud, verbose=verbose)
 
         # SerialInterface acepta device y (según versión) baudrate/timeout.
         # Se pasa baudrate de forma compatible vía kwargs; si tu versión no lo soporta, ignora.
@@ -4430,8 +4528,33 @@ class InterfaceManager:
                                         except Exception:
                                             pass
 
-                                        # Pequeña pausa para que el hilo lector termine y el driver libere el lock
-                                        time.sleep(0.8)
+                                        # Espera generosa para que el hilo lector de pyserial
+                                        # termine su ciclo y el driver libere el lock exclusivo.
+                                        time.sleep(2.5)
+
+                                        # Si el puerto sigue bloqueado, cierra FDs a nivel OS
+                                        # como último recurso (puede causar Bad file descriptor
+                                        # en el hilo lector muerto, pero ya no importa).
+                                        try:
+                                            dev_r = os.path.realpath(dev)
+                                            fd_dir = "/proc/self/fd"
+                                            for fd_name in os.listdir(fd_dir):
+                                                if not fd_name.isdigit():
+                                                    continue
+                                                fd_path = os.path.join(fd_dir, fd_name)
+                                                try:
+                                                    link = os.readlink(fd_path)
+                                                    if link == dev or os.path.realpath(link) == dev_r:
+                                                        try:
+                                                            os.close(int(fd_name))
+                                                            print(f"[receiver] Cerrado FD={fd_name} de {dev} (forzado)", flush=True)
+                                                        except Exception:
+                                                            pass
+                                                except Exception:
+                                                    pass
+                                        except Exception:
+                                            pass
+                                        time.sleep(0.5)
                                 except Exception:
                                     pass
 
