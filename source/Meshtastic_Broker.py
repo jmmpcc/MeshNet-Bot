@@ -4057,12 +4057,21 @@ def _mesh_transport() -> str:
 
 def _force_close_own_serial_fds(dev: str) -> int:
     """
-    Fuerza el cierre de FDs del *propio proceso* que apunten a 'dev'.
-    Solo para recuperación cuando pyserial/meshtastic deja el puerto abierto
-    tras un fallo de handshake/parsing.
+    [DESACTIVADO por defecto]
+    Antes: cerraba FDs del propio proceso con os.close() para "recuperar" /dev/ttyUSB*.
 
-    Devuelve: número de FDs cerrados.
+    Problema: si hay un hilo lector activo (meshtastic.stream_interface), cerrar el FD a bajo nivel
+    provoca 'Bad file descriptor' al desconectar y rompe el framing protobuf (DecodeError).
+
+    Para activar explícitamente (solo debugging puntual):
+      BROKER_USB_FD_RECOVERY=1
+
+    Devuelve siempre 0 cuando está desactivado.
     """
+    enabled = (os.getenv("BROKER_USB_FD_RECOVERY", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return 0
+
     try:
         dev_r = os.path.realpath(dev)
     except Exception:
@@ -4079,11 +4088,8 @@ def _force_close_own_serial_fds(dev: str) -> int:
                 link = os.readlink(fd_path)
             except Exception:
                 continue
-
-            # Algunos links pueden ser 'anon_inode' etc.
             if not link:
                 continue
-
             try:
                 link_r = os.path.realpath(link)
             except Exception:
@@ -4406,16 +4412,30 @@ class InterfaceManager:
                             if who:
                                 print(f"[receiver] USB ocupado: {who}", flush=True)
 
-                            # === RECUPERACIÓN: si el ocupante somos nosotros (pid=1 en Docker) ===
-                            try:
-                                # En contenedor, os.getpid() suele ser 1
-                                mypid = os.getpid()
-                                if f"pid={mypid} " in (who or ""):
-                                    n = _force_close_own_serial_fds(dev)
-                                    if n > 0:
-                                        print(f"[receiver] USB recovery: cerrados {n} FD(s) propios sobre {dev}", flush=True)
-                            except Exception:
-                                pass
+                                # === RECUPERACIÓN SEGURA: si el ocupante somos nosotros (pid=1 en Docker) ===
+                                try:
+                                    mypid = os.getpid()
+                                    if f"pid={mypid} " in (who or ""):
+                                        # En vez de cerrar FDs a bajo nivel (rompe pyserial), intentamos liberar de forma limpia.
+                                        print(f"[receiver] USB ocupado por ESTE proceso (pid={mypid}). Liberando iface de forma segura...", flush=True)
+                                        try:
+                                            with self._lock:
+                                                old_iface = getattr(self, "iface", None)
+                                                self.iface = None
+                                            if old_iface is not None:
+                                                try:
+                                                    old_iface.close()
+                                                except Exception:
+                                                    pass
+                                        except Exception:
+                                            pass
+
+                                        # Pequeña pausa para que el hilo lector termine y el driver libere el lock
+                                        time.sleep(0.8)
+                                except Exception:
+                                    pass
+
+
                 except Exception:
                     pass
 
