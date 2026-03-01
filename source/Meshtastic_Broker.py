@@ -6375,6 +6375,34 @@ def main():
     # === [NUEVO] blindaje contra 10053/10054 en hilos internos del SDK
     install_meshtastic_send_guards(verbose=args.verbose)
 
+    # === Patch _handleFromRadio: no relanzar DecodeError ===
+    # El firmware ESP32 puede insertar logs ANSI en medio de un frame protobuf,
+    # corrompiendo el payload. _handleFromRadio lanza la excepción al parser
+    # y la RELANZA (raise ex), lo que hace que __reader de stream_interface
+    # capture el error y llame a _disconnected() → cierra el puerto.
+    # Con este patch, el DecodeError se registra pero NO se relanza,
+    # el __reader descarta el frame corrupto y sigue leyendo el siguiente header.
+    try:
+        from meshtastic.mesh_interface import MeshInterface as _MI
+        _orig_handleFromRadio = _MI._handleFromRadio
+
+        def _patched_handleFromRadio(self, fromRadioBytes):
+            try:
+                _orig_handleFromRadio(self, fromRadioBytes)
+            except Exception as _ex:
+                # Absorber DecodeError y similares: el __reader ya resetea
+                # _rxBuf y busca el siguiente START1. No necesitamos cerrar.
+                import logging as _logging
+                _logging.getLogger("broker.usb").debug(
+                    f"[usb-patch] DecodeError absorbido ({type(_ex).__name__}), resincronizando..."
+                )
+
+        _MI._handleFromRadio = _patched_handleFromRadio
+        if args.verbose:
+            print("🛡️ Patch _handleFromRadio activo (DecodeError no cierra conexión USB).", flush=True)
+    except Exception as _ep:
+        print(f"⚠️ No se pudo instalar patch _handleFromRadio: {_ep}", flush=True)
+
   # === [NUEVO] Aviso de guards activos (y asegurar parche del pool persistente)
     try:
         import tcpinterface_persistent  # asegura guards del pool/reconexión
