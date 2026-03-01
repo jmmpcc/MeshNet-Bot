@@ -4055,6 +4055,51 @@ def _mesh_transport() -> str:
     """
     return (os.getenv("MESH_TRANSPORT", "tcp") or "tcp").strip().lower()
 
+def _force_close_own_serial_fds(dev: str) -> int:
+    """
+    Fuerza el cierre de FDs del *propio proceso* que apunten a 'dev'.
+    Solo para recuperación cuando pyserial/meshtastic deja el puerto abierto
+    tras un fallo de handshake/parsing.
+
+    Devuelve: número de FDs cerrados.
+    """
+    try:
+        dev_r = os.path.realpath(dev)
+    except Exception:
+        dev_r = dev
+
+    closed = 0
+    fd_dir = "/proc/self/fd"
+    try:
+        for fd_name in os.listdir(fd_dir):
+            if not fd_name.isdigit():
+                continue
+            fd_path = os.path.join(fd_dir, fd_name)
+            try:
+                link = os.readlink(fd_path)
+            except Exception:
+                continue
+
+            # Algunos links pueden ser 'anon_inode' etc.
+            if not link:
+                continue
+
+            try:
+                link_r = os.path.realpath(link)
+            except Exception:
+                link_r = link
+
+            if link == dev or link_r == dev_r:
+                try:
+                    os.close(int(fd_name))
+                    closed += 1
+                except Exception:
+                    pass
+    except Exception:
+        return 0
+
+    return closed
+
 def _debug_who_holds_serial(dev: str, max_pids: int = 8) -> str:
     """
     Diagnóstico Linux: lista procesos que tienen abierto el dispositivo serie.
@@ -4360,6 +4405,17 @@ class InterfaceManager:
                             who = _debug_who_holds_serial(dev)
                             if who:
                                 print(f"[receiver] USB ocupado: {who}", flush=True)
+
+                            # === RECUPERACIÓN: si el ocupante somos nosotros (pid=1 en Docker) ===
+                            try:
+                                # En contenedor, os.getpid() suele ser 1
+                                mypid = os.getpid()
+                                if f"pid={mypid} " in (who or ""):
+                                    n = _force_close_own_serial_fds(dev)
+                                    if n > 0:
+                                        print(f"[receiver] USB recovery: cerrados {n} FD(s) propios sobre {dev}", flush=True)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 
