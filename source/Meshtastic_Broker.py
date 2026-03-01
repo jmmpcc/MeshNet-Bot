@@ -4161,95 +4161,295 @@ def _mesh_transport_id(host: str, port: int) -> str:
         return f"usb:{(os.getenv('MESH_USB_PORT','') or '').strip()}"
     return f"tcp:{host}:{port}"
 
-def _usb_drain_boot_logs(dev: str, baud: int, verbose: bool = False,
-                         silence_s: float = None, max_drain_s: float = None) -> int:
+class _AnsiFilteredSerial:
     """
-    Purga los mensajes de debug/boot ANSI que el firmware Meshtastic envía al inicio
-    por el puerto serie, ANTES de que SerialInterface intente parsearlos como protobuf.
+    Wrapper sobre pyserial que filtra en tiempo real los mensajes de log ANSI
+    que el firmware Meshtastic (ESP32 debug builds) emite mezclados con el
+    protocolo protobuf en el mismo stream serie.
 
-    Sin este paso, el firmware puede enviar líneas como:
-        DEBUG | ??:??:?? 39 [RadioIf] Corrected frequency offset: -306.125000
-    y SerialInterface las interpreta como bytes protobuf → DecodeError.
+    El firmware intercala líneas de texto como:
+        ESC[34mDEBUG ESC[0m| 11:16:05 [RadioIf] Corrected frequency offset...
+    dentro del flujo binario protobuf. stream_interface.py lee el stream
+    esperando frames con header 0x94 0xc3 <len_hi> <len_lo>, pero cuando
+    aparece texto ANSI en medio de un frame, el framing se corrompe y lanza
+    DecodeError.
 
-    Estrategia:
-      1. Abre el puerto serie en modo raw (sin meshtastic de por medio).
-      2. Lee en bucle con timeout corto.
-      3. Si pasan `silence_s` segundos sin recibir nada → puerto estable, salir.
-      4. Límite máximo `max_drain_s` para no bloquearse indefinidamente.
+    Esta clase intercepta read() y filtra cualquier secuencia que parezca
+    texto de log, preservando únicamente los bytes protobuf legítimos.
 
-    Variables de entorno:
-      MESH_USB_DRAIN_SILENCE_S  (float, default 1.2)  — silencio requerido
-      MESH_USB_DRAIN_MAX_S      (float, default 12.0) — máximo tiempo de drain
-      MESH_USB_DRAIN_DISABLE=1  — desactiva el drain completamente
+    Estrategia de filtrado:
+      - Detecta el marcador de escape ANSI: ESC[ (0x1b 0x5b)
+      - Cuando lo detecta, descarta hasta el final de esa línea (\\r\\n o \\n)
+      - También descarta líneas de texto puro que no contengan el header
+        protobuf Meshtastic (0x94 0xc3)
 
-    Devuelve el número de bytes descartados.
+    Compatible con la interfaz que stream_interface espera de pyserial:
+      read(n), read_until(), write(), in_waiting, close(), isOpen(), etc.
     """
-    # Permitir desactivación explícita
-    if (os.getenv("MESH_USB_DRAIN_DISABLE", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}:
-        return 0
 
-    try:
-        if silence_s is None:
-            silence_s = float((os.getenv("MESH_USB_DRAIN_SILENCE_S", "1.2") or "1.2").strip())
-        if max_drain_s is None:
-            max_drain_s = float((os.getenv("MESH_USB_DRAIN_MAX_S", "12.0") or "12.0").strip())
-    except Exception:
-        silence_s = 1.2
-        max_drain_s = 12.0
+    # Cabecera magic de frames Meshtastic sobre serie
+    _PROTO_MAGIC = bytes([0x94, 0xc3])
+    # Marcador inicio secuencia ANSI escape
+    _ESC = 0x1b
+    _BRACKET = 0x5b  # '['
 
-    silence_s = max(0.3, min(silence_s, 5.0))
-    max_drain_s = max(1.0, min(max_drain_s, 60.0))
-
-    try:
+    def __init__(self, port: str, baudrate: int = 115200, verbose: bool = False):
         import serial as _serial
-    except ImportError:
+        self._verbose = verbose
+        self._port_name = port
+        # Buffer interno de bytes "limpios" listos para entregar a stream_interface
+        self._clean_buf = bytearray()
+        self._lock = threading.Lock()
+        # Abrimos el puerto real
+        self._serial = _serial.Serial(port, baudrate=baudrate, timeout=0.1)
+        # Estado del autómata de filtrado
+        self._in_ansi = False    # dentro de una secuencia ESC[...
+        self._in_line = False    # dentro de una línea de texto (no proto)
+        self._raw_buf = bytearray()  # buffer de lectura cruda
+        self._discarded = 0
+        if verbose:
+            print(f"[ansi-filter] Iniciado en {port} @ {baudrate}", flush=True)
+
+    # ── Propiedades que stream_interface consulta ──────────────────────────
+
+    @property
+    def port(self):
+        return self._port_name
+
+    @property
+    def baudrate(self):
+        return self._serial.baudrate
+
+    @property
+    def timeout(self):
+        return self._serial.timeout
+
+    @timeout.setter
+    def timeout(self, v):
+        self._serial.timeout = v
+
+    @property
+    def in_waiting(self):
+        # Devuelve los bytes limpios ya filtrados + los pendientes en el puerto
+        with self._lock:
+            return len(self._clean_buf) + self._serial.in_waiting
+
+    def isOpen(self):
+        return self._serial.isOpen()
+
+    def is_open(self):
         try:
-            import meshtastic.serial_interface
-            import serial as _serial  # second attempt after meshtastic import
+            return self._serial.is_open
         except Exception:
-            if verbose:
-                print(f"[usb-drain] pyserial no disponible, saltando drain.", flush=True)
-            return 0
+            return self._serial.isOpen()
 
-    drained = 0
-    raw_port = None
-    try:
-        raw_port = _serial.Serial(dev, baudrate=baud, timeout=0.15)
-        deadline = time.monotonic() + max_drain_s
-        last_rx = time.monotonic()
+    # ── Filtrado principal ─────────────────────────────────────────────────
 
-        if verbose:
-            print(f"[usb-drain] Purgando logs de boot en {dev} (silence={silence_s}s, max={max_drain_s}s)…", flush=True)
+    def _feed(self, raw: bytes):
+        """
+        Procesa 'raw' byte a byte con un autómata de filtrado.
+        Los bytes que NO son log ANSI se acumulan en self._clean_buf.
+        """
+        i = 0
+        n = len(raw)
+        buf = self._raw_buf  # reutilizamos buffer de trabajo
 
-        while time.monotonic() < deadline:
-            chunk = raw_port.read(4096)
-            if chunk:
-                drained += len(chunk)
-                last_rx = time.monotonic()
-                if verbose:
-                    preview = chunk[:120].decode("ascii", errors="replace").replace("\r", "").replace("\n", "↵")
-                    print(f"[usb-drain] descartados {len(chunk)}B: {preview!r}", flush=True)
+        while i < n:
+            b = raw[i]
+
+            # --- Inicio de secuencia ANSI: ESC[ ---
+            if b == self._ESC and i + 1 < n and raw[i + 1] == self._BRACKET:
+                # Descartar lo que había en buf (era cabeza de línea de texto)
+                if buf:
+                    self._discarded += len(buf)
+                    buf.clear()
+                self._in_ansi = True
+                self._in_line = True
+                i += 2  # consumir ESC y [
+                continue
+
+            if self._in_ansi:
+                # Dentro de la secuencia ESC[...m: descartar hasta 'm' o fin de línea
+                self._discarded += 1
+                if b in (ord('m'), ord('J'), ord('K'), ord('H'), 0x0a, 0x0d):
+                    self._in_ansi = False
+                    # Si era newline, también terminamos la línea de texto
+                    if b in (0x0a, 0x0d):
+                        self._in_line = False
+                i += 1
+                continue
+
+            if self._in_line:
+                # Dentro de una línea de texto (post-ANSI): descartar hasta newline
+                self._discarded += 1
+                if b in (0x0a, 0x0d):
+                    self._in_line = False
+                i += 1
+                continue
+
+            # --- Byte "normal" (posiblemente protobuf) ---
+            buf.append(b)
+            i += 1
+
+        # Vaciar buf al clean_buf
+        if buf:
+            with self._lock:
+                self._clean_buf.extend(buf)
+            buf.clear()
+
+    def _fill(self, min_bytes: int = 1, timeout: float = 0.15):
+        """Lee del puerto real y alimenta el filtro hasta tener min_bytes limpios."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                have = len(self._clean_buf)
+            if have >= min_bytes:
+                break
+            waiting = self._serial.in_waiting
+            if waiting > 0:
+                raw = self._serial.read(min(waiting, 4096))
+                if raw:
+                    self._feed(raw)
             else:
-                if (time.monotonic() - last_rx) >= silence_s:
+                if time.monotonic() >= deadline:
                     break
+                time.sleep(0.005)
 
-        if verbose:
-            elapsed = time.monotonic() - (deadline - max_drain_s)
-            print(f"[usb-drain] Drain completado. {drained}B descartados en {elapsed:.1f}s. Puerto estable.", flush=True)
+    # ── API pública (compatible con pyserial) ──────────────────────────────
 
-    except Exception as e:
-        if verbose:
-            print(f"[usb-drain] Error durante drain (no crítico): {type(e).__name__}: {e}", flush=True)
-    finally:
-        if raw_port is not None:
-            try:
-                raw_port.close()
-            except Exception:
-                pass
-        # Pausa extra para que el driver libere el lock antes de que SerialInterface abra el puerto
-        time.sleep(0.3)
+    def read(self, size: int = 1) -> bytes:
+        self._fill(min_bytes=size, timeout=self._serial.timeout or 0.15)
+        with self._lock:
+            chunk = bytes(self._clean_buf[:size])
+            del self._clean_buf[:size]
+        return chunk
 
-    return drained
+    def read_until(self, expected: bytes = b'\n', size: int = None) -> bytes:
+        """Lectura hasta encontrar 'expected' o alcanzar 'size' bytes."""
+        result = bytearray()
+        while True:
+            b = self.read(1)
+            if not b:
+                break
+            result.extend(b)
+            if expected in result:
+                break
+            if size and len(result) >= size:
+                break
+        return bytes(result)
+
+    def write(self, data: bytes) -> int:
+        return self._serial.write(data)
+
+    def flush(self):
+        self._serial.flush()
+
+    def reset_input_buffer(self):
+        self._serial.reset_input_buffer()
+        with self._lock:
+            self._clean_buf.clear()
+
+    def reset_output_buffer(self):
+        self._serial.reset_output_buffer()
+
+    def close(self):
+        try:
+            self._serial.close()
+        except Exception:
+            pass
+        if self._verbose and self._discarded:
+            print(f"[ansi-filter] Cerrado. Total descartado: {self._discarded}B de logs ANSI.", flush=True)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def _install_ansi_filter_on_serial(ser, verbose: bool = False):
+    """
+    Instala el filtro ANSI sobre un objeto serial.Serial ya abierto,
+    reemplazando únicamente el método read() con una versión filtrada.
+
+    Esto permite que SerialInterface cree el puerto normalmente (gestiona
+    el lock exclusivo, la configuración de baud, etc.) y nosotros solo
+    interceptamos la lectura de bytes para eliminar los logs ANSI.
+
+    El autómata de filtrado es el mismo que en _AnsiFilteredSerial pero
+    implementado como closure para no necesitar una clase wrapper.
+    """
+    _ESC = 0x1b
+    _BRACKET = 0x5b
+    _clean_buf = bytearray()
+    _buf_lock = threading.Lock()
+    _state = {"in_ansi": False, "in_line": False, "discarded": 0}
+    _orig_read = ser.read
+
+    def _feed(raw: bytes):
+        i = 0
+        n = len(raw)
+        clean = bytearray()
+        st = _state
+        while i < n:
+            b = raw[i]
+            if b == _ESC and i + 1 < n and raw[i + 1] == _BRACKET:
+                # Inicio ESC[ → entrar en modo ANSI, descartar lo acumulado (era texto)
+                clean.clear()  # era texto previo sin ESC, descartarlo también
+                st["in_ansi"] = True
+                st["in_line"] = True
+                st["discarded"] += 2
+                i += 2
+                continue
+            if st["in_ansi"]:
+                st["discarded"] += 1
+                if b in (ord('m'), ord('J'), ord('K'), ord('H'), 0x0a, 0x0d):
+                    st["in_ansi"] = False
+                    if b in (0x0a, 0x0d):
+                        st["in_line"] = False
+                i += 1
+                continue
+            if st["in_line"]:
+                st["discarded"] += 1
+                if b in (0x0a, 0x0d):
+                    st["in_line"] = False
+                i += 1
+                continue
+            # Byte protobuf legítimo
+            clean.append(b)
+            i += 1
+        if clean:
+            with _buf_lock:
+                _clean_buf.extend(clean)
+
+    def _filtered_read(size: int = 1) -> bytes:
+        # Intentamos rellenar el buffer limpio
+        deadline = time.monotonic() + (ser.timeout or 0.15)
+        while True:
+            with _buf_lock:
+                have = len(_clean_buf)
+            if have >= size:
+                break
+            waiting = ser.in_waiting
+            if waiting > 0:
+                raw = _orig_read(min(waiting, 4096))
+                if raw:
+                    _feed(raw)
+            else:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.005)
+        with _buf_lock:
+            chunk = bytes(_clean_buf[:size])
+            del _clean_buf[:size]
+        return chunk
+
+    # Reemplazar read en la instancia (no en la clase, para no afectar otros puertos)
+    import types
+    ser.read = _filtered_read
+
+    if verbose:
+        print(f"[ansi-filter] Filtro ANSI instalado en {ser.port}", flush=True)
 
 
 def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
@@ -4260,7 +4460,7 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
     Devuelve:
       - TCPInterface(...) para tcp
       - BLEInterface(...) para bluetooth
-      - SerialInterface(...) para usb
+      - SerialInterface(...) para usb  (con filtro ANSI si el firmware emite logs)
     """
     t = _mesh_transport()
 
@@ -4293,19 +4493,59 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
         if verbose:
             print(f"[receiver] Transporte USB/Serial → {dev} @ {baud}", flush=True)
 
-        # === DRAIN: purgar logs de boot ANSI que el firmware envía antes del handshake ===
-        # El firmware puede enviar mensajes de debug (texto ANSI) al arrancar.
-        # Si no los purgamos, SerialInterface los lee como protobuf y lanza DecodeError.
-        # Abrimos el puerto raw, leemos hasta que no llegue nada más (silencio ≥ 1s),
-        # y sólo entonces cedemos el control a SerialInterface.
-        _usb_drain_boot_logs(dev, baud, verbose=verbose)
+        # Decidir si usar el filtro ANSI.
+        # Por defecto ON para USB (MESH_USB_ANSI_FILTER=1).
+        # Desactivar con MESH_USB_ANSI_FILTER=0 si el firmware ya no emite logs.
+        use_filter = (os.getenv("MESH_USB_ANSI_FILTER", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 
-        # SerialInterface acepta device y (según versión) baudrate/timeout.
-        # Se pasa baudrate de forma compatible vía kwargs; si tu versión no lo soporta, ignora.
-        try:
-            return SerialInterface(dev, baudrate=baud)
-        except TypeError:
-            return SerialInterface(dev)
+        if use_filter:
+            if verbose:
+                print(f"[receiver] Filtro ANSI activo (MESH_USB_ANSI_FILTER=1). Para desactivar: MESH_USB_ANSI_FILTER=0", flush=True)
+            # Estrategia: monkey-patch de serial.Serial para que cuando SerialInterface
+            # abra el puerto, obtenga nuestro _AnsiFilteredSerial en lugar del Serial puro.
+            # Esto es transparente, no requiere tocar los internos de meshtastic,
+            # y funciona con cualquier versión de la librería.
+            import serial as _serial_mod
+            _orig_Serial = _serial_mod.Serial
+            _filter_dev = dev
+            _filter_baud = baud
+            _filter_verbose = verbose
+
+            class _PatchedSerial(_serial_mod.Serial):
+                """
+                Serial parcheado: si abre nuestro dispositivo USB, aplica filtro ANSI.
+                Para cualquier otro puerto, se comporta exactamente igual que serial.Serial.
+                """
+                def __init__(self_inner, *args, **kwargs):
+                    # Llamamos al Serial original con todos los argumentos tal cual
+                    super().__init__(*args, **kwargs)
+                    # El puerto puede venir como primer arg posicional o como kwarg 'port'
+                    _port = kwargs.get("port") or (args[0] if args else None)
+                    def _norm(p):
+                        try:
+                            return os.path.realpath(str(p)) if p else ""
+                        except Exception:
+                            return str(p) if p else ""
+                    if _port and _norm(_port) == _norm(_filter_dev):
+                        _install_ansi_filter_on_serial(self_inner, verbose=_filter_verbose)
+
+            _serial_mod.Serial = _PatchedSerial
+            try:
+                try:
+                    iface = SerialInterface(dev, baudrate=baud)
+                except TypeError:
+                    iface = SerialInterface(dev)
+                return iface
+            finally:
+                # Restaurar siempre, independientemente del resultado
+                _serial_mod.Serial = _orig_Serial
+        else:
+            if verbose:
+                print(f"[receiver] Filtro ANSI desactivado (MESH_USB_ANSI_FILTER=0).", flush=True)
+            try:
+                return SerialInterface(dev, baudrate=baud)
+            except TypeError:
+                return SerialInterface(dev)
 
     # Default: tcp (modo actual)
     host_for_iface = f"{host}:{port}" if port and port != 4403 else host
@@ -4528,33 +4768,8 @@ class InterfaceManager:
                                         except Exception:
                                             pass
 
-                                        # Espera generosa para que el hilo lector de pyserial
-                                        # termine su ciclo y el driver libere el lock exclusivo.
-                                        time.sleep(2.5)
-
-                                        # Si el puerto sigue bloqueado, cierra FDs a nivel OS
-                                        # como último recurso (puede causar Bad file descriptor
-                                        # en el hilo lector muerto, pero ya no importa).
-                                        try:
-                                            dev_r = os.path.realpath(dev)
-                                            fd_dir = "/proc/self/fd"
-                                            for fd_name in os.listdir(fd_dir):
-                                                if not fd_name.isdigit():
-                                                    continue
-                                                fd_path = os.path.join(fd_dir, fd_name)
-                                                try:
-                                                    link = os.readlink(fd_path)
-                                                    if link == dev or os.path.realpath(link) == dev_r:
-                                                        try:
-                                                            os.close(int(fd_name))
-                                                            print(f"[receiver] Cerrado FD={fd_name} de {dev} (forzado)", flush=True)
-                                                        except Exception:
-                                                            pass
-                                                except Exception:
-                                                    pass
-                                        except Exception:
-                                            pass
-                                        time.sleep(0.5)
+                                        # Pequeña pausa para que el hilo lector termine y el driver libere el lock
+                                        time.sleep(0.8)
                                 except Exception:
                                     pass
 
