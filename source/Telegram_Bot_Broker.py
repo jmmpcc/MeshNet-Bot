@@ -5564,6 +5564,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("enviar", "Enviar a nodo/broadcast (canal, alias, forzado)"),
         BotCommand("enviar_ack", "Enviar con ACK (reintentos)"),
         BotCommand("enviar_mc", "Enviar a MeshCore (channel_idx): /enviar_mc ch2 <texto>"),
+        BotCommand("enviar_mc_dm", "Enviar DM a MeshCore: /enviar_mc_dm <contact_prefix|[MC:prefix]> <texto...>"),
         BotCommand("escuchar", "Escuchar broker (canal/all)"),
         BotCommand("parar_escucha", "Detener la escucha del broker"),
         BotCommand("traceroute", "Traceroute a un nodo (!id|número|alias) [Timeout] sg. espera"),
