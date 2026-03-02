@@ -1,0 +1,1681 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+mesh_triple_bridge.py  v6.2.1 — Pasarela externa A↔B y A↔C usando TCP Meshtastic.
+
+Modo tcp:
+- Abre TCP directo a A, B y C.
+- Reenvía A→B, A→C, B→A, C→A según mapas.
+
+Modo broker (HUB_MODE=broker):
+- NO abre TCP a A (evita colisión con el broker).
+- Lee RX de A vía BacklogServer (FETCH_BACKLOG).
+- Envía hacia A vía BacklogServer (SEND_TEXT).
+- Abre TCP solo a B y C.
+"""
+from __future__ import annotations
+
+import os
+import time
+import json
+import asyncio
+import threading
+import re
+import hashlib
+import socket
+from collections import deque
+from typing import Optional, Dict
+import heapq
+
+from pubsub import pub
+
+# ============================================================
+#  Compat TCPInterface: pool persistente si existe, si no SDK
+# ============================================================
+
+_TCPI = None
+try:
+    from tcpinterface_persistent import TCPInterface as _PoolTCPIF  # type: ignore
+    _TCPI = _PoolTCPIF
+except Exception:
+    try:
+        from meshtastic.tcp_interface import TCPInterface as _SDKTCPIF  # type: ignore
+        _TCPI = _SDKTCPIF
+    except Exception as e:
+        raise SystemExit(f"[FATAL] No se pudo importar TCPInterface: {e}")
+
+
+# ============================================================
+#  MeshCore (opcional): bridge Meshtastic <-> MeshCore
+#  Se activa solo si MESHCORE_ENABLE=1 y la librería 'meshcore' está instalada.
+# ============================================================
+
+_MESHCORE_AVAILABLE = False
+try:
+    from meshcore import MeshCore as _MeshCore  # type: ignore
+    from meshcore import EventType as _MCEventType  # type: ignore
+    _MESHCORE_AVAILABLE = True
+except Exception:
+    _MeshCore = None  # type: ignore
+    _MCEventType = None  # type: ignore
+
+# ============================================================
+#  Helpers básicos (mapeos, texto, hash)
+# ============================================================
+
+
+def _truthy(s: str | None, default: bool = False) -> bool:
+    if s is None:
+        return default
+    return s.strip().lower() in {"1", "true", "t", "yes", "y", "on", "si", "sí"}
+
+
+def _parse_ch_map(s: str | None) -> dict[int, int]:
+    out: dict[int, int] = {}
+    if not s:
+        return out
+    for part in s.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        a, b = part.split(":", 1)
+        try:
+            out[int(a.strip())] = int(b.strip())
+        except Exception:
+            continue
+    return out
+
+
+
+
+
+def _parse_meshcore_ch2contact(raw: str | None) -> dict[int, str]:
+    """
+    Parsea MESHCORE_CH2CONTACT (compatibilidad) desde .env.
+
+    Formato:
+      canal:contact_prefix,canal:contact_prefix
+
+    Ejemplo:
+      MESHCORE_CH2CONTACT=0:ab12cd34,2:ee99aa00
+
+    Devuelve:
+      { canal_int: contact_prefix_str }
+    """
+    out: dict[int, str] = {}
+    if not raw:
+        return out
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        a, b = part.split(":", 1)
+        try:
+            ch = int(a.strip())
+        except Exception:
+            continue
+        contact = str(b).strip()
+        if not contact:
+            continue
+        out[ch] = contact
+    return out
+
+def _parse_meshcore_channel_map(raw: str | None) -> dict[int, dict]:
+    """
+    Parsea MESHCORE_CHANNEL_MAP desde .env
+
+    Formato:
+      canal:contact_prefix[:tag],canal:contact_prefix[:tag]
+
+    Devuelve:
+      { canal: {"contact": str, "tag": str|None} }
+    """
+    result: dict[int, dict] = {}
+    if not raw:
+        return result
+
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+
+        parts = item.split(":")
+        if len(parts) < 2:
+            continue
+
+        try:
+            ch = int(parts[0].strip())
+        except Exception:
+            continue
+
+        contact = str(parts[1]).strip()
+        tag = str(parts[2]).strip() if len(parts) >= 3 and str(parts[2]).strip() else None
+
+        if not contact:
+            continue
+
+        result[ch] = {"contact": contact, "tag": tag}
+
+    return result
+
+
+
+def _parse_meshcore_map_json(raw: str | None) -> dict[int, dict]:
+    """
+    Parsea un mapping JSON (opcional) para MeshCore.
+
+    Formato esperado:
+      {"0":{"contact":"ab12cd34","tag":"CH0"}, "2":{"contact":"...","tag":"IGATE"}}
+
+    Devuelve:
+      { canal_int: {"contact": str, "tag": str|None} }
+
+    Se ignoran entradas inválidas.
+    """
+    if not raw:
+        return {}
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(obj, dict):
+        return {}
+    out: dict[int, dict] = {}
+    for k, v in obj.items():
+        try:
+            ch = int(str(k).strip())
+        except Exception:
+            continue
+        if not isinstance(v, dict):
+            continue
+        contact = str(v.get("contact") or "").strip()
+        tag = str(v.get("tag") or "").strip() if v.get("tag") is not None else None
+        tag = tag or None
+        if not contact:
+            continue
+        out[ch] = {"contact": contact, "tag": tag}
+    return out
+
+def _norm_text(s: str) -> str:
+    if not s:
+        return ""
+    rep = {
+        "“": '"', "”": '"',
+        "’": "'", "‘": "'",
+        "—": "-", "–": "-",
+        "…": ".",
+        "\u00A0": " ",
+    }
+    s = s.translate(str.maketrans(rep))
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _hash_key(direction: str, from_id: str, ch: int, payload: str) -> str:
+    h = hashlib.sha256()
+    h.update(direction.encode("utf-8"))
+    h.update(str(from_id or "?").encode("utf-8"))
+    h.update(str(int(ch)).encode("utf-8"))
+    h.update(payload.encode("utf-8"))
+    return h.hexdigest()
+
+
+# ============================================================
+#  Estado auxiliar: rate-limit y deduplicación
+# ============================================================
+
+class RateLimiter:
+    def __init__(self, max_per_min: int = 8):
+        self.max = max(1, int(max_per_min))
+        self.ts = deque()
+
+    def allow(self) -> bool:
+        now = time.time()
+        while self.ts and (now - self.ts[0]) > 60.0:
+            self.ts.popleft()
+        if len(self.ts) < self.max:
+            self.ts.append(now)
+            return True
+        return False
+
+
+class DedupWindow:
+    def __init__(self, ttl_sec: int = 45):
+        self.ttl = max(5, int(ttl_sec))
+        self.store: Dict[str, float] = {}
+
+    def seen(self, key: str) -> bool:
+        now = time.time()
+        dead = [k for k, ts in self.store.items() if (now - ts) > self.ttl]
+        for k in dead:
+            self.store.pop(k, None)
+        if key in self.store:
+            return True
+        self.store[key] = now
+        return False
+
+
+# ============================================================
+#  Broker Hub (BacklogServer): recibir desde A sin abrir TCP a A
+# ============================================================
+
+class BrokerBacklogClient:
+    def __init__(self, host: str, port: int, timeout_s: float = 8.0):
+        self.host = str(host or "127.0.0.1").strip()
+        self.port = int(port or 8766)
+        self.timeout_s = float(timeout_s or 8.0)
+
+    def _request(self, payload: dict) -> dict:
+        line = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        with socket.create_connection((self.host, self.port), timeout=self.timeout_s) as s:
+            s.settimeout(self.timeout_s)
+            s.sendall(line)
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+        try:
+            return json.loads(buf.decode("utf-8", "ignore").strip() or "{}")
+        except Exception:
+            return {"ok": False, "error": "invalid_response"}
+
+    def fetch_backlog(self, since_ts: int | None, portnums: list[str] | None, limit: int = 2000) -> list[dict]:
+        req = {
+            "cmd": "FETCH_BACKLOG",
+            "params": {
+                "since_ts": int(since_ts) if since_ts is not None else None,
+                "until_ts": None,
+                "channel": None,
+                "portnums": portnums or ["TEXT_MESSAGE_APP"],
+                "limit": int(limit or 2000),
+            },
+        }
+        resp = self._request(req)
+        if not resp.get("ok"):
+            return []
+        data = resp.get("data") or []
+        return data if isinstance(data, list) else []
+
+    def send_text(self, text: str, ch: int = 0, dest: str | None = None, ack: bool = False) -> bool:
+        params = {"text": str(text or ""), "ch": int(ch or 0)}
+        if dest and str(dest).strip() and str(dest).strip().lower() != "broadcast":
+            params["dest"] = str(dest).strip()
+            params["ack"] = bool(ack)
+        req = {"cmd": "SEND_TEXT", "params": params}
+        resp = self._request(req)
+        return bool(resp.get("ok"))
+
+
+
+# ============================================================
+#  MeshCore client (opcional) — conectar y traducir eventos
+# ============================================================
+
+class MeshCoreClient:
+    """
+    Cliente MeshCore asíncrono encapsulado en un hilo.
+
+    Objetivo:
+    - Recibir mensajes MeshCore (EventType.CONTACT_MSG_RECV) y anunciarlos al bridge.
+    - Recibir anuncios MeshCore (EventType.ADVERTISEMENT) y registrar "nodos vistos".
+    - Enviar mensajes hacia MeshCore mediante una cola interna, sin bloquear el hilo principal.
+
+    Conexión soportada (según librería meshcore):
+    - Serial: MeshCore.create_serial(port, baud)
+    - TCP:    MeshCore.create_tcp(host, port, auto_reconnect=True)
+    - BLE:    MeshCore.create_ble(address, pin=...)
+
+    NOTA: Este wrapper NO altera el funcionamiento Meshtastic si MeshCore no está activado.
+    """
+
+    def __init__(
+        self,
+        *,
+        enable: bool,
+        mode: str,
+        serial_port: str | None,
+        serial_baud: int,
+        tcp_host: str | None,
+        tcp_port: int,
+        ble_addr: str | None,
+        ble_pin: str | None,
+        seen_path: str,
+        seen_flush_each: bool,
+        on_message,  # callable(dict) -> None
+        on_advert,   # callable(dict) -> None
+        log_prefix: str = "meshcore",
+    ):
+        self.enable = bool(enable) and bool(_MESHCORE_AVAILABLE)
+        self.mode = (mode or "serial").strip().lower()
+        self.serial_port = serial_port
+        self.serial_baud = int(serial_baud or 115200)
+        self.tcp_host = tcp_host
+        self.tcp_port = int(tcp_port or 4000)
+        self.ble_addr = ble_addr
+        self.ble_pin = ble_pin
+        self.seen_path = str(seen_path or "").strip() or "meshcore_seen.jsonl"
+        self.seen_flush_each = bool(seen_flush_each)
+        self.on_message = on_message
+        self.on_advert = on_advert
+        self.log_prefix = log_prefix
+
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._meshcore = None
+        self._tx_q: asyncio.Queue | None = None
+
+    def start(self) -> None:
+        if not self.enable:
+            return
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._runner, name="meshcore-client", daemon=True)
+        self._thread.start()
+        print(f"[{self.log_prefix}] enabled mode={self.mode}", flush=True)
+
+    def stop(self) -> None:
+        """Solicita parada y espera brevemente el hilo (cierre limpio)."""
+        self._stop.set()
+        if self._loop and self._loop.is_running():
+            try:
+                self._loop.call_soon_threadsafe(lambda: None)
+            except Exception:
+                pass
+
+        # Join corto: evita que queden hilos vivos en reinicios del contenedor.
+        th = self._thread
+        if th and th.is_alive():
+            try:
+                th.join(timeout=2.0)
+            except Exception:
+                pass
+
+    def enqueue_send(self, dst: object, text: str) -> None:
+        """Encola un envío hacia MeshCore (dst suele ser contact dict, key bytes o prefix)."""
+        if not self.enable:
+            return
+        if not self._loop or not self._tx_q:
+            return
+        msg = _norm_text(text or "")
+        if not msg:
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._tx_q.put_nowait, (dst, msg))
+        except Exception:
+            pass
+
+    def _runner(self) -> None:
+        """Hilo de MeshCore con supervisor de reconexión (24/7)."""
+        try:
+            asyncio.run(self._supervisor())
+        except Exception as e:
+            print(f"[{self.log_prefix}] runner fatal: {type(e).__name__}: {e}", flush=True)
+
+    async def _supervisor(self) -> None:
+        """
+        Mantiene MeshCore vivo:
+          - Si la conexión falla (arranque o caída), reintenta con backoff.
+          - Sale únicamente cuando self._stop está activo.
+        """
+        backoff = [2, 5, 10, 20, 40, 60, 120]
+        attempt = 0
+
+        while not self._stop.is_set():
+            try:
+                await self._amain_once()
+                # Si _amain_once sale sin error, reinicia el contador y reintenta suave.
+                attempt = 0
+            except Exception as e:
+                delay = backoff[min(attempt, len(backoff) - 1)]
+                attempt += 1
+                print(f"[{self.log_prefix}] supervisor: {type(e).__name__}: {e} (reintento en {delay}s)", flush=True)
+                # sleep cooperativo
+                for _ in range(int(delay * 10)):
+                    if self._stop.is_set():
+                        return
+                    await asyncio.sleep(0.1)
+
+    async def _amain_once(self) -> None:
+        """Una sesión de conexión MeshCore. Si cae, esta corrutina termina y el supervisor reintenta."""
+        self._loop = asyncio.get_running_loop()
+        self._tx_q = asyncio.Queue()
+
+        # --- conectar ---
+        mc = None
+        if self.mode == "tcp":
+            if not self.tcp_host:
+                raise RuntimeError("MESHCORE_TCP_HOST vacío")
+            mc = await _MeshCore.create_tcp(self.tcp_host, int(self.tcp_port), auto_reconnect=True)  # type: ignore[attr-defined]
+        elif self.mode == "ble":
+            if not self.ble_addr:
+                raise RuntimeError("MESHCORE_BLE_ADDR vacío")
+            if self.ble_pin:
+                mc = await _MeshCore.create_ble(self.ble_addr, pin=str(self.ble_pin))  # type: ignore[attr-defined]
+            else:
+                mc = await _MeshCore.create_ble(self.ble_addr)  # type: ignore[attr-defined]
+        else:
+            # serial por defecto
+            if not self.serial_port:
+                raise RuntimeError("MESHCORE_SERIAL_PORT vacío")
+            mc = await _MeshCore.create_serial(self.serial_port, int(self.serial_baud), debug=False)  # type: ignore[attr-defined]
+
+        self._meshcore = mc
+
+        # --- subscripciones ---
+        async def _handle_msg(event):
+            try:
+                data = dict(event.payload or {})
+                out = {
+                    "type": "CONTACT_MSG_RECV",
+                    "pubkey_prefix": str(data.get("pubkey_prefix") or ""),
+                    "text": str(data.get("text") or ""),
+                    "ts": int(time.time()),
+                    "raw": data,
+                }
+                self.on_message(out)
+            except Exception as e:
+                print(f"[{self.log_prefix}] msg handler error: {type(e).__name__}: {e}", flush=True)
+
+        async def _handle_adv(event):
+            try:
+                data = dict(event.payload or {})
+                out = {
+                    "type": "ADVERTISEMENT",
+                    "ts": int(time.time()),
+                    "raw": data,
+                }
+                self.on_advert(out)
+                self._append_seen(out)
+            except Exception as e:
+                print(f"[{self.log_prefix}] advert handler error: {type(e).__name__}: {e}", flush=True)
+
+        try:
+            mc.subscribe(_MCEventType.CONTACT_MSG_RECV, _handle_msg)  # type: ignore[union-attr]
+            mc.subscribe(_MCEventType.ADVERTISEMENT, _handle_adv)  # type: ignore[union-attr]
+        except Exception as e:
+            print(f"[{self.log_prefix}] subscribe error: {type(e).__name__}: {e}", flush=True)
+
+        # --- bucle tx ---
+        while not self._stop.is_set():
+            try:
+                dst, msg = await asyncio.wait_for(self._tx_q.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+
+            try:
+                send_dst = dst
+                if isinstance(dst, str):
+                    try:
+                        c = mc.get_contact_by_key_prefix(dst)  # type: ignore[union-attr]
+                        if c:
+                            send_dst = c
+                    except Exception:
+                        pass
+
+                result = await mc.commands.send_msg(send_dst, msg)  # type: ignore[union-attr]
+                ok = (getattr(result, "type", None) != _MCEventType.ERROR)  # type: ignore[union-attr]
+                print(f"[{self.log_prefix}] TX {'OK' if ok else 'ERROR'} dst={type(send_dst).__name__} msg='{msg[:120]}'", flush=True)
+            except Exception as e:
+                print(f"[{self.log_prefix}] TX error: {type(e).__name__}: {e}", flush=True)
+
+        # --- desconexión ---
+        try:
+            await mc.disconnect()  # type: ignore[union-attr]
+        except Exception:
+            pass
+    def _append_seen(self, obj: dict) -> None:
+        try:
+            line = json.dumps(obj, ensure_ascii=False) + "\n"
+            with open(self.seen_path, "a", encoding="utf-8") as f:
+                f.write(line)
+                if self.seen_flush_each:
+                    f.flush()
+        except Exception:
+            pass
+
+# ============================================================
+#  TripleBridge: A↔B y A↔C
+# ============================================================
+
+class TripleBridge:
+    """
+    Triple bridge "24/7":
+      - HUB_MODE=tcp    : conecta A, B y C por TCP y reenvía A<->B, A<->C.
+      - HUB_MODE=broker : NO conecta A por TCP. Lee eventos desde el backlog del broker y:
+            * A -> (B/C) por TCP (sendText hacia B/C)
+            * (B/C) -> A por broker (SEND_TEXT)
+
+    Resiliencia:
+      - TX spool con reintentos y "DEFER" cuando un peer está offline.
+      - Reconexión automática de B/C cuando cae el TCP.
+      - Watchdog opcional por "stale RX" (TRIPLE_B_STALE_SEC / TRIPLE_C_STALE_SEC).
+    """
+
+    def __init__(
+        self,
+        a_host: str,
+        a_port: int,
+        b_host: str,
+        b_port: int,
+        c_host: str,
+        c_port: int,
+        a2b_map: dict[int, int],
+        b2a_map: dict[int, int],
+        a2c_map: dict[int, int],
+        c2a_map: dict[int, int],
+        hub_mode: str = "tcp",
+        broker_ctrl_host: str | None = None,
+        broker_ctrl_port: int | None = None,
+        broker_poll_sec: float = 1.5,
+        broker_fetch_limit: int = 2000,
+        broker_timeout_s: float = 8.0,
+        forward_text: bool = True,
+        forward_position: bool = False,
+        require_ack: bool = False,
+        rate_limit_per_side: int = 8,
+        dedup_ttl: int = 45,
+        tag_bridge: str = "[BRIDGE]",
+        tag_bridge_a2b: str | None = None,
+        tag_bridge_b2a: str | None = None,
+        tag_bridge_a2c: str | None = None,
+        tag_bridge_c2a: str | None = None,
+        enable_b: bool = True,
+        enable_c: bool = True,
+        meshcore_enable: bool = False,
+        meshcore_mode: str = "serial",
+        meshcore_serial_port: str | None = None,
+        meshcore_serial_baud: int = 115200,
+        meshcore_tcp_host: str | None = None,
+        meshcore_tcp_port: int = 4000,
+        meshcore_ble_addr: str | None = None,
+        meshcore_ble_pin: str | None = None,
+        meshcore_seen_path: str = "meshcore_seen.jsonl",
+        meshcore_seen_flush_each: bool = False,
+        meshcore_default_contact_prefix: str | None = None,
+        meshcore_map_ch_to_contact: str | None = None,
+    ):
+        # --- Peers habilitados por BRIDGE_PEERS ---
+        self.enable_b = bool(enable_b)
+        self.enable_c = bool(enable_c)
+
+        self.meshcore_enable = bool(meshcore_enable) and bool(_MESHCORE_AVAILABLE)
+        self.meshcore_mode = (meshcore_mode or "serial").strip().lower()
+        self.meshcore_serial_port = meshcore_serial_port
+        self.meshcore_serial_baud = int(meshcore_serial_baud or 115200)
+        self.meshcore_tcp_host = meshcore_tcp_host
+        self.meshcore_tcp_port = int(meshcore_tcp_port or 4000)
+        self.meshcore_ble_addr = meshcore_ble_addr
+        self.meshcore_ble_pin = meshcore_ble_pin
+        self.meshcore_seen_path = str(meshcore_seen_path or "").strip() or "meshcore_seen.jsonl"
+        self.meshcore_seen_flush_each = bool(meshcore_seen_flush_each)
+        self.meshcore_default_contact_prefix = (meshcore_default_contact_prefix or "").strip() or None
+        # Mapeos MeshCore (prioridad):
+        #   1) MESHCORE_CHANNEL_MAP   (texto: ch:contact[:tag])
+        #   2) MESHCORE_MAP_CH_TO_CONTACT (JSON)
+        #   3) MESHCORE_CH2CONTACT    (compat simple: ch:contact)
+        self.meshcore_ch_map = _parse_meshcore_channel_map(os.getenv("MESHCORE_CHANNEL_MAP"))
+        self.meshcore_ch_map.update(_parse_meshcore_map_json(os.getenv("MESHCORE_MAP_CH_TO_CONTACT")))
+        self.meshcore_ch_to_contact = _parse_meshcore_ch2contact(meshcore_map_ch_to_contact)
+
+        self._meshcore_client: MeshCoreClient | None = None
+
+        # --- Hosts ---
+        self.a_host, self.a_port = a_host, int(a_port or 4403)
+        self.b_host, self.b_port = b_host, int(b_port or 4403)
+        self.c_host, self.c_port = c_host, int(c_port or 4403)
+
+        # --- Modo HUB ---
+        self.hub_mode = (hub_mode or "tcp").strip().lower()
+
+        # --- Broker backlog (solo en HUB_MODE=broker) ---
+        self.broker_ctrl_host = (broker_ctrl_host or os.getenv("BROKER_CTRL_HOST") or "").strip() or None
+        try:
+            self.broker_ctrl_port = int(broker_ctrl_port or os.getenv("BROKER_CTRL_PORT") or 8766)
+        except Exception:
+            self.broker_ctrl_port = 8766
+
+        try:
+            self.broker_poll_sec = float(broker_poll_sec or os.getenv("BROKER_POLL_SEC") or 1.5)
+        except Exception:
+            self.broker_poll_sec = 1.5
+
+        try:
+            self.broker_fetch_limit = int(broker_fetch_limit or os.getenv("BROKER_FETCH_LIMIT") or 2000)
+        except Exception:
+            self.broker_fetch_limit = 2000
+
+        try:
+            self.broker_timeout_s = float(broker_timeout_s or os.getenv("BROKER_TIMEOUT_S") or 8.0)
+        except Exception:
+            self.broker_timeout_s = 8.0
+
+        # --- Mapas de canal ---
+        self.a2b_map = dict(a2b_map or {})
+        self.b2a_map = dict(b2a_map or {})
+        self.a2c_map = dict(a2c_map or {})
+        self.c2a_map = dict(c2a_map or {})
+
+        # --- Qué se reenvía ---
+        self.forward_text = bool(forward_text)
+        self.forward_position = bool(forward_position)
+        self.require_ack = bool(require_ack)
+
+        # --- Etiquetas ---
+        base = str(tag_bridge or "").strip()
+        self.tag_a2b = (tag_bridge_a2b.strip() if tag_bridge_a2b else base)
+        self.tag_b2a = (tag_bridge_b2a.strip() if tag_bridge_b2a else base)
+        self.tag_a2c = (tag_bridge_a2c.strip() if tag_bridge_a2c else base)
+        self.tag_c2a = (tag_bridge_c2a.strip() if tag_bridge_c2a else base)
+
+        # --- Interfaces TCP (cuando aplique) ---
+        self.iface_a = None
+        self.iface_b = None
+        self.iface_c = None
+
+        # --- IDs locales (para evitar eco) ---
+        self.local_id_a: Optional[str] = None
+        self.local_id_b: Optional[str] = None
+        self.local_id_c: Optional[str] = None
+
+        # --- Control ---
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+
+        # --- Dedupe y rate-limit ---
+        self.dedup = DedupWindow(dedup_ttl)
+        self.rl_a2b = RateLimiter(rate_limit_per_side)
+        self.rl_b2a = RateLimiter(rate_limit_per_side)
+        self.rl_a2c = RateLimiter(rate_limit_per_side)
+        self.rl_c2a = RateLimiter(rate_limit_per_side)
+
+        # --- Broker client (solo broker-mode) ---
+        self._broker: BrokerBacklogClient | None = None
+        self._poll_thread: threading.Thread | None = None
+        self._hub_last_ts: int | None = None
+
+        # --- Estados de peers ---
+        self._b_offline_until = 0.0
+        self._c_offline_until = 0.0
+        self._last_rx_b_ts = 0.0
+        self._last_rx_c_ts = 0.0
+
+        # --- TX spool (cola prioritaria por "due") ---
+        self._pq: list[tuple[float, int, dict]] = []
+        self._pq_seq = 0
+        self._pq_cv = threading.Condition(self._lock)
+        self._tx_thread: threading.Thread | None = None
+
+        # --- Watchdog ---
+        self._wd_stop = threading.Event()
+        self._wd_thread: threading.Thread | None = None
+
+        # --- Backoff reintentos ---
+        self._retry_schedule = [2.0, 5.0, 10.0, 20.0, 40.0, 75.0]
+
+    # ---------------------- Helpers (peers online/offline) ----------------------
+    def _safe_close_iface(self, iface, label: str) -> None:
+        """
+        Cierre duro y silencioso de una interfaz Meshtastic.
+        Crítico para 24/7: evita hilos/timers colgantes tras resets/caídas TCP.
+        """
+        try:
+            if iface and hasattr(iface, "close"):
+                iface.close()
+                print(f"[triple-bridge] Cerrada iface {label}", flush=True)
+        except Exception as e:
+            print(f"[triple-bridge] Error cerrando iface {label}: {type(e).__name__}: {e}", flush=True)
+
+    def _is_b_suppressed(self) -> bool:
+        return time.time() < float(self._b_offline_until or 0.0)
+
+    def _is_c_suppressed(self) -> bool:
+        return time.time() < float(self._c_offline_until or 0.0)
+
+    def _mark_b_down(self, reason: str) -> None:
+        old = self.iface_b
+        self.iface_b = None
+        self.local_id_b = None
+        self._safe_close_iface(old, "B")
+        self._b_offline_until = max(float(self._b_offline_until), time.time() + 75.0)
+        print(f"[triple-bridge] B OFFLINE → {reason}", flush=True)
+
+    def _mark_c_down(self, reason: str) -> None:
+        old = self.iface_c
+        self.iface_c = None
+        self.local_id_c = None
+        self._safe_close_iface(old, "C")
+        self._c_offline_until = max(float(self._c_offline_until), time.time() + 75.0)
+        print(f"[triple-bridge] C OFFLINE → {reason}", flush=True)
+
+    def _is_false_offline_error(self, e: BaseException) -> bool:
+        """
+        Detecta el patrón de error del SDK que no implica caída real del peer,
+        sino handshake/estado interno incompleto.
+
+        Caso típico:
+        MeshInterfaceError: Timed out waiting for connection completion
+
+        Si se trata como OFFLINE 75s se provoca flapping y se pierde capacidad de envío.
+        """
+        try:
+            msg = str(e) or ""
+        except Exception:
+            msg = ""
+        msg_l = msg.lower()
+        needles = (
+            "timed out waiting for connection completion",
+            "connection completion",
+            "waiting for connection completion",
+            "connection not completed",
+        )
+        return any(n in msg_l for n in needles)
+
+
+    def _soft_reset_peer(self, peer: str, why: str) -> None:
+        """
+        Reset suave del peer (B o C) SIN entrar en supresión larga (75s).
+        Acción:
+        - close() de la iface si existe
+        - iface=None, local_id=None
+        - supresión corta (2s) para evitar bucle apretado
+        """
+        now = time.time()
+        try:
+            if peer == "B":
+                if self.iface_b and hasattr(self.iface_b, "close"):
+                    self.iface_b.close()
+                self.iface_b = None
+                self.local_id_b = None
+                self._b_offline_until = max(float(self._b_offline_until), now + 2.0)
+            else:
+                if self.iface_c and hasattr(self.iface_c, "close"):
+                    self.iface_c.close()
+                self.iface_c = None
+                self.local_id_c = None
+                self._c_offline_until = max(float(self._c_offline_until), now + 2.0)
+        except Exception:
+            pass
+        print(f"[triple-bridge] {peer} SOFT-RESET (sin OFFLINE 75s): {why}", flush=True)
+
+
+
+
+
+    # ---------------------- Local IDs ----------------------
+
+    def _discover_local_id(self, iface, label: str) -> Optional[str]:
+        """
+        Intenta obtener el id local (myInfo). Se usa para evitar eco:
+        si un mensaje llega "desde" el propio destino, no se reinyecta.
+        """
+        for _ in range(20):  # ~10s
+            try:
+                info = getattr(iface, "myInfo", None) or {}
+                local_id = (
+                    info.get("my_node_num") or info.get("myNodeNum") or
+                    info.get("num") or info.get("nodeNum") or
+                    info.get("id")
+                )
+                if isinstance(local_id, int):
+                    local_id = f"!{local_id:08x}"
+                if local_id:
+                    s = str(local_id)
+                    print(f"[triple-bridge] local_id_{label}={s}", flush=True)
+                    return s
+            except Exception:
+                pass
+            time.sleep(0.5)
+        print(f"[triple-bridge] ⚠️ local_id_{label} no disponible (myInfo no llegó a tiempo)", flush=True)
+        return None
+
+    # ---------------------- Peer connect/reconnect ----------------------
+
+    def _connect_b(self, tcp_timeout_s: float) -> None:
+        print(f"[triple-bridge] Conectando B: {self.b_host}:{self.b_port}", flush=True)
+        try:
+            self._safe_close_iface(self.iface_b, "B")  # en _connect_b
+            self.iface_b = _TCPI(hostname=self.b_host, portNumber=self.b_port, timeout=tcp_timeout_s)
+            self.local_id_b = self._discover_local_id(self.iface_b, "B")
+            self._b_offline_until = 0.0
+            print("[triple-bridge] reconexión a B OK", flush=True)
+        except Exception as e:
+            self.iface_b = None
+            self.local_id_b = None
+            self._b_offline_until = time.time() + 75.0
+            print(f"[triple-bridge] B OFFLINE: {type(e).__name__}: {e}", flush=True)
+
+    def _connect_c(self, tcp_timeout_s: float) -> None:
+        print(f"[triple-bridge] Conectando C: {self.c_host}:{self.c_port}", flush=True)
+        try:
+            self._safe_close_iface(self.iface_c, "C")  # en _connect_c
+            self.iface_c = _TCPI(hostname=self.c_host, portNumber=self.c_port, timeout=tcp_timeout_s)
+            self.local_id_c = self._discover_local_id(self.iface_c, "C")
+            self._c_offline_until = 0.0
+            print("[triple-bridge] reconexión a C OK", flush=True)
+        except Exception as e:
+            self.iface_c = None
+            self.local_id_c = None
+            self._c_offline_until = time.time() + 75.0
+            print(f"[triple-bridge] C OFFLINE: {type(e).__name__}: {e}", flush=True)
+
+    # ---------------------- TX spool ----------------------
+
+    def _enqueue(self, item: dict, due: float | None = None) -> None:
+        """
+        Encola un envío con 'due' (epoch seconds). Si due=None, sale ya.
+        Item debe incluir:
+          - peer: "B" o "C"
+          - ch, msg, want_ack, direction
+          - attempt, max_retries (opcionales)
+        """
+        with self._pq_cv:
+            self._pq_seq += 1
+            t = float(due if due is not None else time.time())
+            heapq.heappush(self._pq, (t, self._pq_seq, item))
+            self._pq_cv.notify()
+
+    def _reschedule(self, item: dict, delay_s: float) -> None:
+        item["attempt"] = int(item.get("attempt", 0)) + 1
+        self._enqueue(item, due=time.time() + max(0.5, float(delay_s or 1.0)))
+
+    def _tx_worker(self) -> None:
+        while not self._stop.is_set():
+            with self._pq_cv:
+                while not self._stop.is_set() and not self._pq:
+                    self._pq_cv.wait(timeout=1.0)
+                if self._stop.is_set():
+                    return
+                due, _, item = heapq.heappop(self._pq)
+                now = time.time()
+                if due > now:
+                    # aún no toca
+                    self._pq_seq += 1
+                    heapq.heappush(self._pq, (due, self._pq_seq, item))
+                    self._pq_cv.wait(timeout=min(1.0, due - now))
+                    continue
+
+            self._send_item(item)
+
+    def _send_item(self, item: dict) -> None:
+        """
+        Envío real hacia B/C por TCP, con manejo de offline/reintentos.
+        """
+        peer = str(item.get("peer") or "").upper()
+        ch = int(item.get("ch") or 0)
+        msg = str(item.get("msg") or "")
+        want_ack = bool(item.get("want_ack", False))
+        direction = str(item.get("direction") or "?")
+
+        # Rate-limit por dirección
+        if direction == "A2B" and not self.rl_a2b.allow():
+            self._reschedule(item, 2.0); return
+        if direction == "A2C" and not self.rl_a2c.allow():
+            self._reschedule(item, 2.0); return
+
+        # Peer suprimido
+        if peer == "B":
+            if self._is_b_suppressed():
+                remaining = max(0, int(self._b_offline_until - time.time()))
+                print(
+                    f"[brokerhub TX] {direction} → {peer} ch={ch} "
+                    f"len={len(msg)} txt='{msg[:120]}'",
+                    flush=True
+                )
+
+              
+                self._enqueue(item, due=float(self._b_offline_until))
+                return
+            iface = self.iface_b
+        elif peer == "C":
+            if self._is_c_suppressed():
+                remaining = max(0, int(self._c_offline_until - time.time()))
+                print(
+                    f"[brokerhub TX] {direction} → {peer} ch={ch} "
+                    f"len={len(msg)} txt='{msg[:120]}'",
+                    flush=True
+                )
+
+              
+                self._enqueue(item, due=float(self._c_offline_until))
+                return
+            iface = self.iface_c
+        else:
+            return
+
+        attempt = int(item.get("attempt", 0))
+        max_r = int(item.get("max_retries", 8))
+
+        if iface is None:
+            # Aún no reconectó (watchdog lo hará). Reprograma suave.
+            self._reschedule(item, 5.0)
+            return
+
+        try:
+            fn = getattr(iface, "sendText", None)
+            if not callable(fn):
+                raise RuntimeError("iface.sendText no disponible")
+
+            try:
+                fn(msg, destinationId="^all", wantAck=want_ack, wantResponse=False, channelIndex=int(ch))
+            except TypeError:
+                # compatibilidad con SDKs distintos
+                try:
+                    fn(msg, channelIndex=int(ch), wantAck=want_ack)
+                except TypeError:
+                    fn(msg, channelIndex=int(ch))
+
+            print(
+                f"[brokerhub TX] {direction} → {peer} ch={ch} OK "
+                f"len={len(msg)} txt='{msg[:120]}'",
+                flush=True
+            )
+
+            return
+
+        except Exception as e:
+            # Marca peer down y reintenta con backoff
+            # Caso especial: error "falso OFFLINE" del SDK (handshake incompleto)
+            if self._is_false_offline_error(e):
+                self._soft_reset_peer(peer, f"{type(e).__name__}: {e}")
+            else:
+                if peer == "B":
+                    self._mark_b_down(f"{type(e).__name__}: {e}")
+                else:
+                    self._mark_c_down(f"{type(e).__name__}: {e}")
+
+
+            if attempt < max_r:
+                delay = self._retry_schedule[min(attempt, len(self._retry_schedule) - 1)]
+                self._reschedule(item, delay)
+            else:
+                print(f"[triple-bridge] {direction} → {peer} ERROR (agotado): {type(e).__name__}: {e}", flush=True)
+
+    # ---------------------- Watchdog ----------------------
+
+    def _start_watchdog(self) -> None:
+        """
+        Watchdog:
+          - Reintenta reconexión cuando expire offline_until.
+          - Opcional: marca offline si no llega RX en TRIPLE_*_STALE_SEC.
+        """
+        tick = float(os.getenv("TRIPLE_WATCHDOG_TICK", "5") or "5")
+        tcp_timeout_s = float(os.getenv("TCP_TIMEOUT_S", "25") or "25")
+
+        def _run():
+            while not self._stop.is_set() and not self._wd_stop.is_set():
+                now = time.time()
+
+                # Reconexiones por timer
+                if self.enable_b and self.b_host and self.iface_b is None and not self._is_b_suppressed():
+                    self._connect_b(tcp_timeout_s)
+
+                if self.enable_c and self.c_host and self.iface_c is None and not self._is_c_suppressed():
+                    self._connect_c(tcp_timeout_s)
+
+                # Stale RX (si está configurado)
+                if self.enable_b:
+                    try:
+                        stale_b = float(os.getenv("TRIPLE_B_STALE_SEC", "0") or "0")
+                    except Exception:
+                        stale_b = 0.0
+                    if stale_b > 0 and self.iface_b is not None and self._last_rx_b_ts > 0 and (now - self._last_rx_b_ts) > stale_b:
+                        self._mark_b_down(f"stale_rx>{int(stale_b)}s")
+
+                if self.enable_c:
+                    try:
+                        stale_c = float(os.getenv("TRIPLE_C_STALE_SEC", "0") or "0")
+                    except Exception:
+                        stale_c = 0.0
+                    if stale_c > 0 and self.iface_c is not None and self._last_rx_c_ts > 0 and (now - self._last_rx_c_ts) > stale_c:
+                        self._mark_c_down(f"stale_rx>{int(stale_c)}s")
+
+                time.sleep(max(1.0, tick))
+
+        self._wd_thread = threading.Thread(target=_run, name="triple-watchdog", daemon=True)
+        self._wd_thread.start()
+
+    def _stop_watchdog(self) -> None:
+        try:
+            self._wd_stop.set()
+        except Exception:
+            pass
+        try:
+            th = self._wd_thread
+            if th and th.is_alive():
+                th.join(timeout=2.0)
+        except Exception:
+            pass
+
+    # ---------------------- Connect / Close ----------------------
+
+    def connect(self):
+        """
+        Conecta interfaces:
+          - HUB_MODE=broker: NO abre TCP a A. Usa BacklogServer del broker.
+          - HUB_MODE=tcp   : abre TCP a A, y además B/C.
+
+        NOTA: B/C se conectan aunque HUB_MODE=broker, porque son los peers TCP.
+        """
+        # Timeout TCP para handshakes lentos (WiFi justo, CPU baja, etc.)
+        try:
+            tcp_timeout_s = float(os.getenv("TCP_TIMEOUT_S") or 25)
+        except Exception:
+            tcp_timeout_s = 25.0
+
+        if self.hub_mode == "broker":
+            print("[triple-bridge] HUB_MODE=broker: NO se abre TCP a A (se usa broker backlog).", flush=True)
+            if not self.broker_ctrl_host:
+                raise SystemExit("Falta BROKER_CTRL_HOST en HUB_MODE=broker")
+            self._broker = BrokerBacklogClient(
+                host=self.broker_ctrl_host,
+                port=int(self.broker_ctrl_port or 8766),
+                timeout_s=float(self.broker_timeout_s or 8.0),
+            )
+        else:
+            print(f"[triple-bridge] Conectando A: {self.a_host}:{self.a_port}", flush=True)
+            self.iface_a = _TCPI(hostname=self.a_host, portNumber=self.a_port, timeout=tcp_timeout_s)
+            self.local_id_a = self._discover_local_id(self.iface_a, "A")
+
+        # B / C
+        if self.enable_b and self.b_host:
+            self._connect_b(tcp_timeout_s)
+        else:
+            print("[triple-bridge] B deshabilitado por BRIDGE_PEERS", flush=True)
+
+        if self.enable_c and self.c_host:
+            self._connect_c(tcp_timeout_s)
+        else:
+            print("[triple-bridge] C deshabilitado por BRIDGE_PEERS", flush=True)
+
+        if self.iface_b is None and self.iface_c is None:
+            raise SystemExit("No hay peers activos tras connect() (BRIDGE_PEERS)")
+
+        # Subscripción RX (solo B/C y A en tcp-mode)
+        pub.subscribe(self._on_rx, "meshtastic.receive")
+
+        # Poll del backlog (solo broker-mode)
+        if self.hub_mode == "broker":
+            self._poll_thread = threading.Thread(target=self._hub_poll_loop, name="hub-poll", daemon=True)
+            self._poll_thread.start()
+
+        # TX spool
+        self._tx_thread = threading.Thread(target=self._tx_worker, name="tx-spool", daemon=True)
+        self._tx_thread.start()
+
+        # Watchdog de reconexión/stale
+        self._start_watchdog()
+
+
+        # MeshCore opcional
+        if self.meshcore_enable and _MESHCORE_AVAILABLE:
+            self._meshcore_client = MeshCoreClient(
+                enable=True,
+                mode=self.meshcore_mode,
+                serial_port=self.meshcore_serial_port,
+                serial_baud=self.meshcore_serial_baud,
+                tcp_host=self.meshcore_tcp_host,
+                tcp_port=self.meshcore_tcp_port,
+                ble_addr=self.meshcore_ble_addr,
+                ble_pin=self.meshcore_ble_pin,
+                seen_path=self.meshcore_seen_path,
+                seen_flush_each=self.meshcore_seen_flush_each,
+                on_message=self._mc_on_message,
+                on_advert=self._mc_on_advert,
+                log_prefix="meshcore",
+            )
+            self._meshcore_client.start()
+        elif self.meshcore_enable and not _MESHCORE_AVAILABLE:
+            print("[meshcore] MESHCORE_ENABLE=1 pero librería 'meshcore' no disponible.", flush=True)
+
+
+        print(
+            f"[triple-bridge] Conectado. hub_mode={self.hub_mode} "
+            f"local_id_a={self.local_id_a} local_id_b={self.local_id_b} local_id_c={self.local_id_c}",
+            flush=True,
+        )
+
+    
+
+    def close(self) -> None:
+        """Cierre limpio 24/7: detiene hilos, desuscribe RX y cierra ifaces."""
+        self._stop.set()
+        self._stop_watchdog()
+
+        # Desuscripción RX
+        try:
+            pub.unsubscribe(self._on_rx, "meshtastic.receive")
+        except Exception:
+            pass
+
+        # Despertar TX spool
+        try:
+            with self._pq_cv:
+                self._pq_cv.notify_all()
+        except Exception:
+            pass
+
+
+        # Espera corta de hilos internos (evita acumulación en reinicios)
+        try:
+            th = self._tx_thread
+            if th and th.is_alive():
+                th.join(timeout=2.0)
+        except Exception:
+            pass
+        try:
+            th = self._poll_thread
+            if th and th.is_alive():
+                th.join(timeout=2.0)
+        except Exception:
+            pass
+
+        # Parar MeshCore opcional
+        if self._meshcore_client:
+            try:
+                self._meshcore_client.stop()
+            except Exception:
+                pass
+            self._meshcore_client = None
+
+        # Cerrar ifaces (cierre duro, silencioso)
+        self._safe_close_iface(self.iface_a, "A")
+        self._safe_close_iface(self.iface_b, "B")
+        self._safe_close_iface(self.iface_c, "C")
+
+        self.iface_a = None
+        self.iface_b = None
+        self.iface_c = None
+
+    def run_forever(self) -> None:
+        """Bucle principal bloqueante. Diseñado para Docker/servicio 24/7."""
+        try:
+            while not self._stop.is_set():
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.close()
+    def _hub_poll_loop(self) -> None:
+        if self._hub_last_ts is None:
+            self._hub_last_ts = int(time.time())
+
+        portnums: list[str] = []
+        if self.forward_text:
+            portnums.append("TEXT_MESSAGE_APP")
+        if self.forward_position:
+            portnums.extend(["POSITION_APP", "TELEMETRY_APP"])
+
+        while not self._stop.is_set():
+            try:
+                assert self._broker is not None
+                items = self._broker.fetch_backlog(
+                    since_ts=int(self._hub_last_ts or 0),
+                    portnums=portnums or ["TEXT_MESSAGE_APP"],
+                    limit=int(self.broker_fetch_limit or 2000),
+                )
+                items.sort(key=lambda x: int(x.get("rx_time") or 0))
+                for obj in items:
+                    self._process_hub_event(obj)
+
+                # Si el fetch viene vacío NO adelantamos agresivamente el cursor.
+                # Adelantar a 'now' puede saltarse eventos con rx_time ligeramente retrasado.
+                # Solo avanzamos si el cursor quedó muy atrás (p.ej. tras pausas largas).
+                if not items and self._hub_last_ts is not None:
+                    now_ts = int(time.time())
+                    if (now_ts - self._hub_last_ts) > 30:
+                        self._hub_last_ts = now_ts
+
+            except Exception as e:
+                print(f"[triple-bridge] HUB poll error: {type(e).__name__}: {e}", flush=True)
+
+            time.sleep(float(self.broker_poll_sec or 1.5))
+
+    def _process_hub_event(self, obj: dict) -> None:
+        """
+        Evento del backlog del broker (normalmente generado por A).
+        En HUB_MODE=broker, esto es la fuente de mensajes "desde A".
+        """
+        try:
+            rx_time = int(obj.get("rx_time") or 0)
+            if rx_time <= 0:
+                return
+
+            if self._hub_last_ts is None or rx_time >= self._hub_last_ts:
+                self._hub_last_ts = rx_time + 1
+
+            port = str(obj.get("portnum") or "").upper()
+            ch = int(obj.get("channel") or 0)
+            frm = str(obj.get("fromId") or "")
+
+            want_text = self.forward_text and ("TEXT_MESSAGE_APP" in port or port == "TEXT")
+            want_pos = self.forward_position and (("POSITION_APP" in port) or ("TELEMETRY_APP" in port) or (port in {"POSITION", "TELEMETRY"}))
+            if not (want_text or want_pos):
+                return
+
+            decoded = {"portnum": port, "channel": ch}
+            text = ""
+            if want_text:
+                text = str(obj.get("text") or "")
+                decoded["text"] = text
+            else:
+                if "position" in obj:
+                    decoded["position"] = obj.get("position") or {}
+                if "telemetry" in obj:
+                    decoded["telemetry"] = obj.get("telemetry") or {}
+
+            # A -> (B/C)
+            print(
+                f"[brokerhub RX] ch={ch} src={frm} port={port} "
+                f"txt='{text[:120]}'",
+                flush=True
+            )
+
+            self._bridge_from_a(ch, frm, text, decoded, want_text, want_pos)
+
+        except Exception as e:
+            print(f"[triple-bridge] HUB event error: {type(e).__name__}: {e}", flush=True)
+
+    # ---------------------- Envío hacia A (hub) ----------------------
+
+    def _send_text_to_hub(self, text: str, ch: int) -> bool:
+        msg = _norm_text(text or "")
+        if not msg:
+            return False
+
+        # broker-mode: siempre por SEND_TEXT al broker (no TCP a A)
+        if self.hub_mode == "broker":
+            if not self._broker:
+                return False
+            try:
+                ok = bool(self._broker.send_text(msg, ch=int(ch or 0), dest=None, ack=False))
+                print(
+                    f"[brokerhub→A] TX ch={ch} {'OK' if ok else 'ERROR'} txt='{msg[:120]}'",
+                    flush=True
+                )
+                return ok
+
+            except Exception:
+                return False
+
+        # tcp-mode: sendText a iface_a
+        if not self.iface_a:
+            return False
+        try:
+            self.iface_a.sendText(
+                msg,
+                destinationId="^all",
+                wantAck=bool(self.require_ack),
+                wantResponse=False,
+                channelIndex=int(ch or 0),
+            )
+            return True
+        except Exception:
+            return False
+
+    
+
+    def _mc_on_message(self, obj: dict) -> None:
+        """Callback desde MeshCoreClient: mensaje recibido desde MeshCore."""
+        try:
+            text = _norm_text(str(obj.get("text") or ""))
+            if not text:
+                return
+
+            prefix = str(obj.get("pubkey_prefix") or "").strip()
+
+            # Canal destino en Meshtastic: por defecto 0.
+            # Si llega [CHx] al inicio, lo respetamos.
+            ch = 0
+            m = re.match(r"^\[CH(\d+)\]\s*(.*)$", text, flags=re.IGNORECASE)
+            if m:
+                try:
+                    ch = int(m.group(1))
+                except Exception:
+                    ch = 0
+                text = (m.group(2) or "").strip()
+
+            tagged = f"[MESHCORE {prefix}] {text}".strip()
+
+            # MeshCore -> A (hub)
+            self._send_text_to_hub(tagged, ch=int(ch))
+        except Exception as e:
+            print(f"[triple-bridge] meshcore on_message error: {type(e).__name__}: {e}", flush=True)
+
+    def _mc_on_advert(self, obj: dict) -> None:
+        """Callback desde MeshCoreClient: anuncio recibido. Aquí solo dejamos rastro en logs."""
+        try:
+            raw = obj.get("raw") or {}
+            name = raw.get("adv_name") or raw.get("name") or ""
+            lat = raw.get("adv_lat") or raw.get("lat")
+            lon = raw.get("adv_lon") or raw.get("lon")
+            pk = raw.get("public_key") or raw.get("pubkey") or ""
+            pkp = (str(pk)[:12] if pk else "") or (raw.get("pubkey_prefix") or "")
+            print(f"[meshcore ADV] {name} pk={pkp} lat={lat} lon={lon}", flush=True)
+        except Exception:
+            pass
+
+    def _send_text_to_meshcore(self, text: str, ch: int) -> None:
+        """Envía texto Meshtastic -> MeshCore (si está activado)."""
+        if not self._meshcore_client or not self.meshcore_enable:
+            return
+
+        msg = _norm_text(text or "")
+        if not msg:
+            return
+
+        # 1) Resolver mapeo canal -> (contact, tag)
+        mapping = (self.meshcore_ch_map or {}).get(int(ch))
+
+        contact_prefix = ""
+        tag = None
+
+        if mapping:
+            contact_prefix = str(mapping.get("contact") or "").strip()
+            tag_val = str(mapping.get("tag") or "").strip()
+            tag = tag_val or None
+        else:
+            # Compat: mapeo simple canal->canal-contact (sin tag)
+            try:
+                cp = self.meshcore_ch_to_contact.get(int(ch))
+                if cp is not None:
+                    contact_prefix = str(cp).strip()
+            except Exception:
+                pass
+
+        # 2) Fallback a destino por defecto
+        if not contact_prefix:
+            contact_prefix = (self.meshcore_default_contact_prefix or "").strip()
+
+        # sin destino configurado, no enviamos para evitar spam accidental
+        if not contact_prefix:
+            return
+
+        # 3) Payload con tag o CH
+        prefix = f"[{tag}]" if tag else f"[CH{int(ch)}]"
+        payload = f"{prefix} {msg}"
+
+        # 4) Envío asíncrono
+        self._meshcore_client.enqueue_send(contact_prefix, payload)
+
+
+# ---------------------- RX handler (B/C y A en tcp-mode) ----------------------
+
+    def _on_rx(self, interface=None, packet=None, **kwargs):
+        try:
+            pkt = packet or {}
+            decoded = pkt.get("decoded") or {}
+
+            port = decoded.get("portnum") or decoded.get("portnum_name") or decoded.get("portnum_str") or decoded.get("portnumText")
+            port_str = str(port).upper() if not isinstance(port, int) else str(port)
+
+            want_text = self.forward_text and (("TEXT_MESSAGE_APP" in port_str) or (port_str == "TEXT"))
+            want_pos = self.forward_position and (("POSITION_APP" in port_str) or ("TELEMETRY_APP" in port_str) or (port_str in {"POSITION", "TELEMETRY"}))
+            if not (want_text or want_pos):
+                return
+
+            ch = decoded.get("channel") if decoded.get("channel") is not None else pkt.get("channel")
+            try:
+                ch = int(ch) if ch is not None else 0
+            except Exception:
+                ch = 0
+
+            frm = pkt.get("fromId") or decoded.get("fromId") or pkt.get("from")
+            frm = str(frm or "")
+
+            text = str(decoded.get("text") or decoded.get("payload") or "")
+
+            came_from_a = (self.iface_a is not None) and (interface is self.iface_a)
+            came_from_b = (self.iface_b is not None) and (interface is self.iface_b)
+            came_from_c = (self.iface_c is not None) and (interface is self.iface_c)
+
+            if came_from_b:
+                self._last_rx_b_ts = time.time()
+            if came_from_c:
+                self._last_rx_c_ts = time.time()
+
+            if came_from_a:
+                self._bridge_from_a(ch, frm, text, decoded, want_text, want_pos)
+            elif came_from_b:
+                self._bridge_from_b(ch, frm, text, decoded, want_text, want_pos)
+            elif came_from_c:
+                self._bridge_from_c(ch, frm, text, decoded, want_text, want_pos)
+
+        except Exception as e:
+            print(f"[triple-bridge] on_rx error: {type(e).__name__}: {e}", flush=True)
+
+    # ---------------------- Bridging por origen ----------------------
+
+    def _bridge_from_a(self, ch: int, frm: str, text: str, decoded: dict, want_text: bool, want_pos: bool):
+        
+        # === [NUEVO] Dedupe también para A->B/A->C (protege contra duplicados del backlog) ===
+        payload_for_hash = _norm_text(text) if want_text else json.dumps(decoded, sort_keys=True, ensure_ascii=False)
+
+        # A -> MeshCore (opcional): solo texto (evita duplicar posiciones/telemetría por ahora)
+        if want_text and self.meshcore_enable:
+            try:
+                self._send_text_to_meshcore(text, ch=int(ch))
+            except Exception:
+                pass
+
+        # A -> B
+        if self.enable_b and ch in self.a2b_map:
+            out_ch = self.a2b_map[ch]
+            if self.local_id_b and frm == self.local_id_b:
+                return
+        
+            if self.dedup.seen(_hash_key("A2B", frm, int(ch), payload_for_hash)):
+                return
+
+            if want_text:
+                msg = _norm_text(text)
+                if self.tag_a2b and self.tag_a2b not in msg:
+                    msg = f"{self.tag_a2b} {msg}"
+                self._enqueue(
+                    {"peer": "B", "direction": "A2B", "ch": int(out_ch), "msg": msg, "want_ack": bool(self.require_ack), "attempt": 0, "max_retries": 8},
+                    due=float(self._b_offline_until) if self._is_b_suppressed() else None,
+                )
+
+        # A -> C
+        if self.enable_c and ch in self.a2c_map:
+            out_ch = self.a2c_map[ch]
+            if self.local_id_c and frm == self.local_id_c:
+                return
+            if self.dedup.seen(_hash_key("A2C", frm, int(ch), payload_for_hash)):
+                return
+
+            if want_text:
+                msg = _norm_text(text)
+                if self.tag_a2c and self.tag_a2c not in msg:
+                    msg = f"{self.tag_a2c} {msg}"
+                self._enqueue(
+                    {"peer": "C", "direction": "A2C", "ch": int(out_ch), "msg": msg, "want_ack": bool(self.require_ack), "attempt": 0, "max_retries": 8},
+                    due=float(self._c_offline_until) if self._is_c_suppressed() else None,
+                )
+
+    def _bridge_from_b(self, ch: int, frm: str, text: str, decoded: dict, want_text: bool, want_pos: bool):
+        # B -> A
+        if ch not in self.b2a_map:
+            return
+        out_ch = self.b2a_map[ch]
+
+        if self.local_id_a and frm == self.local_id_a:
+            return
+        if not self.rl_b2a.allow():
+            return
+
+        payload_for_hash = _norm_text(text) if want_text else json.dumps(decoded, sort_keys=True, ensure_ascii=False)
+        if self.dedup.seen(_hash_key("B2A", frm, ch, payload_for_hash)):
+            return
+
+        if want_text:
+            msg = _norm_text(text)
+            if self.tag_b2a and self.tag_b2a not in msg:
+                msg = f"{self.tag_b2a} {msg}"
+            ok = self._send_text_to_hub(msg, int(out_ch))
+            print(f"[triple-bridge] B2A B->A ch {ch}->{out_ch} txt OK" if ok else "[triple-bridge] B2A B->A sendText ERROR", flush=True)
+
+    def _bridge_from_c(self, ch: int, frm: str, text: str, decoded: dict, want_text: bool, want_pos: bool):
+        # C -> A
+        if ch not in self.c2a_map:
+            return
+        out_ch = self.c2a_map[ch]
+
+        if self.local_id_a and frm == self.local_id_a:
+            return
+        if not self.rl_c2a.allow():
+            return
+
+        payload_for_hash = _norm_text(text) if want_text else json.dumps(decoded, sort_keys=True, ensure_ascii=False)
+        if self.dedup.seen(_hash_key("C2A", frm, ch, payload_for_hash)):
+            return
+
+        if want_text:
+            msg = _norm_text(text)
+            if self.tag_c2a and self.tag_c2a not in msg:
+                msg = f"{self.tag_c2a} {msg}"
+            ok = self._send_text_to_hub(msg, int(out_ch))
+            print(f"[triple-bridge] C2A C->A ch {ch}->{out_ch} txt OK" if ok else "[triple-bridge] C2A C->A sendText ERROR", flush=True)
+
+
+# ============================================================
+#  CLI
+# ============================================================
+
+def main():
+    a_host = (os.getenv("A_HOST", "") or "").strip()
+    b_host = (os.getenv("B_HOST", "") or "").strip()
+    c_host = (os.getenv("C_HOST", "") or "").strip()
+
+    hub_mode = (os.getenv("HUB_MODE", "tcp") or "tcp").strip().lower()
+
+    def _get_int(name: str, default: int) -> int:
+        try:
+            return int((os.getenv(name) or str(default)).strip())
+        except Exception:
+            return int(default)
+
+    a_port = _get_int("A_PORT", 4403)
+    b_port = _get_int("B_PORT", 4403)
+    c_port = _get_int("C_PORT", 4403)
+
+    a2b = _parse_ch_map(os.getenv("A2B_CH_MAP", "0:0"))
+    b2a = _parse_ch_map(os.getenv("B2A_CH_MAP", "0:0"))
+    a2c = _parse_ch_map(os.getenv("A2C_CH_MAP", "0:0"))
+    c2a = _parse_ch_map(os.getenv("C2A_CH_MAP", "0:0"))
+
+    forward_text = _truthy(os.getenv("FORWARD_TEXT", "1"), True)
+    forward_position = _truthy(os.getenv("FORWARD_POSITION", "0"), False)
+    require_ack = _truthy(os.getenv("REQUIRE_ACK", "0"), False)
+    rate = _get_int("RATE_LIMIT_PER_SIDE", 8)
+    dedup = _get_int("DEDUP_TTL", 45)
+
+    tag_base = os.getenv("TAG_BRIDGE", "[BRIDGE]")
+
+    tag_a2b = (os.getenv("TAG_BRIDGE_A2B", "") or "").strip() or None
+    tag_b2a = (os.getenv("TAG_BRIDGE_B2A", "") or "").strip() or None
+    tag_a2c = (os.getenv("TAG_BRIDGE_A2C", "") or "").strip() or None
+    tag_c2a = (os.getenv("TAG_BRIDGE_C2A", "") or "").strip() or None
+
+    # ------------------------------------------------------------
+    # NUEVO: selección de peers (B/C) con BRIDGE_PEERS
+    #   BRIDGE_PEERS=B,C (default)
+    #   BRIDGE_PEERS=C   (solo C)
+    #   BRIDGE_PEERS=B   (solo B)
+    # ------------------------------------------------------------
+    peers_spec = (os.getenv("BRIDGE_PEERS", "B,C") or "B,C").strip().upper()
+    peers = {p.strip() for p in peers_spec.split(",") if p.strip()}
+
+    enable_b = ("B" in peers) and bool(b_host)
+    enable_c = ("C" in peers) and bool(c_host)
+
+    # Validaciones mínimas
+    if not (enable_b or enable_c):
+        raise SystemExit("BRIDGE_PEERS no habilita ningún peer válido (revisa BRIDGE_PEERS y B_HOST/C_HOST).")
+
+    if hub_mode != "broker":
+        if not a_host:
+            raise SystemExit("Falta A_HOST en HUB_MODE=tcp")
+    else:
+        # En broker, A_HOST puede estar vacío (no abrimos TCP a A).
+        pass
+
+    
+    meshcore_enable = _truthy(os.getenv("MESHCORE_ENABLE"), False)
+    meshcore_mode = (os.getenv("MESHCORE_MODE") or "serial").strip()
+    meshcore_serial_port = (os.getenv("MESHCORE_SERIAL_PORT") or "").strip() or None
+    meshcore_serial_baud = _get_int("MESHCORE_SERIAL_BAUD", 115200)
+    meshcore_tcp_host = (os.getenv("MESHCORE_TCP_HOST") or "").strip() or None
+    meshcore_tcp_port = _get_int("MESHCORE_TCP_PORT", 4000)
+    meshcore_ble_addr = (os.getenv("MESHCORE_BLE_ADDR") or "").strip() or None
+    meshcore_ble_pin = (os.getenv("MESHCORE_BLE_PIN") or "").strip() or None
+    meshcore_seen_path = (os.getenv("MESHCORE_SEEN_PATH") or "meshcore_seen.jsonl").strip()
+    meshcore_seen_flush_each = _truthy(os.getenv("MESHCORE_SEEN_FLUSH_EACH"), False)
+    meshcore_default_contact_prefix = (os.getenv("MESHCORE_DEFAULT_CONTACT_PREFIX") or "").strip() or None
+    meshcore_map_ch_to_contact = (os.getenv("MESHCORE_CH2CONTACT") or "").strip() or None
+
+    print(f"[triple-bridge] hub_mode={hub_mode}")
+    if hub_mode == "broker":
+        print("[triple-bridge] HUB_MODE=broker: NO se abre TCP a A (se usa broker backlog).")
+
+    # Logs de estado peers
+    print(f"[triple-bridge] BRIDGE_PEERS={peers_spec}  B={'ON' if enable_b else 'OFF'}  C={'ON' if enable_c else 'OFF'}")
+
+    bridge = TripleBridge(
+        a_host=a_host,
+        a_port=a_port,
+
+        b_host=b_host,
+        b_port=b_port,
+        c_host=c_host,
+        c_port=c_port,
+
+        # NUEVO: pásalo al constructor (tienes que añadirlo a __init__)
+        enable_b=enable_b,
+        enable_c=enable_c,
+
+        a2b_map=a2b,
+        b2a_map=b2a,
+        a2c_map=a2c,
+        c2a_map=c2a,
+
+        hub_mode=hub_mode,
+        broker_ctrl_host=(os.getenv("BROKER_CTRL_HOST") or "").strip() or None,
+        broker_ctrl_port=_get_int("BROKER_CTRL_PORT", 8766),
+        broker_poll_sec=float(os.getenv("BROKER_POLL_SEC") or 1.5),
+        broker_fetch_limit=_get_int("BROKER_FETCH_LIMIT", 2000),
+        broker_timeout_s=float(os.getenv("BROKER_TIMEOUT_S") or 8.0),
+
+        forward_text=forward_text,
+        forward_position=forward_position,
+        require_ack=require_ack,
+        rate_limit_per_side=rate,
+        dedup_ttl=dedup,
+
+        tag_bridge=tag_base,
+        tag_bridge_a2b=tag_a2b,
+        tag_bridge_b2a=tag_b2a,
+        tag_bridge_a2c=tag_a2c,
+        tag_bridge_c2a=tag_c2a,
+        meshcore_enable=meshcore_enable,
+        meshcore_mode=meshcore_mode,
+        meshcore_serial_port=meshcore_serial_port,
+        meshcore_serial_baud=meshcore_serial_baud,
+        meshcore_tcp_host=meshcore_tcp_host,
+        meshcore_tcp_port=meshcore_tcp_port,
+        meshcore_ble_addr=meshcore_ble_addr,
+        meshcore_ble_pin=meshcore_ble_pin,
+        meshcore_seen_path=meshcore_seen_path,
+        meshcore_seen_flush_each=meshcore_seen_flush_each,
+        meshcore_default_contact_prefix=meshcore_default_contact_prefix,
+        meshcore_map_ch_to_contact=meshcore_map_ch_to_contact,
+    )
+
+    bridge.connect()
+    bridge.run_forever()
+
+if __name__ == "__main__":
+    main()

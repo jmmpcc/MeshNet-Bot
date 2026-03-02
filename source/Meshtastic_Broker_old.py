@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+# Version v6.2.4 con BBS SERVER
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.6.16.py Incluye servidor BBS Meshtastic server corregiso por DM
-Modo añadido: Meshcore embebido
-19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
-    [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
+Meshtastic_Broker_v6.2.4.py
 --------------------------------
 Broker JSONL para Meshtastic (TCPInterface) con salida limpia.
 
@@ -61,847 +58,6 @@ from bridge_in_broker import (
     bridge_mirror_outgoing_from_broker,   # ← NUEVO
 )
 
-# === [NUEVO] MeshCore embebido en broker (opcional, 24/7) =========================
-import asyncio
-import hashlib
-_MESHCORE_AVAILABLE = False
-_MESHCORE_IMPORT_ERROR = None
-try:
-    from meshcore import MeshCore as _MeshCore  # type: ignore
-    from meshcore import EventType as _MCEventType  # type: ignore
-    _MESHCORE_AVAILABLE = True
-except Exception as _e_mc:
-    _MESHCORE_AVAILABLE = False
-    _MESHCORE_IMPORT_ERROR = f"{type(_e_mc).__name__}: {_e_mc}"
-
-MESHCORE_ENGINE = None  # instancia global (si se habilita)
-
-def _env_truthy(name: str, default: str = "0") -> bool:
-    v = (os.getenv(name, default) or default).strip().lower()
-    return v in {"1", "true", "on", "si", "sí", "y", "yes"}
-
-def _mc_parse_ch_map() -> dict[int, dict]:
-    """
-    Mapa Meshtastic CH -> destino MeshCore.
-
-    Prioridad:
-      1) MESHCORE_CHANNEL_MAP (texto, recomendado):
-         - Contacto: "0:AB12CD34:PUBLIC,2:EE99AA00:ZGZ"
-         - Canal MeshCore: "0:chan:0:PUBLIC,2:chan:1:ZGZ"
-           (forma: <ch_meshtastic>:chan:<channel_idx_meshcore>[:tag])
-
-         TAG es opcional. Si no hay TAG:
-           - se usa el nombre del canal si existe, o
-           - CHx como fallback.
-
-      2) MESHCORE_CH2CONTACT (compat simple): "0:AB12CD34,2:EE99AA00"
-      3) MESHCORE_MAP_CH_TO_CONTACT (JSON):
-         {"0":"AB12CD34","2":{"contact":"EE99AA00","tag":"ZGZ"}}
-
-    Devuelve:
-      { ch: {"kind":"contact","contact":"<prefix>","tag":"<tag opcional>"} }
-      { ch: {"kind":"chan","channel_idx":<int>,"tag":"<tag opcional>"} }
-    """
-    out: dict[int, dict] = {}
-
-    def _add_contact(ch: int, contact: str, tag: str | None = None):
-        c = (contact or "").strip()
-        if not c:
-            return
-        out[int(ch)] = {"kind": "contact", "contact": c, "tag": (tag or "").strip() or None}
-
-    def _add_chan(ch: int, chan_idx: int, tag: str | None = None):
-        try:
-            ci = int(chan_idx)
-        except Exception:
-            return
-        out[int(ch)] = {"kind": "chan", "channel_idx": int(ci), "tag": (tag or "").strip() or None}
-
-    raw = (os.getenv("MESHCORE_CHANNEL_MAP") or "").strip()
-    if raw:
-        for part in raw.split(","):
-            p = (part or "").strip()
-            if not p:
-                continue
-            # formatos soportados:
-            #   ch:contact
-            #   ch:contact:tag
-            #   ch:chan:idx
-            #   ch:chan:idx:tag
-            toks = [t.strip() for t in p.split(":")]
-            if len(toks) < 2:
-                continue
-            try:
-                ch = int(toks[0])
-            except Exception:
-                continue
-
-            mode = (toks[1] or "").strip().lower()
-            if mode in ("chan", "channel"):
-                if len(toks) < 3:
-                    continue
-                try:
-                    idx = int(toks[2])
-                except Exception:
-                    continue
-                tag = toks[3] if len(toks) >= 4 else None
-                _add_chan(ch, idx, tag)
-            else:
-                contact = toks[1]
-                tag = toks[2] if len(toks) >= 3 else None
-                _add_contact(ch, contact, tag)
-
-    if out:
-        return out
-
-    raw2 = (os.getenv("MESHCORE_CH2CONTACT") or "").strip()
-    if raw2:
-        for part in raw2.split(","):
-            p = (part or "").strip()
-            if not p:
-                continue
-            toks = [t.strip() for t in p.split(":")]
-            if len(toks) < 2:
-                continue
-            try:
-                ch = int(toks[0])
-            except Exception:
-                continue
-            _add_contact(ch, toks[1], None)
-
-    rawj = (os.getenv("MESHCORE_MAP_CH_TO_CONTACT") or "").strip()
-    if rawj:
-        try:
-            obj = json.loads(rawj)
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    try:
-                        ch = int(k)
-                    except Exception:
-                        continue
-                    if isinstance(v, str):
-                        _add_contact(ch, v, None)
-                    elif isinstance(v, dict):
-                        _add_contact(ch, str(v.get("contact") or ""), (v.get("tag") or None))
-        except Exception:
-            pass
-
-    return out
-def _mc_parse_contact_to_ch() -> dict[str, int]:
-    """
-    Mapa MeshCore contacto(prefix) -> Meshtastic CH.
-
-    Soporta:
-      - MESHCORE_CONTACT_TO_CH: "ABCDEF:0,112233:2"
-      - MESHCORE_CONTACT_DEFAULT_CH: int (fallback)
-    """
-    out: dict[str, int] = {}
-    raw = (os.getenv("MESHCORE_CONTACT_TO_CH") or "").strip()
-    if raw:
-        for part in raw.split(","):
-            p = (part or "").strip()
-            if not p:
-                continue
-            toks = [t.strip() for t in p.split(":")]
-            if len(toks) < 2:
-                continue
-            pref = toks[0]
-            try:
-                ch = int(toks[1])
-            except Exception:
-                continue
-            if pref:
-                out[pref] = int(ch)
-    return out
-
-def _mc_parse_chanidx_to_ch() -> dict[int, int]:
-    """
-    Mapa MeshCore channel_idx -> Meshtastic CH.
-    - MESHCORE_CHANIDX_TO_CH: "0:0,1:2"
-    """
-    out: dict[int, int] = {}
-    raw = (os.getenv("MESHCORE_CHANIDX_TO_CH") or "").strip()
-    if not raw:
-        return out
-    for part in raw.split(","):
-        p = (part or "").strip()
-        if not p:
-            continue
-        toks = [t.strip() for t in p.split(":")]
-        if len(toks) < 2:
-            continue
-        try:
-            a = int(toks[0]); b = int(toks[1])
-        except Exception:
-            continue
-        out[a] = b
-    return out
-
-def _safe_meshcore_max_text_bytes() -> int:
-    """
-    Límite conservador (en BYTES UTF-8) para TX hacia MeshCore.
-    Env:
-      MESHCORE_MAX_TEXT_BYTES (default 180)
-    """
-    try:
-        v = int((os.getenv("MESHCORE_MAX_TEXT_BYTES") or "180").strip())
-    except Exception:
-        v = 180
-    return max(80, min(v, 260))
-
-
-def _split_text_chunks_utf8(text: str, max_bytes: int) -> list[str]:
-    """
-    Divide 'text' en trozos cuyo tamaño en bytes UTF-8 sea <= max_bytes.
-    Preferencia por cortar en espacios; fallback a corte duro.
-    """
-    if text is None:
-        return []
-    s = str(text).strip()
-    if not s:
-        return []
-
-    max_bytes = int(max_bytes or 180)
-    if max_bytes < 80:
-        max_bytes = 80
-
-    out: list[str] = []
-
-    def _take_prefix_fit_bytes(s0: str, limit_b: int) -> tuple[str, str]:
-        if not s0:
-            return "", ""
-
-        if len(s0.encode("utf-8", errors="ignore")) <= limit_b:
-            return s0, ""
-
-        # Búsqueda binaria por longitud de caracteres aproximando bytes
-        lo, hi = 1, len(s0)
-        best = 1
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            cand = s0[:mid]
-            b = len(cand.encode("utf-8", errors="ignore"))
-            if b <= limit_b:
-                best = mid
-                lo = mid + 1
-            else:
-                hi = mid - 1
-
-        cut = best
-
-        # intenta no romper palabras
-        sp = s0.rfind(" ", 0, cut + 1)
-        if sp >= max(10, int(cut * 0.6)):
-            cut = sp
-
-        head = s0[:cut].strip()
-        tail = s0[cut:].strip()
-        if not head:
-            head = s0[:1]
-            tail = s0[1:].strip()
-        return head, tail
-
-    rest = s
-    while rest:
-        head, rest = _take_prefix_fit_bytes(rest, max_bytes)
-        if head:
-            out.append(head)
-        else:
-            break
-
-    return out
-
-
-def _add_part_prefix_fit(part: str, idx: int, total: int, max_bytes: int) -> str:
-    """
-    Añade prefijo "(i/n) " y asegura que el resultado cabe en max_bytes (UTF-8).
-    Si no cabe, recorta el cuerpo para que quepa.
-    """
-    prefix = f"({idx}/{total}) "
-    max_bytes = int(max_bytes or 180)
-    p_b = len(prefix.encode("utf-8", errors="ignore"))
-    if p_b >= max_bytes:
-        return prefix[: max(1, max_bytes // 2)]
-
-    body = str(part or "").strip()
-    if not body:
-        return prefix.strip()
-
-    cand = prefix + body
-    if len(cand.encode("utf-8", errors="ignore")) <= max_bytes:
-        return cand
-
-    avail = max_bytes - p_b
-    chunk = _split_text_chunks_utf8(body, avail)
-    body_fit = chunk[0] if chunk else body[:1]
-    return prefix + body_fit
-
-class MeshCoreEmbeddedBridge:
-    """
-    Pasarela MeshCore embebida en el broker.
-
-    - RX Meshtastic -> TX MeshCore (por mapeo CH->contacto).
-    - RX MeshCore   -> TX Meshtastic (por mapeo contacto->CH o chan_idx->CH).
-
-    Diseñado para 24/7:
-    - Hilo dedicado + asyncio con supervisor de reconexión.
-    - Cola de envío hacia MeshCore para no bloquear el broker.
-    - Dedup simple para evitar eco/loops cuando reinyectamos a Meshtastic.
-    """
-
-    def __init__(self):
-        self.enable = _env_truthy("MESHCORE_ENABLE", "0") and _MESHCORE_AVAILABLE
-        self.mode = (os.getenv("MESHCORE_MODE", "serial") or "serial").strip().lower()
-        self.serial_port = (os.getenv("MESHCORE_SERIAL_PORT") or "").strip() or None
-        self.serial_baud = int((os.getenv("MESHCORE_SERIAL_BAUD", "115200") or "115200").strip() or 115200)
-
-        self.tcp_host = (os.getenv("MESHCORE_TCP_HOST") or "").strip() or None
-        self.tcp_port = int((os.getenv("MESHCORE_TCP_PORT", "4000") or "4000").strip() or 4000)
-
-        self.ble_addr = (os.getenv("MESHCORE_BLE_ADDR") or "").strip() or None
-        self.ble_pin = (os.getenv("MESHCORE_BLE_PIN") or "").strip() or None
-
-        self.default_contact_prefix = (os.getenv("MESHCORE_DEFAULT_CONTACT_PREFIX") or "").strip() or None
-        self.default_contact_ch = int((os.getenv("MESHCORE_CONTACT_DEFAULT_CH", "0") or "0").strip() or 0)
-
-        self.ch_map = _mc_parse_ch_map()  # Meshtastic CH -> MeshCore contact
-        self.contact_to_ch = _mc_parse_contact_to_ch()  # MeshCore contact -> Meshtastic CH
-        self.chanidx_to_ch = _mc_parse_chanidx_to_ch()  # MeshCore channel_idx -> Meshtastic CH
-
-        # Reverse map (MeshCore channel_idx -> tag lógico) para prefijos RX.
-        # Se alimenta desde MESHCORE_CHANNEL_MAP (mismos tags que usas en TX).
-        self.chanidx_to_tag: dict[int, str] = {}
-        try:
-            for _ch, m in (self.ch_map or {}).items():
-                if (m or {}).get("kind") == "chan":
-                    ci = m.get("channel_idx")
-                    tg = (m.get("tag") or "").strip()
-                    if ci is not None and tg:
-                        self.chanidx_to_tag[int(ci)] = tg
-        except Exception:
-            self.chanidx_to_tag = {}
-
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._loop = None
-        self._tx_q = None
-        self._mc = None
-
-        # === Prefijo RX MeshCore -> Meshtastic ===
-        # Estilos:
-        #   tech    -> [MC:<prefix>] (debug)
-        #   alias   -> [MC:<alias>] (usa MESHCORE_CONTACT_ALIASES)
-        #   compact -> [MC]
-        #   channel -> canales: [MC-<TAG>] ; contactos: tech
-        self.rx_prefix_style = (os.getenv("MESHCORE_RX_PREFIX_STYLE", "tech") or "tech").strip().lower()
-
-        # Mapa opcional prefix->alias para contactos MeshCore (solo si rx_prefix_style=alias o quieres fallback)
-        # Formato: "6a18cb3d125b:EA2FBO_V4,ab12cd34:EB2EAS-7"
-        self.contact_aliases = {}
-        raw_alias = (os.getenv("MESHCORE_CONTACT_ALIASES", "") or "").strip()
-        if raw_alias:
-            for part in raw_alias.split(","):
-                part = (part or "").strip()
-                if not part or ":" not in part:
-                    continue
-                k, v = part.split(":", 1)
-                k = (k or "").strip()
-                v = (v or "").strip()
-                if k and v:
-                    self.contact_aliases[k] = v
-
-        # Log de encolado TX hacia MeshCore (útil para debug)
-        self.log_enqueue = _env_truthy("MESHCORE_LOG_ENQUEUE", "0")
-
-
-        # anti-eco: fingerprints de mensajes que hemos inyectado a Meshtastic
-        self._inject_lock = threading.Lock()
-        self._inject_recent: dict[str, float] = {}
-        self._inject_ttl = float((os.getenv("MESHCORE_INJECT_DEDUP_SEC", "12") or "12").strip() or 12.0)
-
-        # métricas básicas
-        self._last_ok = 0.0
-        self._last_err = ""
-        self._connected = False
-
-    def status(self) -> dict:
-        return {
-            "enabled": bool(self.enable),
-            "available": bool(_MESHCORE_AVAILABLE),
-            "import_error": _MESHCORE_IMPORT_ERROR if not _MESHCORE_AVAILABLE else None,
-            "mode": self.mode,
-            "connected": bool(self._connected),
-            "last_ok": int(self._last_ok) if self._last_ok else None,
-            "last_err": self._last_err or None,
-            "ch_map": self.ch_map,
-            "default_contact_prefix": self.default_contact_prefix,
-            "default_contact_ch": self.default_contact_ch,
-        }
-
-    def start(self) -> None:
-        if not self.enable:
-            if _env_truthy("MESHCORE_ENABLE", "0") and not _MESHCORE_AVAILABLE:
-                print(f"[meshcore] ⚠️ MESHCORE_ENABLE=1 pero falta dependencia: {_MESHCORE_IMPORT_ERROR}", flush=True)
-            return
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._runner, name="meshcore-embedded", daemon=True)
-        self._thread.start()
-        print(f"[meshcore] embebido habilitado mode={self.mode}", flush=True)
-
-    def stop(self) -> None:
-        self._stop.set()
-        try:
-            loop = self._loop
-            if loop and loop.is_running():
-                loop.call_soon_threadsafe(lambda: None)
-        except Exception:
-            pass
-        th = self._thread
-        if th and th.is_alive():
-            try:
-                th.join(timeout=2.0)
-            except Exception:
-                pass
-
-    def _runner(self) -> None:
-        try:
-            asyncio.run(self._supervisor())
-        except Exception as e:
-            self._last_err = f"{type(e).__name__}: {e}"
-            print(f"[meshcore] runner fatal: {self._last_err}", flush=True)
-
-    async def _supervisor(self) -> None:
-        """
-        Supervisor 24/7:
-        - Ejecuta sesiones de conexión (_amain_once).
-        - Si cae por error/desconexión, reintenta con backoff.
-        """
-        backoff = [2, 5, 10, 20, 40, 60, 120]
-        attempt = 0
-
-        while not self._stop.is_set():
-            try:
-                await self._amain_once()
-                attempt = 0  # sesión terminó "limpio"
-            except Exception as e:
-                self._last_err = f"{type(e).__name__}: {e}"
-                delay = backoff[min(attempt, len(backoff) - 1)]
-                attempt += 1
-                print(f"[meshcore-embedded] supervisor: {self._last_err} (reintento en {delay}s)", flush=True)
-
-                # Sleep cooperativo cancelable
-                for _ in range(int(delay * 10)):
-                    if self._stop.is_set():
-                        return
-                    await asyncio.sleep(0.1)
-
-
-    async def _connect(self):
-        if self.mode == "tcp":
-            if not self.tcp_host:
-                raise RuntimeError("MESHCORE_TCP_HOST vacío")
-            return await _MeshCore.create_tcp(self.tcp_host, int(self.tcp_port), auto_reconnect=True)  # type: ignore[attr-defined]
-        if self.mode == "ble":
-            if not self.ble_addr:
-                raise RuntimeError("MESHCORE_BLE_ADDR vacío")
-            if self.ble_pin:
-                return await _MeshCore.create_ble(self.ble_addr, pin=str(self.ble_pin))  # type: ignore[attr-defined]
-            return await _MeshCore.create_ble(self.ble_addr)  # type: ignore[attr-defined]
-        # serial
-        if not self.serial_port:
-            raise RuntimeError("MESHCORE_SERIAL_PORT vacío")
-        return await _MeshCore.create_serial(self.serial_port, int(self.serial_baud), debug=False)  # type: ignore[attr-defined]
-
-    async def _amain_once(self) -> None:
-        """
-        Una sesión de conexión MeshCore.
-        Si cae la conexión o hay error, esta corrutina termina y el supervisor reintenta.
-        """
-        import asyncio as _aio
-
-        self._loop = _aio.get_running_loop()
-        self._tx_q = _aio.Queue()
-
-        # --- conectar ---
-        print(f"[meshcore-embedded] CONNECTING mode={self.mode}", flush=True)
-        self._mc = await self._connect()
-        self._connected = True
-        self._last_ok = time.time()
-        self._last_err = ""
-        print("[meshcore-embedded] CONNECTED", flush=True)
-
-        mc = self._mc
-
-        # --- activar auto-fetch (CRÍTICO para que entren eventos RX) ---
-        try:
-            await mc.start_auto_message_fetching()  # type: ignore[union-attr]
-            print("[meshcore-embedded] auto_message_fetching ON", flush=True)
-        except Exception as e:
-            print(f"[meshcore-embedded] auto_message_fetching ERROR: {type(e).__name__}: {e}", flush=True)
-
-        async def _on_msg(event):
-            try:
-                et = getattr(event, "type", None)
-                data = dict(getattr(event, "payload", None) or {})
-                kind = "contact"
-                chan_idx = None
-                if et == _MCEventType.CHANNEL_MSG_RECV:  # type: ignore[union-attr]
-                    kind = "chan"
-                    try:
-                        chan_idx = int(data.get("channel_idx"))
-                    except Exception:
-                        chan_idx = None
-
-                text_msg = str(data.get("text") or "").strip()
-                if not text_msg:
-                    return
-
-                # === [LOG RX MeshCore] ===
-                try:
-                    print(
-                        f"[meshcore-embedded RX] "
-                        f"type={et} kind={kind} chan_idx={chan_idx} "
-                        f"prefix={data.get('pubkey_prefix')} "
-                        f"text='{text_msg[:120]}'",
-                        flush=True
-                    )
-                except Exception:
-                    pass
-
-                # Decide canal Meshtastic destino
-                ch_out = None
-                if kind == "chan" and chan_idx is not None:
-                    ch_out = self.chanidx_to_ch.get(int(chan_idx))
-                if ch_out is None:
-                    pref = str(data.get("pubkey_prefix") or "").strip()
-                    ch_out = self.contact_to_ch.get(pref)
-                if ch_out is None:
-                    ch_out = int(self.default_contact_ch)
-
-                # Prefijo corto para identificar origen MeshCore
-                pref = str(data.get("pubkey_prefix") or "").strip()
-
-                # Alias: 1) si viene en payload (no siempre), 2) mapping por pubkey_prefix,
-                # 3) heurística: si el texto viene como "EA2FBO_V4: ..." usarlo.
-                alias = str(data.get("alias") or data.get("name") or "").strip()
-                if not alias and pref:
-                    alias = str(self.contact_aliases.get(pref) or "").strip()
-
-                # Si el texto lleva "ALIAS: ...", extrae alias y limpia cuerpo (evita duplicar)
-                try:
-                    m = re.match(r"^([A-Za-z0-9_\-/]{3,24})\s*:\s+(.+)$", text_msg)
-                    if m:
-                        extracted = (m.group(1) or "").strip()
-                        rest = (m.group(2) or "").strip()
-                        if extracted and not alias:
-                            alias = extracted
-                            text_msg = rest
-                except Exception:
-                    pass
-
-                head = self._meshcore_rx_head(
-                    kind=kind,
-                    chan_idx=chan_idx,
-                    pubkey_prefix=pref,
-                    alias=alias
-                )
-
-                out_txt = f"{head} {text_msg}"
-
-
-                # Inyectar a Meshtastic vía cola del broker (SENDQ)
-                q = globals().get("SENDQ")
-                if q is not None and hasattr(q, "offer"):
-                    self._remember_injected(int(ch_out), out_txt)
-                    q.offer(
-                        {
-                            "channel": int(ch_out),
-                            "text": out_txt,
-                            "destination": None,
-                            "require_ack": False,
-                            "type": "text",
-                            "no_bridge": True,
-                            "origin": "meshcore",
-                            "meta": {"meshcore": 1, "pubkey_prefix": pref, "kind": kind, "channel_idx": chan_idx},
-                        },
-                        coalesce=False,
-                    )
-
-                    # MeshCore->BOT: emitir también al bus JSONL/backlog para que el bot lo vea
-                    emit_meshcore_rx_to_hub_and_log(
-                        ch=int(ch_out),
-                        text=out_txt,
-                        pubkey_prefix=pref,
-                        kind=kind,
-                        chan_idx=chan_idx,
-                        from_alias=(alias or None),
-                    )
-
-
-                    # === [IMPORTANTE] Replicar también a HOME_NODE_ID (nodo A) si se pide.
-                    # Motivo: cuando el bot está conectado, quieres ver igualmente los mensajes inyectados
-                    # como DM en tu nodo A (HOME).
-                    try:
-                        if _env_truthy("MESHCORE_ECHO_TO_HOME", "0") and HOME_NODE_ID:
-                            self._remember_injected(int(ch_out), out_txt)
-                            q.offer(
-                                {
-                                    "channel": int(ch_out),
-                                    "text": out_txt,
-                                    "destination": str(HOME_NODE_ID),
-                                    "require_ack": False,
-                                    "type": "text",
-                                    "no_bridge": True,
-                                    "origin": "meshcore",
-                                    "meta": {"meshcore": 1, "echo_home": 1, "pubkey_prefix": pref, "kind": kind, "channel_idx": chan_idx},
-                                },
-                                coalesce=False,
-                            )
-                    except Exception:
-                        pass
-                    self._last_ok = time.time()
-
-            except Exception as e:
-                self._last_err = f"{type(e).__name__}: {e}"
-
-        # Suscripción RX
-        try:
-            mc.subscribe(_MCEventType.CONTACT_MSG_RECV, _on_msg)  # type: ignore[union-attr]
-            mc.subscribe(_MCEventType.CHANNEL_MSG_RECV, _on_msg)  # type: ignore[union-attr]
-        except Exception as e:
-            self._last_err = f"subscribe: {type(e).__name__}: {e}"
-            print(f"[meshcore-embedded] {self._last_err}", flush=True)
-
-        # --- bucle TX ---
-        while not self._stop.is_set():
-            try:
-                dst, msg = await _aio.wait_for(self._tx_q.get(), timeout=0.5)
-            except _aio.TimeoutError:
-                continue
-
-            # === [LOG TX MeshCore] ===
-            try:
-                print(f"[meshcore-embedded TX] dst={dst} text='{msg[:120]}'", flush=True)
-            except Exception:
-                pass
-
-            try:
-                # --- [PATCH] Split por bytes UTF-8 para no perder / truncar mensajes largos ---
-                max_b = _safe_meshcore_max_text_bytes()
-                parts = _split_text_chunks_utf8(msg, max_b)
-
-                # Si hay más de una parte, añadir (i/n) garantizando que sigue cabiendo en bytes
-                if len(parts) > 1:
-                    send_parts = [_add_part_prefix_fit(p, i + 1, len(parts), max_b) for i, p in enumerate(parts)]
-                else:
-                    send_parts = parts
-
-                # Enviar secuencialmente (micro-espaciado para evitar ráfagas)
-                for p in (send_parts or [""]):
-                    if isinstance(dst, dict) and str(dst.get("kind") or "").lower() in ("chan", "channel"):
-                        chan_idx = int(dst.get("channel_idx"))
-                        await mc.commands.send_chan_msg(int(chan_idx), p)  # type: ignore[union-attr]
-                    else:
-                        send_dst = dst
-                        if isinstance(send_dst, str):
-                            try:
-                                c = mc.get_contact_by_key_prefix(send_dst)  # type: ignore[union-attr]
-                                if c:
-                                    send_dst = c
-                            except Exception:
-                                pass
-                        await mc.commands.send_msg(send_dst, p)  # type: ignore[union-attr]
-
-                    try:
-                        await _aio.sleep(0.15)
-                    except Exception:
-                        pass
-
-                self._last_ok = time.time()
-
-            except Exception as e:
-                self._last_err = f"tx: {type(e).__name__}: {e}"
-
-        # --- desconexión ---
-        try:
-            await mc.disconnect()  # type: ignore[union-attr]
-        except Exception:
-            pass
-        self._connected = False
-        print("[meshcore-embedded] DISCONNECTED", flush=True)
-
-    def _meshcore_rx_head(
-        self,
-        *,
-        kind: str,
-        chan_idx: Optional[int],
-        pubkey_prefix: str,
-        alias: str
-    ) -> str:
-        """
-        Prefijo para mensajes RX desde MeshCore.
-        Prioriza alias recibido en la trama.
-        """
-
-        style = (self.rx_prefix_style or "tech").strip().lower()
-        prefix = (pubkey_prefix or "").strip()
-        alias = (alias or "").strip()
-
-        # Resolver canal lógico
-        logical_tag = None
-        if kind == "chan" and chan_idx is not None:
-            try:
-                logical_tag = (self.chanidx_to_tag or {}).get(int(chan_idx))
-            except Exception:
-                logical_tag = None
-
-        # Compacto
-        if style == "compact":
-            return "[MC]"
-
-        # Canal puro
-        if style == "channel":
-            if logical_tag:
-                return f"[MC-{logical_tag}]"
-            if kind == "contact":
-                return "[MC-DM]"
-            return f"[MC-CHAN{chan_idx}]" if chan_idx is not None else "[MC]"
-
-        # Alias estructurado
-        if style == "alias":
-
-            # Si MeshCore envía alias, usarlo
-            display = alias if alias else (prefix if prefix else "UNKNOWN")
-
-            if logical_tag:
-                return f"[MC:{logical_tag}:{display}]"
-
-            if kind == "contact":
-                return f"[MC:DM:{display}]"
-
-            return f"[MC:{display}]"
-
-        # Técnico (default)
-        if prefix:
-            return f"[MC:{prefix}]"
-        return "[MC]"
-
-
-    def enqueue_send_contact(self, contact_prefix: str, text: str) -> None:
-        if not self.enable or not self._loop or not self._tx_q:
-            return
-        msg = (text or "").strip()
-        if not msg:
-            return
-        try:
-            if self.log_enqueue:
-                try:
-                    n = len(msg.encode('utf-8', errors='ignore'))
-                except Exception:
-                    n = len(msg)
-                print(f"[meshcore] enqueue -> contact={str(contact_prefix)} len={n}", flush=True)
-            self._loop.call_soon_threadsafe(self._tx_q.put_nowait, (str(contact_prefix), msg))
-        except Exception:
-            pass
-
-    def enqueue_send_channel(self, channel_idx: int, text: str) -> None:
-        if not self.enable or not self._loop or not self._tx_q:
-            return
-        msg = (text or "").strip()
-        if not msg:
-            return
-        try:
-            if self.log_enqueue:
-                try:
-                    n = len(msg.encode('utf-8', errors='ignore'))
-                except Exception:
-                    n = len(msg)
-                print(f"[meshcore] enqueue -> chan_idx={int(channel_idx)} len={n}", flush=True)
-            self._loop.call_soon_threadsafe(self._tx_q.put_nowait, ({"kind": "chan", "channel_idx": int(channel_idx)}, msg))
-        except Exception:
-            pass
-
-    def _fingerprint(self, ch: int, text: str) -> str:
-        return f"{int(ch)}|{hashlib.sha1(text.encode('utf-8', errors='ignore')).hexdigest()}"
-
-    def _remember_injected(self, ch: int, text: str) -> None:
-        fp = self._fingerprint(ch, text)
-        now = time.time()
-        with self._inject_lock:
-            self._inject_recent[fp] = now
-            # purge opportunista
-            for k, ts in list(self._inject_recent.items()):
-                if now - ts > self._inject_ttl:
-                    self._inject_recent.pop(k, None)
-
-    def was_recently_injected(self, ch: int, text: str) -> bool:
-        fp = self._fingerprint(ch, text)
-        now = time.time()
-        with self._inject_lock:
-            ts = self._inject_recent.get(fp)
-            return bool(ts) and (now - ts <= self._inject_ttl)
-
-    def forward_from_meshtastic(self, *, ch: int, text: str, from_id: str, from_alias: str | None, channel_name: str | None, hop_real: int | None) -> None:
-        """
-        Llamar desde MeshReceiver._on_rx para reenviar mensajes Meshtastic -> MeshCore.
-
-        Soporta ruteo por:
-          - contacto (pubkey_prefix)
-          - canal MeshCore (channel_idx) vía MESHCORE_CHANNEL_MAP con 'chan'
-        """
-        if not self.enable:
-            return
-        msg = (text or "").strip()
-        if not msg:
-            return
-
-        # Evitar bucles: si este texto lo acabamos de inyectar desde MeshCore, no lo reenvíes.
-        if self.was_recently_injected(int(ch), msg):
-            return
-
-        # filtros: BBS y comandos /aprs (no deben salir a MeshCore)
-        up = msg.upper()
-        if up.startswith("#BBS"):
-            return
-        if msg.lstrip().lower().startswith("/aprs"):
-            return
-
-        mapping = self.ch_map.get(int(ch)) or {}
-        kind = (mapping.get("kind") or "contact").strip().lower()
-        tag = mapping.get("tag")
-
-        # Prefijo corto: tag -> nombre canal -> CHx
-        if tag:
-            prefix = f"[{tag}]"
-        elif channel_name:
-            prefix = f"[{channel_name}]"
-        else:
-            prefix = f"[CH{int(ch)}]"
-
-        sender = (from_alias or "").strip() or str(from_id)
-        hops = f" h{int(hop_real)}" if isinstance(hop_real, int) and hop_real >= 0 else ""
-        payload = f"{prefix} {sender}{hops}: {msg}"
-
-        if kind in ("chan", "channel"):
-            try:
-                chan_idx = int(mapping.get("channel_idx"))
-            except Exception:
-                chan_idx = None
-            if chan_idx is None:
-                return
-            self.enqueue_send_channel(int(chan_idx), payload)
-            return
-
-        # default: contacto (pubkey_prefix)
-        contact_prefix = mapping.get("contact") or self.default_contact_prefix
-        if not contact_prefix:
-            return  # sin destino
-        self.enqueue_send_contact(str(contact_prefix), payload)
-# ================================================================================
-
-
 
 # Directorio base único (igual que en el bot)
 DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "/app/bot_data")).resolve()
@@ -930,51 +86,6 @@ BBS_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
 # === NUEVO: host/port runtime para Meshtastic (rellenos en main() desde --host)
 RUNTIME_MESH_HOST = None   # se fija en main()
 RUNTIME_MESH_PORT = 4403   # puerto TCP del nodo Meshtastic
-
-
-
-import hashlib
-import time
-from collections import OrderedDict
-
-class _DedupTTL:
-    def __init__(self, ttl_sec: float = 8.0, max_items: int = 2048):
-        self.ttl = float(max(1.0, ttl_sec))
-        self.max_items = int(max(128, max_items))
-        self._store = OrderedDict()  # key -> ts
-
-    def seen_recent(self, key: str) -> bool:
-        now = time.time()
-
-        # purge por TTL
-        dead = []
-        for k, ts in self._store.items():
-            if (now - ts) > self.ttl:
-                dead.append(k)
-            else:
-                break
-        for k in dead:
-            self._store.pop(k, None)
-
-        if key in self._store:
-            self._store.move_to_end(key)
-            self._store[key] = now
-            return True
-
-        self._store[key] = now
-        self._store.move_to_end(key)
-
-        while len(self._store) > self.max_items:
-            self._store.popitem(last=False)
-
-        return False
-
-CTRL_SEND_DEDUP = _DedupTTL(
-    ttl_sec=float(os.getenv("CTRL_SEND_TEXT_DEDUP_SEC", "8")),
-    max_items=int(os.getenv("CTRL_SEND_TEXT_DEDUP_MAX", "2048"))
-)
-
-
 
 # --- Compat shim para Meshtastic TCPInterface (host -> hostname) + pool único ---
 try:
@@ -1014,105 +125,6 @@ except Exception as _e:
 
 
 # ===================== Utilidades =====================
-
-import inspect
-
-def _bridge_mirror_safe(channel: int, message: str, dest_id: str = None, require_ack: bool = False) -> None:
-    """
-    Llama al mirror hook del bridge embebido tolerando cambios de firma.
-    - Firma antigua: bridge_mirror_outgoing_from_broker(channel, message)
-    - Firma nueva (si existiera): bridge_mirror_outgoing_from_broker(payload=..., direction="A2B")
-    Nunca lanza excepción hacia arriba (no rompe TX).
-    """
-    try:
-        fn = globals().get("bridge_mirror_outgoing_from_broker")
-        if not callable(fn):
-            return
-
-        # Intenta detectar si acepta 'payload' por nombre
-        try:
-            sig = inspect.signature(fn)
-            params = sig.parameters
-        except Exception:
-            params = {}
-
-        # 1) Si acepta payload, úsalo (compat con tu patch “payload=…”)
-        if "payload" in params:
-            try:
-                fn(
-                    payload={
-                        "type": "text",
-                        "text": message,
-                        "channel": int(channel),
-                        "destination": (dest_id if dest_id else "broadcast"),
-                        "require_ack": bool(require_ack),
-                    },
-                    direction="A2B",
-                )
-                return
-            except TypeError:
-                # cae a la firma posicional
-                pass
-
-        # 2) Firma posicional (la que tienes ahora en el repo)
-        try:
-            fn(int(channel), message)
-            return
-        except TypeError:
-            # 3) Último intento: por si el orden fuese distinto
-            try:
-                fn(message, int(channel))
-                return
-            except Exception:
-                return
-
-    except Exception as _e:
-        print(f"[bridge] mirror hook ERROR: {type(_e).__name__}: {_e}", flush=True)
-# === NUEVO: Delay opcional para espejo hacia nodo embebido (A -> B) ===
-import random
-import threading
-
-# Segundos de retardo antes de espejar al nodo embebido.
-# 0 = desactivado (comportamiento actual).
-BROKER_EMBEDDED_MIRROR_DELAY_SEC = float(os.getenv("BROKER_EMBEDDED_MIRROR_DELAY_SEC", "0") or "0")
-
-# Jitter opcional para evitar colisiones repetidas (0 = sin jitter).
-BROKER_EMBEDDED_MIRROR_JITTER_SEC = float(os.getenv("BROKER_EMBEDDED_MIRROR_JITTER_SEC", "0") or "0")
-
-
-def _bridge_mirror_delayed(channel: int, message: str, dest_id: str = None, require_ack: bool = False) -> None:
-    """
-    Programa el espejo hacia el bridge embebido con un retardo opcional.
-    - No bloquea el hilo principal del broker.
-    - Mantiene el comportamiento anterior si el delay es 0.
-    """
-    try:
-        delay = float(BROKER_EMBEDDED_MIRROR_DELAY_SEC or 0.0)
-        jitter = float(BROKER_EMBEDDED_MIRROR_JITTER_SEC or 0.0)
-        if jitter > 0:
-            delay += random.uniform(0.0, jitter)
-
-        # Sin delay -> comportamiento actual
-        if delay <= 0:
-            _bridge_mirror_safe(channel=channel, message=message, dest_id=dest_id, require_ack=require_ack)
-            return
-
-        t = threading.Timer(
-            delay,
-            _bridge_mirror_safe,
-            kwargs={
-                "channel": int(channel),
-                "message": str(message),
-                "dest_id": (dest_id if dest_id else None),
-                "require_ack": bool(require_ack),
-            },
-        )
-        t.daemon = True
-        t.start()
-
-    except Exception as _e:
-        # Nunca romper TX por el delay
-        print(f"[bridge] delayed mirror ERROR: {type(_e).__name__}: {_e}", flush=True)
 
 def _safe_first_int(raw: str, default: int = 0) -> int:
     """
@@ -1409,40 +421,6 @@ HEARTBEAT_SILENT = False       # Si True, no imprime ningún heartbeat
 # === [NUEVO] Cooldown broker tras caída de conexión ===
 COOLDOWN_SECS = int(os.getenv("BROKER_COOLDOWN_SECS", "90"))
 
-# === BLOQUEO FORZADO BBS (Bridge / Triple-Bridge) ===
-# Si TRIPLE_BLOCK_BBS_FORCE=1:
-#  - Cualquier tráfico originado por la BBS NO cruzará el bridge.
-#  - Se fuerza no_bridge=True aunque el texto no empiece por '#BBS'.
-#
-# Activar en .env:
-#   TRIPLE_BLOCK_BBS_FORCE=1
-
-TRIPLE_BLOCK_BBS_FORCE = _env_truthy("TRIPLE_BLOCK_BBS_FORCE", "0")
-
-
-def _is_bbs_origin(kwargs: dict) -> bool:
-    """
-    Detecta si el envío proviene del motor BBS.
-    Se basa en flags explícitos añadidos al payload.
-    """
-    try:
-        if not isinstance(kwargs, dict):
-            return False
-
-        origin = (kwargs.get("origin") or "").strip().lower()
-        if origin in {"bbs", "bbs_engine", "bbs_local"}:
-            return True
-
-        meta = kwargs.get("meta")
-        if isinstance(meta, dict) and bool(meta.get("bbs")):
-            return True
-
-    except Exception:
-        return False
-
-    return False
-
-
 # === Nodo B del bridge (usado por /ver_nodos_b y /vecinos_b) ===
 B_HOST = (
     os.getenv("BRIDGE_B_HOST", "").strip()
@@ -1467,41 +445,6 @@ def _print_with_ts(*args, **kwargs):
 
 builtins.print = _print_with_ts
 
-# === [FIX 24/7] Anti-duplicado para SEND_TEXT recibido por CTRL =================
-import hashlib
-
-_CTRL_SENDTEXT_DEDUP: dict[str, float] = {}
-
-def _ctrl_sendtext_fingerprint(ch: int, dest: str | None, text: str) -> str:
-    """
-    Huella estable del comando SEND_TEXT (CTRL) para suprimir reintentos idénticos.
-    """
-    base = f"{int(ch)}|{dest or 'broadcast'}|{text}"
-    return hashlib.sha1(base.encode("utf-8", errors="ignore")).hexdigest()
-
-def _ctrl_sendtext_should_suppress(fp: str, now_ts: float, window_sec: int) -> bool:
-    """
-    Devuelve True si ya vimos esa huella dentro de la ventana.
-    Limpia entradas antiguas para evitar crecimiento infinito.
-    """
-    last = _CTRL_SENDTEXT_DEDUP.get(fp)
-    if last is not None and (now_ts - float(last)) <= float(window_sec):
-        return True
-
-    # registra y GC básico
-    _CTRL_SENDTEXT_DEDUP[fp] = float(now_ts)
-
-    # GC: purga entradas fuera de ventana * 2 (margen)
-    try:
-        cutoff = now_ts - float(window_sec) * 2.0
-        dead = [k for k, v in _CTRL_SENDTEXT_DEDUP.items() if float(v) < cutoff]
-        for k in dead:
-            _CTRL_SENDTEXT_DEDUP.pop(k, None)
-    except Exception:
-        pass
-
-    return False
-# ===============================================================================
 
 
 
@@ -1517,52 +460,6 @@ def _guard_log(kind: str, msg: str, interval: float = 5.0):
         print(msg, flush=True)
         _guard_last_log[kind] = now
 
-# === Throttle de logs de ctrl SEND_TEXT (evita floods) ===
-# BROKER_CTRL_VERBOSE:
-#   0 -> throttle (modo recomendado 24/7)
-#   1 -> más verboso, pero AÚN amortiguado (intervalo mínimo)
-#   2 -> sin throttle (solo debugging puntual)
-_ctrl_verbose_raw = os.getenv("BROKER_CTRL_VERBOSE", "0").strip().lower()
-if _ctrl_verbose_raw in {"true","yes","on"}:
-    CTRL_VERBOSE_LEVEL = 1
-else:
-    try:
-        CTRL_VERBOSE_LEVEL = int(_ctrl_verbose_raw or "0")
-    except Exception:
-        CTRL_VERBOSE_LEVEL = 0
-
-# Intervalo mínimo en modo verbose=1 (evita floods incluso cuando está activo)
-CTRL_VERBOSE_MIN_INTERVAL = float(os.getenv("BROKER_CTRL_VERBOSE_MIN_INTERVAL", "0.5") or "0.5")
-
-_ctrl_last_log = {}
-
-def _ctrl_log(kind: str, msg: str, interval: float = 5.0):
-    """
-    Log de control amortiguado por 'kind'.
-
-    - BROKER_CTRL_VERBOSE=0: imprime como máximo 1 vez cada 'interval' segundos por 'kind'.
-    - BROKER_CTRL_VERBOSE=1: imprime más a menudo, pero sigue amortiguado (intervalo mínimo).
-    - BROKER_CTRL_VERBOSE>=2: imprime siempre (sin throttle).
-    """
-    try:
-        lvl = int(CTRL_VERBOSE_LEVEL)
-    except Exception:
-        lvl = 0
-
-    if lvl >= 2:
-        print(msg, flush=True)
-        return
-
-    # En verbose=1, nunca permitir intervalos por debajo del mínimo configurado
-    eff_interval = float(interval)
-    if lvl == 1:
-        eff_interval = max(eff_interval, CTRL_VERBOSE_MIN_INTERVAL)
-
-    now = time.time()
-    last = float(_ctrl_last_log.get(kind, 0.0))
-    if (now - last) >= eff_interval:
-        print(msg, flush=True)
-        _ctrl_last_log[kind] = now
 
 
 def _print_frame_line(*values, sep=" ", end="\n", file=None, flush=False):
@@ -1744,23 +641,44 @@ except Exception:
 def _extract_ids_from_packet(pkt: dict, decoded: dict) -> tuple[str, str]:
     """
     Devuelve (who_from, who_to) siempre definidos.
-    Intenta varias claves habituales que pueden aparecer en diferentes versiones/estructuras.
+
+    Importante:
+    - NO usar 'or' encadenados con get() para 'to/toId', porque valores como 0 se pierden
+      y acaban degradándose a '^all', rompiendo la detección de DM.
     """
+
+    def _get_if_present(d: dict, key: str):
+        if isinstance(d, dict) and (key in d):
+            return d.get(key)
+        return None
+
+    # from (normalmente siempre viene, pero mantenemos fallback robusto)
     who_from = (
-        pkt.get("fromId")
-        or decoded.get("fromId")
-        or pkt.get("from")
-        or decoded.get("from")
-        or "?"
+        _get_if_present(pkt, "fromId")
+        if _get_if_present(pkt, "fromId") is not None
+        else _get_if_present(decoded, "fromId")
+        if _get_if_present(decoded, "fromId") is not None
+        else _get_if_present(pkt, "from")
+        if _get_if_present(pkt, "from") is not None
+        else _get_if_present(decoded, "from")
+        if _get_if_present(decoded, "from") is not None
+        else "?"
     )
-    who_to = (
-        pkt.get("toId")
-        or decoded.get("toId")
-        or pkt.get("to")
-        or decoded.get("to")
-        or "^all"
-    )
+
+    # to (aquí está el fallo: puede venir 0 y NO debe descartarse por falsy)
+    if _get_if_present(pkt, "toId") is not None:
+        who_to = _get_if_present(pkt, "toId")
+    elif _get_if_present(decoded, "toId") is not None:
+        who_to = _get_if_present(decoded, "toId")
+    elif _get_if_present(pkt, "to") is not None:
+        who_to = _get_if_present(pkt, "to")
+    elif _get_if_present(decoded, "to") is not None:
+        who_to = _get_if_present(decoded, "to")
+    else:
+        who_to = "^all"
+
     return str(who_from), str(who_to)
+
 
 # Helpers reutilizables (colócalos junto a otros helpers de logging):
 def _cooldown_total_secs():
@@ -1804,19 +722,12 @@ class _NoHeartbeatLogs(logging.Filter):
         "Heartbeat",             # genérico
         "HEARTBEAT_APP",         # nombre de port
         "portnum: HEARTBEAT",    # dumps de paquetes
-        "Reprogramada (daily)",   # ← añadido
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-
-        # Ocultar siempre la reprogramación daily
-        if "Reprogramada (daily)" in msg:
-            return False
-
         if SHOW_HEARTBEATS:
             return True
-
+        msg = record.getMessage()
         return not any(k in msg for k in self.HB_MARKERS)
 
 # === [NUEVO] Guardas anti-10053/10054 en hilos internos de meshtastic ===
@@ -1996,7 +907,6 @@ def install_heartbeat_log_filter() -> None:
     f = _NoHeartbeatLogs()
     logging.getLogger("meshtastic").addFilter(f)
     logging.getLogger("meshtastic.mesh_interface").addFilter(f)
-    logging.getLogger("broker.tasks").addFilter(f)   # ← importante
     logging.getLogger().addFilter(f)
 
 # === [NUEVO] Modo sin heartbeat: anula el envío del SDK de meshtastic ===
@@ -2171,26 +1081,21 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     """
     msg: {"channel":int, "text":str, "destination":None|"!id", "require_ack":bool}
     Respeta CircuitBreaker y sólo intenta TX cuando la interfaz está lista.
-    Si no lo está, reencola con backoff y sale.
+    Si no lo está, reencola sin ruido (con un aviso amortiguado) y sale.
     """
-    # --- Log al desencolar (diagnóstico) ---
+    # --- Log al desencolar (diagnóstico útil) ---
     try:
         _ch   = int(msg.get("channel", 0) or 0)
         _dest = msg.get("destination") or "broadcast"
         _txt  = str(msg.get("text") or "")
-        _ctrl_log("send_text_dequeued", f"[ctrl] SEND_TEXT dequeued ch={_ch} dest={_dest} len={len(_txt.encode('utf-8'))}", interval=5.0)
+        print(f"[ctrl] SEND_TEXT dequeued ch={_ch} dest={_dest} len={len(_txt.encode('utf-8'))}", flush=True)
     except Exception as _e:
-        _ctrl_log("send_text_deq_err", f"[ctrl] SEND_TEXT dequeue log error: {type(_e).__name__}: {_e}", interval=5.0)
+        print(f"[ctrl] SEND_TEXT dequeue log error: {type(_e).__name__}: {_e}", flush=True)
 
-    # --- CircuitBreaker: si está abierto, reencola y aplica backoff (evita busy-loop) ---
+    # --- CircuitBreaker: si está abierto, reencola y sal silencioso ---
     if not CIRCUIT_BREAKER.can_attempt():
         try:
-            SENDQ.offer(msg, coalesce=False)
-        except Exception:
-            pass
-        _ctrl_log("circuit_open", "[ctrl] CircuitBreaker abierto. TX pausada temporalmente; reintentará.", interval=5.0)
-        try:
-            time.sleep(0.35)  # backoff para que el worker no haga spin
+            SENDQ.offer(msg, coalesce=False)  # no coalesce para no perder ACK/flags
         except Exception:
             pass
         return False
@@ -2198,13 +1103,20 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     # --- Comprobación de estado de interfaz del broker ---
     ready, reason = _iface_ready_reason()
     if not ready:
+        # Reencola y emite un aviso amortiguado cada ~5 s para evitar bucle de logs
         try:
             SENDQ.offer(msg, coalesce=False)
         except Exception:
             pass
-        _ctrl_log("tx_wait", f"[ctrl] TX en espera — {reason}. Reintentará al reconectar.", interval=5.0)
         try:
-            time.sleep(0.35)
+            import time as _t
+            global _TX_WAIT_LOG_TS
+            now = _t.time()
+            if (now - float(_TX_WAIT_LOG_TS or 0.0)) >= 5.0:
+                print(f"[ctrl] TX en espera — {reason}. Reintentará al reconectar.", flush=True)
+                _TX_WAIT_LOG_TS = now
+            # Pequeño backoff para que el worker no haga busy-loop
+            _t.sleep(0.35)
         except Exception:
             pass
         return False
@@ -2212,104 +1124,41 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     # --- Interfaz lista: ejecutar ruta de envío real ---
     try:
         r = _tasks_send_adapter(
-            ch=int(msg.get("channel", 0) or 0),
-            text=str(msg.get("text") or ""),
-            dest=msg.get("destination") or "broadcast",
-            require_ack=bool(msg.get("require_ack")),
-            timeout_s=None
+            int(msg.get("channel", 0)),
+            str(msg.get("text") or ""),
+            (msg.get("destination") or "broadcast"),
+            bool(msg.get("require_ack"))
         )
-        ok = bool(r.get("ok")) if isinstance(r, dict) else bool(r)
-        if not ok:
-            raise RuntimeError(r.get("error") if isinstance(r, dict) else "tx_failed")
-        return True
-    except Exception as e:
-        # Si falla el envío, reporta al CircuitBreaker y reencola con backoff
+        ok = bool(r.get("ok"))
+        if ok:
+            CIRCUIT_BREAKER.record_success()
+        else:
+            CIRCUIT_BREAKER.record_error()
+        return ok
+    except Exception:
+        # Error en el camino de envío: marcar error y solicitar reconnect suave
+        CIRCUIT_BREAKER.record_error()
         try:
-            CIRCUIT_BREAKER.on_failure()
+            mgr = globals().get("BROKER_IFACE_MGR")
+            if mgr and hasattr(mgr, "signal_disconnect"):
+                mgr.signal_disconnect()
         except Exception:
             pass
+        # Reencola para no perder el mensaje
         try:
             SENDQ.offer(msg, coalesce=False)
-        except Exception:
-            pass
-        _ctrl_log("tx_fail", f"[ctrl] TX fallo: {type(e).__name__}: {e}. Reencolado.", interval=5.0)
-        try:
-            time.sleep(0.35)
         except Exception:
             pass
         return False
 
 
-def _tasks_send_adapter(
-    channel: int | None = None,
-    message: str | None = None,
-    destination: str | None = None,
-    require_ack: bool = False,
-    **kwargs
-) -> dict:
+def _tasks_send_adapter(channel: int, message: str, destination: str, require_ack: bool) -> dict:
     """
-    Adapter de envío usado por:
-      - el scheduler (broker_tasks) -> firma histórica (channel, message, destination, require_ack)
-      - la cola SENDQ/_safe_send_to_radio_via_iface_or_fallback -> firma por keywords (ch/text/dest/require_ack/timeout_s)
-
-    Objetivo 24/7:
-      1) Intentar enviar por la MISMA conexión TCP del broker (iface_mgr) para no abrir 2 sesiones al nodo.
-      2) Si no es posible (no iniciado / no conectado / error), caer al adapter resiliente (pool).
+    1) Intentar enviar por la MISMA conexión TCP del broker (iface_mgr) para no abrir 2 sesiones al nodo.
+    2) Si no es posible (no iniciado / no conectado / error), caer al adapter resiliente (pool).
     Devuelve: {ok: bool, packet_id?: int, error?: str}
     """
-    # --- Compatibilidad con llamadas por keyword (legacy/flex) ---
-    # _safe_send_to_radio_via_iface_or_fallback llama así:
-    #   _tasks_send_adapter(ch=..., text=..., dest=..., require_ack=..., timeout_s=None)
-    if channel is None and "ch" in kwargs:
-        try:
-            channel = int(kwargs.get("ch") or 0)
-        except Exception:
-            channel = 0
-
-    if message is None and "text" in kwargs:
-        message = str(kwargs.get("text") or "")
-
-    if destination is None and "dest" in kwargs:
-        destination = kwargs.get("dest")
-
-    if "require_ack" in kwargs:
-        require_ack = bool(kwargs.get("require_ack"))
-
-    # timeout_s (si viene) se aplica solo a la espera de ACK (si procede)
-    timeout_s = kwargs.get("timeout_s", None)
-    try:
-        timeout_s = float(timeout_s) if timeout_s is not None else None
-    except Exception:
-        timeout_s = None
-
-
-    # [NUEVO] Flag para impedir espejo hacia bridge (BBS / control interno).
-    # Se propaga desde SENDQ como no_bridge=True.
-    no_bridge = bool(kwargs.get("no_bridge", False))
-
-    # Seguridad BBS: bloqueo de tráfico hacia bridge
-    try:
-        # 1) Comandos directos '#BBS'
-        if (message is not None) and str(message).lstrip().upper().startswith("#BBS"):
-            no_bridge = True
-
-        # 2) Respuestas generadas por la BBS (aunque no empiecen por '#BBS')
-        if (not no_bridge) and TRIPLE_BLOCK_BBS_FORCE and _is_bbs_origin(kwargs):
-            no_bridge = True
-
-    except Exception:
-        pass
-
-
-    # Normalización final
-    try:
-        channel_i = int(channel or 0)
-    except Exception:
-        channel_i = 0
-    message_s = "" if message is None else str(message)
-    destination_s = None if destination is None else str(destination)
-
-    dest_id = None if (not destination_s or destination_s.lower() == "broadcast") else destination_s
+    dest_id = None if (not destination or destination.lower() == "broadcast") else destination
 
     # 1) Preferente: usar la interfaz activa del broker
     try:
@@ -2327,53 +1176,21 @@ def _tasks_send_adapter(
                 raise RuntimeError("iface no disponible (todavía no conectado)")
 
             pkt = iface.sendText(
-                message_s,
-                destinationId=(dest_id if dest_id else "^all"),  # broadcast explícito
-                wantAck=bool(require_ack),                       # ACK solo tiene sentido en unicast
+                message,
+                destinationId=(dest_id if dest_id else "^all"),  # ← broadcast explícito
+                wantAck=bool(require_ack),          # ACK solo tiene sentido en unicast
                 wantResponse=False,
-                channelIndex=int(channel_i),
+                channelIndex=int(channel),
             )
-
-            # [NUEVO] Persistir también el TX del broker en OFFLINE_LOG para que bridgehub (hub_mode=broker)
-            # lo vea vía FETCH_BACKLOG y lo reenvíe igual que si fuera RX del nodo embebido.
-            try:
-                _ts = int(time.time())
-                rec_tx = {
-                    "ts": _ts,
-                    "rx_time": _ts,                 # IMPORTANTE: FETCH_BACKLOG filtra por rx_time
-                    "channel": int(channel_i),
-                    "portnum": "TEXT_MESSAGE_APP",
-                    "from": "BROKER",               # origen lógico
-                    "to": (dest_id if dest_id else "^all"),
-                    "from_alias": "broker",
-                    "to_alias": None,
-                    "text": message_s,
-                    # metadatos para evitar ambigüedad aguas abajo
-                    "direction": "tx",
-                    "origin": "broker_local",
-                    "no_bridge": bool(no_bridge),
-                }
-                append_offline_log(rec_tx)
-            except Exception as _e:
-                print(f"⚠️ offline_log TX mirror failed: {type(_e).__name__}: {_e}", flush=True)
 
             # [NUEVO] espejo hacia B si la pasarela embebida está activa
-            # IMPORTANTE: usar wrapper tolerante a firma para no romper 24/7 si cambia el hook
-            # Incorporamos DELAYED entre envios: cambio de _bridge_mirror_safe a _bridge_mirror_delayed
-            if not no_bridge:
-                _bridge_mirror_delayed(
-                    channel=int(channel_i),
-                    message=message_s,
-                    dest_id=(dest_id if dest_id else None),
-                    require_ack=bool(require_ack),
-                )
+            try:
+                bridge_mirror_outgoing_from_broker(int(channel), message)
+            except Exception as _e:
+                print(f"[bridge] mirror hook ERROR: {type(_e).__name__}: {_e}", flush=True)
 
+            print(f"[tx] broker sendText ch={int(channel)} dest={dest_id or 'broadcast'} len={len(message.encode('utf-8'))}", flush=True)
 
-            print(
-                f"[tx] broker sendText ch={int(channel_i)} dest={dest_id or 'broadcast'} "
-                f"len={len(message_s.encode('utf-8'))}",
-                flush=True
-            )
 
             # Extraer packet_id de dict u objeto
             pid = None
@@ -2389,8 +1206,7 @@ def _tasks_send_adapter(
             # Si se pide ACK (solo unicast) e iface lo soporta, esperar
             if require_ack and dest_id and pid is not None and hasattr(iface, "waitForAck"):
                 try:
-                    _to = 15.0 if timeout_s is None else max(1.0, float(timeout_s))
-                    ok_ack = bool(iface.waitForAck(pid, timeout=_to))
+                    ok_ack = bool(iface.waitForAck(pid, timeout=15.0))
                 except Exception:
                     ok_ack = False
                 return {"ok": ok_ack, "packet_id": pid, "error": (None if ok_ack else "NO_APP_ACK")}
@@ -2414,9 +1230,9 @@ def _tasks_send_adapter(
         res = _send(
             host=host,
             port=port,
-            text=message_s,
+            text=message,
             dest_id=dest_id,
-            channel_index=int(channel_i),
+            channel_index=int(channel),
             want_ack=bool(require_ack),
         )
         ok = bool(res.get("ok"))
@@ -2424,6 +1240,7 @@ def _tasks_send_adapter(
         return {"ok": ok, "packet_id": pid, "error": (None if ok else res.get("error"))}
     except Exception as e:
         return {"ok": False, "packet_id": None, "error": f"{type(e).__name__}: {e}"}
+
 def _tasks_reconnect_adapter() -> bool:
     """
     Preferente: pedir al broker (iface_mgr) que se reconecte él.
@@ -2718,92 +1535,6 @@ def append_offline_log(rec: dict):
     except Exception as e:
         _log_ex("append_offline_log failed", e)
 
-def emit_meshcore_rx_to_hub_and_log(
-    *,
-    ch: int,
-    text: str,
-    pubkey_prefix: str = "",
-    kind: str = "contact",
-    chan_idx: int | None = None,
-    from_alias: str | None = None,
-) -> None:
-    """
-    Emite un evento al JsonLineHub (para que el BOT lo vea en vivo)
-    y lo persiste en OFFLINE_LOG (para FETCH_BACKLOG / replay).
-
-    Motivo:
-    - MeshCore->Meshtastic se inyecta por SENDQ (TX interno).
-    - El BOT normalmente "ve" lo que entra por el bus JSONL (hub/backlog).
-    """
-
-    # Canal / nombre de canal
-    try:
-        ch_i = int(ch)
-    except Exception:
-        ch_i = 0
-
-    channel_name = None
-    try:
-        channel_name = CHANNEL_NAME_BY_INDEX.get(int(ch_i))
-    except Exception:
-        channel_name = None
-
-    # 1) Emitir en vivo al HUB (BOT)
-    try:
-        hub = globals().get("BROKER_HUB")
-        if hub is not None and hasattr(hub, "broadcast_line"):
-            ev = {
-                "type": "packet",
-                "packet": {
-                    "fromId": (f"meshcore:{(pubkey_prefix or '').strip()}" if (pubkey_prefix or '').strip() else "meshcore"),
-                    "toId": "^all",
-                    "rxTime": int(_now_s()),
-                    "decoded": {
-                        "portnum": "TEXT_MESSAGE_APP",
-                        "text": text,
-                        # cabecera compatible para extractores que miran header/fromId
-                        "header": {
-                            "fromId": (f"meshcore:{(pubkey_prefix or '').strip()}" if (pubkey_prefix or '').strip() else "meshcore"),
-                        },
-                    },
-                    # extras útiles (no rompen a quien no los use)
-                    "channel": int(ch_i),
-                    "channel_name": channel_name,
-                    "from_alias": (from_alias or None),
-                    "meshcore": 1,
-                    "meshcore_kind": kind,
-                    "meshcore_chan_idx": chan_idx,
-                    "meshcore_pubkey_prefix": (pubkey_prefix or "").strip() or None,
-                },
-                "ts": _now_s(),
-            }
-            hub.broadcast_line(_json_dumps(ev) + "\n")
-    except Exception:
-        pass
-
-    # 2) Persistir en OFFLINE_LOG para backlog
-    try:
-        append_offline_log(
-            {
-                "ts": int(_now_s()),
-                "channel": ch_i,
-                "channel_name": channel_name,
-                "portnum": "TEXT_MESSAGE_APP",
-                "from": (f"meshcore:{(pubkey_prefix or '').strip()}" if (pubkey_prefix or '').strip() else "meshcore"),
-                "to": "broadcast",
-                "from_alias": (from_alias or None),
-                "to_alias": None,
-                "text": text,
-                "rx_rssi": None,
-                "rx_snr": None,
-                "meshcore": 1,
-                "meshcore_kind": kind,
-                "meshcore_chan_idx": chan_idx,
-                "meshcore_pubkey_prefix": (pubkey_prefix or "").strip() or None,
-            }
-        )
-    except Exception:
-        pass
 
 def _iter_backlog_jsonl(since_ts: int | None, until_ts: int | None, channel: int | None, portnums: list[str] | None, limit: int | None):
     """
@@ -2968,6 +1699,7 @@ class _BacklogServer(threading.Thread):
                     conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                     return
         
+
                 text = params.get("text") or ""
                 if not isinstance(text, str) or not text:
                     resp = {"ok": False, "error": "missing text"}
@@ -2986,76 +1718,18 @@ class _BacklogServer(threading.Thread):
 
                 ack_flag = bool(params.get("ack")) and bool(dest)
 
-                # === [FIX 24/7] Suprimir reintentos idénticos por CTRL (típico en respuestas BBS largas) ===
+                 # === [LOG] controlar recepción (antes de encolar)
                 try:
-                    dedup_window = int(os.getenv("CTRL_SENDTEXT_DEDUP_SEC", "20"))
-                except Exception:
-                    dedup_window = 20
-
-                try:
-                    dedup_minlen = int(os.getenv("CTRL_SENDTEXT_DEDUP_MINLEN", "200"))
-                except Exception:
-                    dedup_minlen = 200
-
-                # Solo aplicamos a UNICAST largos (DM) para minimizar falsos positivos
-                if dest and isinstance(text, str) and len(text.encode("utf-8", errors="ignore")) >= dedup_minlen:
-                    now_ts = time.time()
-                    fp = _ctrl_sendtext_fingerprint(ch=int(ch), dest=str(dest), text=text)
-                    if _ctrl_sendtext_should_suppress(fp, now_ts, window_sec=dedup_window):
-                        # Respondemos OK para que el cliente deje de reintentar, pero NO encolamos.
-                        try:
-                            _ctrl_log(
-                                "send_text_dedup",
-                                f"[ctrl] SEND_TEXT dedup SUPPRESS ch={int(ch)} dest={dest} len={len(text.encode('utf-8'))}",
-                                interval=5.0
-                            )
-                        except Exception:
-                            pass
-                        resp = {"ok": True, "queued": False, "duplicate_suppressed": True}
-                        conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                        return
-
-
-                # === [LOG] controlar recepción (antes de encolar) ===
-                try:
-                    msg = f"[ctrl] SEND_TEXT recv ch={int(ch)} dest={dest or 'broadcast'} len={len(text.encode('utf-8'))}"
-                    _ctrl_log("send_text_recv", msg, interval=5.0)
+                    print(f"[ctrl] SEND_TEXT recv ch={int(ch)} dest={dest or 'broadcast'} len={len(text.encode('utf-8'))}", flush=True)
                 except Exception as _e:
-                    _ctrl_log("send_text_recv_err", f"[ctrl] SEND_TEXT recv log error: {type(_e).__name__}: {_e}", interval=5.0)
+                    print(f"[ctrl] SEND_TEXT recv log error: {type(_e).__name__}: {_e}", flush=True)
+
                 # === [NUEVO] Encolar (no coalesce para textos de usuario)
                 try:
 
                     
-                    # === [FIX] Permitir metadatos en SEND_TEXT (no_bridge/origin) para BBS/privado ===
-                    params = req.get("params") or {}
-
-                    no_bridge_flag = bool(params.get("no_bridge", False))
-                    origin = (params.get("origin") or params.get("source") or "").strip().lower() or None
-                    meta = params.get("meta")
-                    if meta is not None and not isinstance(meta, dict):
-                        meta = None
-
-                    payload = {
-                        "channel": ch,
-                        "text": text,
-                        "destination": dest,
-                        "require_ack": ack_flag,
-                        "type": "text",
-                    }
-
-                    # Propaga flags si existen (no rompe nada si no se usan)
-                    if no_bridge_flag:
-                        payload["no_bridge"] = True
-                    if origin:
-                        payload["origin"] = origin
-                    if meta:
-                        payload["meta"] = meta
-
-                    SENDQ.offer(payload, coalesce=False)
-                    resp = {"ok": True, "queued": True, "path": "broker-queue"}
-                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                    return
-
+                    SENDQ.offer({"channel": ch, "text": text, "destination": dest, "require_ack": ack_flag, "type": "text"},
+                                coalesce=False)
                     resp = {"ok": True, "queued": True, "path": "broker-queue"}
                 except Exception as e:
                     resp = {"ok": False, "error": f"queue_error: {e}"}
@@ -3073,145 +1747,7 @@ class _BacklogServer(threading.Thread):
                 except Exception as e:
                     resp = {"ok": False, "error": f"bridge_status_failed: {type(e).__name__}: {e}"}
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); 
-                return            # --- NUEVO: estado MeshCore embebido ---
-            elif cmd == "MESHCORE_STATUS":
-                try:
-                    mc = globals().get("MESHCORE_ENGINE")
-                    st = mc.status() if mc else {"enabled": False, "available": bool(_MESHCORE_AVAILABLE)}
-                    resp = {"ok": True, **st}
-                except Exception as e:
-                    resp = {"ok": False, "error": f"meshcore_status_failed: {type(e).__name__}: {e}"}
-                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"));
                 return
-            
-            # --- NUEVO: enviar a MeshCore (canal_idx) desde clientes (BOT) ---
-            # --- NUEVO: enviar a MeshCore desde clientes (BOT) ---
-            elif cmd == "MESHCORE_SEND":
-                params = req.get("params") or {}
-                text = (params.get("text") or "").strip()
-
-                # Compat: kind opcional. Si no viene, inferimos por campos presentes.
-                kind = str(params.get("kind") or "").strip().lower()
-
-                # Aceptamos channel_idx (preferido) y también "ch" por compat/atajo.
-                ch_raw = params.get("channel_idx", params.get("ch", None))
-                contact_prefix = (params.get("contact_prefix") or params.get("prefix") or "").strip()
-
-                # Inferencia si no viene kind
-                if not kind:
-                    if contact_prefix and ch_raw is None:
-                        kind = "contact"
-                    else:
-                        kind = "chan"
-
-                # Validación común
-                if not text:
-                    resp = {"ok": False, "error": "missing text"}
-                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                    return
-
-                try:
-                    mc = globals().get("MESHCORE_ENGINE")
-                    if not mc or not getattr(mc, "enable", False):
-                        resp = {"ok": False, "error": "meshcore_not_enabled"}
-                        conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                        return
-
-                    if kind in ("chan", "channel"):
-                        try:
-                            channel_idx = int(ch_raw)
-                        except Exception:
-                            channel_idx = None
-
-                        if channel_idx is None:
-                            resp = {"ok": False, "error": "missing channel_idx"}
-                            conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                            return
-
-                        mc.enqueue_send_channel(int(channel_idx), text)
-                        resp = {"ok": True, "queued": True, "kind": "chan", "channel_idx": int(channel_idx)}
-
-                    else:
-                        # DM/contacto
-                        if not contact_prefix:
-                            resp = {"ok": False, "error": "missing contact_prefix"}
-                            conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                            return
-
-                        mc.enqueue_send_contact(contact_prefix, text)
-                        resp = {"ok": True, "queued": True, "kind": "contact", "contact_prefix": contact_prefix}
-
-                except Exception as e:
-                    resp = {"ok": False, "error": f"meshcore_send_failed: {type(e).__name__}: {e}"}
-
-                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                return
-
-            elif cmd == "MESHCORE_CONTACTS":
-                # params: { "limit": 80 }
-                try:
-                    params = params or {}
-                    limit = int(params.get("limit") or 80)
-                except Exception:
-                    limit = 80
-
-                eng = globals().get("MESHCORE_ENGINE")  # (en tu broker ya existe esta global)
-                if not eng:
-                    resp = {"ok": False, "error": "meshcore_disabled"}
-                else:
-                    try:
-                        # Si tu engine ya tiene un método, úsalo.
-                        if hasattr(eng, "list_contacts") and callable(getattr(eng, "list_contacts")):
-                            contacts = eng.list_contacts(limit=limit)
-                        else:
-                            # Fallback best-effort: inspección del objeto meshcore conectado si existe.
-                            mc = getattr(eng, "_meshcore", None) or getattr(eng, "_mc", None) or getattr(eng, "mc", None)
-                            contacts = []
-                            if mc is not None:
-                                try:
-                                    items = mc.get_contacts() if hasattr(mc, "get_contacts") else getattr(mc, "contacts", [])
-                                except Exception:
-                                    items = []
-                                if isinstance(items, dict):
-                                    items = list(items.values())
-                                for c in (items or []):
-                                    try:
-                                        if isinstance(c, dict):
-                                            prefix = c.get("prefix") or c.get("key_prefix") or c.get("pubkey_prefix") or c.get("id") or c.get("key")
-                                            name = c.get("name") or c.get("alias") or c.get("label")
-                                            last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("seen") or c.get("ts")
-                                        else:
-                                            prefix = getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None) or getattr(c, "prefix", None) or getattr(c, "id", None)
-                                            name = getattr(c, "name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
-                                            last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "seen", None)
-
-                                        prefix = (str(prefix).strip() if prefix is not None else "")
-                                        if not prefix:
-                                            continue
-
-                                        contacts.append({
-                                            "prefix": prefix,
-                                            "name": (str(name).strip() if name is not None else "") or None,
-                                            "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
-                                        })
-                                        if len(contacts) >= limit:
-                                            break
-                                    except Exception:
-                                        continue
-
-                        # Dedup
-                        seen = set()
-                        uniq = []
-                        for d in contacts:
-                            pfx = d.get("prefix")
-                            if not pfx or pfx in seen:
-                                continue
-                            seen.add(pfx)
-                            uniq.append(d)
-
-                        resp = {"ok": True, "count": len(uniq), "contacts": uniq}
-                    except Exception as e:
-                        resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
             # --- NUEVO: envío de texto vía lado B del bridge ---
             elif cmd == "SEND_TEXT_VIA":
@@ -3308,77 +1844,79 @@ class _BacklogServer(threading.Thread):
                                 resp = {"ok": True, "scheduled": True, "seconds": int(secs)}
 
                         elif cmd == "FORCE_RECONNECT":
-                            # Reset limpio + preparar ventana de gracia anti-escalado
-                            try:
-                                import time as _t
-                                from tcpinterface_persistent import TCPInterfacePool
-                            except Exception:
-                                pass
-
-                            try:
-                                # === 0) Cooldown corto para el siguiente _on_disconnect ===
-                                # (se aplica una sola vez; NO tocar COOLDOWN_SECS base)
+                                # Reset limpio + preparar ventana de gracia anti-escalado
                                 try:
-                                    with COOLDOWN_FORCE_LOCK:
-                                        globals()["COOLDOWN_FORCE_NEXT"] = 3   # 3s
-                                except Exception:
-                                    globals()["COOLDOWN_FORCE_NEXT"] = 3
-
-                                # === 1) Ventana de gracia anti-escalado tras el reset ===
-                                #   - Tiempo: 45s
-                                #   - Contador: permitir suprimir hasta 2 "caídas tempranas"
-                                try:
-                                    now = _t.time()
-                                    globals()["_SUPPRESS_EARLY_ESC_UNTIL"]  = now + 45.0
-                                    globals()["_SUPPRESS_EARLY_ESC_REMAIN"] = int(globals().get("_SUPPRESS_EARLY_ESC_DEFAULT_REMAIN", 2))
-
+                                    import time as _t
+                                    from tcpinterface_persistent import TCPInterfacePool
                                 except Exception:
                                     pass
 
-                                # === 2) Limpieza de estados globales mínimos (sin romper) ===
                                 try:
-                                    x = globals().get("TX_BLOCKED")
-                                    if x:
-                                        x.clear()
-                                except Exception:
-                                    pass
-                                try:
-                                    cd = globals().get("COOLDOWN")
-                                    if cd:
-                                        cd.clear()
-                                except Exception:
-                                    pass
+                                    # === 0) Cooldown corto para el siguiente _on_disconnect ===
+                                    # (se aplica una sola vez; NO tocar COOLDOWN_SECS base)
+                                    try:
+                                        with COOLDOWN_FORCE_LOCK:
+                                            globals()["COOLDOWN_FORCE_NEXT"] = 3   # 3s
+                                    except Exception:
+                                        globals()["COOLDOWN_FORCE_NEXT"] = 3
 
-                                # === 3) Reset de la sesión del pool TCP (cierra y reabrirá perezoso) ===
-                                try:
-                                    TCPInterfacePool.reset(
-                                        globals().get("RUNTIME_MESH_HOST") or "",
-                                        int(globals().get("RUNTIME_MESH_PORT") or 4403)
-                                    )
-                                    print("[ctrl] FORCE_RECONNECT → TCPInterfacePool.reset() aplicado.", flush=True)
+                                    # === 1) Ventana de gracia anti-escalado tras el reset ===
+                                    #   - Tiempo: 45s
+                                    #   - Contador: permitir suprimir hasta 2 "caídas tempranas"
+                                    try:
+                                        now = _t.time()
+                                        globals()["_SUPPRESS_EARLY_ESC_UNTIL"]  = now + 45.0
+                                        globals()["_SUPPRESS_EARLY_ESC_REMAIN"] = int(globals().get("_SUPPRESS_EARLY_ESC_DEFAULT_REMAIN", 2))
+
+                                    except Exception:
+                                        pass
+
+                                    # === 2) Limpieza de estados globales mínimos (sin romper) ===
+                                    try:
+                                        x = globals().get("TX_BLOCKED")
+                                        if x:
+                                            x.clear()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        cd = globals().get("COOLDOWN")
+                                        if cd:
+                                            cd.clear()
+                                    except Exception:
+                                        pass
+
+                                    # === 3) Reset de la sesión del pool TCP (cierra y reabrirá perezoso) ===
+                                    try:
+                                        TCPInterfacePool.reset(
+                                            globals().get("RUNTIME_MESH_HOST") or "",
+                                            int(globals().get("RUNTIME_MESH_PORT") or 4403)
+                                        )
+                                        print("[ctrl] FORCE_RECONNECT → TCPInterfacePool.reset() aplicado.", flush=True)
+                                    except Exception as e:
+                                        print(f"[ctrl] FORCE_RECONNECT → aviso: no se pudo resetear pool: {type(e).__name__}: {e}", flush=True)
+
+                                    # === 4) Señal suave al manager: desconecta y reanuda (garantiza no-paused) ===
+                                    try:
+                                        mgr = globals().get("BROKER_IFACE_MGR") or self.iface_mgr
+                                    except Exception:
+                                        mgr = None
+
+                                    try:
+                                        if mgr and hasattr(mgr, "signal_disconnect"):
+                                            mgr.signal_disconnect()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if mgr and hasattr(mgr, "resume"):
+                                            mgr.resume()   # estado no-pausado
+                                    except Exception:
+                                        pass
+
+                                    resp = {"ok": True, "status": "running", "action": "force_reconnect"}
                                 except Exception as e:
-                                    print(f"[ctrl] FORCE_RECONNECT → aviso: no se pudo resetear pool: {type(e).__name__}: {e}", flush=True)
+                                    resp = {"ok": False, "error": f"force_reconnect_failed: {type(e).__name__}: {e}"}
 
-                                # === 4) Señal suave al manager: desconecta y reanuda (garantiza no-paused) ===
-                                try:
-                                    mgr = globals().get("BROKER_IFACE_MGR") or self.iface_mgr
-                                except Exception:
-                                    mgr = None
 
-                                try:
-                                    if mgr and hasattr(mgr, "signal_disconnect"):
-                                        mgr.signal_disconnect()
-                                except Exception:
-                                    pass
-                                try:
-                                    if mgr and hasattr(mgr, "resume"):
-                                        mgr.resume()   # estado no-pausado
-                                except Exception:
-                                    pass
-
-                                resp = {"ok": True, "status": "running", "action": "force_reconnect"}
-                            except Exception as e:
-                                resp = {"ok": False, "error": f"force_reconnect_failed: {type(e).__name__}: {e}"}
 
                         elif cmd == "BRIDGE_STATUS":
                             try:
@@ -4762,33 +3300,24 @@ class MeshReceiver:
                         bbs = globals().get("BBS_ENGINE")
                         if bbs and str(portnum) == "TEXT_MESSAGE_APP":
                             t0 = (text or "").strip()
-
                             if t0.upper().startswith("#BBS"):
-
+                                
                                 # Heurística DM robusta: destino presente y NO es broadcast
-                                _to_norm = _norm_node_id(who_to)
-                                is_dm = bool(_to_norm) and _to_norm not in {"^all", "broadcast", "?"}
+                                _to_raw = (str(who_to) if who_to is not None else "").strip().lower()
 
-                                # Motor BBS
-                                bbs = globals().get("BBS_ENGINE")
-                                if not bbs:
-                                    raise StopIteration
+                                # Valores típicos de broadcast / no-dirigido (según builds/versiones)
+                                if _to_raw in {"^all", "broadcast", "?", "0", "!0", ""}:
+                                    _to_norm = ""
+                                else:
+                                    _to_norm = _norm_node_id(str(who_to))
 
-                                bbs_callsign = (os.getenv("BBS_CALLSIGN") or getattr(bbs, "bbs_callsign", "") or "").strip().upper()
-                                if not bbs_callsign:
-                                    raise StopIteration
+                                is_dm = bool(_to_norm)
 
-                                # Política
-                                dm_only = (os.getenv("BBS_DM_ONLY", "1").strip().lower() in {"1", "true", "on", "si", "sí", "y", "yes"})
-                                dm_init_hint = (os.getenv("BBS_DM_INIT_HINT", "1").strip().lower() in {"1", "true", "on", "si", "sí", "y", "yes"})
 
-                                # Canal DM (por defecto CH0)
-                                try:
-                                    dm_ch = int(os.getenv("BBS_DM_CHANNEL", "0"))
-                                except Exception:
-                                    dm_ch = 0
-
-                                # Canales públicos permitidos (BBS_CHANNELS o fallback BBS_CHANNEL)
+                                # Solo exigir BBS_CHANNEL cuando NO es DM
+                                # Canales públicos autorizados de entrada a la BBS:
+                                # - BBS_CHANNELS: lista CSV (p.ej. "5,7,9")
+                                # - fallback: BBS_CHANNEL (histórico)
                                 def _parse_bbs_channels() -> set:
                                     raw = (os.getenv("BBS_CHANNELS") or os.getenv("BBS_CHANNEL") or "").strip()
                                     out = set()
@@ -4801,198 +3330,136 @@ class MeshReceiver:
                                         except Exception:
                                             continue
                                     return out
-
+                                
                                 allowed_ch = _parse_bbs_channels()
+                                if (not is_dm) and allowed_ch and (int(canal) not in allowed_ch):
+                                    raise StopIteration  # No es un canal BBS autorizado → ignorar
 
-                                # Si NO es DM y no hay canales configurados, no atendemos en público (evita enganches accidentales)
-                                if (not is_dm) and (not allowed_ch):
+
+                                # ---- NUEVO: validación estricta de indicativo BBS ----
+                                bbs_callsign = (os.getenv("BBS_CALLSIGN") or getattr(bbs, "bbs_callsign", "") or "").strip().upper()
+                                if not bbs_callsign:
                                     raise StopIteration
 
-                                # Filtrado: si no es DM, solo atender en canales BBS autorizados
-                                if (not is_dm) and (int(canal) not in allowed_ch):
-                                    raise StopIteration
 
-                                # Parseo
+
                                 parts = t0.split(maxsplit=2)
                                 # parts[0] = #BBS
-                                # parts[1] = CALLSIGN (opcional en DM, obligatorio en canal)
-                                # parts[2] = RESTO (opcional)
+                                # parts[1] = CALLSIGN (esperado)
 
-                                # Normalización por defecto (SIEMPRE definidos)
-                                text_for_bbs = t0
-                                ch_for_bbs = int(canal)
+                                if len(parts) < 2:
+                                    # No se especifica a qué BBS se quiere conectar -> DM de ayuda (si procede)
+                                    dm_only = (os.getenv("BBS_DM_ONLY", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
+                                    dm_init_hint = (os.getenv("BBS_DM_INIT_HINT", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
+
+                                # Canal a usar para DMs (por defecto CH0)
+                                try:
+                                    dm_ch = int(os.getenv("BBS_DM_CHANNEL", "0"))
+                                except Exception:
+                                    dm_ch = 0
+                                    
+
+                                    q = globals().get("SENDQ")
+                                    if dm_only and (not is_dm) and dm_init_hint and q is not None and hasattr(q, "offer"):
+                                        hint = (
+                                            "BBS: sintaxis obligatoria (multi-BBS).\n"
+                                            "Usa en canal solo:\n"
+                                            f"#BBS {bbs_callsign}\n"
+                                            "Y continúa por DM con:\n"
+                                            f"#BBS {bbs_callsign} LOGIN TU-INDICATIVO\n"
+                                            f"#BBS {bbs_callsign} PASS TU-PASS\n"
+                                            f"#BBS {bbs_callsign} MENU"
+                                        )
+                                        q.offer(
+                                            {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                            coalesce=False
+                                        )
+
+                                    raise StopIteration
+
+
+                                target_bbs = parts[1].strip().upper()
+
+                                if not bbs_callsign:
+                                     raise StopIteration
+
+
+                                if target_bbs != bbs_callsign:
+                                    # El mensaje no va dirigido a esta BBS
+                                    raise StopIteration
+
+
+                                # ---- NUEVO: modo privacidad por DM ----
+                                dm_only = (os.getenv("BBS_DM_ONLY", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
+                                dm_init_hint = (os.getenv("BBS_DM_INIT_HINT", "1").strip().lower() in {"1","true","on","si","sí","y","yes"})
+
+                                # Canal a usar para DMs (por defecto CH0)
+                                try:
+                                    dm_ch = int(os.getenv("BBS_DM_CHANNEL", "0"))
+                                except Exception:
+                                    dm_ch = 0
 
                                 q = globals().get("SENDQ")
 
-                                # ─────────────────────────────
-                                # CANAL PÚBLICO
-                                # ─────────────────────────────
-                                if not is_dm:
-
-                                    # En canal público SIEMPRE se exige CALLSIGN
-                                    if len(parts) < 2:
-                                        if dm_only and dm_init_hint and (q is not None) and hasattr(q, "offer"):
+                                # Si viene por canal y estamos en dm_only: NO procesar sesión en público.
+                                # Mandar guía por DM y cortar.
+                                if dm_only and (not is_dm):
+                                    if q is not None and hasattr(q, "offer"):
+                                        if dm_init_hint:
                                             hint = (
-                                                "BBS: sintaxis obligatoria en canal (multi-BBS).\n"
-                                                f"Usa: #BBS {bbs_callsign} <COMANDO>\n"
-                                                "Responderé por DM.\n"
-                                                "En DM puedes iniciar con: #BBS"
+                                                f"Para conectarte: #BBS {bbs_callsign}\n"
+                                                "Continúa por DM con:\n"
+                                                f"#BBS {bbs_callsign} LOGIN TU_INDICATIVO\n"
+                                                f"#BBS {bbs_callsign} PASS TU-PASS\n"
+                                                f"#BBS {bbs_callsign} MENU"
                                             )
-                                            q.offer(
-                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
-                                                "no_bridge": True, "origin": "bbs", "meta": {"bbs": 1}
-                                            },
-                                                coalesce=False
-                                            )
-                                        raise StopIteration
 
-                                    target_bbs = (parts[1] or "").strip().upper()
-
-                                    def _looks_like_callsign(tok: str) -> bool:
-                                        t = (tok or "").strip().upper()
-                                        if len(t) < 3 or len(t) > 16:
-                                            return False
-                                        if not any(c.isalpha() for c in t):
-                                            return False
-                                        if not any(c.isdigit() for c in t):
-                                            return False
-                                        return all(c.isalnum() or c in "-/" for c in t)
-
-                                    if target_bbs != bbs_callsign:
-                                        # Si parece que se han olvidado el callsign (p.ej. "#BBS MENU"), mandamos hint por DM.
-                                        if (dm_only and dm_init_hint and (q is not None) and hasattr(q, "offer") and (not _looks_like_callsign(target_bbs))):
-                                            hint = (
-                                                "BBS: sintaxis obligatoria en canal (multi-BBS).\n"
-                                                f"Usa: #BBS {bbs_callsign} <COMANDO>\n"
-                                                "Responderé por DM.\n"
-                                                "En DM puedes iniciar con: #BBS"
-                                            )
-                                            q.offer(
-                                                {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text",
-                                                "no_bridge": True, "origin": "bbs", "meta": {"bbs": 1}
-                                            },
-                                                coalesce=False
-                                            )
-                                        raise StopIteration
-
-                                    # dm_only: bootstrap a DM y normaliza a formato corto "#BBS <COMANDO...>"
-                                    if dm_only:
-                                        if len(parts) == 2:
-                                            text_for_bbs = "#BBS"
                                         else:
-                                            text_for_bbs = "#BBS " + (parts[2] or "").strip()
-                                        ch_for_bbs = int(dm_ch)
-                                    else:
-                                        text_for_bbs = t0
-                                        ch_for_bbs = int(canal)
+                                            hint = f"BBS: usa DM para comandos (#BBS {bbs_callsign} ...)."
 
-                                # ─────────────────────────────
-                                # DM
-                                # ─────────────────────────────
-                                else:
 
-                                    # Si llega "#BBS <CALLSIGN> ..." en DM:
-                                    # - si es nuestra BBS, se normaliza a "#BBS <COMANDO...>"
-                                    # - si es otra BBS, se ignora
-                                    def _looks_like_callsign(tok: str) -> bool:
-                                        t = (tok or "").strip().upper()
-                                        if len(t) < 3 or len(t) > 16:
-                                            return False
-                                        if not any(c.isalpha() for c in t):
-                                            return False
-                                        if not any(c.isdigit() for c in t):
-                                            return False
-                                        return all(c.isalnum() or c in "-/" for c in t)
+                                        q.offer(
+                                            {"channel": dm_ch, "text": hint, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                            coalesce=False
+                                        )
+                                    raise StopIteration
 
-                                    if len(parts) >= 2:
-                                        maybe = (parts[1] or "").strip().upper()
-                                        if _looks_like_callsign(maybe):
-                                            if maybe != bbs_callsign:
-                                                raise StopIteration
-                                            # es nuestra BBS: normalizar
-                                            if len(parts) == 2:
-                                                text_for_bbs = "#BBS"
-                                            else:
-                                                text_for_bbs = "#BBS " + (parts[2] or "").strip()
+                                # Si estamos aquí, o bien es DM, o dm_only está desactivado.
+                                chunks = bbs.handle_text(from_id=str(who_from), ch=int(canal), text=t0)
 
-                                    # En DM siempre usamos dm_ch
-                                    ch_for_bbs = int(dm_ch)
-
-                                # Procesar por el motor BBS
-                                chunks = bbs.handle_text(from_id=str(who_from), ch=int(ch_for_bbs), text=text_for_bbs)
-
-                                # Enviar respuesta
                                 if chunks and (q is not None) and hasattr(q, "offer"):
                                     for c in chunks:
                                         c = (c or "").strip()
                                         if not c:
                                             continue
-                                        # Responder por DM cuando sea DM o cuando dm_only esté activo
-                                        if is_dm or dm_only:
+
+                                        # RESPUESTA:
+                                        # - si dm_only o si el usuario ya está en DM => responder por DM
+                                        # - si no dm_only => se mantiene comportamiento original (canal)
+                                        if dm_only or is_dm:
                                             q.offer(
-                                                {
-                                                    "channel": int(dm_ch),
-                                                    "text": c,
-                                                    "destination": str(who_from),
-                                                    "require_ack": False,
-                                                    "type": "text",
-                                                    "no_bridge": True,
-                                                    "origin": "bbs",
-                                                    "meta": {"bbs": 1},
-                                                },
-                                                coalesce=False,
+                                                {"channel": dm_ch, "text": c, "destination": str(who_from), "require_ack": False, "type": "text"},
+                                                coalesce=False
                                             )
                                         else:
                                             q.offer(
-                                                {
-                                                    "channel": int(canal),
-                                                    "text": c,
-                                                    "destination": None,
-                                                    "require_ack": False,
-                                                    "type": "text",
-                                                    "no_bridge": True,
-                                                    "origin": "bbs",
-                                                    "meta": {"bbs": 1},
-                                                },
-                                                coalesce=False,
+                                                {"channel": int(canal), "text": c, "destination": None, "require_ack": False, "type": "text"},
+                                                coalesce=False
                                             )
 
                                 # Si era BBS, no continuar con el bloque /aprs (evita interferencias)
                                 raise StopIteration
-                                           
 
                     except StopIteration:
                         return
                     except Exception as _e_bbs:
                         if self.verbose:
                             print(f"⚠️ bbs: {_e_bbs}", flush=True)
-                    # === [NUEVO] MeshCore embebido: reenviar TEXT_MESSAGE_APP Meshtastic -> MeshCore ===
-                    try:
-                        mc = globals().get("MESHCORE_ENGINE")
-                        if mc and str(portnum) == "TEXT_MESSAGE_APP":
-                            # hops reales (si están disponibles)
-                            hop_real = None
-                            try:
-                                hs = pkt.get("hop_start")
-                                hl = pkt.get("hop_limit")
-                                if isinstance(hs, (int, float)) and isinstance(hl, (int, float)):
-                                    hop_real = int(hs) - int(hl)
-                            except Exception:
-                                hop_real = None
+                    # ======================================================================================
 
-                            mc.forward_from_meshtastic(
-                                ch=int(canal),
-                                text=str(text or ""),
-                                from_id=str(who_from),
-                                from_alias=(from_alias or None),
-                                channel_name=(channel_name or None),
-                                hop_real=hop_real,
-                            )
-                    except Exception as _e_mc_fw:
-                        if self.verbose:
-                            print(f"⚠️ meshcore→fw: {_e_mc_fw}", flush=True)
 
-                  
+
+
                     # === [NUEVO] DM /aprs canal N ... -> reinyectar SOLO el texto limpio en canal N ===
                     # Motivo: permitir mandar una orden por privado (no visible en canales públicos)
                     # y que el broker publique únicamente el texto resultante en el canal indicado.
@@ -5027,28 +3494,12 @@ class MeshReceiver:
                                 if clean_txt:
                                     q = globals().get("SENDQ")
                                     if q is not None and hasattr(q, "offer"):
-                                        # Reinyecta SOLO el texto limpio al canal Mesh indicado (broadcast) y evita bridge.
                                         q.offer(
-                                            {
-                                                "channel": int(ch_out),
-                                                "text": clean_txt,
-                                                "destination": None,
-                                                "require_ack": False,
-                                                "type": "text",
-                                                "no_bridge": True,
-                                                "origin": "aprs",
-                                                "meta": {"aprs": 1},
-                                            },
-                                            coalesce=False,
+                                                {"channel": ch_out, "text": clean_txt, "destination": None, "require_ack": False, "type": "text"},
+                                                coalesce=False
                                         )
-
                                         if self.verbose:
-                                            print(
-                                                f"[dm→mesh] Reinyectado CH{ch_out} len={len(clean_txt.encode('utf-8'))}",
-                                                flush=True,
-                                            )
-                   
-                   
+                                            print(f"[dm→mesh] Reinyectado CH{ch_out} len={len(clean_txt.encode('utf-8'))}", flush=True)
                     except StopIteration:
                         pass           
                     except Exception as _e_dm:
@@ -6077,8 +4528,6 @@ def main():
 
 
     hub = JsonLineHub()
-    globals()["BROKER_HUB"] = hub  # MeshCore->BOT: acceso global al hub
-
     stats = BrokerStats()
 
     srv = JsonLineServer(args.bind, args.port, hub, verbose=args.verbose)
@@ -6096,7 +4545,7 @@ def main():
     # === NUEVO: iniciar scheduler de tareas ===
     init_broker_tasks()
 
-    print(f"🟢 Broker v6.2.14 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
+    print(f"🟢 Broker v6.2.4 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
     print("   Clientes pueden conectarse por TCP y leer líneas JSONL (una por evento).", flush=True)
 
     # === [NUEVO] Inicializar motor BBS (broker-side) ======================================
@@ -6195,56 +4644,28 @@ def main():
     pub.subscribe(receiver._on_disconnect, "meshtastic.connection.lost")
     
     # === [NUEVO] Arranque condicional de la pasarela embebida al establecer conexión ===
-    
     def _start_bridge_on_first_connection(interface=None, **kwargs):
-        """
-        Arranca servicios embebidos al primer 'connection.established'.
-
-        Reglas (mutua exclusión):
-          - BRIDGE_ENABLED=1  -> pasarela Meshtastic embebida (bridge_in_broker)
-          - MESHCORE_ENABLE=1 -> pasarela MeshCore embebida (este broker)
-          - Si ambas están activas, BRIDGE_ENABLED tiene prioridad y MeshCore se deshabilita.
-
-        Motivo:
-          - Evitar que el broker intente actuar como 2 "pasarelas" simultáneas.
-          - Mantener arranque idempotente y estable 24/7.
-        """
         try:
             import os
+            enabled = (os.getenv("BRIDGE_ENABLED", "0").strip().lower() in {"1","true","on","si","sí","y","yes"})
+            if not enabled:
+                print("[bridge] embebida desactivada (BRIDGE_ENABLED=0)", flush=True)
+                # ya no necesitamos este hook si está desactivada
+                try: pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
+                except Exception: pass
+                return
 
-            bridge_enabled = (os.getenv("BRIDGE_ENABLED", "0").strip().lower() in {"1","true","on","si","sí","y","yes"})
-            meshcore_enabled = (os.getenv("MESHCORE_ENABLE", "0").strip().lower() in {"1","true","on","si","sí","y","yes"})
+            # Usa la interface que entrega el evento; si no viene, pide la actual al gestor
+            iface_for_bridge = interface or iface_mgr.get_iface()
+            if not iface_for_bridge:
+                print("[bridge] ⚠️ sin interface todavía; espero al próximo established…", flush=True)
+                return
 
-            if bridge_enabled and meshcore_enabled:
-                print("[bridge] ⚠️ BRIDGE_ENABLED=1 y MESHCORE_ENABLE=1: se prioriza BRIDGE_ENABLED (MeshCore OFF).", flush=True)
-                meshcore_enabled = False
+            st = bridge_start_in_broker(iface_for_bridge)
+            print("[bridge] embebida habilitada:", st, flush=True)
 
-            # ---- MeshCore embebido ----
-            if meshcore_enabled:
-                try:
-                    global MESHCORE_ENGINE
-                    if MESHCORE_ENGINE is None:
-                        MESHCORE_ENGINE = MeshCoreEmbeddedBridge()
-                    MESHCORE_ENGINE.start()
-                    print("[meshcore] embebido status:", (MESHCORE_ENGINE.status() if MESHCORE_ENGINE else {}), flush=True)
-                except Exception as e:
-                    print(f"[meshcore] ⚠️ no se pudo iniciar embebido: {type(e).__name__}: {e}", flush=True)
-
-            # ---- Bridge Meshtastic embebido (existente) ----
-            if bridge_enabled:
-                try:
-                    iface_for_bridge = interface or iface_mgr.get_iface()
-                    if not iface_for_bridge:
-                        print("[bridge] ⚠️ sin interface todavía; espero al próximo established…", flush=True)
-                        return
-                    st = bridge_start_in_broker(iface_for_bridge)
-                    print("[bridge] embebida habilitada:", st, flush=True)
-                except Exception as e:
-                    print(f"[bridge] ⚠️ no se pudo iniciar la pasarela embebida: {type(e).__name__}: {e}", flush=True)
-            else:
-                if not meshcore_enabled:
-                    print("[bridge] embebida desactivada (BRIDGE_ENABLED=0, MESHCORE_ENABLE=0)", flush=True)
-
+        except Exception as e:
+            print(f"[bridge] ⚠️ no se pudo iniciar la pasarela embebida: {type(e).__name__}: {e}", flush=True)
         finally:
             # Ejecutarlo solo una vez; si necesitas rearmarla en reconexiones, quita esta desuscripción
             try: pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
@@ -6271,16 +4692,6 @@ def main():
         hb.stop()
         srv.stop()
         iface_mgr.stop()
-        try:
-            bridge_stop_in_broker()
-        except Exception:
-            pass
-        try:
-            mc = globals().get("MESHCORE_ENGINE")
-            if mc:
-                mc.stop()
-        except Exception:
-            pass
 
 
 # === NUEVO: CLI para gestionar tareas programadas desde el broker ===

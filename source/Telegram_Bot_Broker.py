@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v6.2.6.10 py
+Telegram_Bot_Broker_v6.2.6.11 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -3166,6 +3166,47 @@ def _write_atomic(path: str, data: str, encoding: str = "utf-8") -> None:
         f.write(data)
     os.replace(tmp, path)
 
+def _meshcore_contacts_via_ctrl(limit: int = 80, timeout: float = 3.0) -> dict:
+    """
+    Consulta al componente remoto (broker ctrl o triple-bridge ctrl) los contactos MeshCore.
+
+    Orden:
+      1) BROKER_CTRL_HOST/BROKER_CTRL_PORT
+      2) (si falla) TRIPLE_CTRL_HOST/TRIPLE_CTRL_PORT  [cuando MeshCore lo lleve el triple-bridge]
+    """
+    payload = {"cmd": "MESHCORE_CONTACTS", "params": {"limit": int(limit)}}
+
+    # 1) Broker CTRL (actual)
+    r = _broker_ctrl(payload, timeout=timeout)
+    if r and r.get("ok"):
+        return r
+
+    # 2) Fallback: triple-bridge CTRL
+    t_host = (os.getenv("TRIPLE_CTRL_HOST", "") or "").strip()
+    t_port = (os.getenv("TRIPLE_CTRL_PORT", "") or "").strip()
+    if not t_host or not t_port:
+        return r or {"ok": False, "error": "meshcore_contacts_failed"}
+
+    try:
+        import socket, json
+        data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        with socket.create_connection((t_host, int(t_port)), timeout=float(timeout)) as s:
+            s.sendall(data)
+            s.settimeout(float(timeout))
+            buf = b""
+            while True:
+                b = s.recv(65536)
+                if not b:
+                    break
+                buf += b
+                if b"\n" in b:
+                    break
+        raw = buf.decode("utf-8", "ignore").strip()
+        if not raw:
+            return {"ok": False, "error": "empty response"}
+        return json.loads(raw)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 def _broker_ctrl(cmd: str, params: dict | None = None, timeout: float = 3.0) -> dict:
     """
@@ -5565,6 +5606,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("enviar_ack", "Enviar con ACK (reintentos)"),
         BotCommand("enviar_mc", "Enviar a MeshCore (channel_idx): /enviar_mc ch2 <texto>"),
         BotCommand("enviar_mc_dm", "Enviar DM a MeshCore: /enviar_mc_dm <contact_prefix|[MC:prefix]> <texto...>"),
+        BotCommand("mc_contactos", "Contactos de MeshCore: /mc_contactos <n contactos>"),
         BotCommand("escuchar", "Escuchar broker (canal/all)"),
         BotCommand("parar_escucha", "Detener la escucha del broker"),
         BotCommand("traceroute", "Traceroute a un nodo (!id|número|alias) [Timeout] sg. espera"),
@@ -8122,6 +8164,42 @@ async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"Canal (channel_idx): <b>{escape(str(int(channel_idx)))}</b>\n"
             f"Resultado: <b>KO</b>: {escape(type(e).__name__)}: {escape(str(e))}"
         )
+
+async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /mc_contactos [max]
+    Lista contactos MeshCore conocidos por el nodo MeshCore (embebido o triple-bridge).
+    """
+    try:
+        max_n = int((context.args or [])[0]) if (context.args or []) else 30
+    except Exception:
+        max_n = 30
+    max_n = max(1, min(200, int(max_n)))
+
+    r = _meshcore_contacts_via_ctrl(limit=max_n, timeout=3.5)
+    if not r.get("ok"):
+        await update.effective_message.reply_text(f"MeshCore contactos: KO • {r.get('error')}")
+        return
+
+    contacts = r.get("contacts") or []
+    if not contacts:
+        await update.effective_message.reply_text("MeshCore contactos: (vacío)")
+        return
+
+    lines = ["MeshCore contactos:"]
+    for c in contacts[:max_n]:
+        pfx = (c.get("prefix") or "").strip()
+        name = (c.get("name") or "").strip()
+        ls = c.get("last_seen")
+        tail = []
+        if name:
+            tail.append(name)
+        if isinstance(ls, int):
+            tail.append(f"last_seen={ls}")
+        extra = (" • " + " • ".join(tail)) if tail else ""
+        lines.append(f"- {pfx}{extra}")
+
+    await update.effective_message.reply_text("\n".join(lines[:120]))
 
 async def enviar_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -14935,6 +15013,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("enviar", enviar_cmd))
     app.add_handler(CommandHandler("enviar_mc", enviar_mc_cmd))
     app.add_handler(CommandHandler(["enviar_mc_dm", "dm_mc"], enviar_mc_dm_cmd))
+    app.add_handler(CommandHandler("mc_contactos", mc_contactos_cmd))
     
     app.add_handler(CommandHandler("enviar_ack", enviar_ack_cmd))
     app.add_handler(CommandHandler("escuchar", escuchar_cmd))
