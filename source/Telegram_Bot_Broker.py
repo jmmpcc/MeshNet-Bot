@@ -3171,24 +3171,26 @@ def _meshcore_contacts_via_ctrl(limit: int = 80, timeout: float = 3.0) -> dict:
     Consulta al componente remoto (broker ctrl o triple-bridge ctrl) los contactos MeshCore.
 
     Orden:
-      1) BROKER_CTRL_HOST/BROKER_CTRL_PORT
-      2) (si falla) TRIPLE_CTRL_HOST/TRIPLE_CTRL_PORT  [cuando MeshCore lo lleve el triple-bridge]
+      1) BROKER_CTRL_HOST/BROKER_CTRL_PORT (vía _broker_rpc, que espera cmd:str)
+      2) (si falla) TRIPLE_CTRL_HOST/TRIPLE_CTRL_PORT (JSONL directo por socket)
     """
-    payload = {"cmd": "MESHCORE_CONTACTS", "params": {"limit": int(limit)}}
+    # 1) Broker CTRL: usa el RPC nativo del bot (cmd str + params dict)
+    try:
+        r = _broker_rpc("MESHCORE_CONTACTS", {"limit": int(limit)})
+        if isinstance(r, dict) and r.get("ok"):
+            return r
+    except Exception:
+        r = None
 
-    # 1) Broker CTRL (actual)
-    r = _broker_ctrl(payload, timeout=timeout)
-    if r and r.get("ok"):
-        return r
-
-    # 2) Fallback: triple-bridge CTRL
+    # 2) Fallback: triple-bridge CTRL (si está configurado)
     t_host = (os.getenv("TRIPLE_CTRL_HOST", "") or "").strip()
     t_port = (os.getenv("TRIPLE_CTRL_PORT", "") or "").strip()
     if not t_host or not t_port:
         return r or {"ok": False, "error": "meshcore_contacts_failed"}
 
+    payload = {"cmd": "MESHCORE_CONTACTS", "params": {"limit": int(limit)}}
+
     try:
-        import socket, json
         data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
         with socket.create_connection((t_host, int(t_port)), timeout=float(timeout)) as s:
             s.sendall(data)
