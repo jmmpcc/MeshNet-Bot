@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.6.14.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v6.2.6.15.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -3084,23 +3084,27 @@ class _BacklogServer(threading.Thread):
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"));
                 return
             
-                        # --- NUEVO: enviar a MeshCore (canal_idx) desde clientes (BOT) ---
+            # --- NUEVO: enviar a MeshCore (canal_idx) desde clientes (BOT) ---
+            # --- NUEVO: enviar a MeshCore desde clientes (BOT) ---
             elif cmd == "MESHCORE_SEND":
                 params = req.get("params") or {}
                 text = (params.get("text") or "").strip()
 
+                # Compat: kind opcional. Si no viene, inferimos por campos presentes.
+                kind = str(params.get("kind") or "").strip().lower()
+
                 # Aceptamos channel_idx (preferido) y también "ch" por compat/atajo.
                 ch_raw = params.get("channel_idx", params.get("ch", None))
-                try:
-                    channel_idx = int(ch_raw)
-                except Exception:
-                    channel_idx = None
+                contact_prefix = (params.get("contact_prefix") or params.get("prefix") or "").strip()
 
-                if channel_idx is None:
-                    resp = {"ok": False, "error": "missing channel_idx"}
-                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                    return
+                # Inferencia si no viene kind
+                if not kind:
+                    if contact_prefix and ch_raw is None:
+                        kind = "contact"
+                    else:
+                        kind = "chan"
 
+                # Validación común
                 if not text:
                     resp = {"ok": False, "error": "missing text"}
                     conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -3113,8 +3117,30 @@ class _BacklogServer(threading.Thread):
                         conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                         return
 
-                    mc.enqueue_send_channel(int(channel_idx), text)
-                    resp = {"ok": True, "queued": True, "channel_idx": int(channel_idx)}
+                    if kind in ("chan", "channel"):
+                        try:
+                            channel_idx = int(ch_raw)
+                        except Exception:
+                            channel_idx = None
+
+                        if channel_idx is None:
+                            resp = {"ok": False, "error": "missing channel_idx"}
+                            conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                            return
+
+                        mc.enqueue_send_channel(int(channel_idx), text)
+                        resp = {"ok": True, "queued": True, "kind": "chan", "channel_idx": int(channel_idx)}
+
+                    else:
+                        # DM/contacto
+                        if not contact_prefix:
+                            resp = {"ok": False, "error": "missing contact_prefix"}
+                            conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                            return
+
+                        mc.enqueue_send_contact(contact_prefix, text)
+                        resp = {"ok": True, "queued": True, "kind": "contact", "contact_prefix": contact_prefix}
+
                 except Exception as e:
                     resp = {"ok": False, "error": f"meshcore_send_failed: {type(e).__name__}: {e}"}
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v6.2.6.9 py
+Telegram_Bot_Broker_v6.2.6.10 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -1483,6 +1483,46 @@ def _send_via_broker_meshcore(channel_idx: int, text: str, timeout: float = 3.0)
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+def _send_via_broker_meshcore_contact(contact_prefix: str, text: str, timeout: float = 3.0) -> dict:
+    """
+    Envía una orden al broker para que haga TX hacia MeshCore por contacto (DM) usando contact_prefix.
+    Requiere que el broker soporte cmd="MESHCORE_SEND" con params={"kind":"contact","contact_prefix":"...","text":"..."}.
+    Devuelve dict con {"ok": bool, ...}
+    """
+    contact_prefix = (contact_prefix or "").strip()
+    text = (text or "").strip()
+    if not contact_prefix:
+        return {"ok": False, "error": "missing contact_prefix"}
+    if not text:
+        return {"ok": False, "error": "missing text"}
+
+    payload = {
+        "cmd": "MESHCORE_SEND",
+        "params": {
+            "kind": "contact",
+            "contact_prefix": contact_prefix,
+            "text": str(text),
+        }
+    }
+    data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+    try:
+        with socket.create_connection((BROKER_CTRL_HOST or "127.0.0.1", int(BROKER_CTRL_PORT)), timeout=float(timeout)) as s:
+            s.sendall(data)
+            s.settimeout(float(timeout))
+            buf = b""
+            while True:
+                b = s.recv(65536)
+                if not b:
+                    break
+                buf += b
+                if b"\n" in b:
+                    break
+        raw = buf.decode("utf-8", "ignore").strip()
+        if not raw:
+            return {"ok": False, "error": "empty response"}
+        return json.loads(raw)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 def _send_via_broker_queue(text: str, ch: int, dest: str | None = None, ack: bool = False, timeout: float = 3.0) -> dict:
     """
@@ -7807,6 +7847,38 @@ def _parse_mc_channel_token(tok: str) -> int | None:
 # MeshCore: mapping Meshtastic CH -> MeshCore (para mirror /enviar)
 # -------------------------
 
+_MC_PREFIX_RE = re.compile(r"\[MC:(?P<prefix>[0-9a-fA-F]{6,64})\]")
+
+def _extract_mc_contact_prefix_from_text(text: str) -> str | None:
+    """
+    Extrae contact_prefix desde texto tipo:
+      - "[MC:6a18cb3d125b]"
+      - "meshcore:6a18cb3d125b ..."
+      - "prefix=6a18cb3d125b" (si se pega un log)
+      - "6a18cb3d125b" (hex limpio)
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+
+    m = _MC_PREFIX_RE.search(t)
+    if m:
+        return (m.group("prefix") or "").lower()
+
+    m2 = re.search(r"(?i)\bmeshcore\s*:\s*([0-9a-f]{6,64})\b", t)
+    if m2:
+        return (m2.group(1) or "").lower()
+
+    m3 = re.search(r"(?i)\bprefix\s*=\s*([0-9a-f]{6,64})\b", t)
+    if m3:
+        return (m3.group(1) or "").lower()
+
+    if re.fullmatch(r"(?i)[0-9a-f]{6,64}", t):
+        return t.lower()
+
+    return None
+
+
 def _parse_meshcore_channel_map(raw: str | None) -> dict[int, dict]:
     """
     Parsea MESHCORE_CHANNEL_MAP desde .env.
@@ -8050,6 +8122,83 @@ async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"Resultado: <b>KO</b>: {escape(type(e).__name__)}: {escape(str(e))}"
         )
 
+async def enviar_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /enviar_mc_dm <contact_prefix|[MC:prefix]> <texto...>
+    /enviar_mc_dm <texto...>   (si respondes a un mensaje que contiene [MC:...])
+
+    Envía un DM a un contacto MeshCore identificado por pubkey_prefix.
+    """
+    # Si en tu bot ya existe control de cooldown, respétalo aquí también
+    try:
+        if await _abort_if_cooldown(update, context):
+            return
+    except Exception:
+        pass
+
+    try:
+        bump_stat(update.effective_user.id, update.effective_user.username or "", "enviar_mc_dm")
+    except Exception:
+        pass
+
+    msg_obj = update.effective_message
+    if not msg_obj:
+        return  # sin message no se puede responder
+
+    args = context.args or []
+
+    # 1) Texto del mensaje citado (reply)
+    reply_txt = ""
+    try:
+        if msg_obj.reply_to_message:
+            reply_txt = (msg_obj.reply_to_message.text or "") + "\n" + (msg_obj.reply_to_message.caption or "")
+    except Exception:
+        reply_txt = ""
+
+    # 2) Caso 1: si el primer token parece un prefix / [MC:prefix]
+    contact_prefix = None
+    text_tokens = list(args)
+
+    if text_tokens:
+        cp = _extract_mc_contact_prefix_from_text(text_tokens[0])
+        if cp:
+            contact_prefix = cp
+            text_tokens = text_tokens[1:]
+
+    # 3) Caso 2: si no, intentar extraer del mensaje citado
+    if not contact_prefix:
+        contact_prefix = _extract_mc_contact_prefix_from_text(reply_txt or "")
+
+    out_text = " ".join(text_tokens).strip()
+
+    if not contact_prefix or not out_text:
+        await msg_obj.reply_text(
+            "Uso:\n"
+            "  /enviar_mc_dm 6a18cb3d125b <texto...>\n"
+            "  /enviar_mc_dm [MC:6a18cb3d125b] <texto...>\n"
+            "  (o responde a un mensaje con [MC:...] y usa: /enviar_mc_dm <texto...>)"
+        )
+        return
+
+    # 4) Envío por broker-control
+    try:
+        resp = await asyncio.to_thread(_send_via_broker_meshcore_contact, contact_prefix, out_text, 3.0)
+    except Exception as e:
+        await msg_obj.reply_text(f"DM MeshCore: error enviando al broker: {type(e).__name__}: {e}")
+        return
+
+    if resp and resp.get("ok"):
+        # No asumir 'len' si el broker no lo devuelve
+        l = resp.get("len")
+        extra = f"\nLen: {l}" if isinstance(l, int) else ""
+        await msg_obj.reply_text(
+            f"DM MeshCore encolado\nDestino: {contact_prefix}{extra}"
+        )
+    else:
+        err = (resp or {}).get("error") or "sin_detalle"
+        await msg_obj.reply_text(
+            f"No se pudo encolar DM MeshCore: {err}"
+        )
 
 async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
@@ -14784,7 +14933,8 @@ def build_application() -> Application:
 
     app.add_handler(CommandHandler("enviar", enviar_cmd))
     app.add_handler(CommandHandler("enviar_mc", enviar_mc_cmd))
-
+    app.add_handler(CommandHandler(["enviar_mc_dm", "dm_mc"], enviar_mc_dm_cmd))
+    
     app.add_handler(CommandHandler("enviar_ack", enviar_ack_cmd))
     app.add_handler(CommandHandler("escuchar", escuchar_cmd))
     app.add_handler(CommandHandler("parar_escucha", parar_escucha_cmd))
