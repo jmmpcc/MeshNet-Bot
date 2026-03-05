@@ -210,6 +210,53 @@ docker ps
 
 ---
 
+### 7.4 Reducir escrituras en la SD (importante en 24/7)
+
+Editar:
+
+```bash
+sudo nano /etc/systemd/journald.conf
+```
+Cambiar:
+```bash
+Storage=volatile
+```
+Reiniciar journald:
+```bash
+sudo systemctl restart systemd-journald
+```
+Otra optimización útil:
+
+Mover logs temporales a RAM.
+
+Editar:
+```bash
+sudo nano /etc/fstab
+```
+Añadir:
+```bash
+tmpfs /tmp tmpfs defaults,noatime,nosuid,size=100m 0 0
+tmpfs /var/tmp tmpfs defaults,noatime,nosuid,size=50m 0 0
+```
+
+### 7.5 Desactivar swap (importante en 24/7)
+
+Editar:
+```bash
+sudo nano /etc/dphys-swapfile
+```
+Cambiar:
+```bash
+CONF_SWAPSIZE=0
+```
+Aplicar:
+```bash
+sudo systemctl disable dphys-swapfile
+sudo systemctl stop dphys-swapfile
+```
+
+---
+
 ## 8) Descargar el proyecto MeshNet
 
 Instala git si no está:
