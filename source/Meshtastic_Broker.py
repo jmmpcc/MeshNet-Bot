@@ -4149,11 +4149,7 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
     if t == "usb":
         dev = (os.getenv("MESH_USB_PORT", "") or "").strip()
         if not dev:
-            raise RuntimeError("MESH_TRANSPORT=usb pero falta MESH_USB_PORT (ej. /dev/ttyACM0).")
-        try:
-            baud = int((os.getenv("MESH_USB_BAUD", "115200") or "115200").strip())
-        except Exception:
-            baud = 115200
+            raise RuntimeError("MESH_TRANSPORT=usb pero falta MESH_USB_PORT (ej. /dev/ttyUSB0).")
 
         try:
             from meshtastic.serial_interface import SerialInterface
@@ -4161,22 +4157,37 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
             raise RuntimeError(f"No se pudo importar SerialInterface: {e}")
 
         if verbose:
-            print(f"[receiver] Transporte USB/Serial → {dev} @ {baud}", flush=True)
+            print(f"[receiver] Transporte USB/Serial → {dev}", flush=True)
 
-        # SerialInterface acepta device y (según versión) baudrate/timeout.
-        # Se pasa baudrate de forma compatible vía kwargs; si tu versión no lo soporta, ignora.
+        iface = None
         try:
-            return SerialInterface(dev, baudrate=baud)
-        except TypeError:
-            return SerialInterface(dev)
+            # API correcta de Meshtastic
+            iface = SerialInterface(devPath=dev)
 
-    # Default: tcp (modo actual)
+            # esperar inicialización del nodo
+            for _ in range(20):
+                try:
+                    if iface.localNode:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.2)
+
+            return iface
+
+        except Exception:
+            try:
+                if iface is not None:
+                    iface.close()
+            except Exception:
+                pass
+            raise
+
+    # Default: tcp
     host_for_iface = f"{host}:{port}" if port and port != 4403 else host
     if verbose:
         print(f"[receiver] Transporte TCP → {host}:{port}", flush=True)
     return TCPInterface(hostname=host_for_iface)
-
-
 
 class InterfaceManager:
     """
@@ -4401,23 +4412,37 @@ class InterfaceManager:
 
 # === MODIFICADA: bucle del pool con anti-reentradas + lock interproceso (sin depender de self.port) ===
     def _loop(self):
-        import threading, time
+        """
+        Bucle principal de conexión/reconexión de la interfaz Meshtastic.
+
+        Soporta:
+        - TCP  (WiFi/LAN)
+        - BLE  (Bluetooth)
+        - USB  (SerialInterface)
+
+        Comportamiento 24/7:
+        - Un único intento de conexión en vuelo.
+        - Lock interproceso por transporte para evitar dobles aperturas.
+        - Limpieza segura de iface previa antes de reconectar.
+        - Recuperación específica USB cuando el propio proceso deja el puerto bloqueado
+            tras un timeout o una apertura parcial.
+        """
+        import threading
+        import time
+        import os
+
         backoff = [2, 4, 8, 12, 20, 30, 45, 60]
         idx = 0
 
-        # Anti-reentradas (un solo connect en vuelo)
         if not hasattr(self, "_connecting"):
             self._connecting = threading.Event()
 
-        # Resolver host/port de forma robusta
         host = getattr(self, "host", None) or str(globals().get("RUNTIME_MESH_HOST") or "127.0.0.1")
         try:
             port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
         except Exception:
             port = 4403
 
-        # Lock interproceso por host:port
-        #lock_name = f"{host}:{port}"
         lock_name = _mesh_transport_id(host, port)
         if not hasattr(self, "_ip_lock"):
             self._ip_lock = SingleInstanceLock(lock_name)
@@ -4427,36 +4452,44 @@ class InterfaceManager:
             if not self._reconnect_event.is_set():
                 continue
 
-            # Si está pausado (exclusiva CLI), no conectar
+            # Si está pausado, no conectar
             if hasattr(self, "_paused") and self._paused.is_set():
                 time.sleep(0.2)
                 continue
 
-            # Si ya hay un connect en curso, espera
+            # Si ya hay un connect en curso, esperar
             if self._connecting.is_set():
                 time.sleep(0.1)
                 continue
 
-            # Consumimos la señal de reconexión
+            # Consumimos la señal
             self._reconnect_event.clear()
 
             # Cierre limpio de iface previa
             try:
                 with self._lock:
                     if getattr(self, "iface", None):
-                        try: self.iface.close()
-                        except Exception: pass
+                        try:
+                            self.iface.close()
+                        except Exception:
+                            pass
                         self.iface = None
             except Exception:
                 pass
 
-            # Respetar cooldown (si lo usas)
-            if getattr(self, "_cooldown_until", 0) > time.time():
-                time.sleep(min(1.0, self._cooldown_until - time.time()))
+            # Respeta cooldown si existe
+            try:
+                if getattr(self, "_cooldown_until", 0) > time.time():
+                    time.sleep(min(1.0, self._cooldown_until - time.time()))
+            except Exception:
+                pass
 
             self._connecting.set()
+            got_lock = False
+            new_iface = None
+
             try:
-                # Intentar adquirir el lock global
+                # Lock interproceso
                 got_lock = self._ip_lock.acquire(timeout_s=2.0)
                 if not got_lock:
                     if getattr(self, "verbose", False):
@@ -4465,78 +4498,126 @@ class InterfaceManager:
                     self._reconnect_event.set()
                     continue
 
-                # Crear TCPInterface SIEMPRE con host+port resueltos
-                try:
-                    if getattr(self, "verbose", False):
-                        print(f"[receiver] Conectando a Meshtastic en {host}:{port}…", flush=True)
-                        host_for_iface = f"{host}:{port}" if port and port != 4403 else host
-                        #new_iface = TCPInterface(hostname=host_for_iface)
-                        new_iface = _create_meshtastic_interface(host=host, port=port, verbose=getattr(self, "verbose", False))
+                # Log correcto del intento
+                if getattr(self, "verbose", False):
+                    print(f"[receiver] Conectando a Meshtastic en {host}:{port}…", flush=True)
 
-                except Exception as e:
-                    # liberar lock y backoff
-                    try: self._ip_lock.release()
-                    except Exception: pass
-                    if getattr(self, "verbose", False):
-                        print(f"[receiver] Fallo al crear TCPInterface: {e}", flush=True)
-                    time.sleep(backoff[min(idx, len(backoff)-1)])
-                    idx += 1
-                    self._reconnect_event.set()
-                    continue
+                # Crear interfaz según transporte
+                new_iface = _create_meshtastic_interface(
+                    host=str(host),
+                    port=int(port),
+                    verbose=getattr(self, "verbose", False),
+                )
 
                 # Conexión OK
                 idx = 0
-                try:
-                    with self._lock:
-                        self.iface = new_iface
-                        try:
-                            # engancha tus handlers como ya hacías
-                            self._attach_handlers_locked()
-                        except Exception:
-                            pass
-                except Exception:
-                    # si falló, cerramos iface y liberamos lock
-                    try: new_iface.close()
-                    except Exception: pass
-                    try: self._ip_lock.release()
-                    except Exception: pass
-                    self._reconnect_event.set()
-                    continue
+
+                with self._lock:
+                    self.iface = new_iface
+                    try:
+                        self._attach_handlers_locked()
+                    except Exception:
+                        pass
 
                 if getattr(self, "verbose", False):
                     print("ℹ️ Broker: conectado al nodo Meshtastic", flush=True)
 
                 try:
-                    if hasattr(self, "_on_connect_ok"): self._on_connect_ok()
+                    if hasattr(self, "_on_connect_ok"):
+                        self._on_connect_ok()
                 except Exception:
                     pass
 
-                # Mantener mientras no haya motivo para reconectar
-                while self._want_run and getattr(self, "iface", None) is not None and not getattr(self, "_paused", threading.Event()).is_set():
+                # Mantener la conexión mientras siga viva
+                while (
+                    self._want_run
+                    and getattr(self, "iface", None) is not None
+                    and not getattr(self, "_paused", threading.Event()).is_set()
+                ):
                     time.sleep(0.25)
+
+            except Exception as e:
+                if getattr(self, "verbose", False):
+                    print(f"[receiver] Fallo al crear interface ({_mesh_transport()}): {e}", flush=True)
+
+                # Recuperación específica USB cuando el puerto queda bloqueado
+                try:
+                    if _mesh_transport() == "usb":
+                        dev = (os.getenv("MESH_USB_PORT", "") or "").strip()
+                        emsg = (str(e) or "").lower()
+
+                        if dev and ("exclusively lock port" in emsg or "resource temporarily unavailable" in emsg):
+                            who = _debug_who_holds_serial(dev)
+                            if who:
+                                print(f"[receiver] USB ocupado: {who}", flush=True)
+
+                                # Si el puerto lo está reteniendo ESTE proceso, liberamos iface limpia
+                                try:
+                                    mypid = os.getpid()
+                                    if f"pid={mypid} " in (who or ""):
+                                        print(f"[receiver] USB ocupado por ESTE proceso (pid={mypid}). Liberando iface de forma segura...", flush=True)
+
+                                        try:
+                                            with self._lock:
+                                                old_iface = getattr(self, "iface", None)
+                                                self.iface = None
+
+                                            if old_iface is not None:
+                                                try:
+                                                    old_iface.close()
+                                                except Exception:
+                                                    pass
+                                        except Exception:
+                                            pass
+
+                                        # Dar tiempo a pyserial/hilo lector a soltar el dispositivo
+                                        time.sleep(0.8)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
+                # Cerrar iface parcial si llegó a construirse
+                try:
+                    if new_iface is not None:
+                        try:
+                            new_iface.close()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                time.sleep(backoff[min(idx, len(backoff) - 1)])
+                idx += 1
+                self._reconnect_event.set()
 
             finally:
                 self._connecting.clear()
-                try: self._ip_lock.release()
-                except Exception: pass
+                try:
+                    if got_lock:
+                        self._ip_lock.release()
+                except Exception:
+                    pass
 
-            # Cierre y call de _on_disconnect
+            # Si salimos del bucle de mantenimiento, cerrar iface actual y notificar desconexión
             try:
                 with self._lock:
                     if getattr(self, "iface", None):
-                        try: self.iface.close()
-                        except Exception: pass
+                        try:
+                            self.iface.close()
+                        except Exception:
+                            pass
                         self.iface = None
             except Exception:
                 pass
+
             try:
-                if hasattr(self, "_on_disconnect"): self._on_disconnect()
+                if hasattr(self, "_on_disconnect"):
+                    self._on_disconnect()
             except Exception:
                 pass
 
-            # Preparar siguiente intento (otro hilo volverá a setear el evento si procede)
             self._reconnect_event.set()
-
 
     # ===================== Receptor PubSub =====================
 
