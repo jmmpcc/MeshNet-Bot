@@ -3,4 +3,4 @@ httpx~=0.25.2
 folium>=0.16.0
 python-telegram-bot[job-queue]>=20.7,<21
 meshtastic>=2.7.4
-
+meshcore>=2.2.28
