@@ -3210,6 +3210,58 @@ def _meshcore_contacts_via_ctrl(limit: int = 80, timeout: float = 3.0) -> dict:
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+def _wait_broker_resumed(max_wait_s: float = 8.0) -> tuple[bool, str]:
+    """
+    Espera a que el broker confirme que ya no está en 'paused'.
+
+    Devuelve:
+      - (True, "running") si confirma reanudación operativa
+      - (True, "<estado>") si responde con otro estado no bloqueante
+      - (False, "<motivo>") si no se pudo confirmar
+    """
+    t0 = time.time()
+    last_status = ""
+    last_error = ""
+
+    while time.time() - t0 < max_wait_s:
+        try:
+            st = _broker_ctrl("BROKER_STATUS", None, timeout=2.5)
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
+            time.sleep(0.20)
+            continue
+
+        if not isinstance(st, dict):
+            last_error = "respuesta no válida"
+            time.sleep(0.20)
+            continue
+
+        if not st.get("ok"):
+            last_error = str(st.get("error") or "BROKER_STATUS no OK")
+            time.sleep(0.20)
+            continue
+
+        status = str(st.get("status") or "").strip().lower()
+        last_status = status
+
+        if status in ("running", "resumed", "active", "connected", "idle"):
+            return True, status
+
+        if status == "paused":
+            time.sleep(0.20)
+            continue
+
+        if status:
+            return True, status
+
+        time.sleep(0.20)
+
+    if last_status:
+        return False, last_status
+    if last_error:
+        return False, last_error
+    return False, "timeout"
+
 def _broker_ctrl(cmd: str, params: dict | None = None, timeout: float = 3.0) -> dict:
     """
     Envía un comando JSON al BacklogServer del broker:
@@ -10581,22 +10633,43 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Pausa/reanuda usando el contexto robusto ya existente
     out_text = ""
+    broker_resume_msg = ""
+
     try:
         with with_broker_paused(max_wait_s=8.0):
             out_text = await asyncio.to_thread(_run_cli_traceroute_blocking)
     finally:
         await update.effective_message.reply_text("▶️ Reanudando conexión…")
 
+        ok_resumed, resumed_info = await asyncio.to_thread(_wait_broker_resumed, 8.0)
+
+        if ok_resumed:
+            if resumed_info == "running":
+                broker_resume_msg = "✅ Broker reanudado y operativo."
+            else:
+                broker_resume_msg = f"✅ Broker reanudado. Estado actual: {resumed_info}"
+        else:
+            if resumed_info == "paused":
+                broker_resume_msg = "❗ El broker sigue en pausa. La reanudación no se ha confirmado."
+            elif resumed_info == "timeout":
+                broker_resume_msg = "⚠️ Reanudación solicitada, pero no se pudo confirmar el estado final del broker."
+            else:
+                broker_resume_msg = f"⚠️ Reanudación solicitada, pero no confirmada: {resumed_info}"
+
     if not out_text:
         await update.effective_message.reply_text("⏰ Traceroute sin respuesta en el tiempo límite.")
+        if broker_resume_msg:
+            await update.effective_message.reply_text(broker_resume_msg)
         return
 
-    # Normaliza salida para evitar “ruido” raro (sin inventar datos)
-    # Si quieres, aquí puedes mejorar parseo más adelante sin romper nada.
     await update.effective_message.reply_text(
         f"🛰️ Traceroute (CLI) → {target}\n{out_text}"
     )
 
+    if broker_resume_msg:
+        await update.effective_message.reply_text(broker_resume_msg)
+        
+        
 # === NUEVO HANDLER: alias corto /rt que reutiliza /traceroute ===
 async def rt_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
