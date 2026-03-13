@@ -3155,25 +3155,28 @@ class _BacklogServer(threading.Thread):
                 except Exception:
                     limit = 80
 
-                eng = globals().get("MESHCORE_ENGINE")  # (en tu broker ya existe esta global)
+                eng = globals().get("MESHCORE_ENGINE")
                 if not eng:
                     resp = {"ok": False, "error": "meshcore_disabled"}
                 else:
                     try:
-                        # Si tu engine ya tiene un método, úsalo.
+                        # Si el engine ya expone list_contacts(), usarlo directamente
                         if hasattr(eng, "list_contacts") and callable(getattr(eng, "list_contacts")):
                             contacts = eng.list_contacts(limit=limit)
                         else:
-                            # Fallback best-effort: inspección del objeto meshcore conectado si existe.
+                            # Fallback best-effort: inspección del objeto meshcore conectado
                             mc = getattr(eng, "_meshcore", None) or getattr(eng, "_mc", None) or getattr(eng, "mc", None)
                             contacts = []
+
                             if mc is not None:
                                 try:
                                     items = mc.get_contacts() if hasattr(mc, "get_contacts") else getattr(mc, "contacts", [])
                                 except Exception:
                                     items = []
+
                                 if isinstance(items, dict):
                                     items = list(items.values())
+
                                 for c in (items or []):
                                     try:
                                         if isinstance(c, dict):
@@ -3194,12 +3197,14 @@ class _BacklogServer(threading.Thread):
                                             "name": (str(name).strip() if name is not None else "") or None,
                                             "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
                                         })
+
                                         if len(contacts) >= limit:
                                             break
+
                                     except Exception:
                                         continue
 
-                        # Dedup
+                        # Deduplicar por prefix
                         seen = set()
                         uniq = []
                         for d in contacts:
@@ -3210,9 +3215,13 @@ class _BacklogServer(threading.Thread):
                             uniq.append(d)
 
                         resp = {"ok": True, "count": len(uniq), "contacts": uniq}
+
                     except Exception as e:
                         resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                return
+            
             # --- NUEVO: envío de texto vía lado B del bridge ---
             elif cmd == "SEND_TEXT_VIA":
                 params = req.get("params") or {}
