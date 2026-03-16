@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v6.2.6.11 py
+Telegram_Bot_Broker_v7.0.0.0 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -328,6 +328,174 @@ from contextlib import contextmanager
 
 # --- Necesario para cálculo de distancias en TODAS las funciones ---
 import math
+
+# === [NUEVO] Selector de transporte Mesh del bot (alineado con el broker) ===
+
+def _mesh_transport() -> str:
+    """
+    Lee el transporte del nodo principal desde .env.
+
+    Valores soportados:
+      - tcp
+      - usb
+      - bluetooth / ble
+
+    El objetivo es que el bot use exactamente la misma lógica de selección
+    que el broker para CLI, prefetch y chequeos de estado, sin romper TCP.
+    """
+    return (os.getenv("MESH_TRANSPORT", "tcp") or "tcp").strip().lower()
+
+
+def _mesh_cli_target_args() -> list[str]:
+    """
+    Devuelve los argumentos base para la CLI 'meshtastic' según transporte.
+
+    Ejemplos:
+      - TCP: ['--host', '192.168.1.201']
+      - USB: ['--port', '/dev/ttyUSB0']
+      - BLE: ['--ble', 'AA:BB:CC:DD:EE:FF']
+    """
+    t = _mesh_transport()
+
+    if t == "usb":
+        dev = (os.getenv("MESH_USB_PORT", "") or "").strip()
+        if not dev:
+            raise RuntimeError("MESH_TRANSPORT=usb pero falta MESH_USB_PORT (ej. /dev/ttyUSB0).")
+        return ["--port", dev]
+
+    if t in ("bluetooth", "ble"):
+        bt = (os.getenv("MESH_BT_ADDR", "") or "").strip()
+        if not bt:
+            raise RuntimeError("MESH_TRANSPORT=bluetooth pero falta MESH_BT_ADDR.")
+        return ["--ble", bt]
+
+    host = (os.getenv("MESHTASTIC_HOST", "") or "").strip()
+    if not host:
+        raise RuntimeError("MESH_TRANSPORT=tcp pero falta MESHTASTIC_HOST.")
+    return ["--host", host]
+
+
+def _mesh_runtime_host() -> str:
+    """
+    Valor descriptivo para logs/estado.
+    En TCP devuelve MESHTASTIC_HOST.
+    En USB devuelve el path del puerto serie.
+    En BLE devuelve la MAC.
+    """
+    t = _mesh_transport()
+    if t == "usb":
+        return (os.getenv("MESH_USB_PORT", "") or "").strip() or "usb:?"
+    if t in ("bluetooth", "ble"):
+        return (os.getenv("MESH_BT_ADDR", "") or "").strip() or "ble:?"
+    return (os.getenv("MESHTASTIC_HOST", "") or "").strip() or "tcp:?"
+
+
+def _mesh_runtime_port() -> int:
+    """
+    Puerto lógico para compatibilidad con código existente.
+    - TCP mantiene 4403 o el que se haya definido.
+    - USB/BLE no usan puerto TCP real, se devuelve 0.
+    """
+    if _mesh_transport() != "tcp":
+        return 0
+    try:
+        return int(os.getenv("MESHTASTIC_PORT", "4403"))
+    except Exception:
+        return 4403
+
+
+def _mesh_is_tcp() -> bool:
+    """True solo cuando el transporte activo del bot es TCP."""
+    return _mesh_transport() == "tcp"
+
+def _mesh_api_host() -> str | None:
+    """
+    Host válido para la API/pool persistente SOLO cuando el transporte real es TCP.
+    En USB/BLE devuelve None para evitar aperturas erróneas de sockets.
+    """
+    if not _mesh_is_tcp():
+        return None
+    host = (os.getenv("MESHTASTIC_HOST", "") or "").strip()
+    return host or None
+
+
+def _mesh_api_port() -> int:
+    """
+    Puerto de la API persistente SOLO para TCP.
+    En USB/BLE devuelve 0.
+    """
+    if not _mesh_is_tcp():
+        return 0
+    try:
+        return int(os.getenv("MESHTASTIC_PORT", "4403"))
+    except Exception:
+        return 4403
+
+
+def _mesh_api_enabled() -> bool:
+    """
+    True únicamente cuando:
+      - el transporte es TCP, y
+      - no está deshabilitado el uso TCP directo del bot.
+    """
+    try:
+        disabled = bool(DISABLE_BOT_TCP)
+    except Exception:
+        disabled = False
+    return _mesh_is_tcp() and not disabled
+
+
+def _mesh_api_list_nodes(max_n: int = 50, timeout_sec: float = 5.0, assume_hops_zero: bool = False) -> list[dict]:
+    """
+    Wrapper seguro para api_list_nodes().
+    En USB/BLE devuelve [] en vez de intentar abrir sockets TCP.
+    """
+    if not _mesh_api_enabled():
+        return []
+
+    host = _mesh_api_host()
+    port = _mesh_api_port()
+    if not host or port <= 0:
+        return []
+
+    try:
+        return api_list_nodes(
+            host=host,
+            port=port,
+            max_n=max_n,
+            timeout_sec=timeout_sec,
+            assume_hops_zero=assume_hops_zero
+        ) or []
+    except TypeError:
+        # Compatibilidad por si la firma local no acepta todos los kwargs
+        try:
+            return api_list_nodes(host, max_n=max_n, timeout_sec=timeout_sec) or []
+        except Exception:
+            return []
+    except Exception:
+        return []
+
+
+def _mesh_api_get_neighbors() -> dict:
+    """
+    Wrapper seguro para api_get_neighbors_via_pool().
+    En USB/BLE devuelve {}.
+    """
+    if not _mesh_api_enabled():
+        return {}
+
+    host = _mesh_api_host()
+    port = _mesh_api_port()
+    if not host or port <= 0:
+        return {}
+
+    try:
+        return api_get_neighbors_via_pool(host, port) or {}
+    except Exception:
+        return {}
+
+
+
 
 # ========= Helpers BBS BOT: Acceso a noticias, boletines de la BBS por el BOT ==========
 
@@ -2476,23 +2644,37 @@ from meshtastic_api_adapter import api_list_nodes  # NUEVO import
 
 def _prefetch_nodes_on_boot(host: str, port: int = 4403, max_n: int = 50, timeout: float = 6.0):
     """
-    Llama al API (TCPInterface efímero), cierra bien el socket y devuelve la lista de nodos.
-    No guarda estado global: el que llama decide si cachea algo.
+    Prefetch inicial de nodos.
+    - En TCP usa la API efímera.
+    - En USB/BLE no intenta abrir sockets TCP y devuelve [] de forma segura.
     """
+    if not _mesh_api_enabled():
+        print(
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ℹ️ Prefetch API inicial omitido "
+            f"(transporte={_mesh_transport()}, api_enabled=False).",
+            flush=True
+        )
+        return []
+
     try:
-        nodes = api_list_nodes(
-            host=host,
-            port=port,
+        nodes = _mesh_api_list_nodes(
             max_n=max_n,
             timeout_sec=timeout,
             assume_hops_zero=True
         )
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Prefetch API inicial: {len(nodes)} nodos (pool aún no conectado).", flush=True)
+        print(
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Prefetch API inicial: "
+            f"{len(nodes)} nodos (pool aún no conectado).",
+            flush=True
+        )
         return nodes
     except Exception as e:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Prefetch API inicial falló: {type(e).__name__}: {e}", flush=True)
+        print(
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Prefetch API inicial falló: "
+            f"{type(e).__name__}: {e}",
+            flush=True
+        )
         return []
-
 
 def _extract_channel_and_strip(s: str) -> tuple[int, str]:
     """
@@ -2524,20 +2706,21 @@ def _fmt_local(dt: datetime) -> str:
 # === [NUEVO] helper: mapa de últimos vistos solo-API (!id -> minutos) ===
 def _build_last_seen_map_api_only(max_n: int = 250, timeout_sec: float = 5.0) -> dict[str, int]:
     """
-    Devuelve dict {'!id': last_heard_min} usando únicamente la API.
-    No lee ni cae a nodos.txt.
+    Devuelve {'!id': last_heard_min} usando únicamente la API cuando el transporte es TCP.
+    En USB/BLE devuelve {} sin intentar sockets TCP.
     """
     last_seen: dict[str, int] = {}
-    try:
-        rows = api_list_nodes(MESHTASTIC_HOST, max_n=max_n, timeout_sec=timeout_sec) or []
-        for r in rows:
+
+    rows = _mesh_api_list_nodes(max_n=max_n, timeout_sec=timeout_sec)
+    for r in rows:
+        try:
             nid = r.get("id")
             mins = r.get("last_heard_min")
             if isinstance(nid, str) and nid and mins is not None:
                 last_seen[nid] = int(mins)
-    except Exception:
-        # Sin fallback: si la API no lo da, se quedará sin minuto (¿?)
-        pass
+        except Exception:
+            pass
+
     return last_seen
 
 # === [NUEVO] helper: últimos vistos SOLO-API con carencia vía broker (sin nodos.txt) ===
@@ -2547,92 +2730,80 @@ def _build_last_seen_map_api_with_broker_fallback(
     lookback_hours: int = 12,
 ) -> dict[str, int]:
     """
-    Devuelve {'!id': last_heard_min}. Estrategia:
-      1) API-first: api_list_nodes(...).
-      2) Carencia (solo para los que quedaron sin minutos):
-         consulta BacklogServer del broker (TEXT_MESSAGE_APP) en una ventana de lookback
-         y computa minutos desde el último rx_time por cada '!id' (usando 'from').
-    No lee nodos.txt.
+    Devuelve {'!id': last_heard_min}.
+
+    Estrategia:
+      1) Si hay API TCP disponible, usa api_list_nodes().
+      2) Si faltan minutos para algunos vecinos directos, intenta completarlos vía backlog broker.
+      3) En USB/BLE no intenta API TCP; simplemente devuelve lo que pueda completar vía broker.
     """
     last_seen: dict[str, int] = {}
 
-    # 1) API-first
-    try:
-        rows = api_list_nodes(MESHTASTIC_HOST, max_n=max_n, timeout_sec=timeout_sec) or []
-        for r in rows:
+    # 1) API-first solo cuando procede
+    rows = _mesh_api_list_nodes(max_n=max_n, timeout_sec=timeout_sec)
+    for r in rows:
+        try:
             nid = r.get("id")
             mins = r.get("last_heard_min")
             if isinstance(nid, str) and nid and mins is not None:
                 last_seen[nid] = int(mins)
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    # ¿Hay pendientes sin minuto? si no, terminamos
-    # (pero dejamos opción de enriquecer cualquiera si lo prefieres)
+    # 2) Pendientes desde tabla de vecinos API/pool si existe
     pending_ids: set[str] = set()
-    try:
-        # Si además tenemos vecinos del API, intentamos cubrirlos con backlog si faltan minutos
-        neigh = api_get_neighbors_via_pool(MESHTASTIC_HOST, 4403) or {}
-        for raw_id in neigh.keys():
-            try:
-                nid = raw_id if str(raw_id).startswith("!") else f"!{int(raw_id):08x}"
-            except Exception:
-                nid = str(raw_id)
-            if nid not in last_seen:
-                pending_ids.add(nid)
-    except Exception:
-        pass
+    neigh = _mesh_api_get_neighbors()
+    for raw_id in neigh.keys():
+        try:
+            nid = raw_id if str(raw_id).startswith("!") else f"!{int(raw_id):08x}"
+        except Exception:
+            nid = str(raw_id)
+        if nid not in last_seen:
+            pending_ids.add(nid)
 
     if not pending_ids:
         return last_seen
 
-    # 2) Carencia vía broker backlog
+    # 3) Completar vía backlog del broker
     try:
         since_ts = int(time.time() - int(lookback_hours) * 3600)
-        # Usa el helper ya presente en este bot
-        resp = fetch_backlog_from_broker(
-            host=BROKER_HOST or "127.0.0.1",
-            backlog_port=BACKLOG_PORT,
-            since_ts=since_ts,
-            channel=None,            # todos los canales
-            limit=5000,              # ventana razonable
-            timeout=10.0
-        )
-        if not resp.get("ok"):
-            return last_seen
+        res = _broker_ctrl("FETCH_BACKLOG", {
+            "since_ts": since_ts,
+            "limit": 2000,
+            "portnums": ["TEXT_MESSAGE_APP"]
+        }, timeout=4.0)
 
-        data = resp.get("data") or []
-        if not isinstance(data, list):
-            return last_seen
+        items = []
+        if isinstance(res, dict) and res.get("ok"):
+            items = res.get("items") or res.get("data") or []
 
-        # Último rx_time por '!id' (preferimos 'from')
-        latest_by_id: dict[str, int] = {}
-        for obj in data:
+        now_ts = int(time.time())
+        for obj in items or []:
             try:
-                nid_from = obj.get("from")
-                rx_time = obj.get("rx_time")
-                if not (isinstance(nid_from, str) and nid_from.startswith("!")):
+                fr = obj.get("from") or obj.get("fromId") or obj.get("from_id")
+                if not fr:
                     continue
-                if not isinstance(rx_time, (int, float)):
+                nid = str(fr)
+                if not nid.startswith("!"):
                     continue
-                cur = latest_by_id.get(nid_from)
-                if cur is None or int(rx_time) > cur:
-                    latest_by_id[nid_from] = int(rx_time)
-            except Exception:
-                continue
+                if nid not in pending_ids:
+                    continue
 
-        now = int(time.time())
-        for nid in pending_ids:
-            ts = latest_by_id.get(nid)
-            if ts:
-                mins = max(0, int((now - ts) / 60))
-                last_seen[nid] = mins
+                ts = obj.get("rx_time") or obj.get("ts") or obj.get("timestamp") or 0
+                ts = int(float(ts)) if ts else 0
+                if ts <= 0:
+                    continue
+
+                mins = max(0, int((now_ts - ts) / 60))
+                old = last_seen.get(nid)
+                if old is None or mins < old:
+                    last_seen[nid] = mins
+            except Exception:
+                pass
     except Exception:
-        # Silencioso: si el broker no está o no hay backlog, no rompemos
         pass
 
     return last_seen
-
 
 def _friendly_node(nid: str, nodes_map: dict | None) -> str:
     """
@@ -3359,14 +3530,11 @@ def _run_cli_nodes_with_retry(
     backoff_sec: int = 2,
 ) -> tuple[bool, list[str], str]:
     """
-    Ejecuta la CLI 'meshtastic --host <host> --nodes' con reintentos y sin usar 'shell=True'
-    (evita errores de quoting en Windows).
-    Estrategia:
-      1) Intenta: [sys.executable, "-m", "meshtastic", "--host", host, "--nodes"]
-      2) Si falla, intenta: ["meshtastic", "--host", host, "--nodes"]
-    Devuelve: (ok, lines, reason) con 'lines' como lista de líneas no vacías.
+    Ejecuta la CLI 'meshtastic ... --nodes' con reintentos.
+    Ya no asume TCP: usa el selector de transporte común del bot.
+    El parámetro 'host' se mantiene por compatibilidad con las llamadas existentes,
+    pero en USB/BLE no se utiliza.
     """
-
     import sys
     import os
     import subprocess
@@ -3377,24 +3545,26 @@ def _run_cli_nodes_with_retry(
 
     def _try_once(timeout_s: int) -> tuple[bool, list[str], str]:
         last_reason = "unknown"
-        # Preferir 'python -m meshtastic' (más estable en Windows)
+
+        try:
+            target_args = _mesh_cli_target_args()
+        except Exception as e:
+            return False, [], f"{type(e).__name__}: {e}"
+
         variants: list[list[str]] = [
-            [sys.executable or "python", "-m", "meshtastic", "--host", host, "--nodes"],
-            ["meshtastic", "--host", host, "--nodes"],
+            [sys.executable or "python", "-m", "meshtastic", *target_args, "--nodes"],
+            ["meshtastic", *target_args, "--nodes"],
         ]
 
-        # Evitar ventanas en Windows
         popen_kwargs = {}
         if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
             popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
-        # Asegurar encoding consistente para la CLI
         env = os.environ.copy()
         env.setdefault("PYTHONIOENCODING", "utf-8")
 
         for argv in variants:
             try:
-                # ¡OJO!: shell=False y argv como lista → sin problemas de quoting
                 cp = subprocess.run(
                     argv,
                     shell=False,
@@ -3412,18 +3582,16 @@ def _run_cli_nodes_with_retry(
                     lines = _normalize_lines(out) or _normalize_lines(err)
                     if lines:
                         return True, lines, ""
-                    else:
-                        last_reason = "empty output"
+                    last_reason = "empty output"
                 else:
-                    # Razón con algo de contexto
                     last_reason = f"rc={cp.returncode}: {(err or out or '').strip() or 'no output'}"
             except subprocess.TimeoutExpired:
                 last_reason = "timeout"
             except FileNotFoundError as e:
-                # Este suele saltar si el entry-point 'meshtastic' no está en PATH
                 last_reason = f"not found: {e}"
             except Exception as e:
                 last_reason = f"{type(e).__name__}: {e}"
+
         return False, [], last_reason
 
     timeout = int(first_timeout)
@@ -3432,15 +3600,16 @@ def _run_cli_nodes_with_retry(
         ok, lines, reason = _try_once(timeout)
         if ok:
             return True, lines, ""
-        # backoff lineal suave
-        try:
+        if attempt < max(1, int(attempts)) - 1:
             time.sleep(max(0, int(backoff_sec)))
-        except Exception:
-            pass
-        timeout = min(timeout + backoff_sec, first_timeout + 10)
+            timeout += max(4, int(backoff_sec))
+    return False, [], reason or "unknown"
 
-    return False, [], (reason or "failed after retries")
 # ===================== /MODIFICADA =====================
+
+
+
+
 # === NUEVO: constructor robusto de mapping (!id/alias -> !id canónico) ===
 def build_nodes_mapping_from_list(rows) -> dict:
     """
@@ -3677,7 +3846,7 @@ def _run_cli_nodes_with_timeout(host: str, timeout_sec: int = 12) -> Tuple[bool,
     Ejecuta `meshtastic --host <host> --nodes` con timeout duro y kill si excede.
     Devuelve (ok, lines, reason).
     """
-    cmd = ["meshtastic", "--host", host, "--nodes"]
+    cmd = ["meshtastic", *_mesh_cli_target_args(), "--nodes"]
     try:
         print(f"⏳ Ejecutando (CLI): {' '.join(cmd)} (timeout {timeout_sec}s)")
         cp = subprocess.Popen(
@@ -4101,14 +4270,37 @@ def bump_stat(user_id: int, username: str, command: str) -> None:
 # -------------------------
 
 def run_command(args: List[str], timeout: int = TIMEOUT_CMD_S) -> str:
+    """
+    Ejecuta la CLI Meshtastic reutilizando la selección de transporte.
+    Regla:
+      - Si 'args' ya contiene un selector explícito (--host/--port/--ble), se respeta.
+      - Si no lo contiene, se antepone automáticamente según MESH_TRANSPORT.
+    """
     exe = MESHTASTIC_EXE or "meshtastic"
-    cmd = [exe] + args
+
+    has_explicit_target = any(
+        a in ("--host", "--port", "--ble")
+        for a in (args or [])
+    )
+
+    try:
+        prefix = [] if has_explicit_target else _mesh_cli_target_args()
+        cmd = [exe] + prefix + list(args)
+    except Exception as e:
+        return f"❗ Error preparando CLI Meshtastic: {e}"
+
     log(f"💻 Ejecutando: {shlex.join(cmd)}")
+
     try:
         import subprocess
         result = subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=timeout, text=True, encoding="utf-8", errors="ignore"
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            text=True,
+            encoding="utf-8",
+            errors="ignore"
         )
         out = (result.stdout or "").strip()
         if not out:
@@ -4203,7 +4395,7 @@ def sync_nodes_and_save(n_max: int = 20) -> None:
     Sincroniza nodos vía CLI 'meshtastic --host ... --nodes' y guarda el resultado crudo en NODES_FILE.
     Durante la ejecución de la CLI, PAUSA el broker como en traceroute_cmd usando 'with_broker_paused(...)'.
     """
-    args = ["--host", MESHTASTIC_HOST, "--nodes"]
+    args = [*_mesh_cli_target_args(), "--nodes"]
 
     try:
         # ⏸️ Pausar broker IO (idéntico espíritu a traceroute_cmd)
@@ -4241,12 +4433,14 @@ def sync_nodes_and_save(n_max: int = 20) -> None:
 def load_nodes_with_hops(n_max: int = 20) -> List[Tuple[str, str, int, Optional[int]]]:
     """
     Devuelve [(id, alias, mins, hops)] ordenados por 'mins' asc.
-    - Con DISABLE_BOT_TCP=1: NO usa API, solo lee nodos.txt (sin abrir sockets).
-    - Si DISABLE_BOT_TCP=0: API-first y enriquece hops con nodos.txt (como antes).
+
+    Reglas:
+      - USB/BLE: nunca usa API TCP; trabaja con NODES_FILE.
+      - TCP con DISABLE_BOT_TCP=1: solo NODES_FILE.
+      - TCP con API habilitada: API-first y fallback a NODES_FILE.
     """
 
-    # === MODO SIN TCP DESDE BOT: solo fichero ===
-    if DISABLE_BOT_TCP:
+    def _load_from_file(limit: int) -> List[Tuple[str, str, int, Optional[int]]]:
         out: List[Tuple[str, str, int, Optional[int]]] = []
         try:
             rows_file = _parse_nodes_table(NODES_FILE)
@@ -4254,8 +4448,9 @@ def load_nodes_with_hops(n_max: int = 20) -> List[Tuple[str, str, int, Optional[
                 nid = (r.get("id") or "").strip()
                 if not nid:
                     continue
+
                 ali = (r.get("alias") or "").strip() or nid
-                # minutos “last seen”
+
                 mins = None
                 for k in ("mins", "last_heard_min", "lastSeenMin", "last_seen_min"):
                     v = r.get(k)
@@ -4267,40 +4462,47 @@ def load_nodes_with_hops(n_max: int = 20) -> List[Tuple[str, str, int, Optional[
                             pass
                 if mins is None:
                     mins = 9_999
-                # hops
+
                 hops = None
                 for k in ("hops", "hops_text"):
                     v = r.get(k)
                     if v is not None:
                         try:
-                            hv = int(float(str(v)))
-                            hops = hv
+                            hops = int(float(str(v)))
                             break
                         except Exception:
                             pass
+
                 out.append((nid, ali, mins, hops))
         except Exception as e:
             log(f"⚠️ Fallback NODES_FILE falló: {e}")
 
         out.sort(key=lambda x: x[2])
-        return out[:n_max]
+        return out[:limit]
 
-    # === MODO API-FIRST (solo si no está desactivado) ===
+    # USB/BLE o TCP directo deshabilitado => solo fichero
+    if not _mesh_api_enabled():
+        return _load_from_file(n_max)
+
+    # API-first
     log("📡 Intentando obtener nodos vía API…")
-    rows = api_list_nodes(MESHTASTIC_HOST, max_n=max(50, n_max)) or []
+    rows = _mesh_api_list_nodes(max_n=max(50, n_max), timeout_sec=5.0)
     out: List[Tuple[str, str, int, Optional[int]]] = []
+
     for r in rows[:n_max]:
-        mins = r.get("last_heard_min")
-        out.append((
-            r["id"],
-            r.get("alias") or r["id"],
-            mins if mins is not None else 9_999,
-            r.get("hops")  # puede venir None
-        ))
+        try:
+            mins = r.get("last_heard_min")
+            out.append((
+                r["id"],
+                r.get("alias") or r["id"],
+                mins if mins is not None else 9_999,
+                r.get("hops"),
+            ))
+        except Exception:
+            pass
 
     if out:
         log(f"✅ API devolvió {len(out)} nodos.")
-        # Guardar nodos.txt y enriquecer hops desde fichero (idéntico a tu versión actual)
         try:
             with open(NODES_FILE, "w", encoding="utf-8") as f:
                 for nid, alias, mins, hops in out:
@@ -4339,62 +4541,31 @@ def load_nodes_with_hops(n_max: int = 20) -> List[Tuple[str, str, int, Optional[
         out.sort(key=lambda x: x[2])
         return out[:n_max]
 
-    # 2) Fallback a fichero si la API vino vacía
-    out2: List[Tuple[str, str, int, Optional[int]]] = []
-    try:
-        rows_file = _parse_nodes_table(NODES_FILE)
-        for r in rows_file:
-            nid = (r.get("id") or "").strip()
-            if not nid:
-                continue
-            ali = (r.get("alias") or "").strip() or nid
-            mins = None
-            for k in ("mins", "last_heard_min", "lastSeenMin", "last_seen_min"):
-                v = r.get(k)
-                if v is not None:
-                    try:
-                        mins = int(float(str(v)))
-                        break
-                    except Exception:
-                        pass
-            if mins is None:
-                mins = 9_999
-
-            hops = None
-            for k in ("hops", "hops_text"):
-                v = r.get(k)
-                if v is not None:
-                    try:
-                        h = int(float(str(v)))
-                        hops = h
-                        break
-                    except Exception:
-                        pass
-
-            out2.append((nid, ali, mins, hops))
-    except Exception as e:
-        log(f"⚠️ Fallback NODES_FILE falló: {e}")
-
-    out2.sort(key=lambda x: x[2])
-    return out2[:n_max]
+    return _load_from_file(n_max)
 
 # === NUEVA ===
 def load_nodes_with_hops_api_only(n_max: int = 20) -> List[Tuple[str, str, int, Optional[int]]]:
     """
-    Igual que load_nodes_with_hops(), pero usa SOLO la API (sin CLI).
-    Si la API no trae nada, cae a leer el fichero NODES_FILE (sin refrescarlo).
+    Igual que load_nodes_with_hops(), pero sin CLI.
+    - En TCP usa solo API + fallback a NODES_FILE.
+    - En USB/BLE no usa API TCP y cae directamente a NODES_FILE.
     """
-    from meshtastic_api_adapter import api_list_nodes_api_only
     out: List[Tuple[str, str, int, Optional[int]]] = []
 
-    # 1) API-only
-    rows = api_list_nodes_api_only(MESHTASTIC_HOST, max_n=max(50, n_max)) or []
+    rows = _mesh_api_list_nodes(max_n=max(50, n_max), timeout_sec=5.0)
     for r in rows[:n_max]:
-        mins = r.get("last_heard_min")
-        out.append((r["id"], r.get("alias") or r["id"], mins if mins is not None else 9_999, r.get("hops")))
+        try:
+            mins = r.get("last_heard_min")
+            out.append((
+                r["id"],
+                r.get("alias") or r["id"],
+                mins if mins is not None else 9_999,
+                r.get("hops"),
+            ))
+        except Exception:
+            pass
 
     if out:
-        # Enriquecer hops con fichero (si existe), sin refrescarlo
         try:
             rows_file = _parse_nodes_table(NODES_FILE)
             hops_map: Dict[str, int] = {}
@@ -4409,15 +4580,18 @@ def load_nodes_with_hops_api_only(n_max: int = 20) -> List[Tuple[str, str, int, 
                     hv = _to_int_safe(str(rf.get("hops_text")))
                 if hv is not None:
                     hops_map[nid] = hv
-            out = [(nid, alias, mins, hops if hops is not None else hops_map.get(nid))
-                   for (nid, alias, mins, hops) in out]
+
+            out = [
+                (nid, alias, mins, hops if hops is not None else hops_map.get(nid))
+                for (nid, alias, mins, hops) in out
+            ]
         except Exception as e:
             log(f"⚠️ Enriquecimiento de hops desde NODES_FILE (API-only) falló: {e}")
 
         out.sort(key=lambda x: x[2])
         return out[:n_max]
 
-    # 2) Fallback a fichero SIN refrescar (nunca CLI aquí)
+    # Fallback seguro a fichero
     try:
         rows_file = _parse_nodes_table(NODES_FILE)
         for r in rows_file:
@@ -4425,6 +4599,7 @@ def load_nodes_with_hops_api_only(n_max: int = 20) -> List[Tuple[str, str, int, 
             if not nid:
                 continue
             ali = (r.get("alias") or "").strip() or nid
+
             mins = None
             for k in ("mins", "last_heard_min", "lastSeenMin", "last_seen_min"):
                 v = r.get(k)
@@ -4450,7 +4625,6 @@ def load_nodes_with_hops_api_only(n_max: int = 20) -> List[Tuple[str, str, int, 
 
     out.sort(key=lambda x: x[2])
     return out[:n_max]
-
 
 def build_nodes_mapping(n_max: int = 50) -> Dict[str, str]:
     nodes = load_nodes_with_hops(n_max)
@@ -4630,24 +4804,52 @@ def traceroute_node(node_id: str, timeout: int = TRACEROUTE_TIMEOUT) -> TraceRes
     # 3) Ejecutar con la iface del pool
     return _do_tr_with_iface(iface, dest)
 
-
-
 def send_text_message(node_id: Optional[str], text: str, canal: int = 0) -> tuple[str, Optional[int]]:
     """
-    MODIFICADA: usa send_text_simple_with_retry_resilient() para reconectar el pool TCP
-    si el primer intento falla por socket/timeout y reintenta 1 vez.
-    Devuelve (texto_resultado, packet_id|None); añade etiqueta '+reconnect' si ocurrió.
+    Envío unificado según transporte activo.
+
+    Reglas:
+      - USB/BLE: NO usa API/pool TCP. Envía siempre por broker-queue.
+      - TCP: mantiene el flujo resiliente actual por API/pool.
+
+    Devuelve:
+      (texto_resultado, packet_id|None)
     """
+    # ------------------------------------------------------------------
+    # USB / BLE -> nunca abrir sockets TCP desde el bot
+    # ------------------------------------------------------------------
+    if not _mesh_is_tcp():
+        try:
+            res = _send_via_broker_queue(
+                text=text,
+                ch=int(canal),
+                dest=(node_id or None),
+                ack=False,
+                timeout=3.0,
+            )
+            if bool((res or {}).get("ok")):
+                return "OK (broker-queue)", None
+            return f"KO: {(res or {}).get('error') or 'broker_queue_not_ok'}", None
+        except Exception as e:
+            return f"KO: {type(e).__name__}: {e}", None
+
+    # ------------------------------------------------------------------
+    # TCP -> mantener envío resiliente por API/pool
+    # ------------------------------------------------------------------
     try:
-        # Preferimos la versión resiliente; si no está disponible aún, caemos a la original.
         try:
             from meshtastic_api_adapter import send_text_simple_with_retry_resilient as _send
         except ImportError:
             from meshtastic_api_adapter import send_text_simple_with_retry as _send
 
+        host = _mesh_api_host()
+        port = _mesh_api_port()
+        if not host or port <= 0:
+            return "KO: mesh_api_not_available", None
+
         res = _send(
-            host=MESHTASTIC_HOST,
-            port=4403,
+            host=host,
+            port=port,
             text=text,
             dest_id=(node_id or None),
             channel_index=int(canal),
@@ -4666,7 +4868,6 @@ def send_text_message(node_id: Optional[str], text: str, canal: int = 0) -> tupl
             msg = f"OK ({tag}){f' • packet_id={pid}' if pid else ''}"
             return msg, pid
 
-        # KO: intenta mostrar causa y si hubo reconexión
         err = ""
         if isinstance(res, dict):
             err = res.get("error") or ""
@@ -4674,27 +4875,53 @@ def send_text_message(node_id: Optional[str], text: str, canal: int = 0) -> tupl
         return (f"KO{tag}: {err or str(res)}", pid)
 
     except Exception as e:
-        return f"KO: {e}", None
-
-
+        return f"KO: {type(e).__name__}: {e}", None
 
 # === NUEVO: adapter de envío para broker_tasks (CORREGIDO: usa iface del broker) ===
 def _tasks_send_adapter(channel: int, message: str, destination: str, require_ack: bool) -> dict:
     """
-    1) Intentar enviar por la MISMA conexión TCP del broker (iface_mgr) para no abrir 2 sesiones al nodo.
-    2) Si no es posible (no iniciado / no conectado / error), caer al adapter resiliente.
-    Devuelve: {ok: bool, packet_id?: int, error?: str}
+    Adapter de envío para broker_tasks.
+
+    Reglas:
+      - USB/BLE:
+          * NO usa pool/API TCP.
+          * Usa exclusivamente broker-queue.
+      - TCP:
+          * intenta primero la MISMA conexión persistente del broker,
+          * y si falla, cae al adapter resiliente del pool.
     """
     import time
 
-    # Normalizar destino: None/"broadcast" => broadcast real (destinationId=None), "!id" => unicast
+    # Normalizar destino: None/"broadcast" => broadcast real
     dest_id = None if (not destination or str(destination).lower() == "broadcast") else str(destination)
 
-    # 1) Preferente: usar la interfaz activa del broker (BROKER_IFACE_MGR/pool)
+    # -------------------------------------------------------------
+    # USB / BLE -> solo broker-queue, sin pool ni API TCP
+    # -------------------------------------------------------------
+    if not _mesh_is_tcp():
+        try:
+            res = _send_via_broker_queue(
+                text=message,
+                ch=int(channel),
+                dest=(dest_id or None),
+                ack=bool(require_ack and dest_id),
+                timeout=3.0,
+            )
+            ok = bool((res or {}).get("ok"))
+            return {
+                "ok": ok,
+                "packet_id": None,
+                "error": (None if ok else ((res or {}).get("error") or "broker_queue_not_ok"))
+            }
+        except Exception as e:
+            return {"ok": False, "packet_id": None, "error": f"{type(e).__name__}: {e}"}
+
+    # -------------------------------------------------------------
+    # TCP -> preferente: usar la interfaz activa del broker/pool
+    # -------------------------------------------------------------
     try:
         mgr = globals().get("BROKER_IFACE_MGR") or globals().get("IFACE_POOL") or globals().get("POOL")
         if mgr is not None:
-            # Espera hasta 6s a que haya iface; si no, ensure_connected + reintento
             iface = None
             t_end = time.time() + 6.0
             while time.time() < t_end and iface is None:
@@ -4709,14 +4936,14 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
 
             if iface is None:
                 ensure_fn = getattr(mgr, "ensure_connected", None)
-                host = globals().get("MESHTASTIC_HOST") or globals().get("RUNTIME_MESH_HOST")
-                port = globals().get("MESHTASTIC_PORT") or globals().get("RUNTIME_MESH_PORT") or 4403
-                if callable(ensure_fn) and host:
+                host = _mesh_api_host()
+                port = _mesh_api_port()
+                if callable(ensure_fn) and host and port > 0:
                     try:
                         ensure_fn(host, port, timeout=6.0)
                     except Exception:
                         pass
-                # reintento de obtener iface
+
                 if hasattr(mgr, "get_iface"):
                     iface = mgr.get_iface()
                 elif hasattr(mgr, "get_interface"):
@@ -4727,16 +4954,14 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
             if iface is None:
                 raise RuntimeError("iface no disponible (todavía no conectado)")
 
-            # ⚠️ Broadcast correcto: destinationId=None (NO "^all")
             pkt = iface.sendText(
                 message,
                 destinationId=(dest_id if dest_id else None),
-                wantAck=bool(require_ack and dest_id),   # ACK sólo tiene sentido en unicast
+                wantAck=bool(require_ack and dest_id),
                 wantResponse=False,
                 channelIndex=int(channel),
             )
 
-            # Extraer packet_id de dict u objeto
             pid = None
             if isinstance(pkt, dict):
                 pid = pkt.get("id") or ((pkt.get("_packet") or {}).get("id"))
@@ -4747,7 +4972,6 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
             except Exception:
                 pid = None
 
-            # Si se pide ACK unicast y la iface lo soporta, esperar confirmación
             if require_ack and dest_id and pid is not None and hasattr(iface, "waitForAck"):
                 try:
                     ok_ack = bool(iface.waitForAck(pid, timeout=15.0))
@@ -4755,45 +4979,55 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
                     ok_ack = False
                 return {"ok": ok_ack, "packet_id": pid, "error": (None if ok_ack else "NO_APP_ACK")}
 
-            # Broadcast o sin ACK → OK con el envío
             return {"ok": True, "packet_id": pid, "error": None}
 
     except Exception:
-        # seguimos al fallback
         pass
 
-    # 2) Fallback: usar el adapter resiliente (abrirá conexión efímera si el broker no puede)
+    # -------------------------------------------------------------
+    # TCP -> fallback final: adapter resiliente del pool
+    # -------------------------------------------------------------
     try:
         try:
             from meshtastic_api_adapter import send_text_simple_with_retry_resilient as _send
         except Exception:
-            from meshtastic_api_adapter import send_text_simple_with_retry as _send  # fallback
+            from meshtastic_api_adapter import send_text_simple_with_retry as _send
 
-        host = globals().get("MESHTASTIC_HOST") or globals().get("RUNTIME_MESH_HOST") or "127.0.0.1"
-        port = globals().get("MESHTASTIC_PORT") or globals().get("RUNTIME_MESH_PORT") or 4403
+        host = _mesh_api_host()
+        port = _mesh_api_port()
+        if not host or port <= 0:
+            return {"ok": False, "packet_id": None, "error": "mesh_api_not_available"}
 
         res = _send(
             host=host,
             port=port,
             text=message,
-            dest_id=dest_id,                 # aquí también: broadcast = None
+            dest_id=dest_id,
             channel_index=int(channel),
             want_ack=bool(require_ack),
         )
-        ok = bool(res.get("ok"))
-        pid = res.get("packet_id")
-        return {"ok": ok, "packet_id": pid, "error": (None if ok else res.get("error"))}
+        ok = bool((res or {}).get("ok"))
+        pid = (res or {}).get("packet_id")
+        return {"ok": ok, "packet_id": pid, "error": (None if ok else ((res or {}).get("error") or "send_failed"))}
     except Exception as e:
         return {"ok": False, "packet_id": None, "error": f"{type(e).__name__}: {e}"}
-
 # === NUEVO: adapter de reconexión para broker_tasks ===
+
 def _tasks_reconnect_adapter() -> bool:
     """
-    Intenta reabrir el pool TCP si el primer envío falla por timeout/socket.
+    Intenta reabrir el pool TCP solo cuando el transporte activo es TCP.
+    En USB/BLE devuelve False sin abrir sockets erróneos.
     """
+    if not _mesh_is_tcp():
+        return False
+
     try:
         from meshtastic_api_adapter import mesh_reconnect
-        return bool(mesh_reconnect(host=MESHTASTIC_HOST, port=4403))
+        host = _mesh_api_host()
+        port = _mesh_api_port()
+        if not host or port <= 0:
+            return False
+        return bool(mesh_reconnect(host=host, port=port))
     except Exception:
         return False
 
@@ -6276,19 +6510,24 @@ def _load_last_seen_nodes(max_n: int, freshness_min: int) -> list[dict]:
     return recent[:max_n]
 
 def _fallback_neighbor_table(max_n: int) -> list[dict]:
-    """Si no hay fichero de últimos vistos, usa la neighbor table de la API."""
-    try:
-        table = api_get_neighbors_via_pool(MESHTASTIC_HOST, 4403) or {}  # { "!id": {...} }
-    except Exception:
-        table = {}
+    """
+    Si no hay fichero de últimos vistos, usa la tabla de vecinos del API/pool.
+    En USB/BLE devuelve [] de forma segura.
+    """
+    table = _mesh_api_get_neighbors()
 
     lst = []
     for nid, info in table.items():
-        alias = info.get("alias") or nid
-        ts = info.get("last_heard", 0)
-        lst.append({"id": nid, "alias": alias, "last_heard": ts})
+        try:
+            alias = info.get("alias") or nid
+            ts = info.get("last_heard", 0)
+            lst.append({"id": nid, "alias": alias, "last_heard": ts})
+        except Exception:
+            pass
+
     lst.sort(key=lambda x: x.get("last_heard", 0), reverse=True)
     return lst[:max_n]
+
 
 def _pick_nodes_for_scan(max_n: int, freshness_min: int, ctx) -> list[dict]:
     candidates = _load_last_seen_nodes(max_n, freshness_min)
@@ -7043,7 +7282,7 @@ def _lora_cli_get() -> dict:
     Intenta obtener config LoRa via CLI: 'meshtastic --get lora'
     Devuelve dict parcial con flags si los encuentra.
     """
-    out = run_command(["--host", MESHTASTIC_HOST, "--get", "lora"], timeout=TIMEOUT_CMD_S)
+    out = run_command([*_mesh_cli_target_args(), "--get", "lora"], timeout=TIMEOUT_CMD_S)
     # Parsing flexible (buscamos 'ignore_incoming' y 'ignore_mqtt')
     flags = {}
     try:
@@ -7070,7 +7309,7 @@ def _lora_cli_set(updates: dict[str, bool]) -> tuple[bool, str]:
     for k, v in updates.items():
         val = "true" if v else "false"
         flag = f"lora.{k}"
-        out = run_command(["--host", MESHTASTIC_HOST, "--set", flag, val], timeout=TIMEOUT_CMD_S)
+        out = run_command([*_mesh_cli_target_args(), "--set", flag, val], timeout=TIMEOUT_CMD_S)
         msgs.append(f"{flag}={val} → {out[:120].strip()}")
     return True, " | ".join(msgs)
 
@@ -8445,74 +8684,46 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         send_ok = False
         send_error = f"{type(e).__name__}: {e}"
 
+  
     # ======================================================================
     # PRIORIDAD 2: Fallback → MISMA conexión persistente (pool)
+    # Solo en TCP
     # ======================================================================
-    if not send_ok:
+    if not send_ok and _mesh_is_tcp():
         used_path = "pool-persistente"
         try:
-            pool_cls = None
-            try:
-                pool_cls = context.application.bot_data.get("tcp_pool")
-            except Exception:
-                pool_cls = None
-
-            host = context.bot_data.get("mesh_host")
-            port = context.bot_data.get("mesh_port", 4403)
-            timeout_iface = 6.0
-
+            pool_cls = context.application.bot_data.get("tcp_pool")
             iface = None
             if pool_cls is not None:
-                # 1) get_iface_wait (o espera manual hasta 6s)
-                try:
-                    if hasattr(pool_cls, "get_iface_wait"):
-                        iface = pool_cls.get_iface_wait(timeout=timeout_iface, interval=0.3)
-                    else:
-                        import time as _t
-                        t_end = time.time() + timeout_iface
-                        while time.time() < t_end:
-                            if hasattr(pool_cls, "get_iface"):
-                                iface = pool_cls.get_iface()
-                            elif hasattr(pool_cls, "get_interface"):
-                                iface = pool_cls.get_interface()
-                            else:
-                                iface = getattr(pool_cls, "iface", None)
-                            if iface is not None:
-                                break
-                            _t.sleep(0.3)
-                except Exception:
-                    iface = None
-
-                # 2) si no hay iface: ensure_connected + reintento de get_iface
-                if iface is None:
-                    try:
-                        ensure_fn = getattr(pool_cls, "ensure_connected", None)
-                        if callable(ensure_fn) and host:
-                            ensure_fn(host, port, timeout=timeout_iface)
+                if hasattr(pool_cls, "get_iface_wait"):
+                    iface = pool_cls.get_iface_wait(timeout=3.0, interval=0.3)
+                else:
+                    import time as _t
+                    for _ in range(10):
                         if hasattr(pool_cls, "get_iface"):
                             iface = pool_cls.get_iface()
                         elif hasattr(pool_cls, "get_interface"):
                             iface = pool_cls.get_interface()
                         else:
                             iface = getattr(pool_cls, "iface", None)
-                    except Exception:
-                        iface = None
+                        if iface is not None:
+                            break
+                        _t.sleep(0.3)
 
             if iface is not None:
-                # ⚠️ CORREGIDO: broadcast => destinationId=None (NO "^all")
-                dest_for_send = node_id if node_id else None
                 pkt = iface.sendText(
                     texto,
-                    destinationId=dest_for_send,
+                    destinationId=None,
                     wantAck=False,
                     wantResponse=False,
                     channelIndex=int(canal),
                 )
-                # Extraer packet_id de forma robusta
+
                 if isinstance(pkt, dict):
                     packet_id = pkt.get("id") or ((pkt.get("_packet") or {}).get("id"))
                 else:
                     packet_id = getattr(pkt, "id", None)
+
                 try:
                     packet_id = int(packet_id) if packet_id is not None else None
                 except Exception:
@@ -8527,10 +8738,12 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             send_ok = False
             send_error = f"{type(e).__name__}: {e}"
 
+        # ======================================================================
+    
+    # PRIORIDAD 3: Fallback → adapter resiliente del pool
+    # Solo en TCP
     # ======================================================================
-    # PRIORIDAD 3: Fallback → adapter resiliente del pool (tu flujo existente)
-    # ======================================================================
-    if not send_ok:
+    if not send_ok and _mesh_is_tcp():
         used_path = "api-pool+retry"
         try:
             try:
@@ -8538,22 +8751,27 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             except Exception:
                 from meshtastic_api_adapter import send_text_simple_with_retry as _send
 
+            host = _mesh_api_host()
+            port = _mesh_api_port()
+            if not host or port <= 0:
+                raise RuntimeError("mesh_api_not_available")
+
             res = _send(
-                host=MESHTASTIC_HOST,
-                port=4403,
+                host=host,
+                port=port,
                 text=texto,
-                dest_id=(node_id or None),  # broadcast = None (ya estaba bien aquí)
+                dest_id=None,   # broadcast real
                 channel_index=int(canal),
                 want_ack=False
             )
-            send_ok = bool(res.get("ok"))
-            packet_id = res.get("packet_id")
+            send_ok = bool((res or {}).get("ok"))
+            packet_id = (res or {}).get("packet_id")
             if not send_ok:
-                send_error = res.get("error") or str(res)
+                send_error = (res or {}).get("error") or str(res)
         except Exception as e:
             send_ok = False
             send_error = f"{type(e).__name__}: {e}"
-
+    
     ## --- NUEVO: espejo a MeshCore para canales designados ---
     mc_mirrored = False
     mc_ok = None
@@ -8779,8 +8997,8 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             out = None
 
-        # PRIORIDAD 2: pool persistente si broker-queue no está
-        if out is None:
+        # PRIORIDAD 2: pool persistente si broker-queue no está (solo TCP)
+        if out is None and _mesh_is_tcp():
             used_path = "pool-persistente"
             try:
                 pool_cls = context.application.bot_data.get("tcp_pool")
@@ -8823,12 +9041,37 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 out = None
                 pid = None
 
-        # PRIORIDAD 3: adapter resiliente
-        if out is None:
+                # PRIORIDAD 3: adapter resiliente (solo TCP)
+       
+        # PRIORIDAD 3: adapter resiliente (solo TCP)
+        if out is None and _mesh_is_tcp():
             used_path = "api-pool+retry"
-            out, pid = send_text_message(None, texto, canal=canal)
-            if out:
-                out = f"{out} (api-pool+retry)"
+            try:
+                try:
+                    from meshtastic_api_adapter import send_text_simple_with_retry_resilient as _send
+                except Exception:
+                    from meshtastic_api_adapter import send_text_simple_with_retry as _send
+
+                host = _mesh_api_host()
+                port = _mesh_api_port()
+                if not host or port <= 0:
+                    raise RuntimeError("mesh_api_not_available")
+
+                res = _send(
+                    host=host,
+                    port=port,
+                    text=texto,
+                    dest_id=None,
+                    channel_index=int(canal),
+                    want_ack=False
+                )
+                if bool((res or {}).get("ok")):
+                    out = "OK"
+                    pid = (res or {}).get("packet_id")
+                else:
+                    out = None
+            except Exception:
+                out = None
 
         # “Confirmación de red” opcional vía broker (no es ACK de app)
         ack_cloud = ""
@@ -8986,8 +9229,8 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception:
         result = None
 
-    # PRIORIDAD 2: pool persistente con waitForAck
-    if result is None:
+    # PRIORIDAD 2: pool persistente con waitForAck (solo TCP)
+    if result is None and _mesh_is_tcp():
         used_path = "pool-persistente"
         try:
             pool_cls = context.application.bot_data.get("tcp_pool")
@@ -9041,11 +9284,19 @@ async def enviar_ack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 }
         except Exception:
             result = None
-
-    # PRIORIDAD 3: adapter resiliente con reintentos/backoff
-    if result is None:
+   
+    # PRIORIDAD 3: adapter resiliente con reintentos/backoff (solo TCP)
+    if result is None and _mesh_is_tcp():
         used_path = "api-pool+retry"
         result = await send_with_ack_retry(node_id, texto, canal, attempts, wait_s, backoff)
+
+    if result is None:
+        result = {
+            "ok": False,
+            "attempts": 1,
+            "reason": "NO_TRANSPORT_FALLBACK_AVAILABLE",
+            "packet_id": None,
+        }
 
     dest_txt = node_id
     if result.get("ok"):
@@ -9133,8 +9384,8 @@ def _render_direct_neighbors_broker(max_mins: int, snr_min: float | None, max_n:
     - Limita a 'max_n'.
     """
     try:
-        # 1) Métricas de vecinos directos por API/pool persistente
-        neigh = api_get_neighbors_via_pool(MESHTASTIC_HOST, 4403) or {}
+        # 1) Métricas de vecinos directos por API/pool persistente solo si procede
+        neigh = _mesh_api_get_neighbors()
     except Exception:
         neigh = {}
 
@@ -10607,7 +10858,7 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             host = (os.getenv("BRIDGE_B_HOST") or os.getenv("B_HOST") or "").strip()
 
         # Construcción de args CLI (mantener simple y compatible)
-        cli = ["--host", host, "--traceroute", target, "--timeout", str(timeout_s)]
+        cli = [*_mesh_cli_target_args(), "--traceroute", target, "--timeout", str(timeout_s)]
 
         # Si ya tienes run_command(args) en tu bot, úsalo (es lo más consistente)
         try:
@@ -10634,27 +10885,31 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Pausa/reanuda usando el contexto robusto ya existente
     out_text = ""
     broker_resume_msg = ""
+    pause_mode = (_get_pause_mode_effective() or "").strip().lower()
 
     try:
         with with_broker_paused(max_wait_s=8.0):
             out_text = await asyncio.to_thread(_run_cli_traceroute_blocking)
     finally:
-        await update.effective_message.reply_text("▶️ Reanudando conexión…")
-
-        ok_resumed, resumed_info = await asyncio.to_thread(_wait_broker_resumed, 8.0)
-
-        if ok_resumed:
-            if resumed_info == "running":
-                broker_resume_msg = "✅ Broker reanudado y operativo."
-            else:
-                broker_resume_msg = f"✅ Broker reanudado. Estado actual: {resumed_info}"
+        if pause_mode == "never":
+            broker_resume_msg = "✅ CLI finalizada. No fue necesario pausar el broker en este modo."
         else:
-            if resumed_info == "paused":
-                broker_resume_msg = "❗ El broker sigue en pausa. La reanudación no se ha confirmado."
-            elif resumed_info == "timeout":
-                broker_resume_msg = "⚠️ Reanudación solicitada, pero no se pudo confirmar el estado final del broker."
+            await update.effective_message.reply_text("▶️ Reanudando conexión…")
+
+            ok_resumed, resumed_info = await asyncio.to_thread(_wait_broker_resumed, 8.0)
+
+            if ok_resumed:
+                if resumed_info == "running":
+                    broker_resume_msg = "✅ Broker reanudado y operativo."
+                else:
+                    broker_resume_msg = f"✅ Broker reanudado. Estado actual: {resumed_info}"
             else:
-                broker_resume_msg = f"⚠️ Reanudación solicitada, pero no confirmada: {resumed_info}"
+                if resumed_info == "paused":
+                    broker_resume_msg = "❗ El broker sigue en pausa. La reanudación no se ha confirmado."
+                elif resumed_info == "timeout":
+                    broker_resume_msg = "⚠️ Reanudación solicitada, pero no se pudo confirmar el estado final del broker."
+                else:
+                    broker_resume_msg = f"⚠️ Reanudación solicitada, pero no confirmada: {resumed_info}"
 
     if not out_text:
         await update.effective_message.reply_text("⏰ Traceroute sin respuesta en el tiempo límite.")
@@ -10668,8 +10923,7 @@ async def traceroute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if broker_resume_msg:
         await update.effective_message.reply_text(broker_resume_msg)
-        
-        
+
 # === NUEVO HANDLER: alias corto /rt que reutiliza /traceroute ===
 async def rt_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
@@ -10853,7 +11107,7 @@ async def traceroute_cmd_CLI(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             with with_broker_paused(max_wait_s=8.0):
                 out = run_command(
-                    ["--host", MESHTASTIC_HOST, "--traceroute", dest.lstrip("!")],
+                    [*_mesh_cli_target_args(), "--traceroute", dest.lstrip("!")],
                     timeout=TRACEROUTE_TIMEOUT
                 )
             cli_res = parse_traceroute_output(out)
@@ -11302,10 +11556,12 @@ async def telemetria_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     pool = context.bot_data.get("tcp_pool")
     host = context.bot_data.get("mesh_host")
     port = context.bot_data.get("mesh_port", 4403)
-        # --- [NUEVO] bandera dura: NO abrir sockets desde el bot ---
-    disable_direct_iface = True
 
-    if not pool or not host:
+    # En USB/BLE no hay pool TCP: el comando debe seguir funcionando en modo
+    # pseudo-live/histórico sin intentar abrir sockets directos.
+    disable_direct_iface = not _mesh_is_tcp()
+
+    if _mesh_is_tcp() and (not pool or not host):
         await update.effective_message.reply_text("⚠️ Config no inicializada (pool/host).")
         return ConversationHandler.END
 
@@ -11673,7 +11929,13 @@ async def canales_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """
         
     bump_stat(update.effective_user.id, update.effective_user.username or "", "canales")
-
+    if not _mesh_is_tcp():
+        await update.effective_message.reply_text(
+            "⚠️ /canales solo está disponible en modo TCP/API persistente. "
+            "En USB/BLE el bot no abre pool TCP al nodo."
+        )
+        return
+    
     pool = context.bot_data.get("tcp_pool")
     host = context.bot_data.get("mesh_host")
     port = context.bot_data.get("mesh_port", 4403)
@@ -14521,10 +14783,41 @@ async def on_forcereply_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         attempts, wait_s, backoff, rest = _extract_ack_params(tokens)
         nodes_map = context.user_data.get("nodes_map") or build_nodes_mapping()
         node_id, canal, texto_final, _ = parse_dest_channel_and_text(rest, nodes_map)
+
         if not texto_final:
             await update.effective_message.reply_text("Falta el texto del mensaje.")
             return
-        result = await send_with_ack_retry(node_id, texto_final, canal, attempts, wait_s, backoff)
+
+        # -------------------------------------------------------------
+        # ACK por transporte:
+        # - TCP    -> usar flujo resiliente con ACK real
+        # - USB/BLE -> no abrir pool/API TCP; usar broker-queue y fallo limpio
+        # -------------------------------------------------------------
+        if _mesh_is_tcp():
+            result = await send_with_ack_retry(node_id, texto_final, canal, attempts, wait_s, backoff)
+        else:
+            try:
+                res = _send_via_broker_queue(
+                    text=texto_final,
+                    ch=int(canal),
+                    dest=(node_id or None),
+                    ack=bool(node_id),   # solo unicast puede pedir ACK lógico
+                    timeout=3.0,
+                )
+                ok = bool((res or {}).get("ok"))
+                result = {
+                    "ok": ok,
+                    "attempts": 1,
+                    "reason": ("BROKER_QUEUE_OK" if ok else ((res or {}).get("error") or "NO_TRANSPORT_FALLBACK_AVAILABLE")),
+                    "packet_id": None,
+                }
+            except Exception as e:
+                result = {
+                    "ok": False,
+                    "attempts": 1,
+                    "reason": f"{type(e).__name__}: {e}",
+                    "packet_id": None,
+                }
 
         dest_txt = "broadcast" if node_id is None else node_id
         if result.get("ok"):
@@ -14538,6 +14831,7 @@ async def on_forcereply_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"Intentos: {result['attempts']}  •  Motivo: {result.get('reason','')}\n"
                 f"packet_id: {result.get('packet_id')}"
             )
+
         for ch in chunk_text(resumen):
             await send_pre(update.effective_message, ch)
 
@@ -14546,10 +14840,10 @@ async def on_forcereply_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
             dest_txt, canal,
             (texto_final[:200] + "…") if len(texto_final) > 200 else texto_final,
             result.get("attempts"), "1" if result.get("ok") else "0",
-            result.get("reason",""), result.get("packet_id",""),
+            result.get("reason", ""), result.get("packet_id", ""),
         ])
         return
-
+    
 # -------------------------
 # ESTADO / ESTADÍSTICA
 # -------------------------
@@ -14565,7 +14859,7 @@ async def estado_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     import os, socket, time
 
     # --- Config de entorno / existentes ---
-    mesh_host = os.getenv("MESHTASTIC_HOST", globals().get("MESHTASTIC_HOST", "")).strip() or "127.0.0.1"
+    mesh_target = _mesh_runtime_host()
     try:
         broker_host = os.getenv("BROKER_HOST", "127.0.0.1").strip()
     except Exception:
@@ -14576,12 +14870,10 @@ async def estado_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         broker_port = 8765
 
     # --- 1) Meshtastic host: usamos el CLI existente (run_command) como ya hacías ---
-    host_line = f"- Meshtastic host {mesh_host}: "
+    host_line = f"- Meshtastic nodo {mesh_target}: "
     try:
-        ok_cli, out = run_command(
-            ["--host", mesh_host, "--info"],
-            timeout=20
-        )
+        out = run_command([*_mesh_cli_target_args(), "--info"], timeout=20)
+        ok_cli = ("❗" not in out and "⏱" not in out)
         host_line += "OK" if ok_cli else "KO"
     except Exception:
         host_line += "KO"
@@ -15186,12 +15478,15 @@ async def post_startup(app: Application) -> None:
     await set_bot_menu(app)
 
     # Config que usan varios comandos
-    app.bot_data["mesh_host"] = MESHTASTIC_HOST
-    app.bot_data["mesh_port"] = 4403  # puerto TCP de la radio/relay
+        
+    app.bot_data["mesh_host"] = _mesh_runtime_host()
+    app.bot_data["mesh_port"] = _mesh_runtime_port()
 
-    # IMPORTANTÍSIMO: guardar el pool persistente (clase con classmethods)
-    # Ya tienes el import arriba: from tcpinterface_persistent import TCPInterfacePool
-    app.bot_data["tcp_pool"] = TCPInterfacePool
+    # Solo tiene sentido inicializar pool TCP cuando el transporte real es TCP.
+    if _mesh_is_tcp():
+        app.bot_data["tcp_pool"] = TCPInterfacePool
+    else:
+        app.bot_data["tcp_pool"] = None
 
     """
     Se ejecuta tras construir la Application (PTB v20+).
