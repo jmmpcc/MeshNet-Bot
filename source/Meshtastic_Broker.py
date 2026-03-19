@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v6.2.6.16.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v7.0.0.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -213,6 +213,132 @@ def _mc_parse_contact_to_ch() -> dict[str, int]:
             if pref:
                 out[pref] = int(ch)
     return out
+
+def _embedded_b_uses_meshcore() -> bool:
+    """
+    Reutiliza el sistema ya existente del broker para saber qué backend embebido
+    está activo.
+
+    Regla real:
+    - Si MESHCORE_ENABLE=1 -> backend embebido MeshCore.
+    - En caso contrario, si BRIDGE_ENABLED=1 -> backend embebido Meshtastic.
+    - No se introduce ninguna variable nueva.
+    """
+    return _env_truthy("MESHCORE_ENABLE", "0")
+
+
+def _check_and_reconnect_embedded_b(iface_a=None, reason: str = "") -> None:
+    """
+    Comprueba si el nodo B embebido sigue sano tras la reconexión del nodo A.
+    Si no lo está, dispara únicamente la reconexión del backend embebido
+    correspondiente.
+
+    Diseño:
+    - Simple
+    - Reutiliza el backend actual
+    - No rearma toda la arquitectura completa
+    """
+    why = (reason or "").strip()
+
+    # ---------------------------------------------------------
+    # CASO 1: backend embebido activo = MeshCore
+    # ---------------------------------------------------------
+    if _embedded_b_uses_meshcore():
+        try:
+            eng = globals().get("MESHCORE_ENGINE")
+            if not eng:
+                print(f"[broker] Check embedded B ({why}): MeshCore activo pero sin engine", flush=True)
+                return
+
+            is_ok = False
+            healthy_fn = getattr(eng, "is_healthy", None)
+
+            if callable(healthy_fn):
+                try:
+                    is_ok = bool(healthy_fn())
+                except Exception:
+                    is_ok = False
+            else:
+                # Fallback mínimo por si no existiera el método
+                th = getattr(eng, "_thread", None)
+                stop_evt = getattr(eng, "_stop", None)
+                mc_obj = getattr(eng, "_mc", None)
+                connected = bool(getattr(eng, "_connected", False))
+                is_ok = bool(
+                    th is not None
+                    and th.is_alive()
+                    and stop_evt is not None
+                    and not stop_evt.is_set()
+                    and mc_obj is not None
+                    and connected
+                )
+
+            if is_ok:
+                print(f"[broker] Check embedded B ({why}): MeshCore OK", flush=True)
+                return
+
+            print(f"[broker] Check embedded B ({why}): MeshCore NO OK -> restart", flush=True)
+
+            try:
+                eng.stop()
+            except Exception as e:
+                print(f"[broker] MeshCore stop warning: {type(e).__name__}: {e}", flush=True)
+
+            time.sleep(1.0)
+
+            try:
+                eng.start()
+            except Exception as e:
+                print(f"[broker] MeshCore start ERROR: {type(e).__name__}: {e}", flush=True)
+
+            return
+
+        except Exception as e:
+            print(f"[broker] Check embedded B ({why}) meshcore ERROR: {type(e).__name__}: {e}", flush=True)
+            return
+
+    # ---------------------------------------------------------
+    # CASO 2: backend embebido activo = Meshtastic bridge
+    # ---------------------------------------------------------
+    try:
+        st = bridge_status_in_broker()
+        if not isinstance(st, dict):
+            st = {}
+
+        running = bool(st.get("running"))
+        iface_b_ok = bool(st.get("iface_b"))
+
+        if running and iface_b_ok:
+            print(f"[broker] Check embedded B ({why}): Bridge Meshtastic OK", flush=True)
+            return
+
+        print(
+            f"[broker] Check embedded B ({why}): Bridge Meshtastic NO OK "
+            f"(running={running}, iface_b={iface_b_ok}) -> reconnect",
+            flush=True
+        )
+
+        try:
+            bridge_stop_in_broker()
+        except Exception as e:
+            print(f"[broker] bridge_stop warning: {type(e).__name__}: {e}", flush=True)
+
+        time.sleep(1.0)
+
+        try:
+            if iface_a is None:
+                mgr = globals().get("BROKER_IFACE_MGR")
+                if mgr and hasattr(mgr, "get_iface"):
+                    iface_a = mgr.get_iface()
+            if iface_a:
+                bridge_start_in_broker(iface_a)
+            else:
+                print(f"[broker] Check embedded B ({why}): sin iface_a válida para rearmar bridge", flush=True)
+        except Exception as e:
+            print(f"[broker] bridge_start ERROR: {type(e).__name__}: {e}", flush=True)
+
+    except Exception as e:
+        print(f"[broker] Check embedded B ({why}) bridge ERROR: {type(e).__name__}: {e}", flush=True)
 
 def _mc_parse_chanidx_to_ch() -> dict[int, int]:
     """
@@ -449,6 +575,33 @@ class MeshCoreEmbeddedBridge:
         self._thread = threading.Thread(target=self._runner, name="meshcore-embedded", daemon=True)
         self._thread.start()
         print(f"[meshcore] embebido habilitado mode={self.mode}", flush=True)
+
+    def is_healthy(self) -> bool:
+        """
+        Comprobación ligera de salud del bridge MeshCore embebido.
+
+        Criterio:
+        - habilitado
+        - hilo supervisor vivo
+        - no marcado para stop
+        - objeto MeshCore creado
+        - conexión marcada como activa
+
+        No valida tráfico profundo; sirve para decidir si conviene reiniciar
+        el backend tras recuperar la conexión principal A.
+        """
+        try:
+            th = self._thread
+            return bool(
+                self.enable
+                and th is not None
+                and th.is_alive()
+                and not self._stop.is_set()
+                and self._mc is not None
+                and bool(self._connected)
+            )
+        except Exception:
+            return False
 
     def stop(self) -> None:
         self._stop.set()
@@ -3155,28 +3308,25 @@ class _BacklogServer(threading.Thread):
                 except Exception:
                     limit = 80
 
-                eng = globals().get("MESHCORE_ENGINE")
+                eng = globals().get("MESHCORE_ENGINE")  # (en tu broker ya existe esta global)
                 if not eng:
                     resp = {"ok": False, "error": "meshcore_disabled"}
                 else:
                     try:
-                        # Si el engine ya expone list_contacts(), usarlo directamente
+                        # Si tu engine ya tiene un método, úsalo.
                         if hasattr(eng, "list_contacts") and callable(getattr(eng, "list_contacts")):
                             contacts = eng.list_contacts(limit=limit)
                         else:
-                            # Fallback best-effort: inspección del objeto meshcore conectado
+                            # Fallback best-effort: inspección del objeto meshcore conectado si existe.
                             mc = getattr(eng, "_meshcore", None) or getattr(eng, "_mc", None) or getattr(eng, "mc", None)
                             contacts = []
-
                             if mc is not None:
                                 try:
                                     items = mc.get_contacts() if hasattr(mc, "get_contacts") else getattr(mc, "contacts", [])
                                 except Exception:
                                     items = []
-
                                 if isinstance(items, dict):
                                     items = list(items.values())
-
                                 for c in (items or []):
                                     try:
                                         if isinstance(c, dict):
@@ -3197,14 +3347,12 @@ class _BacklogServer(threading.Thread):
                                             "name": (str(name).strip() if name is not None else "") or None,
                                             "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
                                         })
-
                                         if len(contacts) >= limit:
                                             break
-
                                     except Exception:
                                         continue
 
-                        # Deduplicar por prefix
+                        # Dedup
                         seen = set()
                         uniq = []
                         for d in contacts:
@@ -3215,13 +3363,9 @@ class _BacklogServer(threading.Thread):
                             uniq.append(d)
 
                         resp = {"ok": True, "count": len(uniq), "contacts": uniq}
-
                     except Exception as e:
                         resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                return
-            
             # --- NUEVO: envío de texto vía lado B del bridge ---
             elif cmd == "SEND_TEXT_VIA":
                 params = req.get("params") or {}
@@ -3379,11 +3523,30 @@ class _BacklogServer(threading.Thread):
                                         mgr.signal_disconnect()
                                 except Exception:
                                     pass
+                              
                                 try:
                                     if mgr and hasattr(mgr, "resume"):
                                         mgr.resume()   # estado no-pausado
                                 except Exception:
                                     pass
+                              
+                                try:
+                                    iface_a = None
+                                    if mgr and hasattr(mgr, "get_iface"):
+                                        iface_a = mgr.get_iface()
+                                    elif mgr:
+                                        iface_a = getattr(mgr, "iface", None)
+
+                                    def _delayed_check():
+                                        try:
+                                            time.sleep(2.0)
+                                            _check_and_reconnect_embedded_b(iface_a=iface_a, reason="FORCE_RECONNECT")
+                                        except Exception as e:
+                                            print(f"[broker] delayed FORCE_RECONNECT check ERROR: {type(e).__name__}: {e}", flush=True)
+
+                                    threading.Thread(target=_delayed_check, daemon=True).start()
+                                except Exception as e:
+                                    print(f"[broker] FORCE_RECONNECT embedded check schedule ERROR: {type(e).__name__}: {e}", flush=True)
 
                                 resp = {"ok": True, "status": "running", "action": "force_reconnect"}
                             except Exception as e:
@@ -5405,7 +5568,14 @@ class MeshReceiver:
             pass
 
         self.hub.broadcast_line(_json_dumps({"type":"status","status":"connected","ts":_now_s()}) + "\n")
-    
+        # Comprobación simple del nodo B embebido tras recuperar A.
+        try:
+            iface_a = interface or self.iface_mgr.get_iface()
+            if iface_a:
+                time.sleep(2.0)
+                _check_and_reconnect_embedded_b(iface_a=iface_a, reason="connection.established")
+        except Exception as e:
+            print(f"[broker] post-connect embedded check ERROR: {type(e).__name__}: {e}", flush=True)
 
     def _on_disconnect(self, interface=None, **kwargs):
         
@@ -6286,24 +6456,24 @@ def main():
     
     # === [NUEVO] Arranque condicional de la pasarela embebida al establecer conexión ===
     
-    def _start_bridge_on_first_connection(interface=None, **kwargs):
+    def _start_or_verify_embedded_on_connection(interface=None, **kwargs):
         """
-        Arranca servicios embebidos al primer 'connection.established'.
+        Arranca los servicios embebidos cuando aún no existen y, en reconexiones
+        posteriores, verifica que siguen sanos.
 
         Reglas (mutua exclusión):
-          - BRIDGE_ENABLED=1  -> pasarela Meshtastic embebida (bridge_in_broker)
-          - MESHCORE_ENABLE=1 -> pasarela MeshCore embebida (este broker)
-          - Si ambas están activas, BRIDGE_ENABLED tiene prioridad y MeshCore se deshabilita.
+          - BRIDGE_ENABLED=1  -> pasarela Meshtastic embebida
+          - MESHCORE_ENABLE=1 -> pasarela MeshCore embebida
+          - Si ambas están activas, BRIDGE_ENABLED tiene prioridad y MeshCore se deshabilita
 
-        Motivo:
-          - Evitar que el broker intente actuar como 2 "pasarelas" simultáneas.
-          - Mantener arranque idempotente y estable 24/7.
+        Comportamiento:
+          - Primera conexión: arranca el backend embebido configurado
+          - Reconexiones: no desuscribe; vuelve a comprobar/rearmar si hace falta
         """
         try:
             import os
-
-            bridge_enabled = (os.getenv("BRIDGE_ENABLED", "0").strip().lower() in {"1","true","on","si","sí","y","yes"})
-            meshcore_enabled = (os.getenv("MESHCORE_ENABLE", "0").strip().lower() in {"1","true","on","si","sí","y","yes"})
+            bridge_enabled = _env_truthy("BRIDGE_ENABLED", "0")
+            meshcore_enabled = _env_truthy("MESHCORE_ENABLE", "0")
 
             if bridge_enabled and meshcore_enabled:
                 print("[bridge] ⚠️ BRIDGE_ENABLED=1 y MESHCORE_ENABLE=1: se prioriza BRIDGE_ENABLED (MeshCore OFF).", flush=True)
@@ -6315,33 +6485,41 @@ def main():
                     global MESHCORE_ENGINE
                     if MESHCORE_ENGINE is None:
                         MESHCORE_ENGINE = MeshCoreEmbeddedBridge()
-                    MESHCORE_ENGINE.start()
+                    if not MESHCORE_ENGINE.is_healthy():
+                        MESHCORE_ENGINE.start()
                     print("[meshcore] embebido status:", (MESHCORE_ENGINE.status() if MESHCORE_ENGINE else {}), flush=True)
                 except Exception as e:
-                    print(f"[meshcore] ⚠️ no se pudo iniciar embebido: {type(e).__name__}: {e}", flush=True)
+                    print(f"[meshcore] ⚠️ no se pudo iniciar/verificar embebido: {type(e).__name__}: {e}", flush=True)
 
-            # ---- Bridge Meshtastic embebido (existente) ----
+            # ---- Bridge Meshtastic embebido ----
             if bridge_enabled:
                 try:
                     iface_for_bridge = interface or iface_mgr.get_iface()
                     if not iface_for_bridge:
                         print("[bridge] ⚠️ sin interface todavía; espero al próximo established…", flush=True)
                         return
-                    st = bridge_start_in_broker(iface_for_bridge)
-                    print("[bridge] embebida habilitada:", st, flush=True)
+
+                    st = bridge_status_in_broker()
+                    running = bool((st or {}).get("running"))
+                    iface_b_ok = bool((st or {}).get("iface_b"))
+
+                    if not (running and iface_b_ok):
+                        st = bridge_start_in_broker(iface_for_bridge)
+                        print("[bridge] embebida habilitada:", st, flush=True)
+                    else:
+                        print("[bridge] embebida ya operativa", flush=True)
+
                 except Exception as e:
-                    print(f"[bridge] ⚠️ no se pudo iniciar la pasarela embebida: {type(e).__name__}: {e}", flush=True)
+                    print(f"[bridge] ⚠️ no se pudo iniciar/verificar la pasarela embebida: {type(e).__name__}: {e}", flush=True)
             else:
                 if not meshcore_enabled:
                     print("[bridge] embebida desactivada (BRIDGE_ENABLED=0, MESHCORE_ENABLE=0)", flush=True)
 
-        finally:
-            # Ejecutarlo solo una vez; si necesitas rearmarla en reconexiones, quita esta desuscripción
-            try: pub.unsubscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
-            except Exception: pass
+        except Exception as e:
+            print(f"[bridge] hook embedded ERROR: {type(e).__name__}: {e}", flush=True)
 
     # Suscribir el hook al evento de conexión establecida
-    pub.subscribe(_start_bridge_on_first_connection, "meshtastic.connection.established")
+    pub.subscribe(_start_or_verify_embedded_on_connection, "meshtastic.connection.established")
 
 
 
