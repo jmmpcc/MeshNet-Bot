@@ -226,29 +226,49 @@ def _embedded_b_uses_meshcore() -> bool:
     """
     return _env_truthy("MESHCORE_ENABLE", "0")
 
-
-def _check_and_reconnect_embedded_b(iface_a=None, reason: str = "") -> None:
+def _check_and_reconnect_embedded_b(iface_a=None, reason: str = "") -> dict:
     """
     Comprueba si el nodo B embebido sigue sano tras la reconexión del nodo A.
-    Si no lo está, dispara únicamente la reconexión del backend embebido
-    correspondiente.
+    Si no lo está, rearma únicamente el backend embebido correspondiente.
 
     Diseño:
-    - Simple
-    - Reutiliza el backend actual
-    - No rearma toda la arquitectura completa
+    - Reutiliza la lógica REAL ya existente en el broker v7.
+    - No introduce variables nuevas de configuración.
+    - Evita reinicios innecesarios del bridge embebido en 24/7.
+
+    Uso:
+        _check_and_reconnect_embedded_b(iface_a=iface_a, reason="connection.established")
+
+    Parámetros:
+    - iface_a: interfaz válida del nodo A ya conectada.
+    - reason: texto para diagnóstico/log.
+
+    Devuelve:
+    - dict con resumen del resultado.
     """
     why = (reason or "").strip()
+    out = {
+        "ok": True,
+        "reason": why,
+        "backend": None,
+        "action": "noop",
+        "details": None,
+    }
 
     # ---------------------------------------------------------
     # CASO 1: backend embebido activo = MeshCore
+    # Regla REAL del broker: MESHCORE_ENABLE=1
     # ---------------------------------------------------------
     if _embedded_b_uses_meshcore():
+        out["backend"] = "meshcore"
         try:
             eng = globals().get("MESHCORE_ENGINE")
             if not eng:
+                out["ok"] = False
+                out["action"] = "skip"
+                out["details"] = "meshcore_engine_missing"
                 print(f"[broker] Check embedded B ({why}): MeshCore activo pero sin engine", flush=True)
-                return
+                return out
 
             is_ok = False
             healthy_fn = getattr(eng, "is_healthy", None)
@@ -259,7 +279,7 @@ def _check_and_reconnect_embedded_b(iface_a=None, reason: str = "") -> None:
                 except Exception:
                     is_ok = False
             else:
-                # Fallback mínimo por si no existiera el método
+                # Fallback mínimo compatible con tu broker actual
                 th = getattr(eng, "_thread", None)
                 stop_evt = getattr(eng, "_stop", None)
                 mc_obj = getattr(eng, "_mc", None)
@@ -274,8 +294,10 @@ def _check_and_reconnect_embedded_b(iface_a=None, reason: str = "") -> None:
                 )
 
             if is_ok:
+                out["action"] = "already_ok"
+                out["details"] = "meshcore_healthy"
                 print(f"[broker] Check embedded B ({why}): MeshCore OK", flush=True)
-                return
+                return out
 
             print(f"[broker] Check embedded B ({why}): MeshCore NO OK -> restart", flush=True)
 
@@ -288,18 +310,28 @@ def _check_and_reconnect_embedded_b(iface_a=None, reason: str = "") -> None:
 
             try:
                 eng.start()
+                out["action"] = "restart"
+                out["details"] = "meshcore_restarted"
             except Exception as e:
+                out["ok"] = False
+                out["action"] = "error"
+                out["details"] = f"meshcore_start_error: {type(e).__name__}: {e}"
                 print(f"[broker] MeshCore start ERROR: {type(e).__name__}: {e}", flush=True)
 
-            return
+            return out
 
         except Exception as e:
+            out["ok"] = False
+            out["action"] = "error"
+            out["details"] = f"meshcore_check_error: {type(e).__name__}: {e}"
             print(f"[broker] Check embedded B ({why}) meshcore ERROR: {type(e).__name__}: {e}", flush=True)
-            return
+            return out
 
     # ---------------------------------------------------------
     # CASO 2: backend embebido activo = Meshtastic bridge
+    # Regla REAL: si NO es MeshCore, el backend embebido es el bridge
     # ---------------------------------------------------------
+    out["backend"] = "bridge"
     try:
         st = bridge_status_in_broker()
         if not isinstance(st, dict):
@@ -308,9 +340,13 @@ def _check_and_reconnect_embedded_b(iface_a=None, reason: str = "") -> None:
         running = bool(st.get("running"))
         iface_b_ok = bool(st.get("iface_b"))
 
+        # Si el bridge está operativo y B está vivo, lo dejamos.
+        # No forzamos restart por defecto para evitar churn 24/7.
         if running and iface_b_ok:
+            out["action"] = "already_ok"
+            out["details"] = "bridge_running_iface_b_ok"
             print(f"[broker] Check embedded B ({why}): Bridge Meshtastic OK", flush=True)
-            return
+            return out
 
         print(
             f"[broker] Check embedded B ({why}): Bridge Meshtastic NO OK "
@@ -326,19 +362,23 @@ def _check_and_reconnect_embedded_b(iface_a=None, reason: str = "") -> None:
         time.sleep(1.0)
 
         try:
-            if iface_a is None:
-                mgr = globals().get("BROKER_IFACE_MGR")
-                if mgr and hasattr(mgr, "get_iface"):
-                    iface_a = mgr.get_iface()
-            if iface_a:
-                bridge_start_in_broker(iface_a)
-            else:
-                print(f"[broker] Check embedded B ({why}): sin iface_a válida para rearmar bridge", flush=True)
+            bridge_start_in_broker(iface_a)
+            out["action"] = "restart" if running else "start"
+            out["details"] = "bridge_restarted_with_iface_a"
         except Exception as e:
+            out["ok"] = False
+            out["action"] = "error"
+            out["details"] = f"bridge_start_error: {type(e).__name__}: {e}"
             print(f"[broker] bridge_start ERROR: {type(e).__name__}: {e}", flush=True)
 
+        return out
+
     except Exception as e:
+        out["ok"] = False
+        out["action"] = "error"
+        out["details"] = f"bridge_check_error: {type(e).__name__}: {e}"
         print(f"[broker] Check embedded B ({why}) bridge ERROR: {type(e).__name__}: {e}", flush=True)
+        return out
 
 def _mc_parse_chanidx_to_ch() -> dict[int, int]:
     """

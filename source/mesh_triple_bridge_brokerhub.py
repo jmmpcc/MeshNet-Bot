@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-mesh_triple_bridge.py  v6.2.6.8 — Pasarela externa A↔B y A↔C usando TCP Meshtastic.
+mesh_triple_bridge.py  v7.0.0 — Pasarela externa A↔B y A↔C usando TCP Meshtastic.
 
 Modo tcp:
 - Abre TCP directo a A, B y C.
@@ -600,10 +600,23 @@ class MeshCoreClient:
         self._tx_q: asyncio.Queue | None = None
 
     def start(self) -> None:
+        """
+        Arranca el cliente MeshCore en su hilo supervisor.
+
+        Importante:
+        - Si antes se llamó a stop(), hay que limpiar self._stop para permitir
+        un arranque real posterior.
+        - Sin este clear(), un restart puede aparentar arrancar pero salir
+        inmediatamente del supervisor.
+        """
         if not self.enable:
             return
         if self._thread and self._thread.is_alive():
             return
+
+        # Permite reinicios reales tras stop()
+        self._stop.clear()
+
         self._thread = threading.Thread(target=self._runner, name="meshcore-client", daemon=True)
         self._thread.start()
         print(f"[{self.log_prefix}] enabled mode={self.mode}", flush=True)
@@ -624,6 +637,28 @@ class MeshCoreClient:
                 th.join(timeout=2.0)
             except Exception:
                 pass
+
+    def is_healthy(self) -> bool:
+        """
+        Comprobación ligera de salud del cliente MeshCore.
+
+        Criterio:
+        - habilitado
+        - hilo vivo
+        - no marcado para stop
+        - sesión/objeto meshcore creado
+
+        No intenta validar tráfico profundo. Solo sirve para decidir si hace falta
+        forzar una reconexión tras la recuperación del nodo A.
+        """
+        th = self._thread
+        return bool(
+            self.enable
+            and th
+            and th.is_alive()
+            and not self._stop.is_set()
+            and self._meshcore is not None
+        )
 
     def enqueue_send(self, dst: object, text: str) -> None:
         """Encola un envío hacia MeshCore.
