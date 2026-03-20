@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-
 from __future__ import annotations
 """
 Meshtastic_Broker_v7.0.0.py Incluye servidor BBS Meshtastic server corregiso por DM
@@ -6396,7 +6395,7 @@ def main():
     # === NUEVO: iniciar scheduler de tareas ===
     init_broker_tasks()
 
-    print(f"🟢 Broker v6.2.14 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
+    print(f"🟢 Broker v7.0.0 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
     print("   Clientes pueden conectarse por TCP y leer líneas JSONL (una por evento).", flush=True)
 
     # === [NUEVO] Inicializar motor BBS (broker-side) ======================================

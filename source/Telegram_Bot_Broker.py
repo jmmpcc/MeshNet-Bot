@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v7.0.0.0 py
+Telegram_Bot_Broker_v7.0.0.0 py USB,BLE,TCP
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -166,8 +166,7 @@ except Exception as _e:
 
 # === Bandera global: NO abrir sockets desde el bot (solo broker/CLI cuando toque) ===
 _TRUTHY = {"1", "true", "t", "yes", "y", "on"}
-DISABLE_BOT_TCP = str(os.getenv("DISABLE_BOT_TCP", "0")).lower() in _TRUTHY  # por defecto ACTIVADO
-
+DISABLE_BOT_TCP = str(os.getenv("DISABLE_BOT_TCP", "0")).lower() in _TRUTHY  # por defecto DESACTIVADO
 DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "/app/bot_data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -333,40 +332,79 @@ import math
 
 def _mesh_transport() -> str:
     """
-    Lee el transporte del nodo principal desde .env.
+    Lee y normaliza el transporte del nodo principal desde .env.
 
-    Valores soportados:
-      - tcp
-      - usb
-      - bluetooth / ble
-
-    El objetivo es que el bot use exactamente la misma lógica de selección
-    que el broker para CLI, prefetch y chequeos de estado, sin romper TCP.
+    Alias aceptados para no romper despliegues ya existentes:
+      - TCP: tcp, network, net
+      - USB: usb, serial, uart
+      - BLE: bluetooth, ble, bt
     """
-    return (os.getenv("MESH_TRANSPORT", "tcp") or "tcp").strip().lower()
+    raw = (os.getenv("MESH_TRANSPORT", "tcp") or "tcp").strip().lower()
+    alias = {
+        "tcp": "tcp",
+        "network": "tcp",
+        "net": "tcp",
+        "usb": "usb",
+        "serial": "usb",
+        "uart": "usb",
+        "bluetooth": "ble",
+        "ble": "ble",
+        "bt": "ble",
+    }
+    return alias.get(raw, "tcp")
 
 
 def _mesh_cli_target_args() -> list[str]:
     """
     Devuelve los argumentos base para la CLI 'meshtastic' según transporte.
 
-    Ejemplos:
-      - TCP: ['--host', '192.168.1.201']
-      - USB: ['--port', '/dev/ttyUSB0']
-      - BLE: ['--ble', 'AA:BB:CC:DD:EE:FF']
+    Fallbacks soportados:
+      - USB: MESH_USB_PORT, MESHTASTIC_PORT_NAME, MESHTASTIC_SERIAL_PORT,
+             MESHTASTIC_SERIAL, SERIAL_PORT, MESH_PORT
+      - BLE: MESH_BT_ADDR, MESH_BLE_ADDR, MESHTASTIC_BLE_ADDR, BLE_ADDR
+      - TCP: MESHTASTIC_HOST
     """
     t = _mesh_transport()
 
     if t == "usb":
-        dev = (os.getenv("MESH_USB_PORT", "") or "").strip()
+        dev = next(
+            (
+                (os.getenv(name, "") or "").strip()
+                for name in (
+                    "MESH_USB_PORT",
+                    "MESHTASTIC_PORT_NAME",
+                    "MESHTASTIC_SERIAL_PORT",
+                    "MESHTASTIC_SERIAL",
+                    "SERIAL_PORT",
+                    "MESH_PORT",
+                )
+                if (os.getenv(name, "") or "").strip()
+            ),
+            "",
+        )
         if not dev:
-            raise RuntimeError("MESH_TRANSPORT=usb pero falta MESH_USB_PORT (ej. /dev/ttyUSB0).")
+            raise RuntimeError(
+                "MESH_TRANSPORT=usb pero falta puerto serie. "
+                "Define MESH_USB_PORT o uno de sus aliases compatibles."
+            )
         return ["--port", dev]
 
-    if t in ("bluetooth", "ble"):
-        bt = (os.getenv("MESH_BT_ADDR", "") or "").strip()
+    if t == "ble":
+        bt = next(
+            (
+                (os.getenv(name, "") or "").strip()
+                for name in (
+                    "MESH_BT_ADDR",
+                    "MESH_BLE_ADDR",
+                    "MESHTASTIC_BLE_ADDR",
+                    "BLE_ADDR",
+                )
+                if (os.getenv(name, "") or "").strip()
+            ),
+            "",
+        )
         if not bt:
-            raise RuntimeError("MESH_TRANSPORT=bluetooth pero falta MESH_BT_ADDR.")
+            raise RuntimeError("MESH_TRANSPORT=ble/bluetooth pero falta la dirección BLE.")
         return ["--ble", bt]
 
     host = (os.getenv("MESHTASTIC_HOST", "") or "").strip()
@@ -377,16 +415,53 @@ def _mesh_cli_target_args() -> list[str]:
 
 def _mesh_runtime_host() -> str:
     """
-    Valor descriptivo para logs/estado.
-    En TCP devuelve MESHTASTIC_HOST.
-    En USB devuelve el path del puerto serie.
-    En BLE devuelve la MAC.
+    Valor descriptivo para logs/estado, alineado con _mesh_cli_target_args().
+
+    Reglas:
+      - TCP: devuelve MESHTASTIC_HOST.
+      - USB: devuelve el puerto serie resuelto usando los mismos aliases que la CLI.
+      - BLE: devuelve la dirección BLE resuelta usando los mismos aliases que la CLI.
+
+    Esto evita inconsistencias del tipo:
+      - la CLI conecta bien por USB/BLE
+      - pero /estado o logs muestran 'usb:?' o 'ble:?'
     """
     t = _mesh_transport()
+
     if t == "usb":
-        return (os.getenv("MESH_USB_PORT", "") or "").strip() or "usb:?"
+        dev = next(
+            (
+                (os.getenv(name, "") or "").strip()
+                for name in (
+                    "MESH_USB_PORT",
+                    "MESHTASTIC_PORT_NAME",
+                    "MESHTASTIC_SERIAL_PORT",
+                    "MESHTASTIC_SERIAL",
+                    "SERIAL_PORT",
+                    "MESH_PORT",
+                )
+                if (os.getenv(name, "") or "").strip()
+            ),
+            "",
+        )
+        return dev or "usb:?"
+
     if t in ("bluetooth", "ble"):
-        return (os.getenv("MESH_BT_ADDR", "") or "").strip() or "ble:?"
+        bt = next(
+            (
+                (os.getenv(name, "") or "").strip()
+                for name in (
+                    "MESH_BT_ADDR",
+                    "MESH_BLE_ADDR",
+                    "MESHTASTIC_BLE_ADDR",
+                    "BLE_ADDR",
+                )
+                if (os.getenv(name, "") or "").strip()
+            ),
+            "",
+        )
+        return bt or "ble:?"
+
     return (os.getenv("MESHTASTIC_HOST", "") or "").strip() or "tcp:?"
 
 
@@ -4705,13 +4780,26 @@ def traceroute_node_old(node_id: str, timeout: int = TRACEROUTE_TIMEOUT) -> Trac
             return TraceResult(ok=ok, hops=int(hops), route=list(path), raw=str(raw))
         except Exception as e:
             log(f"⚠️ traceroute via relay falló: {e}. Probando API…")
-    res = api_traceroute(MESHTASTIC_HOST, node_id, timeout=timeout)
+
+    if not _mesh_is_tcp():
+        return TraceResult(
+            ok=False,
+            hops=0,
+            route=[],
+            raw=f"traceroute API deshabilitado para transporte={_mesh_transport()}"
+        )
+
+    host = _mesh_api_host()
+    if not host:
+        return TraceResult(ok=False, hops=0, route=[], raw="MESHTASTIC_HOST vacío")
+
+    res = api_traceroute(host, node_id, timeout=timeout)
     return TraceResult(ok=bool(res["ok"]), hops=int(res["hops"]), route=list(res["route"]), raw=str(res["raw"]))
 
 def traceroute_node(node_id: str, timeout: int = TRACEROUTE_TIMEOUT) -> TraceResult:
     """
     Traceroute SOLO por API usando la interfaz persistente del pool TCP.
-    Sin RELAY y sin CLI. Devuelve TraceResult(ok, hops, route, raw).
+    En USB/BLE devuelve fallo limpio para no intentar sockets indebidos.
     """
     from tcpinterface_persistent import TCPInterfacePool as _Pool
     import inspect, re
@@ -4720,8 +4808,18 @@ def traceroute_node(node_id: str, timeout: int = TRACEROUTE_TIMEOUT) -> TraceRes
     if not dest:
         return TraceResult(ok=False, hops=0, route=[], raw="dest_id vacío")
 
-    host = MESHTASTIC_HOST
-    port = 4403
+    if not _mesh_is_tcp():
+        return TraceResult(
+            ok=False,
+            hops=0,
+            route=[],
+            raw=f"traceroute API no disponible en transporte={_mesh_transport()}"
+        )
+
+    host = _mesh_api_host()
+    port = _mesh_api_port() or 4403
+    if not host:
+        return TraceResult(ok=False, hops=0, route=[], raw="MESHTASTIC_HOST vacío")
 
     # 1) Obtener iface del pool (sin abrir sockets nuevos si ya está)
     iface = None
@@ -5220,7 +5318,10 @@ async def send_with_ack_retry(node_id: str | None,
     """
     dest_id = None if (node_id is None or str(node_id).lower() == "broadcast") else node_id
     canal = int(canal if canal is not None else BROKER_CHANNEL)
-    host = MESHTASTIC_HOST
+    host = _mesh_api_host() or ""
+
+    if not _mesh_is_tcp() or not host:
+        return {"ok": False, "attempts": 0, "packet_id": None, "reason": f"ACK API no disponible en transporte={_mesh_transport()}"}
 
     if dest_id is None and attempts < 1:
         attempts = 1
@@ -6568,6 +6669,10 @@ def utc_from_ts(ts: float):
 
 def _traceroute_fast(node_id: str, channel: int = 0,
                      hop_timeout: float = 1.2, max_hops: int = 5, total_timeout: float = 3.5):
+    # En USB/BLE no intentamos API TCP directa.
+    if not _mesh_is_tcp():
+        return {"ok": False, "error": f"traceroute rápido no disponible en transporte={_mesh_transport()}"}
+
     # Cache 5 min
     now = utc_now()
     cached = ROUTE_CACHE.get(node_id)
@@ -6580,7 +6685,10 @@ def _traceroute_fast(node_id: str, channel: int = 0,
            return cached[1]
     try:
         # Firma correcta: host, dest_id, timeout
-        res = api_traceroute(MESHTASTIC_HOST, node_id, timeout=int(total_timeout))
+        host = _mesh_api_host()
+        if not host:
+            return {"ok": False, "error": "MESHTASTIC_HOST vacío"}
+        res = api_traceroute(host, node_id, timeout=int(total_timeout))
         if isinstance(res, dict) and res.get("ok"):
             alias_map = _build_alias_fallback_from_nodes_file()
             path_ids = res.get("route") or []
@@ -14701,10 +14809,17 @@ async def on_forcereply_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Intento por API (sin CLI) para evitar cierres bruscos de socket y stacktraces
         try:
-            #res = api_request_telemetry(MESHTASTIC_HOST, node_id, timeout=TELEMETRY_TIMEOUT)
-            res = api_request_telemetry(MESHTASTIC_HOST, node_id, timeout=TELEMETRY_TIMEOUT, allow_cli_fallback=False)
-
-            raw = res.get("raw", "(sin salida)")
+            if _mesh_is_tcp():
+                host = _mesh_api_host()
+                if not host:
+                    raise RuntimeError("MESHTASTIC_HOST vacío")
+                res = api_request_telemetry(host, node_id, timeout=TELEMETRY_TIMEOUT, allow_cli_fallback=False)
+                raw = res.get("raw", "(sin salida)")
+            else:
+                raw = (
+                    f"(solicitud de telemetría activa omitida: transporte={_mesh_transport()} "
+                    "sin API TCP directa; mostrando únicamente respuestas observadas por broker)"
+                )
         except Exception as e:
             raw = f"(error solicitando telemetría por API: {e})"
 
