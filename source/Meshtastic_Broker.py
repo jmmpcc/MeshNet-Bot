@@ -2697,6 +2697,7 @@ def backlog_append(row: dict) -> None:
 # === Meshtastic_Broker.py ===
 # Sustituye COMPLETA la función append_offline_log por esta versión:
 
+
 def append_offline_log(rec: dict):
     """
     Persistencia JSONL compatible con panel + retrocompatible con v6 (paquete plano).
@@ -4852,7 +4853,7 @@ class MeshReceiver:
         self._alias_cache_ttl = 900  # 15 min
 
 
-# MODIFICADA: función completa con persistencia offline
+    # MODIFICADA: función completa con persistencia offline
     def _on_rx(self, packet=None, interface=None, **kwargs):
         try:
             pkt = packet or {}
