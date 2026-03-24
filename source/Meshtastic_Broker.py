@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.0.py Incluye servidor BBS Meshtastic server corregiso por DM
-
+Meshtastic_Broker_v7.0.1.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -1041,8 +1041,13 @@ class MeshCoreEmbeddedBridge:
         Llamar desde MeshReceiver._on_rx para reenviar mensajes Meshtastic -> MeshCore.
 
         Soporta ruteo por:
-          - contacto (pubkey_prefix)
-          - canal MeshCore (channel_idx) vía MESHCORE_CHANNEL_MAP con 'chan'
+        - contacto (pubkey_prefix)
+        - canal MeshCore (channel_idx) vía MESHCORE_CHANNEL_MAP con 'chan'
+
+        Cambio quirúrgico:
+        - Se mantiene intacta la lógica existente de filtros, anti-bucle y ruteo.
+        - Solo se cambia el formato del payload para que salga hacia MeshCore con
+        prefijo estructurado [MT:<CANAL_LOGICO>:<ALIAS>], simétrico al [MC:...].
         """
         if not self.enable:
             return
@@ -1065,17 +1070,28 @@ class MeshCoreEmbeddedBridge:
         kind = (mapping.get("kind") or "contact").strip().lower()
         tag = mapping.get("tag")
 
-        # Prefijo corto: tag -> nombre canal -> CHx
+        # Nombre lógico del canal:
+        # 1) tag del mapping (si existe)
+        # 2) nombre real del canal Meshtastic
+        # 3) fallback CHx
         if tag:
-            prefix = f"[{tag}]"
+            logical_tag = str(tag).strip()
         elif channel_name:
-            prefix = f"[{channel_name}]"
+            logical_tag = str(channel_name).strip()
         else:
-            prefix = f"[CH{int(ch)}]"
+            logical_tag = f"CH{int(ch)}"
 
-        sender = (from_alias or "").strip() or str(from_id)
-        hops = f" h{int(hop_real)}" if isinstance(hop_real, int) and hop_real >= 0 else ""
-        payload = f"{prefix} {sender}{hops}: {msg}"
+        # Alias legible del emisor; fallback al node_id
+        sender = (from_alias or "").strip() or str(from_id).strip() or "UNKNOWN"
+
+        # Nuevo prefijo simétrico con la entrada desde MeshCore
+        mt_prefix = f"[MT:{logical_tag}:{sender}]"
+
+        # Conserva hops reales si vienen informados
+        if isinstance(hop_real, int) and hop_real >= 0:
+            payload = f"{mt_prefix} h{int(hop_real)} {msg}"
+        else:
+            payload = f"{mt_prefix} {msg}"
 
         if kind in ("chan", "channel"):
             try:
@@ -1092,6 +1108,7 @@ class MeshCoreEmbeddedBridge:
         if not contact_prefix:
             return  # sin destino
         self.enqueue_send_contact(str(contact_prefix), payload)
+
 # ================================================================================
 
 
@@ -2696,7 +2713,6 @@ def backlog_append(row: dict) -> None:
 
 # === Meshtastic_Broker.py ===
 # Sustituye COMPLETA la función append_offline_log por esta versión:
-
 
 def append_offline_log(rec: dict):
     """
@@ -4853,7 +4869,7 @@ class MeshReceiver:
         self._alias_cache_ttl = 900  # 15 min
 
 
-    # MODIFICADA: función completa con persistencia offline
+# MODIFICADA: función completa con persistencia offline
     def _on_rx(self, packet=None, interface=None, **kwargs):
         try:
             pkt = packet or {}
