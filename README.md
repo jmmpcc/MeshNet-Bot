@@ -30,6 +30,86 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 # MeshNet — Changelog Consolidado
 
+
+## [v7.0.0] — (20 de Marzo de 2026)
+
+### 🚀 Añadido
+
+- Soporte completo para **multi-transporte**:
+  - USB (Serial)
+  - TCP (IP)
+  - BLE (Bluetooth)
+- Sistema de **prefetch inicial de nodos** al arranque.
+- Integración total con:
+  - Broker v7
+  - BacklogServer (SEND / FETCH)
+- Compatibilidad con **MeshCore embebido**.
+- Reactivación automática de conexión al enviar mensajes.
+- Sistema de espera activa hasta que el broker esté operativo.
+- Mejora en la gestión de alias MeshCore:
+  ```
+  [MC:<CANAL>:<ALIAS>]
+  ```
+
+---
+
+### 🔄 Mejorado
+
+- Reconexión automática en escenarios reales:
+  - caída de nodo Meshtastic
+  - reinicio del broker
+  - desconexión USB
+- Sincronización bot ↔ broker:
+  - evita comandos en frío
+  - evita estados inconsistentes
+- Gestión de estado interno del bot:
+  - mayor coherencia tras reconexiones
+- Comportamiento uniforme entre USB / TCP / BLE.
+- Estabilidad general para ejecución continua (24/7).
+- Tolerancia a fallos en conexiones TCP intermitentes.
+- Reducción de condiciones de carrera en arranque.
+
+---
+
+### 🧠 Cambios internos
+
+- Refactor de lógica de conexión para adaptarse al broker v7.
+- Integración con arquitectura de backend embebido:
+  - MeshCore
+  - Bridge Meshtastic
+- Mejora en el control de flujo de inicialización.
+- Ajustes en timing de arranque y espera de servicios.
+- Optimización de gestión de eventos entrantes.
+
+---
+
+### 🐞 Corregido
+
+- Problemas al iniciar el bot antes de que el broker estuviera listo.
+- Fallos al trabajar con nodo en modo USB.
+- Estados bloqueados tras desconexiones prolongadas.
+- Pérdida de mensajes en reconexiones rápidas.
+- Inconsistencias al cambiar entre transportes.
+
+---
+
+### ⚠️ Compatibilidad
+
+- Requiere:
+  - Broker v7.0.0 o superior
+- Compatible con:
+  - Triple Bridge v7
+  - MeshCore embebido
+- No recomendado usar con versiones antiguas del broker.
+
+---
+
+### 📌 Notas
+
+- Esta versión está diseñada para **producción 24/7**.
+- Sustituye completamente versiones anteriores del bot.
+- El comportamiento observado de reconexión automática tras envío es intencionado y forma parte del diseño resiliente.
+
 # Changelog — MeshNet / MeshBot v6.2.6
 
 > Estado: **Validado para producción 24/7**  
@@ -196,11 +276,6 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 - Base estable para clonación y despliegue rápido.
 
 ---
-
-**v6.2.4** consolida y estabiliza todas las capacidades introducidas en v6.2.3,
-estableciéndose como versión base de referencia para operación continua y evolución futura.
-
-
 
 
 ### 🌐 Guía BROKER
