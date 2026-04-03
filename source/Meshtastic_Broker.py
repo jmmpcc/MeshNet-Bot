@@ -552,8 +552,10 @@ class MeshCoreEmbeddedBridge:
         self._loop = None
         self._tx_q = None
         self._mc = None
-        # Mensajes TX a reintentar tras una reconexión de sesión.
-        # Vive entre sesiones (_amain_once) para evitar perder retries al recrear _tx_q.
+        # Cola persistente entre sesiones para no perder TX durante reconexiones:
+        # - retries explícitos
+        # - mensajes pendientes al romper una sesión
+        # - mensajes encolados mientras no hay _tx_q activa
         self._retry_spool_lock = threading.Lock()
         self._retry_spool: list[tuple[object, str, int]] = []
 
@@ -961,6 +963,21 @@ class MeshCoreEmbeddedBridge:
                         print("[meshcore-embedded] TX persistido para retry=1 tras reconexión", flush=True)
                     except Exception:
                         pass
+                # Preservar también el resto de pendientes de la cola actual
+                # para evitar pérdida bajo ráfagas + reconexión.
+                try:
+                    while True:
+                        _pending = self._tx_q.get_nowait()
+                        if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
+                            _dst = _pending[0]
+                            _msg = str(_pending[1] or "")
+                            _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
+                            with self._retry_spool_lock:
+                                self._retry_spool.append((_dst, _msg, _r))
+                except _aio.QueueEmpty:
+                    pass
+                except Exception:
+                    pass
                 self._connected = False
                 print(f"[meshcore-embedded] TX ERROR -> reconexión: {self._last_err}", flush=True)
                 break
@@ -1031,12 +1048,18 @@ class MeshCoreEmbeddedBridge:
 
 
     def enqueue_send_contact(self, contact_prefix: str, text: str) -> None:
-        if not self.enable or not self._loop or not self._tx_q:
+        if not self.enable:
             return
         msg = (text or "").strip()
         if not msg:
             return
         try:
+            if not self._loop or not self._tx_q:
+                with self._retry_spool_lock:
+                    self._retry_spool.append((str(contact_prefix), msg, 0))
+                if self.log_enqueue:
+                    print(f"[meshcore] enqueue deferred -> contact={str(contact_prefix)} (sin sesión activa)", flush=True)
+                return
             if self.log_enqueue:
                 try:
                     n = len(msg.encode('utf-8', errors='ignore'))
@@ -1048,12 +1071,18 @@ class MeshCoreEmbeddedBridge:
             pass
 
     def enqueue_send_channel(self, channel_idx: int, text: str) -> None:
-        if not self.enable or not self._loop or not self._tx_q:
+        if not self.enable:
             return
         msg = (text or "").strip()
         if not msg:
             return
         try:
+            if not self._loop or not self._tx_q:
+                with self._retry_spool_lock:
+                    self._retry_spool.append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0))
+                if self.log_enqueue:
+                    print(f"[meshcore] enqueue deferred -> chan_idx={int(channel_idx)} (sin sesión activa)", flush=True)
+                return
             if self.log_enqueue:
                 try:
                     n = len(msg.encode('utf-8', errors='ignore'))

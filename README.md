@@ -39,6 +39,8 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
     devuelven `EventType.ERROR` sin excepción.
   - Reintento automático de **una sola vez** del mensaje fallido, persistido para la
     siguiente sesión tras reconexión (no se pierde al recrear la cola TX interna).
+  - Conservación de pendientes TX en reconexión: los mensajes ya en cola (y los
+    encolados sin sesión activa) se preservan para reenvío al restablecer enlace.
   - Logs de envío con contador de reintentos (`retry=0/1`) para diagnóstico en producción.
 
 ### 🐞 Corregido
