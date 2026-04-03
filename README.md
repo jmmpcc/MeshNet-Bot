@@ -30,6 +30,29 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 # MeshNet — Changelog Consolidado
 
+## [v7.0.1] — (3 de Abril de 2026)
+
+### 🔄 Mejorado
+
+- Broker MeshCore embebido:
+  - Detección explícita de errores silenciosos de TX cuando `send_msg` / `send_chan_msg`
+    devuelven `EventType.ERROR` sin excepción.
+  - Reintento automático de **una sola vez** del mensaje fallido antes de forzar reconexión.
+  - Logs de envío con contador de reintentos (`retry=0/1`) para diagnóstico en producción.
+
+### 🐞 Corregido
+
+- Estado de conexión MeshCore “zombie” tras caídas de Internet:
+  - si falla TX, se marca el enlace como no saludable y se fuerza reconexión limpia del engine.
+  - se reduce la pérdida del primer mensaje tras recuperación de enlace.
+
+### 🧠 Cambios internos
+
+- Soporte de subcomandos CLI directos (`schedule`, `tasks`, `cancel`) mediante
+  despacho por `sys.argv` hacia `_cli_tasks`.
+
+---
+
 
 ## [v7.0.0] — (20 de Marzo de 2026)
 

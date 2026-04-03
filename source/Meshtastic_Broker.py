@@ -870,13 +870,25 @@ class MeshCoreEmbeddedBridge:
         # --- bucle TX ---
         while not self._stop.is_set():
             try:
-                dst, msg = await _aio.wait_for(self._tx_q.get(), timeout=0.5)
+                item = await _aio.wait_for(self._tx_q.get(), timeout=0.5)
             except _aio.TimeoutError:
+                continue
+
+            retry_count = 0
+            try:
+                if isinstance(item, (tuple, list)) and len(item) >= 2:
+                    dst, msg = item[0], item[1]
+                    if len(item) >= 3:
+                        retry_count = int(item[2] or 0)
+                else:
+                    # Compat defensiva ante payload inesperado en cola.
+                    continue
+            except Exception:
                 continue
 
             # === [LOG TX MeshCore] ===
             try:
-                print(f"[meshcore-embedded TX] dst={dst} text='{msg[:120]}'", flush=True)
+                print(f"[meshcore-embedded TX] dst={dst} retry={retry_count} text='{msg[:120]}'", flush=True)
             except Exception:
                 pass
 
@@ -893,9 +905,10 @@ class MeshCoreEmbeddedBridge:
 
                 # Enviar secuencialmente (micro-espaciado para evitar ráfagas)
                 for p in (send_parts or [""]):
+                    result = None
                     if isinstance(dst, dict) and str(dst.get("kind") or "").lower() in ("chan", "channel"):
                         chan_idx = int(dst.get("channel_idx"))
-                        await mc.commands.send_chan_msg(int(chan_idx), p)  # type: ignore[union-attr]
+                        result = await mc.commands.send_chan_msg(int(chan_idx), p)  # type: ignore[union-attr]
                     else:
                         send_dst = dst
                         if isinstance(send_dst, str):
@@ -905,7 +918,16 @@ class MeshCoreEmbeddedBridge:
                                     send_dst = c
                             except Exception:
                                 pass
-                        await mc.commands.send_msg(send_dst, p)  # type: ignore[union-attr]
+                        result = await mc.commands.send_msg(send_dst, p)  # type: ignore[union-attr]
+
+                    # Algunos cortes de enlace dejan una "conexión zombie":
+                    # la llamada no lanza excepción pero devuelve ERROR.
+                    # Si lo detectamos, forzamos reconexión limpia del engine.
+                    try:
+                        if getattr(result, "type", None) == _MCEventType.ERROR:  # type: ignore[union-attr]
+                            raise RuntimeError(f"meshcore_tx_error: {getattr(result, 'payload', None)}")
+                    except Exception:
+                        raise
 
                     try:
                         await _aio.sleep(0.15)
@@ -916,6 +938,15 @@ class MeshCoreEmbeddedBridge:
 
             except Exception as e:
                 self._last_err = f"tx: {type(e).__name__}: {e}"
+                if retry_count < 1:
+                    try:
+                        self._tx_q.put_nowait((dst, msg, retry_count + 1))
+                        print("[meshcore-embedded] TX reencolado (retry=1) antes de reconexión", flush=True)
+                    except Exception:
+                        pass
+                self._connected = False
+                print(f"[meshcore-embedded] TX ERROR -> reconexión: {self._last_err}", flush=True)
+                break
 
         # --- desconexión ---
         try:
@@ -6703,4 +6734,3 @@ if __name__ == "__main__":
 
     # Ejecución normal del broker
     main()
-
