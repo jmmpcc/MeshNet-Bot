@@ -53,7 +53,11 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 ### 🛠️ Uso de los comandos internos (broker)
 
-Los subcomandos internos se ejecutan directamente sobre el proceso del broker:
+Los subcomandos internos son **opcionales** y de uso manual (operación/soporte).
+En el funcionamiento normal 24/7 **no se lanzan automáticamente**; lo habitual es
+usar solo la recuperación/reconexión automática de nodos.
+
+Si se necesitan, se ejecutan directamente sobre el proceso del broker:
 
 ```bash
 python source/Meshtastic_Broker.py schedule --when "2026-04-03 22:30" --channel 0 --dest broadcast --msg "Prueba programada" --ack 0 --max-attempts 3
@@ -65,6 +69,7 @@ Notas:
 - `--when` usa hora local configurada del scheduler (`Europe/Madrid` por defecto en broker tasks).
 - `--dest broadcast` envía al canal; para DM usa destino específico cuando aplique.
 - `tasks` permite filtrar por estado: `pending`, `done`, `failed`, `canceled`.
+- Si no vas a programar tareas, puedes ignorar completamente estos subcomandos.
 
 ---
 
