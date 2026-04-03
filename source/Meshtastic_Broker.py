@@ -552,6 +552,10 @@ class MeshCoreEmbeddedBridge:
         self._loop = None
         self._tx_q = None
         self._mc = None
+        # Mensajes TX a reintentar tras una reconexión de sesión.
+        # Vive entre sesiones (_amain_once) para evitar perder retries al recrear _tx_q.
+        self._retry_spool_lock = threading.Lock()
+        self._retry_spool: list[tuple[object, str, int]] = []
 
         # === Prefijo RX MeshCore -> Meshtastic ===
         # Estilos:
@@ -716,6 +720,18 @@ class MeshCoreEmbeddedBridge:
 
         self._loop = _aio.get_running_loop()
         self._tx_q = _aio.Queue()
+
+        # Reinyecta retries persistidos de sesión anterior (si los hay).
+        try:
+            with self._retry_spool_lock:
+                pending_retry = list(self._retry_spool)
+                self._retry_spool.clear()
+            for _dst, _msg, _retry in pending_retry:
+                self._tx_q.put_nowait((_dst, _msg, _retry))
+            if pending_retry:
+                print(f"[meshcore-embedded] retries restaurados tras reconexión: {len(pending_retry)}", flush=True)
+        except Exception:
+            pass
 
         # --- conectar ---
         print(f"[meshcore-embedded] CONNECTING mode={self.mode}", flush=True)
@@ -940,8 +956,9 @@ class MeshCoreEmbeddedBridge:
                 self._last_err = f"tx: {type(e).__name__}: {e}"
                 if retry_count < 1:
                     try:
-                        self._tx_q.put_nowait((dst, msg, retry_count + 1))
-                        print("[meshcore-embedded] TX reencolado (retry=1) antes de reconexión", flush=True)
+                        with self._retry_spool_lock:
+                            self._retry_spool.append((dst, msg, retry_count + 1))
+                        print("[meshcore-embedded] TX persistido para retry=1 tras reconexión", flush=True)
                     except Exception:
                         pass
                 self._connected = False

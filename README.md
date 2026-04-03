@@ -37,7 +37,8 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 - Broker MeshCore embebido:
   - Detección explícita de errores silenciosos de TX cuando `send_msg` / `send_chan_msg`
     devuelven `EventType.ERROR` sin excepción.
-  - Reintento automático de **una sola vez** del mensaje fallido antes de forzar reconexión.
+  - Reintento automático de **una sola vez** del mensaje fallido, persistido para la
+    siguiente sesión tras reconexión (no se pierde al recrear la cola TX interna).
   - Logs de envío con contador de reintentos (`retry=0/1`) para diagnóstico en producción.
 
 ### 🐞 Corregido
