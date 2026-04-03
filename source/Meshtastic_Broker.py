@@ -1055,11 +1055,13 @@ class MeshCoreEmbeddedBridge:
         if not msg:
             return
         try:
-            if not self._loop or not self._tx_q:
+            # Si la sesión no está sana (incluye ventana de reconexión),
+            # persistir al spool en vez de usar una _tx_q potencialmente efímera.
+            if (not self._connected) or (not self._loop) or (not self._tx_q):
                 with self._retry_spool_lock:
                     self._retry_spool.append((str(contact_prefix), msg, 0))
                 if self.log_enqueue:
-                    print(f"[meshcore] enqueue deferred -> contact={str(contact_prefix)} (sin sesión activa)", flush=True)
+                    print(f"[meshcore] enqueue deferred -> contact={str(contact_prefix)} (sesión no activa)", flush=True)
                 return
             if self.log_enqueue:
                 try:
@@ -1078,11 +1080,13 @@ class MeshCoreEmbeddedBridge:
         if not msg:
             return
         try:
-            if not self._loop or not self._tx_q:
+            # Si la sesión no está sana (incluye ventana de reconexión),
+            # persistir al spool en vez de usar una _tx_q potencialmente efímera.
+            if (not self._connected) or (not self._loop) or (not self._tx_q):
                 with self._retry_spool_lock:
                     self._retry_spool.append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0))
                 if self.log_enqueue:
-                    print(f"[meshcore] enqueue deferred -> chan_idx={int(channel_idx)} (sin sesión activa)", flush=True)
+                    print(f"[meshcore] enqueue deferred -> chan_idx={int(channel_idx)} (sesión no activa)", flush=True)
                 return
             if self.log_enqueue:
                 try:
