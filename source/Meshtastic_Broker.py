@@ -960,6 +960,9 @@ class MeshCoreEmbeddedBridge:
                 # Marcar desconectado ANTES de drenar para que cualquier enqueue
                 # concurrente vaya al spool (y no a una _tx_q efímera).
                 self._connected = False
+                # Despublicar la cola de sesión para que nuevos enqueues no apunten aquí.
+                _old_q = self._tx_q
+                self._tx_q = None
                 if retry_count < 1:
                     try:
                         with self._retry_spool_lock:
@@ -970,21 +973,32 @@ class MeshCoreEmbeddedBridge:
                 # Preservar también el resto de pendientes de la cola actual
                 # para evitar pérdida bajo ráfagas + reconexión.
                 try:
-                    # Dos pasadas: drenado inmediato + yield corto para que
-                    # callbacks call_soon_threadsafe pendientes entren en cola.
-                    for _ in range(2):
-                        while True:
-                            try:
-                                _pending = self._tx_q.get_nowait()
-                            except _aio.QueueEmpty:
+                    if _old_q is not None:
+                        # Drenado "cuasi-atómico" con ventana corta de estabilización:
+                        # captura callbacks call_soon_threadsafe ya en vuelo.
+                        _idle_rounds = 0
+                        _max_rounds = 20  # ~400 ms (20 * 20ms)
+                        for _ in range(_max_rounds):
+                            _moved = 0
+                            while True:
+                                try:
+                                    _pending = _old_q.get_nowait()
+                                except _aio.QueueEmpty:
+                                    break
+                                if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
+                                    _dst = _pending[0]
+                                    _msg = str(_pending[1] or "")
+                                    _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
+                                    with self._retry_spool_lock:
+                                        self._retry_spool.append((_dst, _msg, _r))
+                                    _moved += 1
+                            if _moved == 0:
+                                _idle_rounds += 1
+                            else:
+                                _idle_rounds = 0
+                            if _idle_rounds >= 2:
                                 break
-                            if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
-                                _dst = _pending[0]
-                                _msg = str(_pending[1] or "")
-                                _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
-                                with self._retry_spool_lock:
-                                    self._retry_spool.append((_dst, _msg, _r))
-                        await _aio.sleep(0)
+                            await _aio.sleep(0.02)
                 except Exception:
                     pass
                 print(f"[meshcore-embedded] TX ERROR -> reconexión: {self._last_err}", flush=True)
