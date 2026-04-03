@@ -723,7 +723,18 @@ class MeshCoreEmbeddedBridge:
         self._loop = _aio.get_running_loop()
         self._tx_q = _aio.Queue()
 
-        # Reinyecta retries persistidos de sesión anterior (si los hay).
+        # --- conectar ---
+        print(f"[meshcore-embedded] CONNECTING mode={self.mode}", flush=True)
+        self._mc = await self._connect()
+        self._connected = True
+        self._last_ok = time.time()
+        self._last_err = ""
+        print("[meshcore-embedded] CONNECTED", flush=True)
+
+        mc = self._mc
+
+        # Reinyecta retries/pendientes persistidos SOLO tras conexión exitosa.
+        # Si _connect() falla, el spool debe permanecer intacto para próximos intentos.
         try:
             with self._retry_spool_lock:
                 pending_retry = list(self._retry_spool)
@@ -734,16 +745,6 @@ class MeshCoreEmbeddedBridge:
                 print(f"[meshcore-embedded] retries restaurados tras reconexión: {len(pending_retry)}", flush=True)
         except Exception:
             pass
-
-        # --- conectar ---
-        print(f"[meshcore-embedded] CONNECTING mode={self.mode}", flush=True)
-        self._mc = await self._connect()
-        self._connected = True
-        self._last_ok = time.time()
-        self._last_err = ""
-        print("[meshcore-embedded] CONNECTED", flush=True)
-
-        mc = self._mc
 
         # --- activar auto-fetch (CRÍTICO para que entren eventos RX) ---
         try:
