@@ -51,6 +51,21 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 - Soporte de subcomandos CLI directos (`schedule`, `tasks`, `cancel`) mediante
   despacho por `sys.argv` hacia `_cli_tasks`.
 
+### 🛠️ Uso de los comandos internos (broker)
+
+Los subcomandos internos se ejecutan directamente sobre el proceso del broker:
+
+```bash
+python source/Meshtastic_Broker.py schedule --when "2026-04-03 22:30" --channel 0 --dest broadcast --msg "Prueba programada" --ack 0 --max-attempts 3
+python source/Meshtastic_Broker.py tasks --status pending
+python source/Meshtastic_Broker.py cancel --id <TASK_ID>
+```
+
+Notas:
+- `--when` usa hora local configurada del scheduler (`Europe/Madrid` por defecto en broker tasks).
+- `--dest broadcast` envía al canal; para DM usa destino específico cuando aplique.
+- `tasks` permite filtrar por estado: `pending`, `done`, `failed`, `canceled`.
+
 ---
 
 
