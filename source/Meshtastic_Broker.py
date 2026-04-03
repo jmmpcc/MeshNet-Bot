@@ -957,6 +957,9 @@ class MeshCoreEmbeddedBridge:
 
             except Exception as e:
                 self._last_err = f"tx: {type(e).__name__}: {e}"
+                # Marcar desconectado ANTES de drenar para que cualquier enqueue
+                # concurrente vaya al spool (y no a una _tx_q efímera).
+                self._connected = False
                 if retry_count < 1:
                     try:
                         with self._retry_spool_lock:
@@ -967,19 +970,23 @@ class MeshCoreEmbeddedBridge:
                 # Preservar también el resto de pendientes de la cola actual
                 # para evitar pérdida bajo ráfagas + reconexión.
                 try:
-                    while True:
-                        _pending = self._tx_q.get_nowait()
-                        if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
-                            _dst = _pending[0]
-                            _msg = str(_pending[1] or "")
-                            _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
-                            with self._retry_spool_lock:
-                                self._retry_spool.append((_dst, _msg, _r))
-                except _aio.QueueEmpty:
-                    pass
+                    # Dos pasadas: drenado inmediato + yield corto para que
+                    # callbacks call_soon_threadsafe pendientes entren en cola.
+                    for _ in range(2):
+                        while True:
+                            try:
+                                _pending = self._tx_q.get_nowait()
+                            except _aio.QueueEmpty:
+                                break
+                            if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
+                                _dst = _pending[0]
+                                _msg = str(_pending[1] or "")
+                                _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
+                                with self._retry_spool_lock:
+                                    self._retry_spool.append((_dst, _msg, _r))
+                        await _aio.sleep(0)
                 except Exception:
                     pass
-                self._connected = False
                 print(f"[meshcore-embedded] TX ERROR -> reconexión: {self._last_err}", flush=True)
                 break
 
