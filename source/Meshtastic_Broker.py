@@ -1103,9 +1103,15 @@ class MeshCoreEmbeddedBridge:
         if not msg:
             return
         try:
+            loop = None
+            tx_q = None
+            with self._retry_spool_lock:
+                healthy = bool(self._connected)
+                loop = self._loop
+                tx_q = self._tx_q
             # Si la sesión no está sana (incluye ventana de reconexión),
             # persistir al spool en vez de usar una _tx_q potencialmente efímera.
-            if (not self._connected) or (not self._loop) or (not self._tx_q):
+            if (not healthy) or (not loop) or (not tx_q):
                 with self._retry_spool_lock:
                     self._retry_spool.append((str(contact_prefix), msg, 0))
                 if self.log_enqueue:
@@ -1117,9 +1123,13 @@ class MeshCoreEmbeddedBridge:
                 except Exception:
                     n = len(msg)
                 print(f"[meshcore] enqueue -> contact={str(contact_prefix)} len={n}", flush=True)
-            self._loop.call_soon_threadsafe(self._tx_q.put_nowait, (str(contact_prefix), msg))
+            loop.call_soon_threadsafe(tx_q.put_nowait, (str(contact_prefix), msg))
         except Exception:
-            pass
+            try:
+                with self._retry_spool_lock:
+                    self._retry_spool.append((str(contact_prefix), msg, 0))
+            except Exception:
+                pass
 
     def enqueue_send_channel(self, channel_idx: int, text: str) -> None:
         if not self.enable:
@@ -1128,9 +1138,15 @@ class MeshCoreEmbeddedBridge:
         if not msg:
             return
         try:
+            loop = None
+            tx_q = None
+            with self._retry_spool_lock:
+                healthy = bool(self._connected)
+                loop = self._loop
+                tx_q = self._tx_q
             # Si la sesión no está sana (incluye ventana de reconexión),
             # persistir al spool en vez de usar una _tx_q potencialmente efímera.
-            if (not self._connected) or (not self._loop) or (not self._tx_q):
+            if (not healthy) or (not loop) or (not tx_q):
                 with self._retry_spool_lock:
                     self._retry_spool.append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0))
                 if self.log_enqueue:
@@ -1142,9 +1158,13 @@ class MeshCoreEmbeddedBridge:
                 except Exception:
                     n = len(msg)
                 print(f"[meshcore] enqueue -> chan_idx={int(channel_idx)} len={n}", flush=True)
-            self._loop.call_soon_threadsafe(self._tx_q.put_nowait, ({"kind": "chan", "channel_idx": int(channel_idx)}, msg))
+            loop.call_soon_threadsafe(tx_q.put_nowait, ({"kind": "chan", "channel_idx": int(channel_idx)}, msg))
         except Exception:
-            pass
+            try:
+                with self._retry_spool_lock:
+                    self._retry_spool.append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0))
+            except Exception:
+                pass
 
     def _fingerprint(self, ch: int, text: str) -> str:
         return f"{int(ch)}|{hashlib.sha1(text.encode('utf-8', errors='ignore')).hexdigest()}"
