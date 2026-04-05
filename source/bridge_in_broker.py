@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-bridge_in_broker.py V6.2.1 — Pasarela A<->B embebida en el broker usando lógica "peer-safe".
+bridge_in_broker.py V6.2.2 — Pasarela A<->B embebida en el broker usando lógica "peer-safe".
 
 Problemas reales observados:
 - Error falso: 'Timed out waiting for connection completion' aunque el TCP real esté vivo.
@@ -222,6 +222,9 @@ class BrokerEmbeddedBridge:
 
         # Identificador de interfaz "secundaria" para evitar que meshtastic la trate como principal
         self._iface_b_setinterface = _truthy(os.getenv("BRIDGE_B_SETINTERFACE", "0"), False)
+
+        # Expiración de mensajes en cola (wall-clock). 0 = nunca expira.
+        self._msg_expiry_secs = float(os.getenv("BRIDGE_MSG_EXPIRY_SECS", "0") or "0")
 
     # ----------------------------------------------------------------------------------
     # Lifecycle
@@ -557,6 +560,7 @@ class BrokerEmbeddedBridge:
             "want_ack": bool(want_ack),
             "attempt": 0,
             "max_retries": int(self._max_retries_a2b if direction == "A2B" else self._max_retries_b2a),
+            "queued_at": time.time(),
         }
 
         if due is None:
@@ -568,6 +572,14 @@ class BrokerEmbeddedBridge:
 
     def _reschedule(self, item: dict, delay: float) -> None:
         item["attempt"] = int(item.get("attempt", 0)) + 1
+        due = time.time() + float(delay)
+        with self._pq_cv:
+            heapq.heappush(self._pq, (due, next(self._pq_seq), item))
+            self._pq_cv.notify()
+
+    def _defer(self, item: dict, delay: float) -> None:
+        """Re-encola item con delay SIN incrementar attempt. Usar para aplazamientos
+        que no son fallos de envío reales (peer offline, iface en reconexión)."""
         due = time.time() + float(delay)
         with self._pq_cv:
             heapq.heappush(self._pq, (due, next(self._pq_seq), item))
@@ -588,10 +600,10 @@ class BrokerEmbeddedBridge:
                     continue
                 heapq.heappop(self._pq)
 
-            # A->B: si sigue offline, difiere hasta peer_offline_until
+            # A->B: si sigue offline, difiere hasta peer_offline_until (sin consumir reintento)
             if item["direction"] == "A2B" and self._is_peer_suppressed():
                 remaining = max(0, float(self.peer_offline_until - time.time()))
-                self._reschedule(item, max(0.5, remaining))
+                self._defer(item, max(0.5, remaining))
                 continue
 
             self._send_item(item)
@@ -628,23 +640,38 @@ class BrokerEmbeddedBridge:
         # === CAMBIO CLAVE: resolver iface en este instante ===
         iface = self.iface_b if direction == "A2B" else self.iface_a
 
-        # Si iface aún no está lista: reintento con backoff, SIN referencias a 'e'.
+        # Si iface aún no está lista: distinguir reconexión en curso (A2B) de fallo real (B2A).
         if iface is None or not hasattr(iface, "sendText"):
-            attempt = int(item.get("attempt", 0))
-            max_r = int(item.get("max_retries", 0))
-
             if direction == "A2B":
-                # No es "offline real": es reconexión en curso.
-                # Si estaba suprimido ya se difiere en _tx_worker; aquí solo reintentamos.
+                # iface None significa reconexión en curso, NO es un fallo de envío real.
+                # Aseguramos que el reconector esté activo.
                 if not self._is_peer_suppressed():
                     self._schedule_reconnect_b()
 
-            if attempt < max_r:
-                delay = self._retry_schedule[min(attempt, len(self._retry_schedule) - 1)]
-                self._reschedule(item, delay)
+                # Expiración wall-clock opcional (BRIDGE_MSG_EXPIRY_SECS, 0=nunca expira).
+                expiry = float(self._msg_expiry_secs or 0.0)
+                if expiry > 0:
+                    age = time.time() - float(item.get("queued_at", time.time()))
+                    if age > expiry:
+                        print(
+                            f"[bridge] A2B ch {item.get('ch')} EXPIRED tras {int(age)}s en cola "
+                            f"(BRIDGE_MSG_EXPIRY_SECS={int(expiry)}), descartado.",
+                            flush=True,
+                        )
+                        return
+
+                # No consumir reintento: diferir hasta que B reconecte.
+                delay = self._retry_schedule[min(
+                    int(item.get("attempt", 0)), len(self._retry_schedule) - 1
+                )]
+                self._defer(item, delay)
             else:
-                if direction == "A2B":
-                    print("[bridge] A2B sendText ERROR (agotado): iface None", flush=True)
+                # B2A: iface_a None es excepcional; consumimos reintento normalmente.
+                attempt = int(item.get("attempt", 0))
+                max_r = int(item.get("max_retries", 0))
+                if attempt < max_r:
+                    delay = self._retry_schedule[min(attempt, len(self._retry_schedule) - 1)]
+                    self._reschedule(item, delay)
                 else:
                     print("[bridge] B2A sendText ERROR (agotado): iface None", flush=True)
             return
