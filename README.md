@@ -30,6 +30,54 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 # MeshNet — Changelog Consolidado
 
+## [v7.0.1] — (3 de Abril de 2026)
+
+### 🔄 Mejorado
+
+- Broker MeshCore embebido:
+  - Detección explícita de errores silenciosos de TX cuando `send_msg` / `send_chan_msg`
+    devuelven `EventType.ERROR` sin excepción.
+  - Reintento automático de **una sola vez** del mensaje fallido, persistido para la
+    siguiente sesión tras reconexión (no se pierde al recrear la cola TX interna).
+  - Conservación de pendientes TX en reconexión: los mensajes ya en cola (y los
+    encolados sin sesión activa) se preservan para reenvío al restablecer enlace.
+  - Límite de memoria para cola diferida (`MESHCORE_RETRY_SPOOL_MAX`, default 2000)
+    para evitar crecimiento indefinido en desconexiones prolongadas.
+  - Logs de envío con contador de reintentos (`retry=0/1`) para diagnóstico en producción.
+
+### 🐞 Corregido
+
+- Estado de conexión MeshCore “zombie” tras caídas de Internet:
+  - si falla TX, se marca el enlace como no saludable y se fuerza reconexión limpia del engine.
+  - se reduce la pérdida del primer mensaje tras recuperación de enlace.
+
+### 🧠 Cambios internos
+
+- Soporte de subcomandos CLI directos (`schedule`, `tasks`, `cancel`) mediante
+  despacho por `sys.argv` hacia `_cli_tasks`.
+
+### 🛠️ Uso de los comandos internos (broker)
+
+Los subcomandos internos son **opcionales** y de uso manual (operación/soporte).
+En el funcionamiento normal 24/7 **no se lanzan automáticamente**; lo habitual es
+usar solo la recuperación/reconexión automática de nodos.
+
+Si se necesitan, se ejecutan directamente sobre el proceso del broker:
+
+```bash
+python source/Meshtastic_Broker.py schedule --when "2026-04-03 22:30" --channel 0 --dest broadcast --msg "Prueba programada" --ack 0 --max-attempts 3
+python source/Meshtastic_Broker.py tasks --status pending
+python source/Meshtastic_Broker.py cancel --id <TASK_ID>
+```
+
+Notas:
+- `--when` usa hora local configurada del scheduler (`Europe/Madrid` por defecto en broker tasks).
+- `--dest broadcast` envía al canal; para DM usa destino específico cuando aplique.
+- `tasks` permite filtrar por estado: `pending`, `done`, `failed`, `canceled`.
+- Si no vas a programar tareas, puedes ignorar completamente estos subcomandos.
+
+---
+
 
 ## [v7.0.0] — (20 de Marzo de 2026)
 

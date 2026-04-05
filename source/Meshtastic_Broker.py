@@ -31,6 +31,7 @@ import selectors
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 import re
@@ -552,6 +553,17 @@ class MeshCoreEmbeddedBridge:
         self._loop = None
         self._tx_q = None
         self._mc = None
+        # Cola persistente entre sesiones para no perder TX durante reconexiones:
+        # - retries explícitos
+        # - mensajes pendientes al romper una sesión
+        # - mensajes encolados mientras no hay _tx_q activa
+        self._retry_spool_lock = threading.Lock()
+        self._retry_spool_max = max(
+            100,
+            int((os.getenv("MESHCORE_RETRY_SPOOL_MAX", "2000") or "2000").strip() or 2000),
+        )
+        self._retry_spool: deque[tuple[object, str, int]] = deque(maxlen=self._retry_spool_max)
+        self._retry_spool_drop_count = 0
 
         # === Prefijo RX MeshCore -> Meshtastic ===
         # Estilos:
@@ -674,6 +686,7 @@ class MeshCoreEmbeddedBridge:
         backoff = [2, 5, 10, 20, 40, 60, 120]
         attempt = 0
 
+        _orphan_q_after_break = None
         while not self._stop.is_set():
             try:
                 await self._amain_once()
@@ -726,6 +739,19 @@ class MeshCoreEmbeddedBridge:
         print("[meshcore-embedded] CONNECTED", flush=True)
 
         mc = self._mc
+
+        # Reinyecta retries/pendientes persistidos SOLO tras conexión exitosa.
+        # Si _connect() falla, el spool debe permanecer intacto para próximos intentos.
+        try:
+            with self._retry_spool_lock:
+                pending_retry = list(self._retry_spool)
+                self._retry_spool.clear()
+            for _dst, _msg, _retry in pending_retry:
+                self._tx_q.put_nowait((_dst, _msg, _retry))
+            if pending_retry:
+                print(f"[meshcore-embedded] retries restaurados tras reconexión: {len(pending_retry)}", flush=True)
+        except Exception:
+            pass
 
         # --- activar auto-fetch (CRÍTICO para que entren eventos RX) ---
         try:
@@ -868,15 +894,28 @@ class MeshCoreEmbeddedBridge:
             print(f"[meshcore-embedded] {self._last_err}", flush=True)
 
         # --- bucle TX ---
+        _orphan_q_after_break = None
         while not self._stop.is_set():
             try:
-                dst, msg = await _aio.wait_for(self._tx_q.get(), timeout=0.5)
+                item = await _aio.wait_for(self._tx_q.get(), timeout=0.5)
             except _aio.TimeoutError:
+                continue
+
+            retry_count = 0
+            try:
+                if isinstance(item, (tuple, list)) and len(item) >= 2:
+                    dst, msg = item[0], item[1]
+                    if len(item) >= 3:
+                        retry_count = int(item[2] or 0)
+                else:
+                    # Compat defensiva ante payload inesperado en cola.
+                    continue
+            except Exception:
                 continue
 
             # === [LOG TX MeshCore] ===
             try:
-                print(f"[meshcore-embedded TX] dst={dst} text='{msg[:120]}'", flush=True)
+                print(f"[meshcore-embedded TX] dst={dst} retry={retry_count} text='{msg[:120]}'", flush=True)
             except Exception:
                 pass
 
@@ -893,9 +932,10 @@ class MeshCoreEmbeddedBridge:
 
                 # Enviar secuencialmente (micro-espaciado para evitar ráfagas)
                 for p in (send_parts or [""]):
+                    result = None
                     if isinstance(dst, dict) and str(dst.get("kind") or "").lower() in ("chan", "channel"):
                         chan_idx = int(dst.get("channel_idx"))
-                        await mc.commands.send_chan_msg(int(chan_idx), p)  # type: ignore[union-attr]
+                        result = await mc.commands.send_chan_msg(int(chan_idx), p)  # type: ignore[union-attr]
                     else:
                         send_dst = dst
                         if isinstance(send_dst, str):
@@ -905,7 +945,16 @@ class MeshCoreEmbeddedBridge:
                                     send_dst = c
                             except Exception:
                                 pass
-                        await mc.commands.send_msg(send_dst, p)  # type: ignore[union-attr]
+                        result = await mc.commands.send_msg(send_dst, p)  # type: ignore[union-attr]
+
+                    # Algunos cortes de enlace dejan una "conexión zombie":
+                    # la llamada no lanza excepción pero devuelve ERROR.
+                    # Si lo detectamos, forzamos reconexión limpia del engine.
+                    try:
+                        if getattr(result, "type", None) == _MCEventType.ERROR:  # type: ignore[union-attr]
+                            raise RuntimeError(f"meshcore_tx_error: {getattr(result, 'payload', None)}")
+                    except Exception:
+                        raise
 
                     try:
                         await _aio.sleep(0.15)
@@ -916,10 +965,78 @@ class MeshCoreEmbeddedBridge:
 
             except Exception as e:
                 self._last_err = f"tx: {type(e).__name__}: {e}"
+                # Marcar desconectado ANTES de drenar para que cualquier enqueue
+                # concurrente vaya al spool (y no a una _tx_q efímera).
+                self._connected = False
+                # Despublicar la cola de sesión para que nuevos enqueues no apunten aquí.
+                _old_q = self._tx_q
+                self._tx_q = None
+                if retry_count < 1:
+                    try:
+                        self._spool_append((dst, msg, retry_count + 1), why="tx_retry")
+                        print("[meshcore-embedded] TX persistido para retry=1 tras reconexión", flush=True)
+                    except Exception:
+                        pass
+                # Preservar también el resto de pendientes de la cola actual
+                # para evitar pérdida bajo ráfagas + reconexión.
+                try:
+                    if _old_q is not None:
+                        # Drenado "cuasi-atómico" con ventana corta de estabilización:
+                        # captura callbacks call_soon_threadsafe ya en vuelo.
+                        _idle_rounds = 0
+                        _max_rounds = 20  # ~400 ms (20 * 20ms)
+                        for _ in range(_max_rounds):
+                            _moved = 0
+                            while True:
+                                try:
+                                    _pending = _old_q.get_nowait()
+                                except _aio.QueueEmpty:
+                                    break
+                                if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
+                                    _dst = _pending[0]
+                                    _msg = str(_pending[1] or "")
+                                    _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
+                                    self._spool_append((_dst, _msg, _r), why="drain_old_q")
+                                    _moved += 1
+                            if _moved == 0:
+                                _idle_rounds += 1
+                            else:
+                                _idle_rounds = 0
+                            if _idle_rounds >= 2:
+                                break
+                            await _aio.sleep(0.02)
+                except Exception:
+                    pass
+                _orphan_q_after_break = _old_q
+                print(f"[meshcore-embedded] TX ERROR -> reconexión: {self._last_err}", flush=True)
+                break
 
         # --- desconexión ---
         try:
             await mc.disconnect()  # type: ignore[union-attr]
+        except Exception:
+            pass
+        # Último drenado por si entraron callbacks tardíos en la cola huérfana
+        # mientras hacíamos disconnect().
+        try:
+            if _orphan_q_after_break is not None:
+                for _ in range(3):
+                    moved = 0
+                    while True:
+                        try:
+                            _pending = _orphan_q_after_break.get_nowait()
+                        except _aio.QueueEmpty:
+                            break
+                        if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
+                            _dst = _pending[0]
+                            _msg = str(_pending[1] or "")
+                            _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
+                            self._spool_append((_dst, _msg, _r), why="drain_orphan_q")
+                            moved += 1
+                    if moved == 0:
+                        await _aio.sleep(0)
+                    else:
+                        await _aio.sleep(0.01)
         except Exception:
             pass
         self._connected = False
@@ -981,40 +1098,91 @@ class MeshCoreEmbeddedBridge:
             return f"[MC:{prefix}]"
         return "[MC]"
 
+    def _spool_append(self, item: tuple[object, str, int], *, why: str = "") -> None:
+        """
+        Inserta en spool persistente con límite de tamaño para evitar OOM
+        durante desconexiones prolongadas.
+        """
+        with self._retry_spool_lock:
+            was_full = (len(self._retry_spool) >= self._retry_spool_max)
+            self._retry_spool.append(item)
+            if was_full:
+                self._retry_spool_drop_count += 1
+                # Log limitado: cada 100 drops para no inundar consola.
+                if (self._retry_spool_drop_count % 100) == 1:
+                    rsn = f" reason={why}" if why else ""
+                    print(
+                        f"[meshcore] ⚠️ retry_spool lleno (max={self._retry_spool_max}), "
+                        f"drop_oldest total={self._retry_spool_drop_count}{rsn}",
+                        flush=True,
+                    )
+
 
     def enqueue_send_contact(self, contact_prefix: str, text: str) -> None:
-        if not self.enable or not self._loop or not self._tx_q:
+        if not self.enable:
             return
         msg = (text or "").strip()
         if not msg:
             return
         try:
+            loop = None
+            tx_q = None
+            with self._retry_spool_lock:
+                healthy = bool(self._connected)
+                loop = self._loop
+                tx_q = self._tx_q
+            # Si la sesión no está sana (incluye ventana de reconexión),
+            # persistir al spool en vez de usar una _tx_q potencialmente efímera.
+            if (not healthy) or (not loop) or (not tx_q):
+                self._spool_append((str(contact_prefix), msg, 0), why="enqueue_contact_deferred")
+                if self.log_enqueue:
+                    print(f"[meshcore] enqueue deferred -> contact={str(contact_prefix)} (sesión no activa)", flush=True)
+                return
             if self.log_enqueue:
                 try:
                     n = len(msg.encode('utf-8', errors='ignore'))
                 except Exception:
                     n = len(msg)
                 print(f"[meshcore] enqueue -> contact={str(contact_prefix)} len={n}", flush=True)
-            self._loop.call_soon_threadsafe(self._tx_q.put_nowait, (str(contact_prefix), msg))
+            loop.call_soon_threadsafe(tx_q.put_nowait, (str(contact_prefix), msg))
         except Exception:
-            pass
+            try:
+                self._spool_append((str(contact_prefix), msg, 0), why="enqueue_contact_fallback")
+            except Exception:
+                pass
 
     def enqueue_send_channel(self, channel_idx: int, text: str) -> None:
-        if not self.enable or not self._loop or not self._tx_q:
+        if not self.enable:
             return
         msg = (text or "").strip()
         if not msg:
             return
         try:
+            loop = None
+            tx_q = None
+            with self._retry_spool_lock:
+                healthy = bool(self._connected)
+                loop = self._loop
+                tx_q = self._tx_q
+            # Si la sesión no está sana (incluye ventana de reconexión),
+            # persistir al spool en vez de usar una _tx_q potencialmente efímera.
+            if (not healthy) or (not loop) or (not tx_q):
+                self._spool_append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0), why="enqueue_chan_deferred")
+                if self.log_enqueue:
+                    print(f"[meshcore] enqueue deferred -> chan_idx={int(channel_idx)} (sesión no activa)", flush=True)
+                return
             if self.log_enqueue:
                 try:
                     n = len(msg.encode('utf-8', errors='ignore'))
                 except Exception:
                     n = len(msg)
                 print(f"[meshcore] enqueue -> chan_idx={int(channel_idx)} len={n}", flush=True)
-            self._loop.call_soon_threadsafe(self._tx_q.put_nowait, ({"kind": "chan", "channel_idx": int(channel_idx)}, msg))
+            loop.call_soon_threadsafe(tx_q.put_nowait, ({"kind": "chan", "channel_idx": int(channel_idx)}, msg))
         except Exception:
-            pass
+            try:
+                self._spool_append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0), why="enqueue_chan_fallback")
+            except Exception:
+                pass
 
     def _fingerprint(self, ch: int, text: str) -> str:
         return f"{int(ch)}|{hashlib.sha1(text.encode('utf-8', errors='ignore')).hexdigest()}"
@@ -6703,4 +6871,3 @@ if __name__ == "__main__":
 
     # Ejecución normal del broker
     main()
-
