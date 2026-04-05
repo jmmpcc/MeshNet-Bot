@@ -680,6 +680,7 @@ class MeshCoreEmbeddedBridge:
         backoff = [2, 5, 10, 20, 40, 60, 120]
         attempt = 0
 
+        _orphan_q_after_break = None
         while not self._stop.is_set():
             try:
                 await self._amain_once()
@@ -887,6 +888,7 @@ class MeshCoreEmbeddedBridge:
             print(f"[meshcore-embedded] {self._last_err}", flush=True)
 
         # --- bucle TX ---
+        _orphan_q_after_break = None
         while not self._stop.is_set():
             try:
                 item = await _aio.wait_for(self._tx_q.get(), timeout=0.5)
@@ -1001,12 +1003,37 @@ class MeshCoreEmbeddedBridge:
                             await _aio.sleep(0.02)
                 except Exception:
                     pass
+                _orphan_q_after_break = _old_q
                 print(f"[meshcore-embedded] TX ERROR -> reconexión: {self._last_err}", flush=True)
                 break
 
         # --- desconexión ---
         try:
             await mc.disconnect()  # type: ignore[union-attr]
+        except Exception:
+            pass
+        # Último drenado por si entraron callbacks tardíos en la cola huérfana
+        # mientras hacíamos disconnect().
+        try:
+            if _orphan_q_after_break is not None:
+                for _ in range(3):
+                    moved = 0
+                    while True:
+                        try:
+                            _pending = _orphan_q_after_break.get_nowait()
+                        except _aio.QueueEmpty:
+                            break
+                        if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
+                            _dst = _pending[0]
+                            _msg = str(_pending[1] or "")
+                            _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
+                            with self._retry_spool_lock:
+                                self._retry_spool.append((_dst, _msg, _r))
+                            moved += 1
+                    if moved == 0:
+                        await _aio.sleep(0)
+                    else:
+                        await _aio.sleep(0.01)
         except Exception:
             pass
         self._connected = False
