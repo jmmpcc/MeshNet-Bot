@@ -41,6 +41,8 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
     siguiente sesión tras reconexión (no se pierde al recrear la cola TX interna).
   - Conservación de pendientes TX en reconexión: los mensajes ya en cola (y los
     encolados sin sesión activa) se preservan para reenvío al restablecer enlace.
+  - Límite de memoria para cola diferida (`MESHCORE_RETRY_SPOOL_MAX`, default 2000)
+    para evitar crecimiento indefinido en desconexiones prolongadas.
   - Logs de envío con contador de reintentos (`retry=0/1`) para diagnóstico en producción.
 
 ### 🐞 Corregido

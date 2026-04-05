@@ -31,6 +31,7 @@ import selectors
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 import re
@@ -557,7 +558,12 @@ class MeshCoreEmbeddedBridge:
         # - mensajes pendientes al romper una sesión
         # - mensajes encolados mientras no hay _tx_q activa
         self._retry_spool_lock = threading.Lock()
-        self._retry_spool: list[tuple[object, str, int]] = []
+        self._retry_spool_max = max(
+            100,
+            int((os.getenv("MESHCORE_RETRY_SPOOL_MAX", "2000") or "2000").strip() or 2000),
+        )
+        self._retry_spool: deque[tuple[object, str, int]] = deque(maxlen=self._retry_spool_max)
+        self._retry_spool_drop_count = 0
 
         # === Prefijo RX MeshCore -> Meshtastic ===
         # Estilos:
@@ -967,8 +973,7 @@ class MeshCoreEmbeddedBridge:
                 self._tx_q = None
                 if retry_count < 1:
                     try:
-                        with self._retry_spool_lock:
-                            self._retry_spool.append((dst, msg, retry_count + 1))
+                        self._spool_append((dst, msg, retry_count + 1), why="tx_retry")
                         print("[meshcore-embedded] TX persistido para retry=1 tras reconexión", flush=True)
                     except Exception:
                         pass
@@ -991,8 +996,7 @@ class MeshCoreEmbeddedBridge:
                                     _dst = _pending[0]
                                     _msg = str(_pending[1] or "")
                                     _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
-                                    with self._retry_spool_lock:
-                                        self._retry_spool.append((_dst, _msg, _r))
+                                    self._spool_append((_dst, _msg, _r), why="drain_old_q")
                                     _moved += 1
                             if _moved == 0:
                                 _idle_rounds += 1
@@ -1027,8 +1031,7 @@ class MeshCoreEmbeddedBridge:
                             _dst = _pending[0]
                             _msg = str(_pending[1] or "")
                             _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
-                            with self._retry_spool_lock:
-                                self._retry_spool.append((_dst, _msg, _r))
+                            self._spool_append((_dst, _msg, _r), why="drain_orphan_q")
                             moved += 1
                     if moved == 0:
                         await _aio.sleep(0)
@@ -1095,6 +1098,25 @@ class MeshCoreEmbeddedBridge:
             return f"[MC:{prefix}]"
         return "[MC]"
 
+    def _spool_append(self, item: tuple[object, str, int], *, why: str = "") -> None:
+        """
+        Inserta en spool persistente con límite de tamaño para evitar OOM
+        durante desconexiones prolongadas.
+        """
+        with self._retry_spool_lock:
+            was_full = (len(self._retry_spool) >= self._retry_spool_max)
+            self._retry_spool.append(item)
+            if was_full:
+                self._retry_spool_drop_count += 1
+                # Log limitado: cada 100 drops para no inundar consola.
+                if (self._retry_spool_drop_count % 100) == 1:
+                    rsn = f" reason={why}" if why else ""
+                    print(
+                        f"[meshcore] ⚠️ retry_spool lleno (max={self._retry_spool_max}), "
+                        f"drop_oldest total={self._retry_spool_drop_count}{rsn}",
+                        flush=True,
+                    )
+
 
     def enqueue_send_contact(self, contact_prefix: str, text: str) -> None:
         if not self.enable:
@@ -1112,8 +1134,7 @@ class MeshCoreEmbeddedBridge:
             # Si la sesión no está sana (incluye ventana de reconexión),
             # persistir al spool en vez de usar una _tx_q potencialmente efímera.
             if (not healthy) or (not loop) or (not tx_q):
-                with self._retry_spool_lock:
-                    self._retry_spool.append((str(contact_prefix), msg, 0))
+                self._spool_append((str(contact_prefix), msg, 0), why="enqueue_contact_deferred")
                 if self.log_enqueue:
                     print(f"[meshcore] enqueue deferred -> contact={str(contact_prefix)} (sesión no activa)", flush=True)
                 return
@@ -1126,8 +1147,7 @@ class MeshCoreEmbeddedBridge:
             loop.call_soon_threadsafe(tx_q.put_nowait, (str(contact_prefix), msg))
         except Exception:
             try:
-                with self._retry_spool_lock:
-                    self._retry_spool.append((str(contact_prefix), msg, 0))
+                self._spool_append((str(contact_prefix), msg, 0), why="enqueue_contact_fallback")
             except Exception:
                 pass
 
@@ -1147,8 +1167,7 @@ class MeshCoreEmbeddedBridge:
             # Si la sesión no está sana (incluye ventana de reconexión),
             # persistir al spool en vez de usar una _tx_q potencialmente efímera.
             if (not healthy) or (not loop) or (not tx_q):
-                with self._retry_spool_lock:
-                    self._retry_spool.append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0))
+                self._spool_append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0), why="enqueue_chan_deferred")
                 if self.log_enqueue:
                     print(f"[meshcore] enqueue deferred -> chan_idx={int(channel_idx)} (sesión no activa)", flush=True)
                 return
@@ -1161,8 +1180,7 @@ class MeshCoreEmbeddedBridge:
             loop.call_soon_threadsafe(tx_q.put_nowait, ({"kind": "chan", "channel_idx": int(channel_idx)}, msg))
         except Exception:
             try:
-                with self._retry_spool_lock:
-                    self._retry_spool.append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0))
+                self._spool_append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0), why="enqueue_chan_fallback")
             except Exception:
                 pass
 
