@@ -30,6 +30,44 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 # MeshNet — Changelog Consolidado
 
+## [v7.0.2] — (9 de Abril de 2026)
+
+### 🔄 Mejorado
+
+- **`/cobertura` — Visualización de saltos RF (hops) en el mapa de cobertura:**
+  - Nueva capa HTML **"Saltos RF (hops)"**: marcadores coloreados por número de saltos que
+    atravesó cada paquete de posición antes de ser escuchado por el nodo local.
+    - 🟢 Verde: recibido directamente (0 saltos)
+    - 🟠 Naranja: 1 salto (un repetidor intermedio)
+    - 🔴 Rojo-naranja: 2 saltos
+    - 🔴 Rojo oscuro: 3 o más saltos
+    - ⚫ Gris: sin datos de hops disponibles
+  - Nueva capa HTML **"Nodos repetidores"**: marcadores naranjas sobre los nodos que
+    actuaron como repetidores y cuya posición GPS es conocida en la misma ventana temporal.
+  - Nueva capa HTML **"Rutas de salto"** (desactivada por defecto): líneas que unen cada
+    origen con su repetidor para visualizar los caminos RF en la malla.
+  - Leyenda de colores fija en la esquina inferior derecha del mapa HTML.
+  - **KML**: pines coloreados por hop count (verde/naranja/rojo/gris) con descripción del
+    salto y el ID del repetidor en cada placemark.
+  - Todas las capas son activables/desactivables individualmente desde el `LayerControl`.
+  - Compatibilidad total con el fallback `positions.jsonl`: si no hay datos de BacklogServer,
+    el mapa se genera sin capas de hops (sin errores).
+
+### 🧠 Cambios internos
+
+- `coverage_backlog.py`:
+  - Nuevos helpers `_get_hops()`, `_hop_color()`, `_hop_label()`, `_kml_hop_style_id()`.
+  - `build_coverage_from_backlog()` construye un índice `relay_positions` (node_id → lat/lon)
+    desde el propio dataset del backlog para localizar repetidores en el mapa.
+  - Tuple de puntos extendido a `(lat, lon, score, label, hops, relay_nid)`.
+  - Eliminación del bloque Folium duplicado en `build_coverage_from_backlog`;
+    ahora delega completamente en `_build_html_heatmap_and_circles()`.
+
+> **Nota:** Solo se conoce el *último* repetidor del salto (`relay_node` del paquete),
+> no la cadena completa. Para la ruta completa de nodos intermedios se requeriría `TRACEROUTE_APP`.
+
+---
+
 ## [v7.0.1] — (3 de Abril de 2026)
 
 ### 🔄 Mejorado
