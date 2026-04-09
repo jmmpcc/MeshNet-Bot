@@ -74,6 +74,36 @@ def _get_metrics(evt: dict) -> Tuple[Optional[float], Optional[float]]:
     except: rssi = None
     return snr, rssi
 
+def _get_hops(evt: dict) -> Tuple[Optional[int], Optional[str]]:
+    """Devuelve (hops_real, relay_node_id) desde un evento del backlog.
+    hops_real = hop_start - hop_limit (0 = directo, 1+ = repetido).
+    relay_node_id es el último nodo que retransmitió el paquete, o None si directo/desconocido.
+    """
+    hop_start = _first(evt.get("hop_start"), evt.get("hopStart"))
+    hop_limit = _first(evt.get("hop_limit"), evt.get("hopLimit"))
+    relay = _first(evt.get("relay_node"), evt.get("relayNode"))
+    hops: Optional[int] = None
+    if isinstance(hop_start, (int, float)) and isinstance(hop_limit, (int, float)):
+        hops = max(0, int(hop_start) - int(hop_limit))
+    if relay is not None:
+        relay = f"!{str(relay).lstrip('!').lower()}"
+    return hops, relay
+
+_HOP_COLORS = {0: "#00cc44", 1: "#ff9900", 2: "#ff4400"}
+
+def _hop_color(hops: Optional[int]) -> str:
+    """Color hex por número de saltos: verde=directo, naranja=1, rojo-naranja=2, rojo=3+, gris=desconocido."""
+    if hops is None:
+        return "#888888"
+    return _HOP_COLORS.get(hops, "#cc0000")
+
+def _hop_label(hops: Optional[int]) -> str:
+    if hops is None:
+        return "Saltos: ?"
+    if hops == 0:
+        return "Directo (0 saltos)"
+    return f"{hops} salto{'s' if hops != 1 else ''}"
+
 def _score_from_metrics(snr: Optional[float], rssi: Optional[float]) -> float:
     # 60% SNR (clip [-12,+12]), 40% RSSI (clip [-120,-50]) → [0..1]
     s_snr = None
@@ -215,14 +245,38 @@ def _kml_circle_polygon(lon: float, lat: float, radius_m: float, label: str, num
   </Polygon>
 </Placemark>"""
 
+def _kml_hop_style_id(hops: Optional[int]) -> str:
+    if hops is None:
+        return "hopX"
+    if hops == 0:
+        return "hop0"
+    if hops == 1:
+        return "hop1"
+    if hops == 2:
+        return "hop2"
+    return "hop3"
+
 def _write_kml(points: List[Tuple[float, float, float]], out_path: str, env: str) -> str:
+    # KML usa formato de color AABBGGRR (alpha, blue, green, red)
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<kml xmlns="http://www.opengis.net/kml/2.2">',
         "<Document>",
         "<name>Cobertura (círculos + pines)</name>",
-        # estilo pin tenue
-        "<Style id='pin'><IconStyle><scale>0.7</scale>"
+        # Estilos por número de saltos RF (color en AABBGGRR)
+        "<Style id='hop0'><IconStyle><color>ff44cc00</color><scale>0.8</scale>"  # verde (directo)
+        "<Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon>"
+        "</IconStyle></Style>",
+        "<Style id='hop1'><IconStyle><color>ff0099ff</color><scale>0.8</scale>"  # naranja (1 salto)
+        "<Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon>"
+        "</IconStyle></Style>",
+        "<Style id='hop2'><IconStyle><color>ff0044ff</color><scale>0.8</scale>"  # rojo-naranja (2 saltos)
+        "<Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon>"
+        "</IconStyle></Style>",
+        "<Style id='hop3'><IconStyle><color>ff0000cc</color><scale>0.8</scale>"  # rojo oscuro (3+)
+        "<Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon>"
+        "</IconStyle></Style>",
+        "<Style id='hopX'><IconStyle><color>ff888888</color><scale>0.7</scale>"  # gris (desconocido)
         "<Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon>"
         "</IconStyle></Style>",
     ]
@@ -231,14 +285,19 @@ def _write_kml(points: List[Tuple[float, float, float]], out_path: str, env: str
         label = (rest[0] if rest else "Cobertura")
         parts.append(_kml_circle_polygon(lon, lat, _radius_from_score(w, env), label))
 
-    # Pines
-   # AHORA:
+    # Pines coloreados por número de saltos
     for (lat, lon, w, *rest) in points:
-        label = (rest[0] if rest else "Cobertura")
+        label    = rest[0] if rest else "Cobertura"
+        hops     = rest[1] if len(rest) > 1 else None
+        relay_id = rest[2] if len(rest) > 2 else None
+        style_id = _kml_hop_style_id(hops)
+        relay_txt = f" • Repetidor: {relay_id}" if relay_id else ""
+        desc = f"{_hop_label(hops)}{relay_txt}"
         parts += [
             "<Placemark>",
             f"<name>{html.escape(str(label or ''))}</name>",
-            "<styleUrl>#pin</styleUrl>",
+            f"<description>{html.escape(desc)}</description>",
+            f"<styleUrl>#{style_id}</styleUrl>",
             "<Point>",
             f"<coordinates>{lon:.7f},{lat:.7f},0</coordinates>",
             "</Point>",
@@ -281,7 +340,19 @@ def build_coverage_from_backlog(
         raise RuntimeError(f"BacklogServer devolvió error: {res}")
 
     rows = res.get("data") or []
-    points: List[Tuple[float, float, float]] = []  # (lat, lon, score)
+
+    # Índice de posiciones por nodo: node_id → (lat, lon)
+    # Se usa para localizar repetidores en el mapa cuando tenemos su relay_node ID.
+    relay_positions: dict = {}
+    for evt in rows:
+        nid = _first(evt.get("from"), evt.get("from_id"), evt.get("from_str"))
+        if nid:
+            ll = _parse_latlon(evt)
+            if ll:
+                nkey = f"!{str(nid).lstrip('!').lower()}"
+                relay_positions.setdefault(nkey, ll)  # guardamos solo la primera posición conocida
+
+    points: List[Tuple] = []  # (lat, lon, score, label, hops, relay_nid)
     for evt in rows:
         if not _match_node(evt, target_node):
             continue
@@ -295,8 +366,8 @@ def build_coverage_from_backlog(
         snr, rssi = _get_metrics(evt)
         w = _score_from_metrics(snr, rssi)
         label = _alias_from_evt(evt)
-        points.append((lat, lon, w, label))  # ahora guardamos también el alias/ID
-
+        hops, relay_nid = _get_hops(evt)
+        points.append((lat, lon, w, label, hops, relay_nid))
 
     if not points:
         raise RuntimeError("Sin puntos válidos en la ventana solicitada (comprueba horas/nodo).")
@@ -305,52 +376,19 @@ def build_coverage_from_backlog(
     base = f"coverage_backlog_{node_slug}_{hours}h"
     out = {"html": None, "kml": None}
 
-    # --- HTML: Heatmap + Círculos (si Folium disponible) ---
-    folium, HeatMap = _try_import_folium()
-    if folium and HeatMap:
-        lat0, lon0 = points[0][0], points[0][1]
-        m = folium.Map(location=[lat0, lon0], zoom_start=12, control_scale=True, tiles="OpenStreetMap")
+    # --- HTML: Heatmap + Círculos + capas de saltos RF (si Folium disponible) ---
+    out_html = os.path.join(output_dir, base + ".html")
+    title = (
+        f"Cobertura (últimas {hours} h) — "
+        + (f"Nodo: {target_node}" if target_node else "Todos los nodos")
+    )
+    html_path = _build_html_heatmap_and_circles(
+        points, out_html, title, env,
+        relay_positions=relay_positions,
+    )
+    out["html"] = html_path
 
-        # Heatmap (peso = score)
-        hm = [(lat, lon, w) for (lat, lon, w) in points]
-        HeatMap(hm, name="Cobertura (Heatmap)", radius=18, blur=20, max_zoom=16,
-                min_opacity=0.2, max_val=1.0).add_to(m)
-
-        # Círculos de radio estimado (relleno suave)
-        circles = folium.FeatureGroup(name=f"Cobertura (Círculos • {env})", show=True)
-        for (lat, lon, w) in points:
-            r_m = _radius_from_score(w, env)
-            # Nota: folium.Circle radius en metros
-            folium.Circle(
-                location=(lat, lon),
-                radius=r_m,
-                weight=0,
-                fill=True,
-                fill_opacity=0.18 + 0.32 * w,  # más calidad → un poco más opaco
-                popup=f"score={w:.2f} • r≈{int(r_m)} m",
-            ).add_to(circles)
-        circles.add_to(m)
-
-        # Capa de puntos (opc: desactivada por defecto)
-        pts_fg = folium.FeatureGroup(name="Sondas (puntos)", show=False)
-        for (lat, lon, w) in points:
-            folium.CircleMarker(location=(lat, lon), radius=3, opacity=0.6, fill=True, fill_opacity=0.7,
-                                popup=f"score={w:.2f}").add_to(pts_fg)
-        pts_fg.add_to(m)
-
-        folium.LayerControl().add_to(m)
-        title_html = f"""
-        <div style="position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
-             background: rgba(255,255,255,0.9); padding: 6px 12px; border: 1px solid #ccc; border-radius: 8px; z-index: 9999;">
-            <b>Cobertura (últimas {hours} h)</b> — {('Nodo: ' + target_node) if target_node else 'Todos los nodos'} — Entorno: <i>{_norm_env(env)}</i>
-        </div>"""
-        m.get_root().html.add_child(folium.Element(title_html))
-
-        out_html = os.path.join(output_dir, base + ".html")
-        m.save(out_html)
-        out["html"] = out_html
-
-    # --- KML: polígonos circulares + pines (si quieres siempre/backup) ---
+    # --- KML: polígonos circulares + pines coloreados por saltos ---
     if make_kml:
         out_kml = os.path.join(output_dir, base + ".kml")
         _write_kml(points, out_kml, env=_norm_env(env))
@@ -408,13 +446,19 @@ def build_coverage_combined(
         return {"html": None, "kml": out_kml}
 
 # === NUEVO: helpers para construir HTML/KML desde una lista de (lat, lon, score) ===
-def _build_html_heatmap_and_circles(points: List[Tuple[float, float, float]], out_html: str, title: str, env: str) -> Optional[str]:
+def _build_html_heatmap_and_circles(
+    points: List[Tuple],
+    out_html: str,
+    title: str,
+    env: str,
+    relay_positions: Optional[dict] = None,
+) -> Optional[str]:
     folium, HeatMap = _try_import_folium()
     if not (folium and HeatMap):
         return None
     lat0, lon0 = points[0][0], points[0][1]
     m = folium.Map(location=[lat0, lon0], zoom_start=12, control_scale=True, tiles="OpenStreetMap")
-    
+
     # Heatmap (peso = score) — no necesita label
     HeatMap([(lat, lon, w) for (lat, lon, w, *rest) in points],
             name="Cobertura (Heatmap)", radius=18, blur=20, max_zoom=16,
@@ -448,9 +492,80 @@ def _build_html_heatmap_and_circles(points: List[Tuple[float, float, float]], ou
             popup=f"{label} • score={w:.2f}",
         ).add_to(pts_fg)
     pts_fg.add_to(m)
- 
 
+    # ── Capa: Saltos RF (marcadores coloreados por número de hops) ─────────
+    has_hop_data = any(len(p) > 4 and p[4] is not None for p in points)
+    if has_hop_data:
+        hops_fg = folium.FeatureGroup(name="Saltos RF (hops)", show=True)
+        for (lat, lon, w, *rest) in points:
+            label    = rest[0] if rest else "—"
+            hops     = rest[1] if len(rest) > 1 else None
+            relay_id = rest[2] if len(rest) > 2 else None
+            color    = _hop_color(hops)
+            relay_txt = f"<br>Repetidor: <code>{relay_id}</code>" if relay_id else ""
+            popup_html = (
+                f"<b>{html.escape(str(label))}</b><br>"
+                f"{_hop_label(hops)}{relay_txt}<br>"
+                f"score RF={w:.2f}"
+            )
+            folium.CircleMarker(
+                location=(lat, lon),
+                radius=7,
+                color=color,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.8,
+                popup=folium.Popup(popup_html, max_width=250),
+                tooltip=_hop_label(hops),
+            ).add_to(hops_fg)
+        hops_fg.add_to(m)
 
+        # ── Capa: Nodos repetidores con posición conocida ──────────────────
+        relay_fg = folium.FeatureGroup(name="Nodos repetidores", show=True)
+        shown_relays: set = set()
+        for (lat, lon, w, *rest) in points:
+            relay_id = rest[2] if len(rest) > 2 else None
+            if (relay_id and relay_positions and relay_id in relay_positions
+                    and relay_id not in shown_relays):
+                rlat, rlon = relay_positions[relay_id]
+                folium.Marker(
+                    location=(rlat, rlon),
+                    popup=f"Repetidor: {relay_id}",
+                    tooltip=f"↗ {relay_id}",
+                    icon=folium.Icon(color="orange", icon="signal", prefix="fa"),
+                ).add_to(relay_fg)
+                shown_relays.add(relay_id)
+        relay_fg.add_to(m)
+
+        # ── Capa: Rutas de salto origen→repetidor (desactivada por defecto) ─
+        lines_fg = folium.FeatureGroup(name="Rutas de salto", show=False)
+        for (lat, lon, w, *rest) in points:
+            hops     = rest[1] if len(rest) > 1 else None
+            relay_id = rest[2] if len(rest) > 2 else None
+            if (hops and hops > 0 and relay_id
+                    and relay_positions and relay_id in relay_positions):
+                rlat, rlon = relay_positions[relay_id]
+                folium.PolyLine(
+                    locations=[(lat, lon), (rlat, rlon)],
+                    color=_hop_color(hops),
+                    weight=2,
+                    opacity=0.5,
+                    tooltip=f"→ {relay_id}",
+                ).add_to(lines_fg)
+        lines_fg.add_to(m)
+
+        # ── Leyenda de saltos ──────────────────────────────────────────────
+        legend_html = """
+        <div style="position:fixed;bottom:30px;right:10px;background:rgba(255,255,255,0.92);
+             padding:8px 12px;border:1px solid #ccc;border-radius:8px;z-index:9999;font-size:12px;">
+            <b>Saltos RF</b><br>
+            <span style="color:#00cc44">&#9679;</span> Directo (0)<br>
+            <span style="color:#ff9900">&#9679;</span> 1 salto<br>
+            <span style="color:#ff4400">&#9679;</span> 2 saltos<br>
+            <span style="color:#cc0000">&#9679;</span> 3+ saltos<br>
+            <span style="color:#888888">&#9679;</span> Desconocido
+        </div>"""
+        m.get_root().html.add_child(folium.Element(legend_html))
 
     folium.LayerControl().add_to(m)
     title_html = f"""
@@ -493,7 +608,8 @@ def _rows_to_points(rows: List[dict], *, since_ts: int, target_node: Optional[st
 
         # AHORA:
         label = _alias_from_evt(evt)
-        pts.append((lat, lon, w, label))
+        hops, relay_nid = _get_hops(evt)  # será (None, None) desde positions.jsonl
+        pts.append((lat, lon, w, label, hops, relay_nid))
 
     return pts
 
