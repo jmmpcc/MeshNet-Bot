@@ -4851,7 +4851,7 @@ def traceroute_node(node_id: str, timeout: int = TRACEROUTE_TIMEOUT) -> TraceRes
             ("traceroute",     {"node_id": did, "timeout": timeout}),
             ("traceroute",     {"dest_id": did, "timeout": timeout}),
             ("traceroute",     {"id": did,      "timeout": timeout}),
-            ("sendTraceroute", {"dest_id": did, "timeout": timeout}),
+            ("sendTraceRoute", {"dest_id": did, "timeout": timeout}),
             ("tracerouteNode", {"dest_id": did, "timeout": timeout}),
         ]
         last_err = None
@@ -4874,7 +4874,7 @@ def traceroute_node(node_id: str, timeout: int = TRACEROUTE_TIMEOUT) -> TraceRes
                 # Normalizar resultado
                 hops, route = None, None
                 if isinstance(res, dict):
-                    hops  = res.get("hops") or res.get("hopCount")
+                    hops  = res.get("hops") if res.get("hops") is not None else res.get("hopCount")
                     route = res.get("path") or res.get("route") or res.get("nodes")
                 elif isinstance(res, (list, tuple)):
                     route = list(res)
@@ -11449,7 +11449,7 @@ async def _get_iface_wait_async(_pool, _host, _port, _timeout: float, _interval:
             ("traceroute",     {"node_id": did, "timeout": timeout}),
             ("traceroute",     {"dest_id": did, "timeout": timeout}),
             ("traceroute",     {"id": did,      "timeout": timeout}),
-            ("sendTraceroute", {"dest_id": did, "timeout": timeout}),
+            ("sendTraceRoute", {"dest_id": did, "timeout": timeout}),
             ("tracerouteNode", {"dest_id": did, "timeout": timeout}),
         ]
 
@@ -11471,7 +11471,7 @@ async def _get_iface_wait_async(_pool, _host, _port, _timeout: float, _interval:
 
                 hops, path = None, None
                 if isinstance(res, dict):
-                    hops = res.get("hops") or res.get("hopCount")
+                    hops = res.get("hops") if res.get("hops") is not None else res.get("hopCount")
                     path = res.get("path") or res.get("route") or res.get("nodes")
                 elif isinstance(res, (list, tuple)):
                     path = list(res)
@@ -11515,7 +11515,7 @@ async def _get_iface_wait_async(_pool, _host, _port, _timeout: float, _interval:
     dest_id = dest_id or target
 
     # comprobar que hay algún método disponible en la API
-    method_names = ("traceroute", "traceRoute", "sendTraceroute", "tracerouteNode", "requestTraceroute", "routeDiscovery")
+    method_names = ("traceroute", "traceRoute", "sendTraceRoute", "tracerouteNode", "requestTraceroute", "routeDiscovery")
     if not any(callable(getattr(iface, n, None)) for n in method_names):
         await update.effective_message.reply_text(
             "⚠️ Traceroute no disponible por API: la interfaz no expone un método compatible en esta versión."
