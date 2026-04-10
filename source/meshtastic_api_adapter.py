@@ -556,21 +556,20 @@ def api_traceroute(host: str, dest_id: str, timeout: int = 30, hop_limit: int = 
 
     try:
         iface = _open_iface(host)
+        fn = getattr(iface, "sendTraceRoute", None)
+        if not callable(fn):
+            return {"ok": False, "started": False, "dest_node_num": node_num, "raw": "sendTraceRoute no disponible"}
+
+        # Intento firma completa; si falla, degradamos
         try:
-            fn = getattr(iface, "sendTraceRoute", None)
-            if not callable(fn):
-                return {"ok": False, "started": False, "dest_node_num": node_num, "raw": "sendTraceRoute no disponible"}
-
-            # Intento firma completa; si falla, degradamos
+            fn(node_num, hop_limit, channelIndex=0)
+        except TypeError:
             try:
-                fn(node_num, hop_limit, channelIndex=0)
+                fn(node_num, hop_limit, 0)
             except TypeError:
-                try:
-                    fn(node_num, hop_limit, 0)
-                except TypeError:
-                    fn(node_num, hop_limit)
+                fn(node_num, hop_limit)
 
-            return {"ok": True, "started": True, "dest_node_num": node_num, "raw": "started"}
+        return {"ok": True, "started": True, "dest_node_num": node_num, "raw": "started"}
     except Exception as e:
         return {"ok": False, "started": False, "dest_node_num": node_num, "raw": str(e)}
 
