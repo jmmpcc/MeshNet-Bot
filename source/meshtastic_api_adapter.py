@@ -527,7 +527,7 @@ def _parse_route_from_text(raw: str) -> List[str]:
     return [i.strip() for i in ids]
 
 
-def api_traceroute(host: str, dest_id: str, timeout: int = 30) -> Dict[str, Any]:
+def api_traceroute(host: str, dest_id: str, timeout: int = 30, hop_limit: int = 5) -> Dict[str, Any]:
     """
     Lanza traceroute por API (sendTraceRoute) sin CLI.
 
@@ -538,6 +538,7 @@ def api_traceroute(host: str, dest_id: str, timeout: int = 30) -> Dict[str, Any]
       - sendTraceRoute() no devuelve la ruta inmediatamente.
       - La ruta se obtiene escuchando TRACEROUTE_APP/ROUTING_APP por el flujo RX (como hace el broker/backlog).
     """
+    hop_limit = max(1, min(hop_limit, 7))
     dest = str(dest_id).strip()
     if not dest:
         return {"ok": False, "started": False, "dest_node_num": None, "raw": "dest_id vacío"}
@@ -555,27 +556,20 @@ def api_traceroute(host: str, dest_id: str, timeout: int = 30) -> Dict[str, Any]
 
     try:
         iface = _open_iface(host)
+        fn = getattr(iface, "sendTraceRoute", None)
+        if not callable(fn):
+            return {"ok": False, "started": False, "dest_node_num": node_num, "raw": "sendTraceRoute no disponible"}
+
+        # Intento firma completa; si falla, degradamos
         try:
-            fn = getattr(iface, "sendTraceRoute", None)
-            if not callable(fn):
-                return {"ok": False, "started": False, "dest_node_num": node_num, "raw": "sendTraceRoute no disponible"}
-
-            # Intento firma completa; si falla, degradamos
+            fn(node_num, hop_limit, channelIndex=0)
+        except TypeError:
             try:
-                fn(node_num, 20, channelIndex=0)
+                fn(node_num, hop_limit, 0)
             except TypeError:
-                try:
-                    fn(node_num, 20, 0)
-                except TypeError:
-                    fn(node_num, 20)
+                fn(node_num, hop_limit)
 
-            return {"ok": True, "started": True, "dest_node_num": node_num, "raw": "started"}
-        finally:
-            # defensivo: si no fuera pool
-            try:
-                iface.close()
-            except Exception:
-                pass
+        return {"ok": True, "started": True, "dest_node_num": node_num, "raw": "started"}
     except Exception as e:
         return {"ok": False, "started": False, "dest_node_num": node_num, "raw": str(e)}
 
