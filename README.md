@@ -30,6 +30,17 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 # MeshNet — Changelog Consolidado
 
+## [v7.0.2] — (12 de Abril de 2026)
+
+### 📝 Changelog reciente (2026-04-12)
+
+- ✅ Corrección de inconsistencia en el cálculo de **Hops reales**: se unifica la fórmula a `hop_start - hop_limit` (acotada a `>= 0`) para evitar mostrar saltos invertidos.
+- ✅ Mejora en extracción de saltos y metadatos en eventos MeshCore/broker sintéticos:
+  - ahora se buscan valores en `summary.*`, `payload.*`, `routing.*`, `raw.routing.*`
+  - soporte para claves `snake_case` y `camelCase` (`hop_limit/hopLimit`, `hop_start/hopStart`, `relay_node/relayNode`)
+- ✅ Ajuste en `/vecinos` para mantener el mismo criterio de cálculo de hops que el resto del bot.
+- ℹ️ Nota: si un evento no trae `hop_start/hop_limit` en origen, el bot seguirá mostrando `—` (no se inventan saltos).
+
 ## [v7.0.2] — (9 de Abril de 2026)
 
 ### 🔄 Mejorado
@@ -416,15 +427,6 @@ Ambas funciones analizan la información del backlog, nodos escuchados, métrica
 ### 🌐 Historial de versiones publicadas
 
 > 🔄 Listado Historial de versiones publicadas
-
-### 📝 Changelog reciente (2026-04-12)
-
-- ✅ Corrección de inconsistencia en el cálculo de **Hops reales**: se unifica la fórmula a `hop_start - hop_limit` (acotada a `>= 0`) para evitar mostrar saltos invertidos.
-- ✅ Mejora en extracción de saltos y metadatos en eventos MeshCore/broker sintéticos:
-  - ahora se buscan valores en `summary.*`, `payload.*`, `routing.*`, `raw.routing.*`
-  - soporte para claves `snake_case` y `camelCase` (`hop_limit/hopLimit`, `hop_start/hopStart`, `relay_node/relayNode`)
-- ✅ Ajuste en `/vecinos` para mantener el mismo criterio de cálculo de hops que el resto del bot.
-- ℹ️ Nota: si un evento no trae `hop_start/hop_limit` en origen, el bot seguirá mostrando `—` (no se inventan saltos).
 
 📘 **[Abrir Historial de versiones → Historial_Versiones.md](./docs/Historial_Versiones.md)**
 
