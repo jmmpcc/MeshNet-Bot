@@ -4993,6 +4993,42 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
     # Normalizar destino: None/"broadcast" => broadcast real
     dest_id = None if (not destination or str(destination).lower() == "broadcast") else str(destination)
 
+    def _mirror_to_meshcore_if_needed() -> dict:
+        """
+        Espejo best-effort para tareas programadas hacia MeshCore.
+        Solo aplica a broadcast/canal (sin dest_id), usando el mapping CH->channel_idx.
+        Nunca debe romper el envío principal.
+        """
+        try:
+            if dest_id is not None:
+                return {"mirrored": False, "ok": None, "error": "skip_unicast"}
+
+            txt = (message or "").strip()
+            if not txt:
+                return {"mirrored": False, "ok": None, "error": "skip_empty"}
+
+            mc_chanidx = _meshcore_chanidx_for_meshtastic_ch(int(channel))
+            if mc_chanidx is None:
+                return {"mirrored": False, "ok": None, "error": "no_meshcore_mapping_for_channel"}
+
+            # Reutiliza la misma política de delay para evitar ráfagas y colisiones.
+            if _meshcore_delay_should_apply("broker_tasks"):
+                try:
+                    time.sleep(float(MESHCORE_TG_MIRROR_DELAY_SEC or 0))
+                except Exception:
+                    pass
+
+            r_mc = _send_via_broker_meshcore(int(mc_chanidx), txt, 3.0)
+            mc_ok = bool((r_mc or {}).get("ok"))
+            return {
+                "mirrored": True,
+                "ok": mc_ok,
+                "error": (None if mc_ok else ((r_mc or {}).get("error") or "meshcore_send_failed")),
+                "channel_idx": int(mc_chanidx),
+            }
+        except Exception as e:
+            return {"mirrored": True, "ok": False, "error": f"{type(e).__name__}: {e}"}
+
     # -------------------------------------------------------------
     # USB / BLE -> solo broker-queue, sin pool ni API TCP
     # -------------------------------------------------------------
@@ -5006,10 +5042,21 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
                 timeout=3.0,
             )
             ok = bool((res or {}).get("ok"))
+            # Evitar duplicados:
+            # En modo broker-queue, el broker ya aplica su propio espejo hacia embebido.
+            # Si espejamos también aquí, MeshCore recibe dos copias (prefijada + plana).
+            mc = {
+                "mirrored": False,
+                "ok": None,
+                "error": ("skip_broker_queue_already_mirrors" if ok else "skip_meshtastic_send_failed"),
+            }
             return {
                 "ok": ok,
                 "packet_id": None,
-                "error": (None if ok else ((res or {}).get("error") or "broker_queue_not_ok"))
+                "error": (None if ok else ((res or {}).get("error") or "broker_queue_not_ok")),
+                "meshcore_mirrored": bool(mc.get("mirrored")),
+                "meshcore_ok": mc.get("ok"),
+                "meshcore_error": mc.get("error"),
             }
         except Exception as e:
             return {"ok": False, "packet_id": None, "error": f"{type(e).__name__}: {e}"}
@@ -5075,9 +5122,25 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
                     ok_ack = bool(iface.waitForAck(pid, timeout=15.0))
                 except Exception:
                     ok_ack = False
-                return {"ok": ok_ack, "packet_id": pid, "error": (None if ok_ack else "NO_APP_ACK")}
+                mc = _mirror_to_meshcore_if_needed() if ok_ack else {"mirrored": False, "ok": None, "error": "skip_meshtastic_send_failed"}
+                return {
+                    "ok": ok_ack,
+                    "packet_id": pid,
+                    "error": (None if ok_ack else "NO_APP_ACK"),
+                    "meshcore_mirrored": bool(mc.get("mirrored")),
+                    "meshcore_ok": mc.get("ok"),
+                    "meshcore_error": mc.get("error"),
+                }
 
-            return {"ok": True, "packet_id": pid, "error": None}
+            mc = _mirror_to_meshcore_if_needed()
+            return {
+                "ok": True,
+                "packet_id": pid,
+                "error": None,
+                "meshcore_mirrored": bool(mc.get("mirrored")),
+                "meshcore_ok": mc.get("ok"),
+                "meshcore_error": mc.get("error"),
+            }
 
     except Exception:
         pass
@@ -5106,7 +5169,15 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
         )
         ok = bool((res or {}).get("ok"))
         pid = (res or {}).get("packet_id")
-        return {"ok": ok, "packet_id": pid, "error": (None if ok else ((res or {}).get("error") or "send_failed"))}
+        mc = _mirror_to_meshcore_if_needed() if ok else {"mirrored": False, "ok": None, "error": "skip_meshtastic_send_failed"}
+        return {
+            "ok": ok,
+            "packet_id": pid,
+            "error": (None if ok else ((res or {}).get("error") or "send_failed")),
+            "meshcore_mirrored": bool(mc.get("mirrored")),
+            "meshcore_ok": mc.get("ok"),
+            "meshcore_error": mc.get("error"),
+        }
     except Exception as e:
         return {"ok": False, "packet_id": None, "error": f"{type(e).__name__}: {e}"}
 # === NUEVO: adapter de reconexión para broker_tasks ===
