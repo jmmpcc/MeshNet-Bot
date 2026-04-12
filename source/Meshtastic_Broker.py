@@ -2746,6 +2746,34 @@ def _tasks_send_adapter(
                     require_ack=bool(require_ack),
                 )
 
+                # [FIX] Cuando el embebido activo es MeshCore (nodo B), los TX locales
+                # del broker (incluidas tareas programadas) también deben reenviarse.
+                # Se limita a broadcast/canal para mantener semántica actual de mapeo CH->B.
+                try:
+                    mc = globals().get("MESHCORE_ENGINE")
+                    if (
+                        mc
+                        and getattr(mc, "enable", False)
+                        and (dest_id is None)
+                        and str(message_s).strip()
+                    ):
+                        ch_name = None
+                        try:
+                            ch_name = (globals().get("CHANNEL_NAME_BY_INDEX") or {}).get(int(channel_i))
+                        except Exception:
+                            ch_name = None
+
+                        mc.forward_from_meshtastic(
+                            ch=int(channel_i),
+                            text=str(message_s),
+                            from_id="BROKER",
+                            from_alias="BROKER",
+                            channel_name=(ch_name or None),
+                            hop_real=None,
+                        )
+                except Exception as _e_mc_tx:
+                    print(f"⚠️ meshcore→fw(tx): {_e_mc_tx}", flush=True)
+
 
             print(
                 f"[tx] broker sendText ch={int(channel_i)} dest={dest_id or 'broadcast'} "
