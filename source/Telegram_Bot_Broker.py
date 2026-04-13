@@ -2424,6 +2424,7 @@ def _broker_send_text(ch: int, text: str, dest: str | None, ack: bool) -> dict:
         "dest": (None if (not dest or str(dest).lower()=="broadcast") else str(dest)),
         "ch": int(ch),
         "ack": 1 if bool(ack) else 0,
+        "origin": "bot",
     }
     r = _broker_rpc("SEND_TEXT", params)
     ok = bool(r.get("ok"))
