@@ -8036,30 +8036,75 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     def _send(mesh_dest: str, canal_int: int, text: str):
         """
-        Envía una única orden por Mesh para que la pasarela broker→APRS
-        sea la única responsable del TX APRS.
+        Ruta inmediata APRS + Mesh sin duplicados.
 
-        Objetivo:
-        - Evitar doble o triple envío APRS.
-        - No usar _udp_send() desde el bot en la ruta inmediata.
+        Diseño:
+        - APRS se transmite DIRECTAMENTE a la pasarela por UDP.
+        - Mesh recibe SOLO el texto limpio, no la orden /aprs.
+        - Así evitamos:
+            1) depender de que el broker vuelva a ver el TX local,
+            2) bucles /aprs en el stream,
+            3) duplicados RF.
+
+        Comportamiento:
+        - broadcast/all -> APRS status troceado + texto limpio a Mesh canal
+        - CALL/SSID     -> APRS message troceado + texto limpio a Mesh canal
         """
         mesh_dest_norm = (mesh_dest or "broadcast").strip() or "broadcast"
+        mesh_dest_low = mesh_dest_norm.lower()
 
-        # Orden canónica para que la pasarela APRS la procese desde el stream Mesh.
-        raw_for_mesh = f"/aprs canal {int(canal_int)} {mesh_dest_norm}: {text}"
+        # ------------------------------------------------------------
+        # 1) Validación de longitud para Mesh (texto limpio)
+        # ------------------------------------------------------------
+        text_clean = (text or "").strip()
+        if not text_clean:
+            return "❌ <b>Falta texto</b>"
 
-        node_id = None  # broadcast por Mesh
-        mesh_result, packet_id = send_text_message(node_id, raw_for_mesh, canal=canal_int)
+        ok_len, err_len = _validate_len_or_block(text_clean, max_bytes=BOT_MESH_MAX_BYTES)
+        if not ok_len:
+            return err_len
+
+        # ------------------------------------------------------------
+        # 2) Envío APRS directo por UDP (ÚNICO punto APRS de esta ruta)
+        # ------------------------------------------------------------
+        if mesh_dest_low in ("broadcast", "all"):
+            chunks = _aprs_split_broadcast(text_clean, APRS_LEN) or [text_clean[:APRS_LEN]]
+            aprs_dest = "broadcast"
+        else:
+            chunks = _aprs_split_directed(text_clean, APRS_LEN) or [text_clean[:APRS_LEN]]
+            aprs_dest = mesh_dest_norm
+
+        aprs_ok = True
+        aprs_sent = 0
+
+        for part in chunks:
+            try:
+                _udp_send(aprs_dest, part)
+                aprs_sent += 1
+                time.sleep(0.15)
+            except Exception:
+                aprs_ok = False
+
+        # ------------------------------------------------------------
+        # 3) Envío Mesh SOLO con texto limpio
+        # ------------------------------------------------------------
+        node_id = None  # broadcast al canal Mesh indicado
+        mesh_result, packet_id = send_text_message(node_id, text_clean, canal=canal_int)
+
+        aprs_status = f"OK ({aprs_sent} parte{'s' if aprs_sent != 1 else ''})" if aprs_ok else \
+                    f"KO parcial ({aprs_sent}/{len(chunks)} parte{'s' if len(chunks) != 1 else ''})"
 
         html = (
-            "<b>APRS</b> → orden enviada por Mesh a la pasarela.\n"
+            "<b>APRS</b> → enviado a pasarela y malla.\n"
             f"Destino APRS: <code>{escape(mesh_dest_norm)}</code>\n"
             f"Canal Mesh: <code>{canal_int}</code>\n"
-            f"Orden: <code>{escape(raw_for_mesh)}</code>\n"
+            f"Texto Mesh: <code>{escape(text_clean)}</code>\n"
+            f"Chunks APRS: <code>{len(chunks)}</code> (máx={APRS_LEN})\n"
             f"Mesh: <code>{escape(mesh_result)}</code> {('packet_id=' + str(packet_id)) if packet_id else ''}\n"
-            f"Pasarela APRS: <code>transmisión delegada al flujo broker→aprs</code>"
+            f"Pasarela APRS: <code>{escape(aprs_status)}</code>"
         ).strip()
         return html
+
 
     # nuevos atajos inmediatos
     dest_clean = None
