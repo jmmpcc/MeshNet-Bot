@@ -2642,13 +2642,19 @@ def _resolve_alias_and_cache(evt: dict, nodes_map: dict) -> tuple[str, str]:
     return (alias, f"!{from_id[-8:]}" if len(from_id) >= 8 else f"!{from_id}")
 
 def _compute_real_hops(evt: dict) -> int | None:
-    """Devuelve hop_limit - hop_start si ambos existen; si no, None."""
+    """Devuelve hops reales = hop_start - hop_limit si ambos existen; si no, None."""
     try:
-        hl = int(evt.get("hop_limit")) if evt.get("hop_limit") is not None else None
-        hs = int(evt.get("hop_start")) if evt.get("hop_start") is not None else None
+        hl = _get_any(evt, ["hop_limit", "hopLimit"])
+        hs = _get_any(evt, ["hop_start", "hopStart"])
+        if hl is None or hs is None:
+            r0 = evt.get("routing") or {}
+            if hl is None:
+                hl = _get_any(r0, ["hop_limit", "hopLimit"])
+            if hs is None:
+                hs = _get_any(r0, ["hop_start", "hopStart"])
         if hl is None or hs is None:
             return None
-        return max(0, hl - hs)
+        return max(0, int(hs) - int(hl))
     except Exception:
         return None
 
@@ -5042,14 +5048,7 @@ def _tasks_send_adapter(channel: int, message: str, destination: str, require_ac
                 timeout=3.0,
             )
             ok = bool((res or {}).get("ok"))
-            # Evitar duplicados:
-            # En modo broker-queue, el broker ya aplica su propio espejo hacia embebido.
-            # Si espejamos también aquí, MeshCore recibe dos copias (prefijada + plana).
-            mc = {
-                "mirrored": False,
-                "ok": None,
-                "error": ("skip_broker_queue_already_mirrors" if ok else "skip_meshtastic_send_failed"),
-            }
+            mc = _mirror_to_meshcore_if_needed() if ok else {"mirrored": False, "ok": None, "error": "skip_meshtastic_send_failed"}
             return {
                 "ok": ok,
                 "packet_id": None,
@@ -5559,49 +5558,73 @@ def _get(d: dict, path: str, default=None):
             return default
     return cur
 
-#29-08-2025 08:25 horas
-def extract_hop_limit(pkt: dict) -> int | None:
-    # Busca en varias rutas habituales
-    for path in (
-        "meta.hopLimit",
-        "hop_limit",
-        "raw.hop_limit",
-        "rxMetadata.hopLimit",
-        "decoded.header.hopLimit",
-    ):
+def _first_int(pkt: dict, paths: tuple[str, ...], direct_keys: tuple[str, ...]) -> int | None:
+    for path in paths:
         v = _get(pkt, path)
         if isinstance(v, (int, float)):
             return int(v)
-    # Fallback por claves directas
-    for k in ("hop_limit", "hopLimit"):
+    for k in direct_keys:
         v = pkt.get(k)
         if isinstance(v, (int, float)):
             return int(v)
     return None
 
+#29-08-2025 08:25 horas
+def extract_hop_limit(pkt: dict) -> int | None:
+    # Busca en varias rutas habituales (Meshtastic + eventos sintéticos MeshCore)
+    return _first_int(pkt, (
+        "meta.hopLimit",
+        "hop_limit",
+        "hopLimit",
+        "raw.hop_limit",
+        "raw.hopLimit",
+        "raw.routing.hop_limit",
+        "raw.routing.hopLimit",
+        "routing.hop_limit",
+        "routing.hopLimit",
+        "summary.hop_limit",
+        "summary.hopLimit",
+        "payload.hop_limit",
+        "payload.hopLimit",
+        "rxMetadata.hopLimit",
+        "decoded.header.hopLimit",
+    ), ("hop_limit", "hopLimit"))
+
 def extract_hop_start(pkt: dict) -> int | None:
-    for path in (
+    return _first_int(pkt, (
         "meta.hopStart",
         "hop_start",
+        "hopStart",
         "raw.hop_start",
+        "raw.hopStart",
+        "raw.routing.hop_start",
+        "raw.routing.hopStart",
+        "routing.hop_start",
+        "routing.hopStart",
+        "summary.hop_start",
+        "summary.hopStart",
+        "payload.hop_start",
+        "payload.hopStart",
         "rxMetadata.hopStart",
         "decoded.header.hopStart",
-    ):
-        v = _get(pkt, path)
-        if isinstance(v, (int, float)):
-            return int(v)
-    for k in ("hop_start", "hopStart"):
-        v = pkt.get(k)
-        if isinstance(v, (int, float)):
-            return int(v)
-    return None
+    ), ("hop_start", "hopStart"))
 
 def extract_relay_node(pkt: dict) -> int | str | None:
     # Puede venir como int o string; devolvemos lo que haya
     for path in (
         "meta.relayNode",
         "relay_node",
+        "relayNode",
         "raw.relay_node",
+        "raw.relayNode",
+        "raw.routing.relay_node",
+        "raw.routing.relayNode",
+        "routing.relay_node",
+        "routing.relayNode",
+        "summary.relay_node",
+        "summary.relayNode",
+        "payload.relay_node",
+        "payload.relayNode",
         "rxMetadata.relayNode",
         "decoded.header.relayNode",
         "decoded.relay_node",
@@ -9750,7 +9773,7 @@ async def vecinos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             if hl is None or hs is None:
                 return None
             hl = int(hl); hs = int(hs)
-            return max(0, min(hl - hs, 7))
+            return max(0, min(hs - hl, 7))
         except Exception:
             return None
 
@@ -14071,6 +14094,10 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 pkt = obj.get("packet", {}) or {}
                 dec = (pkt.get("decoded", {}) or {}) if isinstance(pkt, dict) else {}
                 summary = obj.get("summary", {}) or {}
+                pkt_metrics = dict(pkt) if isinstance(pkt, dict) else {}
+                pkt_metrics["summary"] = summary
+                pkt_metrics["payload"] = obj.get("payload", {}) or {}
+                pkt_metrics["raw"] = obj.get("raw", {}) or {}
 
                 port = dec.get("portnum") or summary.get("portnum")
                 if port != "TEXT_MESSAGE_APP":
@@ -14152,11 +14179,11 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
 
                 # Métricas de señal y hops (reutilizando tus funciones)
                 try:
-                    rssi = extract_rssi(pkt)
+                    rssi = extract_rssi(pkt_metrics)
                 except Exception:
                     rssi = None
                 try:
-                    snr = extract_snr(pkt)
+                    snr = extract_snr(pkt_metrics)
                 except Exception:
                     snr = None
 
@@ -14170,15 +14197,15 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                     snr_txt = str(snr) if snr is not None else "¿?"
 
                 try:
-                    hop_limit = extract_hop_limit(pkt)
+                    hop_limit = extract_hop_limit(pkt_metrics)
                 except Exception:
                     hop_limit = None
                 try:
-                    hop_start = extract_hop_start(pkt)
+                    hop_start = extract_hop_start(pkt_metrics)
                 except Exception:
                     hop_start = None
                 try:
-                    relay = extract_relay_node(pkt)
+                    relay = extract_relay_node(pkt_metrics)
                 except Exception:
                     relay = None
 
