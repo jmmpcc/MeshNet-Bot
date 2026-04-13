@@ -2004,6 +2004,10 @@ async def task_control_udp():
         if _dedup_seen(dest_norm, text):
             print(f"[ctrl] duplicado ignorado para dest={dest_norm}")
             continue
+        # Marcar ANTES de transmitir para cerrar ventana de carrera:
+        # si entra el mismo payload por otra ruta (p.ej. eco broker) mientras
+        # aún estamos enviando partes RF, debe quedar suprimido.
+        _dedup_mark(dest_norm, text)
 
         if dest_norm == "broadcast":
             payloads = build_aprs_status_chunks(text)
@@ -2018,7 +2022,6 @@ async def task_control_udp():
             ok_all = ok_all and ok
             await asyncio.sleep(0.12)
 
-        _dedup_mark(dest_norm, text)
         print(f"[ctrl] Resultado: {'OK' if ok_all else 'KO'} para dest={dest_norm}")
 
 
@@ -2185,6 +2188,10 @@ async def task_broker_to_aprs():
 
                     payloads = build_aprs_message_chunks(dest_norm, payload_text, MAX_MSG_LEN)
 
+                # Marcar ANTES del TX (RF/IS) para evitar doble emisión cuando
+                # la misma orden llega casi simultáneamente por dos entradas.
+                _dedup_mark(dest_norm, payload_text)
+                print(f"[broker→aprs][DBG] DEDUP MARK(pre) dest={dest_norm} payload={payload_text!r}")
 
                 # --- 1) RF (KISS) ---
                 ok_all = True
@@ -2231,9 +2238,6 @@ async def task_broker_to_aprs():
                     except Exception as e:
                         ok_is = False
                         print(f"[broker→IS] ❌ {type(e).__name__}: {e}")
-
-                _dedup_mark(dest_norm, payload_text)
-                print(f"[broker→aprs][DBG] DEDUP MARK dest={dest_norm} payload={payload_text!r}")
 
                 print(f"[broker→aprs] {dest_norm} parts={len(payloads)} → RF={'OK' if ok_all else 'KO'} IS={'OK' if ok_is else 'KO'}")
 
