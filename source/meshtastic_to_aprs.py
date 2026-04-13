@@ -14,7 +14,7 @@ Sin verificacion APRS-IS
 """
 
 from __future__ import annotations
-import asyncio, json, os, re, socket
+import asyncio, json, os, re, socket, hashlib
 from typing import Optional, List, Tuple
 import aprslib
 
@@ -65,6 +65,35 @@ def _print_with_ts(*args, **kwargs):
     _builtin_print(f"[{ts}]", *args, sep=sep, end=end, file=file, flush=flush, **kwargs)
 
 builtins.print = _print_with_ts
+
+# DEDUP de payload RF (protección adicional intra-proceso)
+_RF_DEDUP_TTL_S = float(os.getenv("APRS_RF_DEDUP_TTL", "8"))
+_recent_rf_tx_keys: dict[str, float] = {}
+
+def _rf_tx_key(dest_hdr: str, payload: bytes) -> str:
+    h = hashlib.sha1()
+    h.update((dest_hdr or "").strip().upper().encode("utf-8", "ignore"))
+    h.update(b"|")
+    h.update(bytes(payload or b""))
+    return h.hexdigest()
+
+def _rf_tx_dedup_seen(dest_hdr: str, payload: bytes) -> bool:
+    now = time.time()
+    k = _rf_tx_key(dest_hdr, payload)
+    exp = _recent_rf_tx_keys.get(k)
+    if exp is None:
+        return False
+    if exp < now:
+        _recent_rf_tx_keys.pop(k, None)
+        return False
+    return True
+
+def _rf_tx_dedup_mark(dest_hdr: str, payload: bytes) -> None:
+    now = time.time()
+    _recent_rf_tx_keys[_rf_tx_key(dest_hdr, payload)] = now + max(0.1, _RF_DEDUP_TTL_S)
+    stale = [k for k, exp in _recent_rf_tx_keys.items() if exp < now]
+    for k in stale:
+        _recent_rf_tx_keys.pop(k, None)
 
 
 def _aprs_source_allowed(src: str) -> bool:
@@ -1175,6 +1204,12 @@ def _has_ch_tag_in_info(pkt: dict) -> bool:
 # === TX APRS util ========
 # =========================
 def _tx_aprs_payload(payload: bytes, dest_hdr: str, path_override: Optional[List[str]] = None) -> bool:
+    # DEDUP de última milla (RF): evita doble salida casi simultánea del mismo frame
+    # aunque el origen lógico haya entrado por rutas diferentes.
+    if _rf_tx_dedup_seen(dest_hdr, payload):
+        print(f"[ctrl→aprs] DEDUP RF skip {len(payload)}B → {dest_hdr}")
+        return True
+
     ax25 = build_ax25_ui(dest=dest_hdr, src=MY_CALL,
                          path=[p for p in (path_override or APRS_PATH) if p],
                          payload=payload)
@@ -1184,6 +1219,9 @@ def _tx_aprs_payload(payload: bytes, dest_hdr: str, path_override: Optional[List
         _kiss_init(s)                           # [NUEVO] fija TXDELAY/PERSIST/SLOTTIME
         s.sendall(kiss)
         s.close()
+        # Marcar dedup SOLO tras envío KISS exitoso.
+        # Así, si hay fallo transitorio de socket, no se enmascaran reintentos válidos.
+        _rf_tx_dedup_mark(dest_hdr, payload)
         
         print(f"[ctrl→aprs] TX {len(payload)}B → {dest_hdr}")
         return True
