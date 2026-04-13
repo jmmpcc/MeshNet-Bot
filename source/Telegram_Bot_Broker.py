@@ -7937,15 +7937,20 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _safe_reply_html(update.effective_message, f"❌ Error al cargar scheduler: <code>{escape(type(e).__name__)}</code>: <code>{escape(str(e))}</code>")
             return
 
-        # Meta común para ambas tareas (Mesh y APRS)
+        # Meta común para la tarea programada APRS+Mesh.
+        # IMPORTANTE:
+        # - Se programa UNA sola tarea por minuto solicitado.
+        # - transport="both" hace que el scheduler envíe por Mesh y,
+        #   si el envío Mesh termina OK, reenvíe también a APRS por UDP.
+        # - Así evitamos duplicados RF y doble notificación de "Tarea ejecutada".
         base_meta = {
             "scheduled_by": update.effective_user.username or str(update.effective_user.id),
             "via": "/aprs",
             "aprs_dest": "broadcast",
             "bot_est_parts": est_parts,
-            # Para notificación de ejecución (si la usas en el broker/bot)
             "chat_id": update.effective_chat.id,
             "reply_to": update.effective_message.message_id,
+            "transport": "both",
         }
 
         ids, errors = [], []
@@ -7953,58 +7958,32 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             when_local_dt = datetime.now(TZ_EUROPE_MADRID) + timedelta(minutes=mins)
             when_local_str = when_local_dt.strftime("%Y-%m-%d %H:%M")
 
-            # 1) Tarea principal: envío por Mesh
             try:
-                res_mesh = _bt.schedule_message(
+                res_task = _bt.schedule_message(
                     when_local=when_local_str,
                     channel=int(canal),
                     message=texto_norm,
                     destination="broadcast",
                     require_ack=False,
-                    meta={
-                        **base_meta,
-                        # Transporte explícito por Mesh
-                        "transport": "mesh",
-                    },
+                    meta=base_meta.copy(),
                 )
-                if isinstance(res_mesh, dict) and res_mesh.get("ok"):
-                    ids.append(res_mesh.get("task", {}).get("id", "?"))
+
+                if isinstance(res_task, dict) and res_task.get("ok"):
+                    ids.append(res_task.get("task", {}).get("id", "?"))
                 else:
                     errors.append(f"{mins}min")
                     try:
-                        print(f"[bot:/aprs en] NOK Mesh ({mins}min) canal={canal} res={res_mesh!r}", flush=True)
+                        print(f"[bot:/aprs en] NOK BOTH ({mins}min) canal={canal} res={res_task!r}", flush=True)
                     except Exception:
                         pass
+
             except Exception as e:
-                errors.append(f"{mins}min:Mesh:{type(e).__name__}")
+                errors.append(f"{mins}min:{type(e).__name__}")
                 try:
-                    print(f"[bot:/aprs en] EXC Mesh ({mins}min) canal={canal} {type(e).__name__}: {e}", flush=True)
+                    print(f"[bot:/aprs en] EXC BOTH ({mins}min) canal={canal} {type(e).__name__}: {e}", flush=True)
                 except Exception:
                     pass
-
-            # 2) Tarea gemela: APRS-only (no depende de que Mesh vaya bien)
-            try:
-                _bt.schedule_message(
-                    when_local=when_local_str,
-                    channel=int(canal),
-                    message=texto_norm,
-                    destination="broadcast",
-                    require_ack=False,
-                    meta={
-                        **base_meta,
-                        # Forzamos transporte "aprs" para que el scheduler
-                        # use _aprs_forward_via_udp() directamente.
-                        "transport": "aprs",
-                    },
-                )
-            except Exception as e:
-                # No marcamos error "duro": lo dejamos solo en log.
-                try:
-                    print(f"[bot:/aprs en] EXC APRS ({mins}min) canal={canal} {type(e).__name__}: {e}", flush=True)
-                except Exception:
-                    pass
-
-
+                
         # <<< AÑADE AQUÍ EL LOG >>>
         try:
             print(f"[bot:/aprs en] Programadas {len(ids)} tareas APRS canal={canal} mins={minutes_list} IDs={ids} ERRORS={errors}", flush=True)
