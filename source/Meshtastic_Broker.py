@@ -2770,16 +2770,21 @@ def _tasks_send_adapter(
                             ch_name = None
 
                         if scheduled_task:
-                            _m = (getattr(mc, "ch_map", None) or {}).get(int(channel_i)) or {}
-                            _k = str(_m.get("kind") or "contact").strip().lower()
-                            if _k in ("chan", "channel"):
-                                _mc_ch = _m.get("channel_idx")
-                                if _mc_ch is not None:
-                                    mc.enqueue_send_channel(int(_mc_ch), str(message_s))
+                            # Mantener paridad con forward_from_meshtastic:
+                            # los comandos APRS no deben reflejarse hacia MeshCore.
+                            if str(message_s).lstrip().lower().startswith("/aprs"):
+                                pass
                             else:
-                                _contact = _m.get("contact") or getattr(mc, "default_contact_prefix", None)
-                                if _contact:
-                                    mc.enqueue_send_contact(str(_contact), str(message_s))
+                                _m = (getattr(mc, "ch_map", None) or {}).get(int(channel_i)) or {}
+                                _k = str(_m.get("kind") or "contact").strip().lower()
+                                if _k in ("chan", "channel"):
+                                    _mc_ch = _m.get("channel_idx")
+                                    if _mc_ch is not None:
+                                        mc.enqueue_send_channel(int(_mc_ch), str(message_s))
+                                else:
+                                    _contact = _m.get("contact") or getattr(mc, "default_contact_prefix", None)
+                                    if _contact:
+                                        mc.enqueue_send_contact(str(_contact), str(message_s))
                         else:
                             mc.forward_from_meshtastic(
                                 ch=int(channel_i),
