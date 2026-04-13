@@ -1209,7 +1209,6 @@ def _tx_aprs_payload(payload: bytes, dest_hdr: str, path_override: Optional[List
     if _rf_tx_dedup_seen(dest_hdr, payload):
         print(f"[ctrl→aprs] DEDUP RF skip {len(payload)}B → {dest_hdr}")
         return True
-    _rf_tx_dedup_mark(dest_hdr, payload)
 
     ax25 = build_ax25_ui(dest=dest_hdr, src=MY_CALL,
                          path=[p for p in (path_override or APRS_PATH) if p],
@@ -1220,6 +1219,9 @@ def _tx_aprs_payload(payload: bytes, dest_hdr: str, path_override: Optional[List
         _kiss_init(s)                           # [NUEVO] fija TXDELAY/PERSIST/SLOTTIME
         s.sendall(kiss)
         s.close()
+        # Marcar dedup SOLO tras envío KISS exitoso.
+        # Así, si hay fallo transitorio de socket, no se enmascaran reintentos válidos.
+        _rf_tx_dedup_mark(dest_hdr, payload)
         
         print(f"[ctrl→aprs] TX {len(payload)}B → {dest_hdr}")
         return True
