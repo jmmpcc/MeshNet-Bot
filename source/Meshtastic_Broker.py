@@ -2668,6 +2668,7 @@ def _tasks_send_adapter(
     # Se propaga desde SENDQ como no_bridge=True.
     no_bridge = bool(kwargs.get("no_bridge", False))
     origin = str(kwargs.get("origin") or "").strip().lower()
+    scheduled_task = bool(kwargs.get("scheduled_task", False))
 
     # Seguridad BBS: bloqueo de tráfico hacia bridge
     try:
@@ -2768,14 +2769,31 @@ def _tasks_send_adapter(
                         except Exception:
                             ch_name = None
 
-                        mc.forward_from_meshtastic(
-                            ch=int(channel_i),
-                            text=str(message_s),
-                            from_id="BROKER",
-                            from_alias="BROKER",
-                            channel_name=(ch_name or None),
-                            hop_real=None,
-                        )
+                        if scheduled_task:
+                            # Mantener paridad con forward_from_meshtastic:
+                            # los comandos APRS no deben reflejarse hacia MeshCore.
+                            if str(message_s).lstrip().lower().startswith("/aprs"):
+                                pass
+                            else:
+                                _m = (getattr(mc, "ch_map", None) or {}).get(int(channel_i)) or {}
+                                _k = str(_m.get("kind") or "contact").strip().lower()
+                                if _k in ("chan", "channel"):
+                                    _mc_ch = _m.get("channel_idx")
+                                    if _mc_ch is not None:
+                                        mc.enqueue_send_channel(int(_mc_ch), str(message_s))
+                                else:
+                                    _contact = _m.get("contact") or getattr(mc, "default_contact_prefix", None)
+                                    if _contact:
+                                        mc.enqueue_send_contact(str(_contact), str(message_s))
+                        else:
+                            mc.forward_from_meshtastic(
+                                ch=int(channel_i),
+                                text=str(message_s),
+                                from_id="BROKER",
+                                from_alias="BROKER",
+                                channel_name=(ch_name or None),
+                                hop_real=None,
+                            )
                 except Exception as _e_mc_tx:
                     print(f"⚠️ meshcore→fw(tx): {_e_mc_tx}", flush=True)
 
@@ -2886,7 +2904,15 @@ SENDQ.start()
 
 def init_broker_tasks():
     try:
-        broker_tasks.configure_sender(_tasks_send_adapter)
+        broker_tasks.configure_sender(
+            lambda ch, msg, dst, ack: _tasks_send_adapter(
+                channel=ch,
+                message=msg,
+                destination=dst,
+                require_ack=ack,
+                scheduled_task=True,
+            )
+        )
         broker_tasks.configure_reconnect(_tasks_reconnect_adapter)
         # Guarda en ./broker_data/scheduled_tasks.jsonl (separado del bot)
        
