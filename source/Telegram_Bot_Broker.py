@@ -13155,19 +13155,55 @@ async def diario_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if gid:
             group_id = gid
 
-        # En modo BOTH, permitir 'aprs <dest>[:]' en los tokens y retirarlo antes del parseo mesh
+        # En modo BOTH, permitir 'aprs <dest>[:]' SOLO como modificador explícito
+        # y únicamente en una posición de control:
+        #   /diario HH:MM ambos [grupo X] <destino[:canal] | canal N> aprs <CALL|broadcast> <texto...>
+        #
+        # No debe capturar la palabra "aprs" si aparece dentro del texto libre,
+        # por ejemplo: "Envio a canal y aprs programado".
         if transport == "both":
             t = tail_mesh[:]
-            j = 0
-            while j < len(t):
-                if t[j].lower() == "aprs":
-                    aprs_dest = (t[j + 1] if (j + 1) < len(t) else "broadcast")
-                    if isinstance(aprs_dest, str) and aprs_dest.endswith(":"):
-                        aprs_dest = aprs_dest[:-1]
-                    del t[j:j+2]
-                    tail_mesh = t
-                    break
-                j += 1
+
+            def _looks_like_aprs_dest(tok: str) -> bool:
+                s = (tok or "").strip().rstrip(":")
+                if not s:
+                    return False
+                if s.lower() == "broadcast":
+                    return True
+                # Indicativo APRS típico con o sin SSID
+                return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9\-\/]*", s) is not None
+
+            # Solo aceptamos el modificador APRS si aparece justo después
+            # del bloque de destino mesh, no en texto libre.
+            #
+            # Casos válidos:
+            #   canal 4 aprs broadcast Aviso...
+            #   !12345678 aprs EB2EAS-11 Aviso...
+            #   broadcast aprs EB2EAS-11 Aviso...
+            #   alias:4 aprs broadcast Aviso...
+            #
+            # Casos NO válidos como modificador:
+            #   Envio a canal y aprs programado
+            aprs_idx = None
+
+            if len(t) >= 4 and t[0].lower() == "canal" and str(t[1]).lstrip("-").isdigit():
+                # Forma: canal N aprs DEST ...
+                if t[2].lower() == "aprs" and _looks_like_aprs_dest(t[3]):
+                    aprs_idx = 2
+            elif len(t) >= 3:
+                # Forma: DESTINO aprs DEST ...
+                if t[1].lower() == "aprs" and _looks_like_aprs_dest(t[2]):
+                    aprs_idx = 1
+
+            if aprs_idx is not None:
+                aprs_dest = (t[aprs_idx + 1] if (aprs_idx + 1) < len(t) else "broadcast")
+                if isinstance(aprs_dest, str):
+                    aprs_dest = aprs_dest.rstrip(":").upper() or "BROADCAST"
+                else:
+                    aprs_dest = "BROADCAST"
+
+                del t[aprs_idx:aprs_idx + 2]
+                tail_mesh = t 
 
         if not tail_mesh:
             await update.effective_message.reply_text("❗ Falta el destino y el texto.")
