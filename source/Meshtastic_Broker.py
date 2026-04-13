@@ -2594,6 +2594,9 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
             text=str(msg.get("text") or ""),
             dest=msg.get("destination") or "broadcast",
             require_ack=bool(msg.get("require_ack")),
+            no_bridge=bool(msg.get("no_bridge", False)),
+            origin=(msg.get("origin") or ""),
+            meta=(msg.get("meta") if isinstance(msg.get("meta"), dict) else None),
             timeout_s=None
         )
         ok = bool(r.get("ok")) if isinstance(r, dict) else bool(r)
