@@ -8035,35 +8035,32 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception: pass
 
     def _send(mesh_dest: str, canal_int: int, text: str):
-        # 1) Inyecta en Mesh
-        raw_for_mesh = f"/msg {mesh_dest}: {text}" if not text.lower().startswith("/msg ") else text
-        node_id = None  # broadcast Mesh por defecto
+        """
+        Envía una única orden por Mesh para que la pasarela broker→APRS
+        sea la única responsable del TX APRS.
+
+        Objetivo:
+        - Evitar doble o triple envío APRS.
+        - No usar _udp_send() desde el bot en la ruta inmediata.
+        """
+        mesh_dest_norm = (mesh_dest or "broadcast").strip() or "broadcast"
+
+        # Orden canónica para que la pasarela APRS la procese desde el stream Mesh.
+        raw_for_mesh = f"/aprs canal {int(canal_int)} {mesh_dest_norm}: {text}"
+
+        node_id = None  # broadcast por Mesh
         mesh_result, packet_id = send_text_message(node_id, raw_for_mesh, canal=canal_int)
 
-        # 2) APRS troceado
-        dest_for_aprs = mesh_dest.lower()
-        if dest_for_aprs in ("broadcast", "all"):
-            chunks = _aprs_split_broadcast(text, APRS_LEN) or [text[:APRS_LEN]]
-            for part in chunks:
-                _udp_send("broadcast", part)
-                time.sleep(0.15)
-        else:
-            chunks = _aprs_split_directed(text, APRS_LEN) or [text[:APRS_LEN]]
-            for part in chunks:
-                _udp_send(dest_for_aprs, part)
-                time.sleep(0.15)
-
-        aprs_status = f"OK ({len(chunks)} parte{'s' if len(chunks)!=1 else ''})"
         html = (
-            "<b>APRS</b> → enviado a Mesh y pasarela.\n"
-            f"Destino: <code>{escape(mesh_dest)}</code>\n"
+            "<b>APRS</b> → orden enviada por Mesh a la pasarela.\n"
+            f"Destino APRS: <code>{escape(mesh_dest_norm)}</code>\n"
             f"Canal Mesh: <code>{canal_int}</code>\n"
-            f"Chunks APRS: <code>{len(chunks)}</code> (máx={APRS_LEN})\n"
-            f"Mesh: <code>{escape(mesh_result)}</code> {('packet_id='+str(packet_id)) if packet_id else ''}\n"
-            f"Pasarela APRS: <code>{escape(aprs_status)}</code>"
+            f"Orden: <code>{escape(raw_for_mesh)}</code>\n"
+            f"Mesh: <code>{escape(mesh_result)}</code> {('packet_id=' + str(packet_id)) if packet_id else ''}\n"
+            f"Pasarela APRS: <code>transmisión delegada al flujo broker→aprs</code>"
         ).strip()
         return html
-   
+
     # nuevos atajos inmediatos
     dest_clean = None
     canal = BROKER_CHANNEL
