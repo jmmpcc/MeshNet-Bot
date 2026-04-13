@@ -2664,6 +2664,7 @@ def _tasks_send_adapter(
     # [NUEVO] Flag para impedir espejo hacia bridge (BBS / control interno).
     # Se propaga desde SENDQ como no_bridge=True.
     no_bridge = bool(kwargs.get("no_bridge", False))
+    origin = str(kwargs.get("origin") or "").strip().lower()
 
     # Seguridad BBS: bloqueo de tráfico hacia bridge
     try:
@@ -2755,6 +2756,7 @@ def _tasks_send_adapter(
                         mc
                         and getattr(mc, "enable", False)
                         and (dest_id is None)
+                        and (not origin.startswith("bot"))
                         and str(message_s).strip()
                     ):
                         ch_name = None

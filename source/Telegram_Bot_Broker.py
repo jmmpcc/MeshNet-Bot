@@ -1665,6 +1665,7 @@ def _send_via_broker_wait(text: str, ch: int, dest: str | None = None, ack: bool
             "ch": int(ch),
             "dest": (None if not dest or str(dest).lower() == "broadcast" else str(dest)),
             "ack": bool(ack),
+            "origin": "bot",
         }
     }
     data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
@@ -1782,7 +1783,8 @@ def _send_via_broker_queue(text: str, ch: int, dest: str | None = None, ack: boo
             "text": str(text),
             "ch": int(ch),
             "dest": (None if not dest or str(dest).lower() == "broadcast" else str(dest)),
-            "ack": bool(ack)
+            "ack": bool(ack),
+            "origin": "bot",
         }
     }
     data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
