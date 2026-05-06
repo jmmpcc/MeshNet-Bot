@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-meshtastic_to_aprs.py (v7.0.2)
+meshtastic_to_aprs.py (v7.0.3)
 Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
 - /aprs (bot) -> UDP local -> TX APRS (troceo automático).
@@ -14,7 +14,7 @@ Sin verificacion APRS-IS
 """
 
 from __future__ import annotations
-import asyncio, json, os, re, socket
+import asyncio, json, os, re, socket, threading
 from typing import Optional, List, Tuple
 import aprslib
 
@@ -25,6 +25,24 @@ import unicodedata
 # Nota: se escribe en un fichero separado (por defecto bot_data/aprs_rx.jsonl) para NO tocar positions.jsonl.
 BOT_DATA_DIR = os.getenv("BOT_DATA_DIR", "bot_data")
 APRS_RX_LOG_PATH = os.getenv("BOT_APRS_RX_PATH", os.path.join(BOT_DATA_DIR, "aprs_rx.jsonl"))
+
+# === [WEB ADMIN v7.0.3] APRS RX -> backlog del broker =========================
+# Objetivo:
+#   - Mantener aprs_rx.jsonl exactamente como estaba.
+#   - Duplicar cada RX APRS en el JSONL que el broker usa para FETCH_BACKLOG.
+#   - Permitir que el WebPanel vea portnum=APRS_RX sin tocar el broker ni transmitir RF.
+#
+# Requisito operativo:
+#   - El contenedor meshnet-aprs debe compartir el mismo BOT_DATA_DIR que el broker,
+#     o bien definir BROKER_OFFLINE_LOG_PATH apuntando al broker_offline_log.jsonl real.
+APRS_RX_BROKER_BACKLOG_ENABLED = int(os.getenv("APRS_RX_BROKER_BACKLOG_ENABLED", "1") or "1")
+APRS_RX_BROKER_BACKLOG_DEBUG = int(os.getenv("APRS_RX_BROKER_BACKLOG_DEBUG", "0") or "0")
+BROKER_OFFLINE_LOG_PATH = os.getenv(
+    "BROKER_OFFLINE_LOG_PATH",
+    os.getenv("BOT_BROKER_OFFLINE_LOG_PATH", os.path.join(BOT_DATA_DIR, "broker_offline_log.jsonl")),
+)
+_APRS_BROKER_BACKLOG_LOCK = threading.Lock()
+
 try:
     os.makedirs(BOT_DATA_DIR, exist_ok=True)
 except Exception:
@@ -37,6 +55,111 @@ def _aprs_web_append(rec: dict) -> None:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         # No interrumpir la pasarela por fallos de IO
+        return
+
+
+def _aprs_broker_backlog_row(rec: dict) -> dict:
+    """
+    Convierte una trama APRS RX al formato plano que lee FETCH_BACKLOG.
+
+    Uso interno:
+      row = _aprs_broker_backlog_row(rec)
+
+    Parámetros:
+      rec: diccionario APRS generado en task_kiss_to_mesh(), con callsign, info,
+           raw, lat/lon opcionales y timestamp.
+
+    Funcionalidad:
+      - Genera portnum=APRS_RX.
+      - Incluye rx_time, que es el campo usado por _iter_backlog_jsonl() del broker
+        para filtrar since_ts/until_ts.
+      - No cambia aprs_rx.jsonl y no transmite RF.
+    """
+    rec = rec or {}
+    ts = int(rec.get("ts") or time.time())
+    callsign = str(rec.get("callsign") or "").strip().upper()
+    info = str(rec.get("info") or "")
+    raw = rec.get("raw")
+
+    row = {
+        "ts": ts,
+        "rx_time": ts,
+        "channel": None,
+        "portnum": "APRS_RX",
+        "from": f"APRS:{callsign}" if callsign else "APRS",
+        "to": str(rec.get("dest") or "APRS"),
+        "from_alias": callsign or None,
+        "to_alias": str(rec.get("dest") or "APRS"),
+        "text": info,
+        "info": info,
+        "raw": raw,
+        "aprs": 1,
+        "aprs_rx": 1,
+        "aprs_type": rec.get("type"),
+        "aprs_callsign": callsign or None,
+        "aprs_dest": rec.get("dest"),
+        "aprs_path": rec.get("path"),
+    }
+
+    # Atajos útiles para parser/mapa si aprslib consiguió posición.
+    for key in ("lat", "lon", "course", "speed", "alt", "symbol"):
+        if rec.get(key) is not None:
+            row[key] = rec.get(key)
+
+    # Estructura compatible con extractores que esperan packet.decoded.
+    row["packet"] = {
+        "fromId": row["from"],
+        "toId": row["to"],
+        "rxTime": ts,
+        "decoded": {
+            "portnum": "APRS_RX",
+            "text": info,
+            "payload": {
+                "callsign": callsign,
+                "info": info,
+                "raw": raw,
+                "lat": row.get("lat"),
+                "lon": row.get("lon"),
+            },
+        },
+    }
+    row["summary"] = {
+        "portnum": "APRS_RX",
+        "text": info,
+        "from": row["from"],
+        "from_alias": callsign or None,
+    }
+    return row
+
+
+def _aprs_broker_backlog_append(rec: dict) -> None:
+    """
+    Añade una RX APRS al broker_offline_log.jsonl para que FETCH_BACKLOG la vea.
+
+    Uso interno:
+      _aprs_broker_backlog_append(rec)
+
+    Funcionalidad:
+      - Escritura best-effort y protegida con lock local.
+      - No interrumpe la pasarela APRS si falla el disco/ruta/permisos.
+      - No modifica aprs_rx.jsonl ni altera los filtros [CHx] existentes.
+      - No transmite RF; solo hace visible APRS_RX para WebPanel/FETCH_BACKLOG.
+    """
+    if not APRS_RX_BROKER_BACKLOG_ENABLED:
+        return
+    try:
+        path = os.path.abspath(os.path.expanduser(os.path.expandvars(BROKER_OFFLINE_LOG_PATH)))
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        row = _aprs_broker_backlog_row(rec)
+        line = json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+        with _APRS_BROKER_BACKLOG_LOCK:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+        if APRS_RX_BROKER_BACKLOG_DEBUG:
+            print(f"[aprs→broker-backlog] APRS_RX append OK path={path} src={row.get('from_alias')} len={len(line)}")
+    except Exception as e:
+        if APRS_RX_BROKER_BACKLOG_DEBUG:
+            print(f"[aprs→broker-backlog] ❌ {type(e).__name__}: {e}")
         return
 
 KISS_CHANNEL = int(os.getenv("KISS_CHANNEL", "0"))
@@ -1476,6 +1599,11 @@ async def task_aprs_to_meshtastic():
                             if ap.get("symbol") is not None:
                                 rec["symbol"] = ap.get("symbol")
                         _aprs_web_append(rec)
+
+                        # --- [WEB ADMIN v7.0.3] Duplicar RX APRS en backlog del broker ---
+                        # Esto hace que el WebPanel pueda obtenerlo por FETCH_BACKLOG portnum=APRS_RX.
+                        # No altera aprs_rx.jsonl ni cambia el puente APRS→Mesh basado en [CHx].
+                        _aprs_broker_backlog_append(rec)
                     except Exception:
                         pass
                     # --- Extraer canal + posible delay (+N minutos) desde [CH x] / [CANAL x+N] ---
