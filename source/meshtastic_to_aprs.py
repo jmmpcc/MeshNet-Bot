@@ -14,7 +14,7 @@ Sin verificacion APRS-IS
 """
 
 from __future__ import annotations
-import asyncio, json, os, re, socket, threading, time
+import asyncio, json, os, re, socket, threading
 from typing import Optional, List, Tuple
 import aprslib
 
@@ -26,7 +26,7 @@ import unicodedata
 BOT_DATA_DIR = os.getenv("BOT_DATA_DIR", "bot_data")
 APRS_RX_LOG_PATH = os.getenv("BOT_APRS_RX_PATH", os.path.join(BOT_DATA_DIR, "aprs_rx.jsonl"))
 
-# === [WEB ADMIN v7.0.4] APRS RX -> backlog del broker + diagnóstico de rutas ===
+# === [WEB ADMIN v7.0.3] APRS RX -> backlog del broker =========================
 # Objetivo:
 #   - Mantener aprs_rx.jsonl exactamente como estaba.
 #   - Duplicar cada RX APRS en el JSONL que el broker usa para FETCH_BACKLOG.
@@ -41,14 +41,7 @@ BROKER_OFFLINE_LOG_PATH = os.getenv(
     "BROKER_OFFLINE_LOG_PATH",
     os.getenv("BOT_BROKER_OFFLINE_LOG_PATH", os.path.join(BOT_DATA_DIR, "broker_offline_log.jsonl")),
 )
-
-# Si está activo, intenta escribir también en rutas candidatas habituales.
-# Esto evita el fallo típico de Docker: meshnet-aprs escribe en ./bot_data local
-# mientras el broker lee /app/bot_data/broker_offline_log.jsonl.
-APRS_RX_BROKER_BACKLOG_MULTIPATH = int(os.getenv("APRS_RX_BROKER_BACKLOG_MULTIPATH", "1") or "1")
-APRS_RX_BROKER_BACKLOG_STARTUP_LOG = int(os.getenv("APRS_RX_BROKER_BACKLOG_STARTUP_LOG", "1") or "1")
 _APRS_BROKER_BACKLOG_LOCK = threading.Lock()
-_APRS_BROKER_BACKLOG_STARTUP_PRINTED = False
 
 try:
     os.makedirs(BOT_DATA_DIR, exist_ok=True)
@@ -139,85 +132,6 @@ def _aprs_broker_backlog_row(rec: dict) -> dict:
     return row
 
 
-def _aprs_broker_backlog_candidate_paths() -> List[str]:
-    """
-    Devuelve rutas candidatas para broker_offline_log.jsonl.
-
-    Uso interno:
-      paths = _aprs_broker_backlog_candidate_paths()
-
-    Funcionalidad:
-      - Prioriza BROKER_OFFLINE_LOG_PATH explícito.
-      - Añade rutas habituales en Docker y ejecución directa.
-      - Elimina duplicados conservando el orden.
-      - No crea ficheros por sí sola.
-    """
-    candidates: List[str] = []
-
-    def _add(raw: Optional[str]) -> None:
-        if not raw:
-            return
-        try:
-            path = os.path.abspath(os.path.expanduser(os.path.expandvars(str(raw).strip())))
-            if path and path not in candidates:
-                candidates.append(path)
-        except Exception:
-            return
-
-    _add(os.getenv("BROKER_OFFLINE_LOG_PATH"))
-    _add(os.getenv("BOT_BROKER_OFFLINE_LOG_PATH"))
-    _add(BROKER_OFFLINE_LOG_PATH)
-    _add(os.path.join(BOT_DATA_DIR, "broker_offline_log.jsonl"))
-
-    # Ruta habitual dentro de los contenedores del proyecto.
-    _add("/app/bot_data/broker_offline_log.jsonl")
-
-    # Ruta habitual si se ejecuta fuera de Docker desde el usuario meshnet.
-    _add("/home/meshnet/MeshNet-Bot/bot_data/broker_offline_log.jsonl")
-
-    if not APRS_RX_BROKER_BACKLOG_MULTIPATH and candidates:
-        return candidates[:1]
-    return candidates
-
-
-def _aprs_broker_backlog_print_startup_once() -> None:
-    """
-    Muestra una sola vez el diagnóstico de rutas APRS_RX -> broker backlog.
-
-    Funcionalidad:
-      - Ayuda a confirmar desde docker logs si meshnet-aprs escribe donde lee el broker.
-      - No muestra secretos.
-      - No interrumpe la pasarela si no puede comprobar una ruta.
-    """
-    global _APRS_BROKER_BACKLOG_STARTUP_PRINTED
-    if _APRS_BROKER_BACKLOG_STARTUP_PRINTED:
-        return
-    _APRS_BROKER_BACKLOG_STARTUP_PRINTED = True
-    if not APRS_RX_BROKER_BACKLOG_STARTUP_LOG:
-        return
-    try:
-        print(
-            "[aprs→broker-backlog] config "
-            f"enabled={APRS_RX_BROKER_BACKLOG_ENABLED} "
-            f"multipath={APRS_RX_BROKER_BACKLOG_MULTIPATH} "
-            f"BOT_DATA_DIR={BOT_DATA_DIR!r} "
-            f"BROKER_OFFLINE_LOG_PATH={BROKER_OFFLINE_LOG_PATH!r}",
-            flush=True,
-        )
-        for idx, path in enumerate(_aprs_broker_backlog_candidate_paths(), start=1):
-            exists = os.path.exists(path)
-            parent = os.path.dirname(path) or "."
-            parent_exists = os.path.isdir(parent)
-            writable = os.access(parent, os.W_OK) if parent_exists else False
-            print(
-                f"[aprs→broker-backlog] candidate#{idx} path={path} "
-                f"exists={exists} parent_exists={parent_exists} parent_writable={writable}",
-                flush=True,
-            )
-    except Exception:
-        return
-
-
 def _aprs_broker_backlog_append(rec: dict) -> None:
     """
     Añade una RX APRS al broker_offline_log.jsonl para que FETCH_BACKLOG la vea.
@@ -227,39 +141,25 @@ def _aprs_broker_backlog_append(rec: dict) -> None:
 
     Funcionalidad:
       - Escritura best-effort y protegida con lock local.
-      - Escribe en BROKER_OFFLINE_LOG_PATH y, si APRS_RX_BROKER_BACKLOG_MULTIPATH=1,
-        también en rutas habituales compartidas con el broker.
       - No interrumpe la pasarela APRS si falla el disco/ruta/permisos.
       - No modifica aprs_rx.jsonl ni altera los filtros [CHx] existentes.
       - No transmite RF; solo hace visible APRS_RX para WebPanel/FETCH_BACKLOG.
     """
-    _aprs_broker_backlog_print_startup_once()
     if not APRS_RX_BROKER_BACKLOG_ENABLED:
         return
     try:
+        path = os.path.abspath(os.path.expanduser(os.path.expandvars(BROKER_OFFLINE_LOG_PATH)))
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         row = _aprs_broker_backlog_row(rec)
         line = json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
-        ok_paths: List[str] = []
-        err_paths: List[str] = []
-
         with _APRS_BROKER_BACKLOG_LOCK:
-            for path in _aprs_broker_backlog_candidate_paths():
-                try:
-                    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-                    with open(path, "a", encoding="utf-8") as f:
-                        f.write(line)
-                    ok_paths.append(path)
-                except Exception as e:
-                    err_paths.append(f"{path} ({type(e).__name__}: {e})")
-
-        if APRS_RX_BROKER_BACKLOG_DEBUG or not ok_paths:
-            if ok_paths:
-                print(f"[aprs→broker-backlog] APRS_RX append OK src={row.get('from_alias')} paths={ok_paths}", flush=True)
-            if err_paths:
-                print(f"[aprs→broker-backlog] APRS_RX append ERR src={row.get('from_alias')} errors={err_paths}", flush=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+        if APRS_RX_BROKER_BACKLOG_DEBUG:
+            print(f"[aprs→broker-backlog] APRS_RX append OK path={path} src={row.get('from_alias')} len={len(line)}")
     except Exception as e:
         if APRS_RX_BROKER_BACKLOG_DEBUG:
-            print(f"[aprs→broker-backlog] ❌ {type(e).__name__}: {e}", flush=True)
+            print(f"[aprs→broker-backlog] ❌ {type(e).__name__}: {e}")
         return
 
 KISS_CHANNEL = int(os.getenv("KISS_CHANNEL", "0"))
@@ -533,6 +433,7 @@ def _aprsis_ready() -> bool:
     return bool(APRSIS_USER and APRSIS_PASSCODE)
 
 # --- De-dup sencillo para evitar doble TX (bot UDP + eco broker) ---
+import time
 
 _DEDUP_TTL_S = int(os.getenv("APRS_DEDUP_TTL", "20"))  # segundos
 _recent_aprs_keys: dict[str, float] = {}
@@ -1673,7 +1574,12 @@ async def task_aprs_to_meshtastic():
                         ap = None
 
                     # --- [WEB ADMIN] Persistir RX APRS en jsonl para mapa/stream del panel ---
-                    # Se guarda SIEMPRE (best-effort) para no depender del backlog del broker.
+                    # Se guarda SIEMPRE en modo best-effort.
+                    # Importante:
+                    #   - aprs_rx.jsonl mantiene su comportamiento histórico.
+                    #   - broker_offline_log.jsonl recibe una copia APRS_RX solo para observabilidad WebPanel.
+                    #   - El reenvío a Mesh sigue dependiendo del filtro [CHx] posterior.
+                    rec = None
                     try:
                         rec = {
                             "ts": int(time.time()),
@@ -1684,6 +1590,7 @@ async def task_aprs_to_meshtastic():
                             "info": preview,
                             "raw": tnc2 if 'tnc2' in locals() else None,
                         }
+
                         if isinstance(ap, dict):
                             if "latitude" in ap and "longitude" in ap:
                                 rec["lat"] = float(ap.get("latitude"))
@@ -1692,19 +1599,47 @@ async def task_aprs_to_meshtastic():
                                 rec["course"] = ap.get("course")
                             if ap.get("speed") is not None:
                                 rec["speed"] = ap.get("speed")
-                            # aprslib suele usar altitude (m) en 'altitude'
                             if ap.get("altitude") is not None:
                                 rec["alt"] = ap.get("altitude")
                             if ap.get("symbol") is not None:
                                 rec["symbol"] = ap.get("symbol")
-                        _aprs_web_append(rec)
 
-                        # --- [WEB ADMIN v7.0.4] Duplicar RX APRS en backlog del broker con diagnóstico de rutas ---
-                        # Esto hace que el WebPanel pueda obtenerlo por FETCH_BACKLOG portnum=APRS_RX.
-                        # No altera aprs_rx.jsonl ni cambia el puente APRS→Mesh basado en [CHx].
-                        _aprs_broker_backlog_append(rec)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(
+                            f"[aprs→broker-backlog] APRS_RX build ERR "
+                            f"src={src} err={type(e).__name__}: {e}",
+                            flush=True,
+                        )
+                        rec = None
+
+                    if isinstance(rec, dict):
+                        # Guardado histórico APRS local.
+                        # Separado del backlog broker para que un fallo en aprs_rx.jsonl
+                        # no impida publicar APRS_RX para el WebPanel.
+                        try:
+                            _aprs_web_append(rec)
+                        except Exception as e:
+                            print(
+                                f"[aprs→web-jsonl] APRS_RX append ERR "
+                                f"src={src} err={type(e).__name__}: {e}",
+                                flush=True,
+                            )
+
+                        # Duplicado de observabilidad hacia backlog del broker.
+                        # No transmite RF. No puentea a Mesh. No depende del filtro [CHx].
+                        try:
+                            print(
+                                f"[aprs→broker-backlog] APRS_RX observed append TRY src={src}",
+                                flush=True,
+                            )
+                            _aprs_broker_backlog_append(rec)
+                        except Exception as e:
+                            print(
+                                f"[aprs→broker-backlog] APRS_RX observed append ERR "
+                                f"src={src} err={type(e).__name__}: {e}",
+                                flush=True,
+                            )
+                                       
                     # --- Extraer canal + posible delay (+N minutos) desde [CH x] / [CANAL x+N] ---
                     ch, delay_min, msg = _parse_ch_and_delay_from_pkt(pkt, default_ch=MESHTASTIC_CHANNEL)
                     if ch is None or not msg:
