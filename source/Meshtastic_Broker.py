@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.3.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v7.0.4.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -1892,6 +1892,44 @@ def _traceroute_match_pending(pkt: dict, decoded: dict) -> dict | None:
             ]
         if len(recent) == 1:
             return recent[0]
+    except Exception:
+        pass
+
+    return None
+
+def _traceroute_get_single_recent_pending() -> dict | None:
+    """
+    Devuelve el único traceroute pendiente reciente si solo hay uno.
+
+    Uso:
+        ctx = _traceroute_get_single_recent_pending()
+
+    Objetivo:
+        - Resolver respuestas ROUTING_APP que llegan sin campo destino claro.
+        - Evitar que el WebAdmin quede en espera cuando el broker sí ha recibido
+          una respuesta real de traceroute.
+        - Mantener seguridad: solo se asocia si hay exactamente un traceroute
+          pendiente dentro del TTL.
+
+    No transmite RF.
+    No modifica colas.
+    No borra estado.
+    No toca APRS/BBS/MeshCore/bridge.
+    """
+    try:
+        now = int(time.time())
+        ttl = int(os.getenv("BROKER_TRACEROUTE_PENDING_TTL_SEC", "300") or "300")
+
+        with _TRACEROUTE_PENDING_LOCK:
+            recent = [
+                dict(v)
+                for v in _TRACEROUTE_PENDING.values()
+                if now - int(v.get("started_ts") or 0) <= max(60, ttl)
+            ]
+
+        if len(recent) == 1:
+            return recent[0]
+
     except Exception:
         pass
 
@@ -3976,8 +4014,16 @@ def append_offline_log(rec: dict):
             traceroute = dec.get("traceroute") if isinstance(dec, dict) else None
 
             pending_ctx = rec.get("pending_ctx") if isinstance(rec.get("pending_ctx"), dict) else None
+
             if not pending_ctx:
                 pending_ctx = _traceroute_match_pending(pkt, dec)
+
+            # Fallback quirúrgico v7.0.5:
+            # Algunas respuestas ROUTING_APP llegan como from=local/to=local y no traen
+            # el destino solicitado en el paquete RX. Si solo existe un traceroute pendiente
+            # reciente, se asocia de forma segura a ese contexto.
+            if not pending_ctx:
+                pending_ctx = _traceroute_get_single_recent_pending()
 
             event_type = (
                 rec.get("event_type")
@@ -6828,9 +6874,12 @@ class MeshReceiver:
                     if self.verbose:
                         try:
                             print(
-                                f"[traceroute] RX persisted port={port} "
-                                f"from={rec.get('from')} to={rec.get('to')} "
-                                f"target={(pending_ctx or {}).get('target_requested')}",
+                                f"[traceroute] RX persisted "
+                                f"port={portnum} "
+                                f"from={rec.get('from')} "
+                                f"to={rec.get('to')} "
+                                f"target={rec.get('target_norm') or rec.get('target_requested')} "
+                                f"event={rec.get('event_type') or rec.get('trace_event')}",
                                 flush=True,
                             )
                         except Exception:
