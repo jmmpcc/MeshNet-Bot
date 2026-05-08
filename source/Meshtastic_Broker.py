@@ -1950,6 +1950,516 @@ def _traceroute_compact_text(pkt: dict, decoded: dict, rec: dict | None = None) 
     except Exception:
         return "traceroute"
 
+# === [WEBPANEL/TRACEROUTE v7.0.3] Extracción enriquecida de rutas =============
+# Objetivo:
+#   - No cambiar la ejecución RF de traceroute.
+#   - No cambiar RUN_TRACEROUTE.
+#   - No tocar BBS/APRS/MeshCore/bridge.
+#   - Enriquecer únicamente lo que se persiste en broker_offline_log.jsonl y
+#     broker_traceroute_log.jsonl para que el WebPanel pueda dibujar/diagnosticar
+#     mejor el resultado.
+#
+# Uso:
+#   enriched = _traceroute_extract_enriched_route(pkt, decoded, rec)
+#
+# Devuelve:
+#   dict con route_nodes, route_back_nodes, route_snr, route_back_snr,
+#   route_text_enriched, traceroute_payload y diagnóstico defensivo.
+# ==============================================================================
+
+def _traceroute_node_id_any(value) -> str | None:
+    """
+    Convierte distintos formatos de nodo a '!xxxxxxxx'.
+
+    Parámetros:
+      value:
+        - int decimal nodeNum
+        - str decimal
+        - str '!xxxxxxxx'
+        - str hex de 8 caracteres
+
+    Devuelve:
+      '!xxxxxxxx' en minúsculas o None.
+
+    Seguridad:
+      - No transmite RF.
+      - No modifica estado global.
+      - No lanza excepción.
+    """
+    try:
+        if value is None:
+            return None
+
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+
+            if s.startswith("!"):
+                h = s[1:].strip().lower()
+                if re.fullmatch(r"[0-9a-f]{8}", h):
+                    return "!" + h
+                return s.lower()
+
+            if re.fullmatch(r"[0-9a-fA-F]{8}", s):
+                return "!" + s.lower()
+
+            if s.isdigit():
+                return f"!{int(s) & 0xFFFFFFFF:08x}"
+
+            return None
+
+        if isinstance(value, (int, float)):
+            return f"!{int(value) & 0xFFFFFFFF:08x}"
+
+    except Exception:
+        return None
+
+    return None
+
+
+def _traceroute_safe_jsonable(value, max_depth: int = 5):
+    """
+    Convierte objetos potencialmente raros del SDK Meshtastic a estructuras JSON.
+
+    Uso:
+      clean = _traceroute_safe_jsonable(decoded)
+
+    Funcionalidad:
+      - Soporta dict/list/tuple/set/bytes/objetos con __dict__.
+      - Limita profundidad para evitar crecimiento inesperado.
+      - No modifica el objeto original.
+      - No lanza excepción.
+    """
+    try:
+        if max_depth <= 0:
+            return str(value)[:300]
+
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+
+        if isinstance(value, bytes):
+            return {
+                "_type": "bytes",
+                "len": len(value),
+                "hex": value[:256].hex(),
+            }
+
+        if isinstance(value, dict):
+            out = {}
+            for k, v in value.items():
+                try:
+                    ks = str(k)
+                    out[ks] = _traceroute_safe_jsonable(v, max_depth - 1)
+                except Exception:
+                    continue
+            return out
+
+        if isinstance(value, (list, tuple, set)):
+            return [_traceroute_safe_jsonable(v, max_depth - 1) for v in list(value)[:200]]
+
+        if hasattr(value, "__dict__"):
+            return _traceroute_safe_jsonable(vars(value), max_depth - 1)
+
+        return str(value)[:500]
+
+    except Exception:
+        try:
+            return str(value)[:300]
+        except Exception:
+            return None
+
+
+def _traceroute_walk_dicts(*roots) -> list[dict]:
+    """
+    Recorre de forma acotada estructuras anidadas y devuelve diccionarios.
+
+    Uso:
+      dicts = _traceroute_walk_dicts(pkt, decoded, rec)
+
+    Funcionalidad:
+      - Ayuda a encontrar route/routeBack/snrTowards aunque el SDK los coloque
+        en decoded, decoded.payload, routing, traceroute, etc.
+      - Evita ciclos por id().
+      - Profundidad máxima fija para uso 24/7.
+    """
+    out: list[dict] = []
+    seen: set[int] = set()
+
+    def _walk(obj, depth: int):
+        if depth > 7:
+            return
+
+        if isinstance(obj, dict):
+            oid = id(obj)
+            if oid in seen:
+                return
+            seen.add(oid)
+            out.append(obj)
+            for v in obj.values():
+                if isinstance(v, (dict, list, tuple)):
+                    _walk(v, depth + 1)
+
+        elif isinstance(obj, (list, tuple)):
+            for v in obj[:200]:
+                if isinstance(v, (dict, list, tuple)):
+                    _walk(v, depth + 1)
+
+    for r in roots:
+        _walk(r, 0)
+
+    return out
+
+
+def _traceroute_first_value(dicts: list[dict], keys: tuple[str, ...]):
+    """
+    Devuelve el primer valor no vacío encontrado para una lista de claves.
+
+    Uso:
+      route = _traceroute_first_value(dicts, ("route", "routes"))
+
+    No lanza excepción.
+    """
+    try:
+        for d in dicts:
+            if not isinstance(d, dict):
+                continue
+            for k in keys:
+                if k in d and d.get(k) not in (None, "", [], {}):
+                    return d.get(k)
+    except Exception:
+        pass
+    return None
+
+
+def _traceroute_normalize_node_list(value) -> list[str]:
+    """
+    Normaliza una ruta a lista de nodos '!xxxxxxxx'.
+
+    Soporta:
+      - [123, 456]
+      - ["!db5de158", "!849a5b24"]
+      - [{"node": 123}, {"nodeNum": 456}]
+      - {"route": [...]}
+      - {"nodes": [...]}
+
+    Devuelve:
+      lista de nodos sin duplicar consecutivos.
+    """
+    nodes: list[str] = []
+
+    def _append(v):
+        nid = _traceroute_node_id_any(v)
+        if nid:
+            if not nodes or nodes[-1] != nid:
+                nodes.append(nid)
+
+    try:
+        if value is None:
+            return nodes
+
+        if isinstance(value, dict):
+            for key in ("route", "routes", "nodes", "hops", "hop", "routeBack", "route_back"):
+                if key in value:
+                    return _traceroute_normalize_node_list(value.get(key))
+
+            for key in ("node", "nodeNum", "node_num", "id", "from", "to"):
+                if key in value:
+                    _append(value.get(key))
+
+            return nodes
+
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, dict):
+                    sub = _traceroute_normalize_node_list(item)
+                    for n in sub:
+                        if not nodes or nodes[-1] != n:
+                            nodes.append(n)
+                else:
+                    _append(item)
+
+            return nodes
+
+        _append(value)
+
+    except Exception:
+        return nodes
+
+    return nodes
+
+
+def _traceroute_normalize_snr_list(value) -> list:
+    """
+    Normaliza listas de SNR de traceroute.
+
+    Soporta:
+      - [3, -8, None]
+      - ["?dB", "4dB"]
+      - {"snrTowards": [...]}
+
+    Devuelve lista simple para JSON.
+    """
+    out: list = []
+
+    try:
+        if value is None:
+            return out
+
+        if isinstance(value, dict):
+            for key in ("snrTowards", "routeBackSnr", "snrBack", "snr", "snrs"):
+                if key in value:
+                    return _traceroute_normalize_snr_list(value.get(key))
+            return out
+
+        if isinstance(value, (list, tuple)):
+            for item in value[:200]:
+                if item is None:
+                    out.append(None)
+                elif isinstance(item, (int, float)):
+                    out.append(item)
+                else:
+                    out.append(str(item))
+            return out
+
+        if isinstance(value, (int, float)):
+            return [value]
+
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+
+    except Exception:
+        return out
+
+    return out
+
+
+def _traceroute_route_text_from_nodes(
+    route_nodes: list[str],
+    route_snr: list | None = None,
+    fallback: str = "",
+) -> str:
+    """
+    Construye texto legible de ruta a partir de nodos y SNR.
+
+    Ejemplo:
+      !a -> !b -> !c
+      !a --(3dB)--> !b --(?dB)--> !c
+
+    Si no hay nodos, devuelve fallback.
+    """
+    try:
+        if not route_nodes:
+            return fallback or ""
+
+        snrs = route_snr or []
+        parts = []
+
+        for i, node in enumerate(route_nodes):
+            if i == 0:
+                parts.append(str(node))
+                continue
+
+            snr_txt = ""
+            try:
+                snr = snrs[i - 1] if i - 1 < len(snrs) else None
+                if snr is not None:
+                    snr_txt = f" --({snr}dB)--> "
+            except Exception:
+                snr_txt = ""
+
+            parts.append(snr_txt if snr_txt else " -> ")
+            parts.append(str(node))
+
+        return "".join(parts)
+
+    except Exception:
+        return fallback or ""
+
+
+def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | None = None) -> dict:
+    """
+    Extrae información enriquecida de ROUTING_APP/TRACEROUTE_APP.
+
+    Parámetros:
+      pkt:
+        paquete RX normalizado del broker.
+      decoded:
+        decoded del paquete Meshtastic.
+      rec:
+        registro plano que se va a persistir, si existe.
+
+    Devuelve:
+      {
+        "route_nodes": [...],
+        "route_snr": [...],
+        "route_back_nodes": [...],
+        "route_back_snr": [...],
+        "route_text_enriched": "...",
+        "traceroute_payload": {...},
+        "traceroute_payload_keys": [...],
+        "route_quality_hint": "..."
+      }
+
+    Seguridad:
+      - Solo lectura.
+      - No transmite RF.
+      - No modifica colas.
+      - No borra ni rota ficheros.
+      - No altera la correlación existente por _TRACEROUTE_PENDING.
+    """
+    if not isinstance(pkt, dict):
+        pkt = {}
+    if not isinstance(decoded, dict):
+        decoded = {}
+    if not isinstance(rec, dict):
+        rec = {}
+
+    dicts = _traceroute_walk_dicts(pkt, decoded, rec)
+
+    route_raw = _traceroute_first_value(
+        dicts,
+        (
+            "route",
+            "routes",
+            "hops",
+            "hop",
+            "routeTowards",
+            "route_towards",
+        ),
+    )
+
+    route_back_raw = _traceroute_first_value(
+        dicts,
+        (
+            "routeBack",
+            "route_back",
+            "backRoute",
+            "back_route",
+            "returnRoute",
+            "return_route",
+        ),
+    )
+
+    snr_raw = _traceroute_first_value(
+        dicts,
+        (
+            "snrTowards",
+            "snr_towards",
+            "routeSnr",
+            "route_snr",
+            "snr",
+            "snrs",
+        ),
+    )
+
+    snr_back_raw = _traceroute_first_value(
+        dicts,
+        (
+            "routeBackSnr",
+            "route_back_snr",
+            "snrBack",
+            "snr_back",
+            "returnSnr",
+            "return_snr",
+        ),
+    )
+
+    route_nodes = _traceroute_normalize_node_list(route_raw)
+    route_back_nodes = _traceroute_normalize_node_list(route_back_raw)
+    route_snr = _traceroute_normalize_snr_list(snr_raw)
+    route_back_snr = _traceroute_normalize_snr_list(snr_back_raw)
+
+    # Fallback: si no hay route estructurada, intenta sacar nodos del texto.
+    existing_text = (
+        rec.get("route_text")
+        or rec.get("text")
+        or decoded.get("text")
+        or decoded.get("route_text")
+        or ""
+    )
+    if not route_nodes and isinstance(existing_text, str):
+        found = re.findall(r"![0-9a-fA-F]{8}", existing_text)
+        for n in found:
+            nid = n.lower()
+            if not route_nodes or route_nodes[-1] != nid:
+                route_nodes.append(nid)
+
+    fallback_text = _traceroute_compact_text(pkt, decoded, rec)
+    route_text_enriched = _traceroute_route_text_from_nodes(
+        route_nodes,
+        route_snr,
+        fallback=fallback_text,
+    )
+
+    # Payload útil, acotado. No guardamos objetos arbitrarios sin límite.
+    payload_candidates = {}
+    for key in (
+        "routing",
+        "traceroute",
+        "route",
+        "routes",
+        "routeBack",
+        "routeBackSnr",
+        "snrTowards",
+        "snrBack",
+        "payload",
+    ):
+        try:
+            if key in decoded and decoded.get(key) not in (None, "", [], {}):
+                payload_candidates[key] = decoded.get(key)
+            elif key in pkt and pkt.get(key) not in (None, "", [], {}):
+                payload_candidates[key] = pkt.get(key)
+            elif key in rec and rec.get(key) not in (None, "", [], {}):
+                payload_candidates[key] = rec.get(key)
+        except Exception:
+            pass
+
+    traceroute_payload = _traceroute_safe_jsonable(payload_candidates, max_depth=5)
+
+    # Límite defensivo de tamaño en JSON embebido.
+    try:
+        max_chars = int(os.getenv("BROKER_TRACEROUTE_PAYLOAD_MAX_CHARS", "12000") or "12000")
+    except Exception:
+        max_chars = 12000
+
+    try:
+        payload_json = json.dumps(traceroute_payload, ensure_ascii=False, default=str)
+        if len(payload_json) > max_chars:
+            traceroute_payload = {
+                "_truncated": True,
+                "_max_chars": max_chars,
+                "_preview": payload_json[:max_chars],
+            }
+    except Exception:
+        traceroute_payload = {"_error": "payload_not_json_serializable"}
+
+    quality_hint = "empty_route"
+    if route_nodes:
+        if len(route_nodes) >= 2 and route_nodes[0] == route_nodes[-1]:
+            quality_hint = "self_loop"
+        else:
+            quality_hint = "route_nodes_present"
+    elif route_back_nodes:
+        quality_hint = "route_back_only"
+    elif payload_candidates:
+        quality_hint = "payload_present_without_normalized_nodes"
+
+    return {
+        "route_nodes": route_nodes,
+        "route_snr": route_snr,
+        "route_back_nodes": route_back_nodes,
+        "route_back_snr": route_back_snr,
+        "route_text_enriched": route_text_enriched,
+        "traceroute_payload": traceroute_payload,
+        "traceroute_payload_keys": sorted(list(payload_candidates.keys())),
+        "route_quality_hint": quality_hint,
+        "route_raw_present": route_raw is not None,
+        "route_back_raw_present": route_back_raw is not None,
+        "snr_raw_present": snr_raw is not None,
+        "snr_back_raw_present": snr_back_raw is not None,
+    }
+
 
 # === NUEVO: referencia global al gestor de interfaz del broker ===
 BROKER_IFACE_MGR = None  # se rellena en main()
@@ -3402,11 +3912,21 @@ def append_offline_log(rec: dict):
 
         elif port in {"TRACEROUTE_APP", "ROUTING_APP", "ADMIN_APP:TRACEROUTE", "ADMIN_TRACEROUTE"}:
             # Resultado de traceroute/routing recibido por RX.
-            # Objetivo:
-            #   - Hacerlo visible por FETCH_BACKLOG.
-            #   - No leer docker logs.
-            #   - No bloquear el broker.
-            #   - No cambiar la transmisión RF.
+            #
+            # Cambio quirúrgico v7.0.3:
+            #   - Conserva la persistencia anterior: text, route_text, target_norm, etc.
+            #   - Añade extracción enriquecida para WebPanel:
+            #       route_nodes
+            #       route_snr
+            #       route_back_nodes
+            #       route_back_snr
+            #       route_display
+            #       route_quality_hint
+            #       traceroute_payload
+            #   - No cambia RUN_TRACEROUTE.
+            #   - No transmite RF.
+            #   - No toca BBS/APRS/MeshCore/bridge.
+            #   - No depende de logs Docker.
             route = dec.get("route") if isinstance(dec, dict) else None
             traceroute = dec.get("traceroute") if isinstance(dec, dict) else None
 
@@ -3443,6 +3963,7 @@ def append_offline_log(rec: dict):
                 if rec.get(k) is not None:
                     obj[k] = rec.get(k)
 
+            # Texto compacto anterior: se conserva.
             route_text = (
                 rec.get("route_text")
                 or rec.get("text")
@@ -3459,16 +3980,71 @@ def append_offline_log(rec: dict):
                 obj["traceroute"] = traceroute
 
             # Campos defensivos habituales según versión del SDK.
-            for k in ("hop", "via", "routes", "snrTowards", "routeBack", "routeBackSnr"):
+            for k in (
+                "hop",
+                "via",
+                "routes",
+                "snrTowards",
+                "routeBack",
+                "routeBackSnr",
+                "snrBack",
+                "routing",
+                "payload",
+            ):
                 try:
                     if rec.get(k) is not None:
                         obj[k] = rec.get(k)
                     elif isinstance(dec, dict) and dec.get(k) is not None:
                         obj[k] = dec.get(k)
+                    elif isinstance(pkt, dict) and pkt.get(k) is not None:
+                        obj[k] = pkt.get(k)
                 except Exception:
                     pass
 
-            useful = True        
+            # Enriquecimiento no invasivo para WebPanel.
+            try:
+                enriched = _traceroute_extract_enriched_route(pkt, dec, rec)
+
+                obj["route_nodes"] = enriched.get("route_nodes") or []
+                obj["route_snr"] = enriched.get("route_snr") or []
+                obj["route_back_nodes"] = enriched.get("route_back_nodes") or []
+                obj["route_back_snr"] = enriched.get("route_back_snr") or []
+                obj["route_quality_hint"] = enriched.get("route_quality_hint")
+                obj["traceroute_payload_keys"] = enriched.get("traceroute_payload_keys") or []
+                obj["route_raw_present"] = bool(enriched.get("route_raw_present"))
+                obj["route_back_raw_present"] = bool(enriched.get("route_back_raw_present"))
+                obj["snr_raw_present"] = bool(enriched.get("snr_raw_present"))
+                obj["snr_back_raw_present"] = bool(enriched.get("snr_back_raw_present"))
+
+                # route_display será el texto preferente para el WebPanel.
+                route_display = (
+                    enriched.get("route_text_enriched")
+                    or route_text
+                    or ""
+                )
+                obj["route_display"] = route_display
+
+                # Si el enriquecimiento ha generado una ruta mejor que el texto anterior,
+                # no destruimos route_text original; añadimos route_text_enriched.
+                obj["route_text_enriched"] = route_display
+
+                payload = enriched.get("traceroute_payload")
+                if payload:
+                    obj["traceroute_payload"] = payload
+
+            except Exception as e_enrich:
+                obj["route_display"] = route_text
+                obj["route_quality_hint"] = "enrich_error"
+                obj["traceroute_enrich_error"] = f"{type(e_enrich).__name__}: {str(e_enrich)[:200]}"
+
+            # Persistencia adicional específica de traceroute.
+            # broker_traceroute_log.jsonl queda como histórico especializado.
+            try:
+                backlog_append(dict(obj))
+            except Exception:
+                pass
+
+            useful = True
 
         if not useful:
             return
@@ -6157,13 +6733,45 @@ class MeshReceiver:
                     except Exception:
                         rec["route_text"] = "traceroute_result"
 
-                    # Campos que algunas versiones de la API exponen directamente.
-                    for k in ("hop", "via", "route", "routes", "snrTowards", "routeBack", "routeBackSnr"):
+                                        # Campos que algunas versiones de la API exponen directamente.
+                    # Cambio quirúrgico v7.0.3:
+                    #   - Se amplía la copia defensiva de campos posibles.
+                    #   - No se cambia el envío RF.
+                    #   - No se cambia la correlación pendiente.
+                    #   - append_offline_log() hará la normalización final.
+                    for k in (
+                        "hop",
+                        "via",
+                        "route",
+                        "routes",
+                        "snrTowards",
+                        "routeBack",
+                        "routeBackSnr",
+                        "snrBack",
+                        "routing",
+                        "traceroute",
+                        "payload",
+                    ):
                         try:
                             if decoded.get(k) is not None:
                                 rec[k] = decoded.get(k)
+                            elif pkt.get(k) is not None:
+                                rec[k] = pkt.get(k)
                         except Exception:
                             pass
+
+                    # Payload enriquecido preliminar, útil aunque el SDK cambie
+                    # el nombre de los campos internos.
+                    try:
+                        rec["traceroute_payload_preview"] = _traceroute_safe_jsonable(
+                            {
+                                "decoded": decoded,
+                                "packet_keys": sorted(list(pkt.keys())) if isinstance(pkt, dict) else [],
+                            },
+                            max_depth=4,
+                        )
+                    except Exception:
+                        pass
 
                     append_offline_log(rec)
 
