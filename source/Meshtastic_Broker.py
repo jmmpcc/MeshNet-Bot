@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.1.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v7.0.2.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -1715,6 +1715,240 @@ OFFLINE_LOG_PATH = os.path.join(OFFLINE_DIR, "broker_offline_log.jsonl")
 TRACEROUTE_LOG_PATH = os.path.join(OFFLINE_DIR, "broker_traceroute_log.jsonl")
 _TRACEROUTE_LOCK = threading.Lock()
 
+# === [WEBPANEL/TRACEROUTE v7.0.2] Contexto mínimo de traceroutes lanzados ===
+# Objetivo:
+#   - No cambiar la forma de enviar traceroute.
+#   - No bloquear el broker con waitForTraceRoute().
+#   - Guardar contexto para que el WebPanel pueda relacionar:
+#       RUN_TRACEROUTE -> TRACEROUTE_APP/ROUTING_APP recibido.
+#   - Mantener intacto BBS, APRS, MeshCore, bridge y envío RF.
+_TRACEROUTE_PENDING: dict[int, dict] = {}
+_TRACEROUTE_PENDING_LOCK = threading.Lock()
+
+
+def _traceroute_nodeid_from_num(node_num) -> str | None:
+    """
+    Convierte un nodeNum decimal Meshtastic a formato '!xxxxxxxx'.
+
+    Uso:
+        node_id = _traceroute_nodeid_from_num(1378889282)
+
+    Parámetros:
+        node_num:
+            Número decimal del nodo destino.
+
+    Devuelve:
+        Cadena '!xxxxxxxx' en minúsculas o None si no puede convertir.
+    """
+    try:
+        if node_num is None:
+            return None
+        return f"!{int(node_num) & 0xFFFFFFFF:08x}"
+    except Exception:
+        return None
+
+
+def _traceroute_remember_start(
+    *,
+    target_requested: str,
+    dest_node_num: int,
+    hop_limit: int,
+    ch_index: int,
+) -> dict:
+    """
+    Registra en memoria un traceroute lanzado desde RUN_TRACEROUTE.
+
+    Uso:
+        ctx = _traceroute_remember_start(
+            target_requested=raw_target,
+            dest_node_num=node_num,
+            hop_limit=hop_limit,
+            ch_index=ch_index,
+        )
+
+    No transmite RF.
+    No escribe disco.
+    Solo conserva contexto temporal para correlación posterior.
+    """
+    now = int(time.time())
+    target_norm = _traceroute_nodeid_from_num(dest_node_num) or str(target_requested or "").strip()
+
+    ctx = {
+        "started_ts": now,
+        "target_requested": str(target_requested or "").strip(),
+        "target_norm": target_norm,
+        "dest_node_num": int(dest_node_num),
+        "hop_limit": int(hop_limit),
+        "ch_index": int(ch_index),
+    }
+
+    try:
+        ttl = int(os.getenv("BROKER_TRACEROUTE_PENDING_TTL_SEC", "300") or "300")
+    except Exception:
+        ttl = 300
+
+    try:
+        with _TRACEROUTE_PENDING_LOCK:
+            _TRACEROUTE_PENDING[int(dest_node_num)] = dict(ctx)
+
+            # Limpieza oportunista para 24/7.
+            cutoff = now - max(60, ttl)
+            for k, v in list(_TRACEROUTE_PENDING.items()):
+                try:
+                    if int(v.get("started_ts") or 0) < cutoff:
+                        _TRACEROUTE_PENDING.pop(k, None)
+                except Exception:
+                    _TRACEROUTE_PENDING.pop(k, None)
+    except Exception:
+        pass
+
+    return ctx
+
+
+def _traceroute_match_pending(pkt: dict, decoded: dict) -> dict | None:
+    """
+    Intenta asociar una respuesta RX de traceroute con un RUN_TRACEROUTE reciente.
+
+    La librería Meshtastic puede exponer campos distintos según versión.
+    Por eso se buscan varias claves posibles en pkt y decoded.
+
+    Devuelve:
+        Contexto pendiente o None.
+    """
+    candidates: list[int] = []
+
+    def _add_candidate(v):
+        try:
+            if v is None:
+                return
+
+            if isinstance(v, str):
+                s = v.strip()
+                if not s:
+                    return
+
+                if s.startswith("!"):
+                    candidates.append(int(s[1:], 16))
+                    return
+
+                if s.isdigit():
+                    candidates.append(int(s))
+                    return
+
+                # Si llega hex sin '!'
+                if re.fullmatch(r"[0-9a-fA-F]{8}", s):
+                    candidates.append(int(s, 16))
+                    return
+
+            elif isinstance(v, (int, float)):
+                candidates.append(int(v))
+        except Exception:
+            return
+
+    try:
+        if not isinstance(pkt, dict):
+            pkt = {}
+        if not isinstance(decoded, dict):
+            decoded = {}
+
+        route = decoded.get("route") if isinstance(decoded.get("route"), dict) else {}
+        traceroute = decoded.get("traceroute") if isinstance(decoded.get("traceroute"), dict) else {}
+
+        _add_candidate(pkt.get("to"))
+        _add_candidate(pkt.get("toId"))
+        _add_candidate(pkt.get("to_id"))
+        _add_candidate(decoded.get("to"))
+        _add_candidate(decoded.get("toId"))
+        _add_candidate(decoded.get("to_id"))
+
+        for obj in (route, traceroute):
+            _add_candidate(obj.get("dest"))
+            _add_candidate(obj.get("to"))
+            _add_candidate(obj.get("node"))
+            _add_candidate(obj.get("nodeNum"))
+            _add_candidate(obj.get("node_num"))
+
+    except Exception:
+        pass
+
+    try:
+        with _TRACEROUTE_PENDING_LOCK:
+            for c in candidates:
+                if c in _TRACEROUTE_PENDING:
+                    return dict(_TRACEROUTE_PENDING.get(c) or {})
+    except Exception:
+        pass
+
+    # Fallback seguro:
+    # Si solo hay un traceroute reciente, se asocia como best-effort.
+    try:
+        now = int(time.time())
+        ttl = int(os.getenv("BROKER_TRACEROUTE_PENDING_TTL_SEC", "300") or "300")
+        with _TRACEROUTE_PENDING_LOCK:
+            recent = [
+                dict(v)
+                for v in _TRACEROUTE_PENDING.values()
+                if now - int(v.get("started_ts") or 0) <= max(60, ttl)
+            ]
+        if len(recent) == 1:
+            return recent[0]
+    except Exception:
+        pass
+
+    return None
+
+
+def _traceroute_compact_text(pkt: dict, decoded: dict, rec: dict | None = None) -> str:
+    """
+    Construye texto compacto para guardar en broker_offline_log.jsonl.
+
+    No intenta depender de un único formato interno del SDK.
+    Prioriza route_text/text si ya existen y cae a un resumen básico.
+    """
+    try:
+        if isinstance(rec, dict):
+            for k in ("route_text", "text", "info"):
+                v = rec.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+
+        if not isinstance(pkt, dict):
+            pkt = {}
+        if not isinstance(decoded, dict):
+            decoded = {}
+
+        for k in ("text", "message", "route_text"):
+            v = decoded.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+
+        src = (
+            pkt.get("fromId")
+            or pkt.get("from")
+            or decoded.get("fromId")
+            or decoded.get("from")
+            or "?"
+        )
+        dst = (
+            pkt.get("toId")
+            or pkt.get("to")
+            or decoded.get("toId")
+            or decoded.get("to")
+            or "?"
+        )
+
+        route = decoded.get("route")
+        traceroute = decoded.get("traceroute")
+
+        if isinstance(route, dict) and route:
+            return f"route {src} -> {dst} {route}"
+
+        if isinstance(traceroute, dict) and traceroute:
+            return f"traceroute {src} -> {dst} {traceroute}"
+
+        return f"traceroute {src} -> {dst}"
+    except Exception:
+        return "traceroute"
 
 
 # === NUEVO: referencia global al gestor de interfaz del broker ===
@@ -2975,15 +3209,24 @@ def append_offline_log(rec: dict):
         if not port:
             return
 
-        # Tipos permitidos (igual que tu versión nueva + fácil de ampliar)
+        # Tipos permitidos para broker_offline_log.jsonl.
+        # Cambio quirúrgico v7.0.2:
+        #   - Se añaden TRACEROUTE_APP/ROUTING_APP para que el WebPanel pueda
+        #     ver las respuestas reales por FETCH_BACKLOG.
+        #   - Se añade NEIGHBORINFO_APP porque ya existe handler RX para ello.
+        #   - No se retira ningún tipo existente.
         ALLOWED = {
             "TEXT_MESSAGE_APP",
             "POSITION_APP",
             "TELEMETRY_APP",
             "NODEINFO_APP",
-            # Descomenta si quieres también estos en el offline:
-            # "TRACEROUTE_APP", "ROUTING_APP", "NEIGHBORINFO_APP",
+            "NEIGHBORINFO_APP",
+            "TRACEROUTE_APP",
+            "ROUTING_APP",
+            "ADMIN_APP:TRACEROUTE",
+            "ADMIN_TRACEROUTE",
         }
+
         if port not in ALLOWED:
             return
 
@@ -3009,7 +3252,14 @@ def append_offline_log(rec: dict):
             "POSITION_APP": "position",
             "TELEMETRY_APP": "telemetry",
             "NODEINFO_APP": "nodeinfo",
+            "NEIGHBORINFO_APP": "neighborinfo",
+            "TRACEROUTE_APP": "traceroute",
+            "ROUTING_APP": "routing",
+            "ADMIN_APP:TRACEROUTE": "traceroute",
+            "ADMIN_TRACEROUTE": "traceroute",
         }
+
+
         row_type = TYPE_MAP.get(port)
         if not row_type:
             return
@@ -3017,6 +3267,7 @@ def append_offline_log(rec: dict):
         obj = {
             "id": pkt.get("id") or rec.get("id"),
             "rx_time": rx_time_val,
+            "ts": rec.get("ts") or rx_time_val,
             "channel": (
                 pkt.get("channel")
                 or (pkt.get("meta") or {}).get("channelIndex")
@@ -3025,8 +3276,8 @@ def append_offline_log(rec: dict):
             ),
             "portnum": port,
             "type": row_type,  # usado por el panel
-            "from": rec.get("from") or pkt.get("from"),
-            "to": rec.get("to") or pkt.get("to"),
+            "from": rec.get("from") or pkt.get("from") or pkt.get("fromId"),
+            "to": rec.get("to") or pkt.get("to") or pkt.get("toId"),
             "from_alias": from_alias_val,
             "to_alias": rec.get("to_alias") or pkt.get("to_alias"),
             "rx_rssi": (
@@ -3121,6 +3372,103 @@ def append_offline_log(rec: dict):
                     if alias:
                         obj["from_alias"] = alias
                 useful = True
+
+        elif port == "NEIGHBORINFO_APP":
+            # Persistencia ligera de vecinos/saltos.
+            # No interpreta la trama en profundidad: conserva campos útiles
+            # para topología, históricos y diagnóstico.
+            neighborinfo = (
+                dec.get("neighborinfo")
+                or dec.get("neighbors")
+                or pkt.get("neighborinfo")
+                or rec.get("neighborinfo")
+                or {}
+            )
+
+            if neighborinfo:
+                obj["neighborinfo"] = neighborinfo
+
+            if rec.get("hops") is not None:
+                obj["hops"] = rec.get("hops")
+            elif dec.get("hops") is not None:
+                obj["hops"] = dec.get("hops")
+
+            if rec.get("via") is not None:
+                obj["via"] = rec.get("via")
+            elif dec.get("via") is not None:
+                obj["via"] = dec.get("via")
+
+            useful = True
+
+        elif port in {"TRACEROUTE_APP", "ROUTING_APP", "ADMIN_APP:TRACEROUTE", "ADMIN_TRACEROUTE"}:
+            # Resultado de traceroute/routing recibido por RX.
+            # Objetivo:
+            #   - Hacerlo visible por FETCH_BACKLOG.
+            #   - No leer docker logs.
+            #   - No bloquear el broker.
+            #   - No cambiar la transmisión RF.
+            route = dec.get("route") if isinstance(dec, dict) else None
+            traceroute = dec.get("traceroute") if isinstance(dec, dict) else None
+
+            pending_ctx = rec.get("pending_ctx") if isinstance(rec.get("pending_ctx"), dict) else None
+            if not pending_ctx:
+                pending_ctx = _traceroute_match_pending(pkt, dec)
+
+            event_type = (
+                rec.get("event_type")
+                or rec.get("trace_event")
+                or "traceroute_result"
+            )
+
+            obj["event_type"] = event_type
+            obj["trace_event"] = event_type
+
+            if pending_ctx:
+                obj["target_requested"] = pending_ctx.get("target_requested")
+                obj["target_norm"] = pending_ctx.get("target_norm")
+                obj["dest_node_num"] = pending_ctx.get("dest_node_num")
+                obj["trace_hop_limit"] = pending_ctx.get("hop_limit")
+                obj["trace_ch_index"] = pending_ctx.get("ch_index")
+                obj["trace_started_ts"] = pending_ctx.get("started_ts")
+
+            # Si rec trae contexto explícito, prevalece sobre la correlación.
+            for k in (
+                "target_requested",
+                "target_norm",
+                "dest_node_num",
+                "trace_hop_limit",
+                "trace_ch_index",
+                "trace_started_ts",
+            ):
+                if rec.get(k) is not None:
+                    obj[k] = rec.get(k)
+
+            route_text = (
+                rec.get("route_text")
+                or rec.get("text")
+                or _traceroute_compact_text(pkt, dec, rec)
+            )
+
+            obj["text"] = route_text
+            obj["route_text"] = route_text
+
+            if isinstance(route, dict):
+                obj["route"] = route
+
+            if isinstance(traceroute, dict):
+                obj["traceroute"] = traceroute
+
+            # Campos defensivos habituales según versión del SDK.
+            for k in ("hop", "via", "routes", "snrTowards", "routeBack", "routeBackSnr"):
+                try:
+                    if rec.get(k) is not None:
+                        obj[k] = rec.get(k)
+                    elif isinstance(dec, dict) and dec.get(k) is not None:
+                        obj[k] = dec.get(k)
+                except Exception:
+                    pass
+
+            useful = True        
 
         if not useful:
             return
@@ -4117,6 +4465,57 @@ class _BacklogServer(threading.Thread):
                                 fn(node_num, hop_limit)
 
                         ok = True
+
+                        # === [WEBPANEL/TRACEROUTE v7.0.2] Registrar inicio en OFFLINE_LOG ===
+                        # Este registro no es una respuesta RF.
+                        # Es una marca local para que el WebPanel vea que el broker lanzó
+                        # correctamente el traceroute y pueda correlacionar después la respuesta RX.
+                        try:
+                            ctx = _traceroute_remember_start(
+                                target_requested=raw_target,
+                                dest_node_num=int(node_num),
+                                hop_limit=int(hop_limit),
+                                ch_index=int(ch_index),
+                            )
+
+                            trace_text = (
+                                f"traceroute started target={raw_target} "
+                                f"node_num={int(node_num)} "
+                                f"hop_limit={int(hop_limit)} "
+                                f"ch_index={int(ch_index)}"
+                            )
+
+                            append_offline_log(
+                                {
+                                    "ts": int(time.time()),
+                                    "rx_time": int(time.time()),
+                                    "channel": int(ch_index),
+                                    "portnum": "TRACEROUTE_APP",
+                                    "from": "BROKER",
+                                    "to": ctx.get("target_norm") or raw_target,
+                                    "from_alias": "broker",
+                                    "to_alias": None,
+                                    "event_type": "traceroute_started",
+                                    "trace_event": "traceroute_started",
+                                    "target_requested": raw_target,
+                                    "target_norm": ctx.get("target_norm"),
+                                    "dest_node_num": int(node_num),
+                                    "trace_hop_limit": int(hop_limit),
+                                    "trace_ch_index": int(ch_index),
+                                    "trace_started_ts": ctx.get("started_ts"),
+                                    "route_text": trace_text,
+                                    "text": trace_text,
+                                }
+                            )
+                        except Exception as _e_trace_start:
+                            try:
+                                print(
+                                    f"⚠️ traceroute_started offline_log failed: "
+                                    f"{type(_e_trace_start).__name__}: {_e_trace_start}",
+                                    flush=True,
+                                )
+                            except Exception:
+                                pass
 
                     except Exception as e:
                         ok = False
@@ -5722,36 +6121,66 @@ class MeshReceiver:
 
 
 
-            # === [NUEVO] Handler TRACEROUTE_* → persistir en OFFLINE_LOG =================
+            # === [WEBPANEL/TRACEROUTE v7.0.2] Persistir TRACEROUTE/ROUTING RX en OFFLINE_LOG ===
+            # Objetivo:
+            #   - Hacer visible la respuesta real al WebPanel mediante FETCH_BACKLOG.
+            #   - No leer docker logs.
+            #   - No bloquear el broker.
+            #   - No alterar BBS/APRS/MeshCore/bridge.
             try:
                 port = (decoded.get("portnum") or pkt.get("portnum") or "").upper()
                 is_tr = port in ("TRACEROUTE_APP", "ROUTING_APP", "ADMIN_APP:TRACEROUTE", "ADMIN_TRACEROUTE")
+
                 if is_tr:
                     _ts = pkt.get("rxTime") or pkt.get("timestamp") or time.time()
+                    pending_ctx = _traceroute_match_pending(pkt, decoded)
+
                     rec = {
-                        "ts":       int(_ts),
-                        "rx_time":  int(_ts),               # 👈 IMPORTANTE: lo usa _iter_backlog_jsonl para since_ts
-                        "channel":  canal,                  # si lo tienes calculado arriba
-                        "portnum":  port,
-                        "from":     pkt.get("fromId") or pkt.get("from") or pkt.get("from_id"),
-                        "to":       pkt.get("toId")   or pkt.get("to")   or pkt.get("to_id"),
+                        "ts": int(_ts),
+                        "rx_time": int(_ts),
+                        "channel": canal,
+                        "portnum": port,
+                        "from": pkt.get("fromId") or pkt.get("from") or pkt.get("from_id"),
+                        "to": pkt.get("toId") or pkt.get("to") or pkt.get("to_id"),
                         "from_alias": from_alias or None,
-                        "to_alias":   to_alias   or None,
+                        "to_alias": to_alias or None,
                         "relay_node": pkt.get("relay_node") or decoded.get("viaNode"),
-                        # campos “útiles” del traceroute:
-                        "hop":      decoded.get("hop") or decoded.get("hop_index") or pkt.get("hop"),
-                        "via":      decoded.get("viaNode") or decoded.get("relay_node") or pkt.get("relay_node"),
-                        # guardamos el decoded entero por si luego quieres más detalles:
-                        "decoded":  decoded,
+                        "rx_rssi": rssi,
+                        "rx_snr": snr,
+                        "event_type": "traceroute_result",
+                        "trace_event": "traceroute_result",
+                        "pending_ctx": pending_ctx,
                     }
-                    # Reutilizamos el MISMO helper que TEXT usa y que FETCH_BACKLOG ya lee:
+
+                    try:
+                        rec["route_text"] = _traceroute_compact_text(pkt, decoded, rec)
+                    except Exception:
+                        rec["route_text"] = "traceroute_result"
+
+                    # Campos que algunas versiones de la API exponen directamente.
+                    for k in ("hop", "via", "route", "routes", "snrTowards", "routeBack", "routeBackSnr"):
+                        try:
+                            if decoded.get(k) is not None:
+                                rec[k] = decoded.get(k)
+                        except Exception:
+                            pass
+
                     append_offline_log(rec)
-                    # (opcional) traza:
-                    # print(f"[trace] +TR {rec['from']} hop={rec.get('hop')} via={rec.get('via')} port={port}", flush=True)
+
+                    if self.verbose:
+                        try:
+                            print(
+                                f"[traceroute] RX persisted port={port} "
+                                f"from={rec.get('from')} to={rec.get('to')} "
+                                f"target={(pending_ctx or {}).get('target_requested')}",
+                                flush=True,
+                            )
+                        except Exception:
+                            pass
+
             except Exception as e_tr:
                 logging.warning(f"[traceroute] persist fail: {e_tr}")
-            # === [FIN TRACEROUTE_*] ======================================================
-
+            # === [FIN WEBPANEL/TRACEROUTE] ===============================================
 
         except Exception as e:
             if self.verbose:
