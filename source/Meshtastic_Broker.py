@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.2.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v7.0.3.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -2477,6 +2477,34 @@ def _ensure_dir(path: str):
     if d and not os.path.isdir(d):
         os.makedirs(d, exist_ok=True)
 
+def _log_ex(context: str, exc: Exception) -> None:
+    """
+    Log defensivo de excepciones del broker.
+
+    Uso:
+        _log_ex("append_offline_log failed", e)
+
+    Parámetros:
+        context:
+            Texto corto indicando dónde se produjo el fallo.
+        exc:
+            Excepción capturada.
+
+    Funcionalidad:
+        - Evita que una ruta de error provoque otro NameError.
+        - No transmite RF.
+        - No modifica colas.
+        - No toca BBS/APRS/MeshCore/bridge.
+        - Solo imprime un aviso controlado en consola/log Docker.
+    """
+    try:
+        print(
+            f"⚠️ {context}: {type(exc).__name__}: {str(exc)[:300]}",
+            flush=True,
+        )
+    except Exception:
+        pass
+
 _append_lock = threading.Lock()
 
 _pool_reconnected_recently = False
@@ -3671,16 +3699,33 @@ def init_broker_tasks():
 
 def backlog_append(row: dict) -> None:
     """
-    Guarda un registro de traceroute en broker_traceroute_log.jsonl
+    Guarda un registro de traceroute en broker_traceroute_log.jsonl.
+
+    Cambio quirúrgico v7.0.4:
+      - Convierte el registro a JSON seguro antes de escribirlo.
+      - Evita fallos con objetos SDK/protobuf como Routing.
+      - Mantiene el fichero broker_traceroute_log.jsonl.
+      - No cambia RUN_TRACEROUTE.
+      - No cambia TX/RX RF.
+      - No toca APRS/BBS/MeshCore/bridge.
     """
     try:
         os.makedirs(os.path.dirname(TRACEROUTE_LOG_PATH), exist_ok=True)
-        line = json.dumps(row, ensure_ascii=False) + "\n"
+
+        safe_row = _traceroute_safe_jsonable(row, max_depth=6)
+
+        line = json.dumps(
+            safe_row,
+            ensure_ascii=False,
+            default=str,
+        ) + "\n"
+
         with _TRACEROUTE_LOCK:
             with open(TRACEROUTE_LOG_PATH, "a", encoding="utf-8") as f:
                 f.write(line)
+
     except Exception as e:
-        print(f"⚠️ backlog_append error: {e}", flush=True)
+        print(f"⚠️ backlog_append error: {type(e).__name__}: {str(e)[:300]}", flush=True)
 
 # === Meshtastic_Broker.py ===
 # Sustituye COMPLETA la función append_offline_log por esta versión:
@@ -4073,8 +4118,13 @@ def append_offline_log(rec: dict):
         except Exception:
             pass
 
+        # Escritura final JSON-safe.
+        # Importante para ROUTING_APP/TRACEROUTE_APP:
+        # algunos campos del SDK pueden ser objetos protobuf no serializables.
+        safe_obj = _traceroute_safe_jsonable(obj, max_depth=6)
+
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            f.write(json.dumps(safe_obj, ensure_ascii=False, default=str) + "\n")
 
     except Exception as e:
         _log_ex("append_offline_log failed", e)
