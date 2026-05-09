@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.4.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v7.0.6.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -5110,6 +5110,25 @@ class _BacklogServer(threading.Thread):
                         # Convierte a nodeNum decimal (forma canónica para sendTraceRoute)
                         node_num = _parse_dest_to_node_num(raw_target)
 
+                        # === [WEBPANEL/TRACEROUTE v7.0.6] Registrar contexto ANTES de enviar RF ===
+                        # Motivo:
+                        #   Algunas respuestas ROUTING_APP pueden llegar muy rápido, incluso antes de
+                        #   que el bloque posterior registre traceroute_started. Si el contexto no está
+                        #   ya en _TRACEROUTE_PENDING, el RX puede persistir target=None y el WebAdmin
+                        #   queda esperando.
+                        #
+                        # Seguridad:
+                        #   - No transmite RF.
+                        #   - No modifica sendTraceRoute.
+                        #   - No toca APRS/BBS/MeshCore/bridge.
+                        #   - Solo registra contexto temporal en memoria.
+                        ctx = _traceroute_remember_start(
+                            target_requested=raw_target,
+                            dest_node_num=int(node_num),
+                            hop_limit=int(hop_limit),
+                            ch_index=int(ch_index),
+                        )
+
                         # Host/port REALES del nodo (los fijaste en main())
                         mesh_host = globals().get("RUNTIME_MESH_HOST")
                         mesh_port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
@@ -5143,13 +5162,6 @@ class _BacklogServer(threading.Thread):
                         # Es una marca local para que el WebPanel vea que el broker lanzó
                         # correctamente el traceroute y pueda correlacionar después la respuesta RX.
                         try:
-                            ctx = _traceroute_remember_start(
-                                target_requested=raw_target,
-                                dest_node_num=int(node_num),
-                                hop_limit=int(hop_limit),
-                                ch_index=int(ch_index),
-                            )
-
                             trace_text = (
                                 f"traceroute started target={raw_target} "
                                 f"node_num={int(node_num)} "
@@ -5179,6 +5191,8 @@ class _BacklogServer(threading.Thread):
                                     "text": trace_text,
                                 }
                             )
+
+
                         except Exception as _e_trace_start:
                             try:
                                 print(
@@ -6869,6 +6883,16 @@ class MeshReceiver:
                     except Exception:
                         pass
 
+                    # Reflejar también el contexto pendiente en rec para que el log RX
+                    # muestre el target real y no target=None.
+                    if isinstance(pending_ctx, dict) and pending_ctx:
+                        rec["target_requested"] = pending_ctx.get("target_requested")
+                        rec["target_norm"] = pending_ctx.get("target_norm")
+                        rec["dest_node_num"] = pending_ctx.get("dest_node_num")
+                        rec["trace_hop_limit"] = pending_ctx.get("hop_limit")
+                        rec["trace_ch_index"] = pending_ctx.get("ch_index")
+                        rec["trace_started_ts"] = pending_ctx.get("started_ts")
+                        
                     append_offline_log(rec)
 
                     if self.verbose:
