@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.6.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v7.0.7.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -1897,44 +1897,6 @@ def _traceroute_match_pending(pkt: dict, decoded: dict) -> dict | None:
 
     return None
 
-def _traceroute_get_single_recent_pending() -> dict | None:
-    """
-    Devuelve el único traceroute pendiente reciente si solo hay uno.
-
-    Uso:
-        ctx = _traceroute_get_single_recent_pending()
-
-    Objetivo:
-        - Resolver respuestas ROUTING_APP que llegan sin campo destino claro.
-        - Evitar que el WebAdmin quede en espera cuando el broker sí ha recibido
-          una respuesta real de traceroute.
-        - Mantener seguridad: solo se asocia si hay exactamente un traceroute
-          pendiente dentro del TTL.
-
-    No transmite RF.
-    No modifica colas.
-    No borra estado.
-    No toca APRS/BBS/MeshCore/bridge.
-    """
-    try:
-        now = int(time.time())
-        ttl = int(os.getenv("BROKER_TRACEROUTE_PENDING_TTL_SEC", "300") or "300")
-
-        with _TRACEROUTE_PENDING_LOCK:
-            recent = [
-                dict(v)
-                for v in _TRACEROUTE_PENDING.values()
-                if now - int(v.get("started_ts") or 0) <= max(60, ttl)
-            ]
-
-        if len(recent) == 1:
-            return recent[0]
-
-    except Exception:
-        pass
-
-    return None
-
 
 def _traceroute_compact_text(pkt: dict, decoded: dict, rec: dict | None = None) -> str:
     """
@@ -2515,33 +2477,228 @@ def _ensure_dir(path: str):
     if d and not os.path.isdir(d):
         os.makedirs(d, exist_ok=True)
 
-def _log_ex(context: str, exc: Exception) -> None:
+
+# === [WEBPANEL/TRACEROUTE v7.0.7] Captura cruda controlada ================
+# Objetivo:
+#   - Diagnosticar si la ruta completa de traceroute llega realmente al broker.
+#   - Guardar pkt/decoded/rec antes de la normalización final.
+#   - No cambiar RUN_TRACEROUTE, RF, APRS, BBS, MeshCore ni bridge.
+#   - Mantener rotación por tamaño para uso 24/7.
+#
+# Variables:
+#   BROKER_TRACEROUTE_RAW_DEBUG=1                  -> captura siempre TRACEROUTE/ROUTING.
+#   BROKER_TRACEROUTE_RAW_DEBUG_AUTO_ON_ERROR=1    -> captura automática si no hay route/raw o hay errorReason.
+#   BROKER_TRACEROUTE_RAW_DEBUG_MAX_BYTES=5242880  -> 5 MiB por defecto.
+#   BROKER_TRACEROUTE_RAW_DEBUG_MAX_STR=5000       -> límite de repr/str por objeto.
+# ============================================================================
+TRACEROUTE_RAW_DEBUG_PATH = os.path.join(OFFLINE_DIR, "broker_traceroute_raw_debug.jsonl")
+_TRACEROUTE_RAW_DEBUG_LOCK = threading.Lock()
+
+
+def _traceroute_raw_debug_enabled() -> bool:
     """
-    Log defensivo de excepciones del broker.
+    Devuelve True si se fuerza la captura cruda de todo traceroute.
 
     Uso:
-        _log_ex("append_offline_log failed", e)
+        if _traceroute_raw_debug_enabled(): ...
 
-    Parámetros:
-        context:
-            Texto corto indicando dónde se produjo el fallo.
-        exc:
-            Excepción capturada.
-
-    Funcionalidad:
-        - Evita que una ruta de error provoque otro NameError.
-        - No transmite RF.
-        - No modifica colas.
-        - No toca BBS/APRS/MeshCore/bridge.
-        - Solo imprime un aviso controlado en consola/log Docker.
+    No modifica estado y nunca lanza excepción.
     """
     try:
-        print(
-            f"⚠️ {context}: {type(exc).__name__}: {str(exc)[:300]}",
-            flush=True,
-        )
+        return _env_truthy("BROKER_TRACEROUTE_RAW_DEBUG", "0")
     except Exception:
-        pass
+        return False
+
+
+def _traceroute_raw_debug_auto_on_error() -> bool:
+    """
+    Devuelve True si se permite captura automática ante errores o rutas vacías.
+
+    Por defecto está activo porque solo actúa en eventos ROUTING/TRACEROUTE
+    problemáticos y el fichero tiene rotación por tamaño.
+    """
+    try:
+        return _env_truthy("BROKER_TRACEROUTE_RAW_DEBUG_AUTO_ON_ERROR", "1")
+    except Exception:
+        return True
+
+
+def _traceroute_raw_debug_should_capture(pkt: dict, decoded: dict, rec: dict) -> tuple[bool, str]:
+    """
+    Decide si conviene guardar captura cruda de traceroute.
+
+    Criterios:
+      - BROKER_TRACEROUTE_RAW_DEBUG=1 -> siempre.
+      - Auto-on-error activo y:
+          * routing.errorReason distinto de NONE
+          * no hay route/routeBack/snrTowards/routeBackSnr
+          * payload existe pero no se ha normalizado a route_nodes
+
+    Devuelve:
+      (capturar, motivo)
+    """
+    try:
+        if _traceroute_raw_debug_enabled():
+            return True, "forced"
+
+        if not _traceroute_raw_debug_auto_on_error():
+            return False, "disabled"
+
+        if not isinstance(decoded, dict):
+            decoded = {}
+        if not isinstance(pkt, dict):
+            pkt = {}
+        if not isinstance(rec, dict):
+            rec = {}
+
+        # Detectar errorReason en varias formas posibles.
+        routing = decoded.get("routing") or pkt.get("routing") or rec.get("routing") or {}
+        err = None
+        if isinstance(routing, dict):
+            err = routing.get("errorReason") or routing.get("error_reason")
+        else:
+            txt = str(routing)
+            m = re.search(r"error[_ ]?reason\s*[:=]\s*([A-Z0-9_]+)", txt, re.I)
+            if m:
+                err = m.group(1)
+
+        if err and str(err).upper() not in {"NONE", "0"}:
+            return True, f"routing_error:{err}"
+
+        # Si hay payload pero no hay campos estructurados de ruta, interesa capturar.
+        has_payload = any(
+            x.get("payload") is not None
+            for x in (decoded, pkt, rec)
+            if isinstance(x, dict)
+        )
+        has_routeish = False
+        for x in (decoded, pkt, rec):
+            if not isinstance(x, dict):
+                continue
+            for k in ("route", "routes", "routeBack", "route_back", "snrTowards", "routeBackSnr", "snrBack"):
+                if x.get(k) not in (None, "", [], {}):
+                    has_routeish = True
+                    break
+            if has_routeish:
+                break
+
+        if has_payload and not has_routeish:
+            return True, "payload_without_route_fields"
+
+    except Exception:
+        return False, "decision_error"
+
+    return False, "not_needed"
+
+
+def _traceroute_trim_repr(obj, max_chars: int | None = None) -> str:
+    """
+    Representación textual acotada para inspección profunda.
+
+    No sustituye al JSON-safe; complementa para ver cómo imprime el SDK/protobuf.
+    """
+    try:
+        if max_chars is None:
+            max_chars = int(os.getenv("BROKER_TRACEROUTE_RAW_DEBUG_MAX_STR", "5000") or "5000")
+    except Exception:
+        max_chars = 5000
+    try:
+        s = repr(obj)
+    except Exception:
+        try:
+            s = str(obj)
+        except Exception:
+            s = "<unrepresentable>"
+    if len(s) > max_chars:
+        return s[:max_chars] + "…[truncated]"
+    return s
+
+
+def _traceroute_append_raw_debug(pkt: dict, decoded: dict, rec: dict, reason: str = "") -> None:
+    """
+    Persiste una captura cruda/acotada de eventos TRACEROUTE/ROUTING.
+
+    Uso:
+        _traceroute_append_raw_debug(pkt, decoded, rec, reason="routing_error")
+
+    Contenido:
+      - pkt completo convertido a JSON seguro.
+      - decoded completo convertido a JSON seguro.
+      - rec preliminar convertido a JSON seguro.
+      - claves principales.
+      - repr acotado de pkt/decoded/routing/payload para detectar campos no parseados.
+
+    Seguridad:
+      - No transmite RF.
+      - No altera append_offline_log.
+      - No modifica colas.
+      - Rota el fichero por tamaño.
+    """
+    try:
+        path = TRACEROUTE_RAW_DEBUG_PATH
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        try:
+            max_bytes = int(os.getenv("BROKER_TRACEROUTE_RAW_DEBUG_MAX_BYTES", "5242880") or "5242880")
+        except Exception:
+            max_bytes = 5242880
+
+        try:
+            if os.path.exists(path) and os.path.getsize(path) > max_bytes:
+                bak = f"{path}.1"
+                try:
+                    if os.path.exists(bak):
+                        os.remove(bak)
+                except Exception:
+                    pass
+                try:
+                    os.replace(path, bak)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        if not isinstance(pkt, dict):
+            pkt = {}
+        if not isinstance(decoded, dict):
+            decoded = {}
+        if not isinstance(rec, dict):
+            rec = {}
+
+        routing_obj = decoded.get("routing") or pkt.get("routing") or rec.get("routing")
+        payload_obj = decoded.get("payload") or pkt.get("payload") or rec.get("payload")
+
+        row = {
+            "ts": int(time.time()),
+            "reason": reason or None,
+            "portnum": str(decoded.get("portnum") or pkt.get("portnum") or rec.get("portnum") or ""),
+            "from": rec.get("from") or pkt.get("fromId") or pkt.get("from"),
+            "to": rec.get("to") or pkt.get("toId") or pkt.get("to"),
+            "target_requested": rec.get("target_requested"),
+            "target_norm": rec.get("target_norm"),
+            "event_type": rec.get("event_type"),
+            "trace_event": rec.get("trace_event"),
+            "pkt_keys": sorted([str(k) for k in pkt.keys()]),
+            "decoded_keys": sorted([str(k) for k in decoded.keys()]),
+            "rec_keys": sorted([str(k) for k in rec.keys()]),
+            "pkt": _traceroute_safe_jsonable(pkt, max_depth=7),
+            "decoded": _traceroute_safe_jsonable(decoded, max_depth=7),
+            "rec": _traceroute_safe_jsonable(rec, max_depth=7),
+            "repr_pkt": _traceroute_trim_repr(pkt),
+            "repr_decoded": _traceroute_trim_repr(decoded),
+            "repr_routing": _traceroute_trim_repr(routing_obj),
+            "repr_payload": _traceroute_trim_repr(payload_obj),
+        }
+
+        with _TRACEROUTE_RAW_DEBUG_LOCK:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+
+    except Exception as e:
+        try:
+            print(f"⚠️ traceroute_raw_debug error: {type(e).__name__}: {str(e)[:300]}", flush=True)
+        except Exception:
+            pass
 
 _append_lock = threading.Lock()
 
@@ -3737,33 +3894,16 @@ def init_broker_tasks():
 
 def backlog_append(row: dict) -> None:
     """
-    Guarda un registro de traceroute en broker_traceroute_log.jsonl.
-
-    Cambio quirúrgico v7.0.4:
-      - Convierte el registro a JSON seguro antes de escribirlo.
-      - Evita fallos con objetos SDK/protobuf como Routing.
-      - Mantiene el fichero broker_traceroute_log.jsonl.
-      - No cambia RUN_TRACEROUTE.
-      - No cambia TX/RX RF.
-      - No toca APRS/BBS/MeshCore/bridge.
+    Guarda un registro de traceroute en broker_traceroute_log.jsonl
     """
     try:
         os.makedirs(os.path.dirname(TRACEROUTE_LOG_PATH), exist_ok=True)
-
-        safe_row = _traceroute_safe_jsonable(row, max_depth=6)
-
-        line = json.dumps(
-            safe_row,
-            ensure_ascii=False,
-            default=str,
-        ) + "\n"
-
+        line = json.dumps(row, ensure_ascii=False) + "\n"
         with _TRACEROUTE_LOCK:
             with open(TRACEROUTE_LOG_PATH, "a", encoding="utf-8") as f:
                 f.write(line)
-
     except Exception as e:
-        print(f"⚠️ backlog_append error: {type(e).__name__}: {str(e)[:300]}", flush=True)
+        print(f"⚠️ backlog_append error: {e}", flush=True)
 
 # === Meshtastic_Broker.py ===
 # Sustituye COMPLETA la función append_offline_log por esta versión:
@@ -4014,16 +4154,8 @@ def append_offline_log(rec: dict):
             traceroute = dec.get("traceroute") if isinstance(dec, dict) else None
 
             pending_ctx = rec.get("pending_ctx") if isinstance(rec.get("pending_ctx"), dict) else None
-
             if not pending_ctx:
                 pending_ctx = _traceroute_match_pending(pkt, dec)
-
-            # Fallback quirúrgico v7.0.5:
-            # Algunas respuestas ROUTING_APP llegan como from=local/to=local y no traen
-            # el destino solicitado en el paquete RX. Si solo existe un traceroute pendiente
-            # reciente, se asocia de forma segura a ese contexto.
-            if not pending_ctx:
-                pending_ctx = _traceroute_get_single_recent_pending()
 
             event_type = (
                 rec.get("event_type")
@@ -4164,13 +4296,8 @@ def append_offline_log(rec: dict):
         except Exception:
             pass
 
-        # Escritura final JSON-safe.
-        # Importante para ROUTING_APP/TRACEROUTE_APP:
-        # algunos campos del SDK pueden ser objetos protobuf no serializables.
-        safe_obj = _traceroute_safe_jsonable(obj, max_depth=6)
-
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(safe_obj, ensure_ascii=False, default=str) + "\n")
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
     except Exception as e:
         _log_ex("append_offline_log failed", e)
@@ -5110,25 +5237,6 @@ class _BacklogServer(threading.Thread):
                         # Convierte a nodeNum decimal (forma canónica para sendTraceRoute)
                         node_num = _parse_dest_to_node_num(raw_target)
 
-                        # === [WEBPANEL/TRACEROUTE v7.0.6] Registrar contexto ANTES de enviar RF ===
-                        # Motivo:
-                        #   Algunas respuestas ROUTING_APP pueden llegar muy rápido, incluso antes de
-                        #   que el bloque posterior registre traceroute_started. Si el contexto no está
-                        #   ya en _TRACEROUTE_PENDING, el RX puede persistir target=None y el WebAdmin
-                        #   queda esperando.
-                        #
-                        # Seguridad:
-                        #   - No transmite RF.
-                        #   - No modifica sendTraceRoute.
-                        #   - No toca APRS/BBS/MeshCore/bridge.
-                        #   - Solo registra contexto temporal en memoria.
-                        ctx = _traceroute_remember_start(
-                            target_requested=raw_target,
-                            dest_node_num=int(node_num),
-                            hop_limit=int(hop_limit),
-                            ch_index=int(ch_index),
-                        )
-
                         # Host/port REALES del nodo (los fijaste en main())
                         mesh_host = globals().get("RUNTIME_MESH_HOST")
                         mesh_port = int(globals().get("RUNTIME_MESH_PORT") or 4403)
@@ -5162,6 +5270,13 @@ class _BacklogServer(threading.Thread):
                         # Es una marca local para que el WebPanel vea que el broker lanzó
                         # correctamente el traceroute y pueda correlacionar después la respuesta RX.
                         try:
+                            ctx = _traceroute_remember_start(
+                                target_requested=raw_target,
+                                dest_node_num=int(node_num),
+                                hop_limit=int(hop_limit),
+                                ch_index=int(ch_index),
+                            )
+
                             trace_text = (
                                 f"traceroute started target={raw_target} "
                                 f"node_num={int(node_num)} "
@@ -5191,8 +5306,6 @@ class _BacklogServer(threading.Thread):
                                     "text": trace_text,
                                 }
                             )
-
-
                         except Exception as _e_trace_start:
                             try:
                                 print(
@@ -6838,6 +6951,20 @@ class MeshReceiver:
                         "pending_ctx": pending_ctx,
                     }
 
+                    # Reflejar contexto pendiente en rec ANTES de persistir y de imprimir log.
+                    # Esto evita target=None en observabilidad y ayuda a que la captura cruda
+                    # quede correlacionada con el RUN_TRACEROUTE activo.
+                    try:
+                        if isinstance(pending_ctx, dict) and pending_ctx:
+                            rec["target_requested"] = pending_ctx.get("target_requested")
+                            rec["target_norm"] = pending_ctx.get("target_norm")
+                            rec["dest_node_num"] = pending_ctx.get("dest_node_num")
+                            rec["trace_hop_limit"] = pending_ctx.get("hop_limit")
+                            rec["trace_ch_index"] = pending_ctx.get("ch_index")
+                            rec["trace_started_ts"] = pending_ctx.get("started_ts")
+                    except Exception:
+                        pass
+
                     try:
                         rec["route_text"] = _traceroute_compact_text(pkt, decoded, rec)
                     except Exception:
@@ -6883,27 +7010,23 @@ class MeshReceiver:
                     except Exception:
                         pass
 
-                    # Reflejar también el contexto pendiente en rec para que el log RX
-                    # muestre el target real y no target=None.
-                    if isinstance(pending_ctx, dict) and pending_ctx:
-                        rec["target_requested"] = pending_ctx.get("target_requested")
-                        rec["target_norm"] = pending_ctx.get("target_norm")
-                        rec["dest_node_num"] = pending_ctx.get("dest_node_num")
-                        rec["trace_hop_limit"] = pending_ctx.get("hop_limit")
-                        rec["trace_ch_index"] = pending_ctx.get("ch_index")
-                        rec["trace_started_ts"] = pending_ctx.get("started_ts")
-                        
+                    # Captura cruda/acotada antes de normalizar en append_offline_log().
+                    # Permite verificar si routeBack/route/snr vienen realmente en el paquete local.
+                    try:
+                        _cap, _why = _traceroute_raw_debug_should_capture(pkt, decoded, rec)
+                        if _cap:
+                            _traceroute_append_raw_debug(pkt, decoded, rec, reason=_why)
+                    except Exception:
+                        pass
+
                     append_offline_log(rec)
 
                     if self.verbose:
                         try:
                             print(
-                                f"[traceroute] RX persisted "
-                                f"port={portnum} "
-                                f"from={rec.get('from')} "
-                                f"to={rec.get('to')} "
-                                f"target={rec.get('target_norm') or rec.get('target_requested')} "
-                                f"event={rec.get('event_type') or rec.get('trace_event')}",
+                                f"[traceroute] RX persisted port={port} "
+                                f"from={rec.get('from')} to={rec.get('to')} "
+                                f"target={(pending_ctx or {}).get('target_requested')}",
                                 flush=True,
                             )
                         except Exception:
