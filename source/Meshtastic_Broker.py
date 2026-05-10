@@ -6882,6 +6882,16 @@ class MeshReceiver:
                         )
                     except Exception:
                         pass
+                    
+                    # Reflejar también el contexto pendiente en rec para que el log RX
+                    # muestre el target real y no target=None.
+                    if isinstance(pending_ctx, dict) and pending_ctx:
+                        rec["target_requested"] = pending_ctx.get("target_requested")
+                        rec["target_norm"] = pending_ctx.get("target_norm")
+                        rec["dest_node_num"] = pending_ctx.get("dest_node_num")
+                        rec["trace_hop_limit"] = pending_ctx.get("hop_limit")
+                        rec["trace_ch_index"] = pending_ctx.get("ch_index")
+                        rec["trace_started_ts"] = pending_ctx.get("started_ts")
 
                     append_offline_log(rec)
 
