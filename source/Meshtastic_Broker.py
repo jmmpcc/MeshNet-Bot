@@ -2543,6 +2543,248 @@ def _log_ex(context: str, exc: Exception) -> None:
     except Exception:
         pass
 
+
+# === [WEBPANEL/TRACEROUTE v7.0.7b] Captura cruda segura de traceroute ==========
+# Objetivo:
+#   - Diagnosticar si la ruta completa que se ve en MeshView llega realmente al
+#     broker local antes de la normalización.
+#   - Mantener intacta la ejecución RF, RUN_TRACEROUTE, BBS, APRS, MeshCore,
+#     bridge, SENDQ, reconexión, cooldown y telemetría.
+#   - No activar captura masiva salvo que se configure expresamente.
+#
+# Variables:
+#   BROKER_TRACEROUTE_RAW_DEBUG=1
+#       Captura todos los TRACEROUTE_APP/ROUTING_APP.
+#
+#   BROKER_TRACEROUTE_RAW_DEBUG_AUTO_ON_ERROR=1
+#       Captura automáticamente solo casos útiles para diagnóstico:
+#       errorReason != NONE o paquetes sin route/routeBack normalizable.
+#
+#   BROKER_TRACEROUTE_RAW_DEBUG_MAX_BYTES=5242880
+#       Tamaño máximo del fichero antes de rotar a .1.
+#
+#   BROKER_TRACEROUTE_RAW_DEBUG_MAX_STR=5000
+#       Tamaño máximo de repr/str guardado por campo.
+# ============================================================================== 
+TRACEROUTE_RAW_DEBUG_PATH = os.path.join(OFFLINE_DIR, "broker_traceroute_raw_debug.jsonl")
+_TRACEROUTE_RAW_DEBUG_LOCK = threading.Lock()
+
+
+def _traceroute_env_bool(name: str, default: str = "0") -> bool:
+    """
+    Lee una variable booleana de entorno para la captura diagnóstica.
+
+    Uso:
+        if _traceroute_env_bool("BROKER_TRACEROUTE_RAW_DEBUG"):
+            ...
+
+    No lanza excepción y no altera estado global.
+    """
+    try:
+        v = (os.getenv(name, default) or default).strip().lower()
+        return v in {"1", "true", "yes", "on", "si", "sí", "y"}
+    except Exception:
+        return False
+
+
+def _traceroute_raw_debug_max_str() -> int:
+    """
+    Devuelve el límite de caracteres para repr/str en raw debug.
+    Protege el broker 24/7 frente a objetos SDK grandes.
+    """
+    try:
+        return max(500, min(int(os.getenv("BROKER_TRACEROUTE_RAW_DEBUG_MAX_STR", "5000") or "5000"), 50000))
+    except Exception:
+        return 5000
+
+
+def _traceroute_raw_debug_limited_repr(value) -> str:
+    """
+    Convierte un objeto a repr() acotado.
+
+    Uso:
+        s = _traceroute_raw_debug_limited_repr(pkt)
+
+    Funcionalidad:
+        - Permite ver objetos protobuf/SDK sin romper json.dumps().
+        - Limita tamaño para no inflar el JSONL.
+        - No lanza excepción.
+    """
+    try:
+        limit = _traceroute_raw_debug_max_str()
+        s = repr(value)
+        if len(s) > limit:
+            return s[:limit] + "…[truncated]"
+        return s
+    except Exception as e:
+        return f"<repr_error {type(e).__name__}: {str(e)[:200]}>"
+
+
+def _traceroute_get_routing_error_reason(*objs) -> str | None:
+    """
+    Extrae errorReason/error_reason de routing desde pkt/decoded/rec.
+
+    Devuelve:
+        'MAX_RETRANSMIT', 'NONE', etc., o None si no existe.
+    """
+    try:
+        for obj in objs:
+            if not isinstance(obj, dict):
+                continue
+            routing = obj.get("routing")
+            if isinstance(routing, dict):
+                val = routing.get("errorReason") or routing.get("error_reason") or routing.get("error")
+                if val is not None:
+                    return str(val)
+            elif routing is not None:
+                val = getattr(routing, "errorReason", None)
+                if val is None:
+                    val = getattr(routing, "error_reason", None)
+                if val is not None:
+                    return str(val)
+    except Exception:
+        pass
+    return None
+
+
+def _traceroute_raw_debug_reason(pkt: dict, decoded: dict, rec: dict) -> str | None:
+    """
+    Decide si debe capturarse raw debug y devuelve el motivo.
+
+    Reglas:
+        - BROKER_TRACEROUTE_RAW_DEBUG=1 => captura siempre.
+        - BROKER_TRACEROUTE_RAW_DEBUG_AUTO_ON_ERROR=1 => captura si:
+            * routing.errorReason existe y no es NONE.
+            * no hay route/routeBack/SNR estructurados.
+            * route_nodes queda vacío o con un único nodo.
+
+    No escribe disco. No transmite RF. No modifica rec.
+    """
+    try:
+        if _traceroute_env_bool("BROKER_TRACEROUTE_RAW_DEBUG", "0"):
+            return "forced_all"
+
+        if not _traceroute_env_bool("BROKER_TRACEROUTE_RAW_DEBUG_AUTO_ON_ERROR", "1"):
+            return None
+
+        err = _traceroute_get_routing_error_reason(rec, decoded, pkt)
+        if err and err.upper() not in {"NONE", "0", "NO_ERROR"}:
+            return f"routing_error:{err}"
+
+        enriched = _traceroute_extract_enriched_route(pkt, decoded, rec)
+        route_nodes = enriched.get("route_nodes") or []
+        route_back_nodes = enriched.get("route_back_nodes") or []
+        has_raw = bool(enriched.get("route_raw_present") or enriched.get("route_back_raw_present"))
+        has_snr = bool(enriched.get("snr_raw_present") or enriched.get("snr_back_raw_present"))
+
+        if not has_raw and not has_snr:
+            return "no_structured_route_fields"
+
+        if len(route_nodes) <= 1 and len(route_back_nodes) <= 1:
+            return "incomplete_normalized_route"
+
+    except Exception as e:
+        return f"raw_debug_reason_error:{type(e).__name__}"
+
+    return None
+
+
+def _traceroute_append_raw_debug(pkt: dict, decoded: dict, rec: dict, *, reason: str) -> None:
+    """
+    Guarda una captura cruda acotada de TRACEROUTE_APP/ROUTING_APP.
+
+    Uso:
+        reason = _traceroute_raw_debug_reason(pkt, decoded, rec)
+        if reason:
+            _traceroute_append_raw_debug(pkt, decoded, rec, reason=reason)
+
+    Parámetros:
+        pkt:
+            Paquete RX tal como lo ve el broker.
+        decoded:
+            decoded del paquete.
+        rec:
+            Registro plano preliminar antes de append_offline_log().
+        reason:
+            Motivo de captura.
+
+    Funcionalidad:
+        - Escribe en broker_traceroute_raw_debug.jsonl.
+        - Rota a .1 al superar BROKER_TRACEROUTE_RAW_DEBUG_MAX_BYTES.
+        - Convierte objetos SDK/protobuf a JSON seguro.
+        - Guarda repr() acotado para ver campos que __dict__ no exponga.
+
+    Seguridad:
+        - Best-effort: cualquier fallo queda aislado.
+        - No bloquea RF salvo el tiempo mínimo de escritura local.
+        - No toca BBS/APRS/MeshCore/bridge/SENDQ.
+    """
+    try:
+        path = TRACEROUTE_RAW_DEBUG_PATH
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        try:
+            max_bytes = int(os.getenv("BROKER_TRACEROUTE_RAW_DEBUG_MAX_BYTES", "5242880") or "5242880")
+        except Exception:
+            max_bytes = 5242880
+        max_bytes = max(262144, min(max_bytes, 52428800))
+
+        with _TRACEROUTE_RAW_DEBUG_LOCK:
+            try:
+                if os.path.exists(path) and os.path.getsize(path) > max_bytes:
+                    bak = f"{path}.1"
+                    try:
+                        if os.path.exists(bak):
+                            os.remove(bak)
+                    except Exception:
+                        pass
+                    try:
+                        os.replace(path, bak)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            row = {
+                "ts": int(time.time()),
+                "reason": str(reason or "unknown"),
+                "portnum": rec.get("portnum") if isinstance(rec, dict) else None,
+                "from": rec.get("from") if isinstance(rec, dict) else None,
+                "to": rec.get("to") if isinstance(rec, dict) else None,
+                "target_requested": rec.get("target_requested") if isinstance(rec, dict) else None,
+                "target_norm": rec.get("target_norm") if isinstance(rec, dict) else None,
+                "event_type": rec.get("event_type") if isinstance(rec, dict) else None,
+                "trace_event": rec.get("trace_event") if isinstance(rec, dict) else None,
+                "pkt_keys": sorted(list(pkt.keys())) if isinstance(pkt, dict) else [],
+                "decoded_keys": sorted(list(decoded.keys())) if isinstance(decoded, dict) else [],
+                "rec_keys": sorted(list(rec.keys())) if isinstance(rec, dict) else [],
+                "routing_error_reason": _traceroute_get_routing_error_reason(rec, decoded, pkt),
+                "pkt": _traceroute_safe_jsonable(pkt, max_depth=7),
+                "decoded": _traceroute_safe_jsonable(decoded, max_depth=7),
+                "rec": _traceroute_safe_jsonable(rec, max_depth=7),
+                "repr_pkt": _traceroute_raw_debug_limited_repr(pkt),
+                "repr_decoded": _traceroute_raw_debug_limited_repr(decoded),
+                "repr_routing": _traceroute_raw_debug_limited_repr(
+                    (rec.get("routing") if isinstance(rec, dict) else None)
+                    or (decoded.get("routing") if isinstance(decoded, dict) else None)
+                    or (pkt.get("routing") if isinstance(pkt, dict) else None)
+                ),
+                "repr_payload": _traceroute_raw_debug_limited_repr(
+                    (rec.get("payload") if isinstance(rec, dict) else None)
+                    or (decoded.get("payload") if isinstance(decoded, dict) else None)
+                    or (pkt.get("payload") if isinstance(pkt, dict) else None)
+                ),
+            }
+
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+
+    except Exception as e:
+        try:
+            print(f"⚠️ traceroute raw debug append error: {type(e).__name__}: {str(e)[:250]}", flush=True)
+        except Exception:
+            pass
+
 _append_lock = threading.Lock()
 
 _pool_reconnected_recently = False
@@ -6892,6 +7134,21 @@ class MeshReceiver:
                         rec["trace_hop_limit"] = pending_ctx.get("hop_limit")
                         rec["trace_ch_index"] = pending_ctx.get("ch_index")
                         rec["trace_started_ts"] = pending_ctx.get("started_ts")
+
+                    # Captura cruda diagnóstica v7.0.7b antes de normalizar/persistir.
+                    # No altera el flujo existente: si no procede capturar, no hace nada.
+                    try:
+                        _raw_reason = _traceroute_raw_debug_reason(pkt, decoded, rec)
+                        if _raw_reason:
+                            _traceroute_append_raw_debug(pkt, decoded, rec, reason=_raw_reason)
+                    except Exception as _e_raw_dbg:
+                        try:
+                            print(
+                                f"⚠️ traceroute raw debug skipped: {type(_e_raw_dbg).__name__}: {str(_e_raw_dbg)[:200]}",
+                                flush=True,
+                            )
+                        except Exception:
+                            pass
 
                     append_offline_log(rec)
 
