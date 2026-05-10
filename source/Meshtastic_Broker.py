@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.6.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v7.0.8.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -2096,6 +2096,43 @@ def _traceroute_safe_jsonable(value, max_depth: int = 5):
         if isinstance(value, (list, tuple, set)):
             return [_traceroute_safe_jsonable(v, max_depth - 1) for v in list(value)[:200]]
 
+        # Protobuf / objetos generados por la librería Meshtastic.
+        # Algunas respuestas ROUTING_APP/TRACEROUTE_APP no llegan como dict, sino
+        # como objetos con ListFields(). Si no se tratan aquí, route/routeBack/SNR
+        # quedan ocultos y el WebPanel solo ve un string compacto.
+        list_fields = getattr(value, "ListFields", None)
+        if callable(list_fields):
+            out = {}
+            try:
+                for field_desc, field_value in list_fields():
+                    name = getattr(field_desc, "name", "") or getattr(field_desc, "json_name", "") or str(field_desc)
+                    if name:
+                        out[str(name)] = _traceroute_safe_jsonable(field_value, max_depth - 1)
+                if out:
+                    return out
+            except Exception:
+                pass
+
+        # Objetos SDK ligeros que no tienen __dict__, pero sí atributos públicos.
+        # Se limita a nombres conocidos para no serializar media interfaz radio.
+        known_attrs = (
+            "route", "routes", "routeBack", "route_back",
+            "snrTowards", "snr_towards", "snrBack", "snr_back",
+            "routeBackSnr", "route_back_snr", "payload", "routing",
+            "errorReason", "error_reason"
+        )
+        attr_out = {}
+        for attr in known_attrs:
+            try:
+                if hasattr(value, attr):
+                    av = getattr(value, attr)
+                    if av not in (None, "", [], {}):
+                        attr_out[attr] = _traceroute_safe_jsonable(av, max_depth - 1)
+            except Exception:
+                pass
+        if attr_out:
+            return attr_out
+
         if hasattr(value, "__dict__"):
             return _traceroute_safe_jsonable(vars(value), max_depth - 1)
 
@@ -2197,7 +2234,7 @@ def _traceroute_normalize_node_list(value) -> list[str]:
             return nodes
 
         if isinstance(value, dict):
-            for key in ("route", "routes", "nodes", "hops", "hop", "routeBack", "route_back"):
+            for key in ("route", "routes", "nodes", "hops", "hop", "routeBack", "route_back", "routeNodes", "route_nodes", "routeBackNodes", "route_back_nodes", "forwardPath", "forward_path", "returnPath", "return_path"):
                 if key in value:
                     return _traceroute_normalize_node_list(value.get(key))
 
@@ -2245,7 +2282,7 @@ def _traceroute_normalize_snr_list(value) -> list:
             return out
 
         if isinstance(value, dict):
-            for key in ("snrTowards", "routeBackSnr", "snrBack", "snr", "snrs"):
+            for key in ("snrTowards", "snr_towards", "routeSnr", "route_snr", "routeBackSnr", "route_back_snr", "snrBack", "snr_back", "returnSnr", "return_snr", "snr", "snrs"):
                 if key in value:
                     return _traceroute_normalize_snr_list(value.get(key))
             return out
@@ -2353,7 +2390,13 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
     if not isinstance(rec, dict):
         rec = {}
 
-    dicts = _traceroute_walk_dicts(pkt, decoded, rec)
+    # Además de las estructuras dict originales, se recorren copias JSON-safe.
+    # Esto permite ver campos ocultos dentro de objetos protobuf/SDK: route,
+    # route_back, snr_towards y snr_back.
+    safe_pkt = _traceroute_safe_jsonable(pkt, max_depth=7)
+    safe_decoded = _traceroute_safe_jsonable(decoded, max_depth=7)
+    safe_rec = _traceroute_safe_jsonable(rec, max_depth=7)
+    dicts = _traceroute_walk_dicts(pkt, decoded, rec, safe_pkt, safe_decoded, safe_rec)
 
     route_raw = _traceroute_first_value(
         dicts,
@@ -2364,6 +2407,10 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
             "hop",
             "routeTowards",
             "route_towards",
+            "routeNodes",
+            "route_nodes",
+            "forwardPath",
+            "forward_path",
         ),
     )
 
@@ -2376,6 +2423,12 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
             "back_route",
             "returnRoute",
             "return_route",
+            "returnPath",
+            "return_path",
+            "backPath",
+            "back_path",
+            "routeBackNodes",
+            "route_back_nodes",
         ),
     )
 
@@ -2388,6 +2441,8 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
             "route_snr",
             "snr",
             "snrs",
+            "routeSnrs",
+            "route_snrs",
         ),
     )
 
@@ -2400,6 +2455,8 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
             "snr_back",
             "returnSnr",
             "return_snr",
+            "returnSnrs",
+            "return_snrs",
         ),
     )
 
@@ -2437,11 +2494,21 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
         "traceroute",
         "route",
         "routes",
+        "routeNodes",
+        "route_nodes",
         "routeBack",
+        "route_back",
+        "routeBackNodes",
+        "route_back_nodes",
         "routeBackSnr",
+        "route_back_snr",
         "snrTowards",
+        "snr_towards",
         "snrBack",
+        "snr_back",
         "payload",
+        "raw_payload",
+        "payload_hex",
     ):
         try:
             if key in decoded and decoded.get(key) not in (None, "", [], {}):
@@ -2472,6 +2539,29 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
     except Exception:
         traceroute_payload = {"_error": "payload_not_json_serializable"}
 
+    route_back_text_enriched = _traceroute_route_text_from_nodes(
+        route_back_nodes,
+        route_back_snr,
+        fallback="",
+    )
+
+    # Estructura tipo MeshView: conserva ida, vuelta y camino RF combinado.
+    # actual_rf_path prioriza ida si existe; si solo hay vuelta, usa vuelta invertida
+    # para poder pintar algo coherente sin inventar saltos.
+    actual_rf_path = list(route_nodes or [])
+    if not actual_rf_path and route_back_nodes:
+        actual_rf_path = list(reversed(route_back_nodes))
+
+    route_data = {
+        "route_nodes": route_nodes,
+        "snr_towards": route_snr,
+        "route_back": route_back_nodes,
+        "snr_back": route_back_snr,
+        "forward_path": route_nodes,
+        "return_path": route_back_nodes,
+        "actual_rf_path": actual_rf_path,
+    }
+
     quality_hint = "empty_route"
     if route_nodes:
         if len(route_nodes) >= 2 and route_nodes[0] == route_nodes[-1]:
@@ -2489,6 +2579,8 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
         "route_back_nodes": route_back_nodes,
         "route_back_snr": route_back_snr,
         "route_text_enriched": route_text_enriched,
+        "route_back_text_enriched": route_back_text_enriched,
+        "route_data": route_data,
         "traceroute_payload": traceroute_payload,
         "traceroute_payload_keys": sorted(list(payload_candidates.keys())),
         "route_quality_hint": quality_hint,
@@ -4317,12 +4409,22 @@ def append_offline_log(rec: dict):
                 "hop",
                 "via",
                 "routes",
+                "routeNodes",
+                "route_nodes",
                 "snrTowards",
+                "snr_towards",
                 "routeBack",
+                "route_back",
+                "routeBackNodes",
+                "route_back_nodes",
                 "routeBackSnr",
+                "route_back_snr",
                 "snrBack",
+                "snr_back",
                 "routing",
                 "payload",
+                "raw_payload",
+                "payload_hex",
             ):
                 try:
                     if rec.get(k) is not None:
@@ -4342,6 +4444,12 @@ def append_offline_log(rec: dict):
                 obj["route_snr"] = enriched.get("route_snr") or []
                 obj["route_back_nodes"] = enriched.get("route_back_nodes") or []
                 obj["route_back_snr"] = enriched.get("route_back_snr") or []
+                obj["snr_towards"] = enriched.get("route_snr") or []
+                obj["snr_back"] = enriched.get("route_back_snr") or []
+                obj["route_data"] = enriched.get("route_data") or {}
+                obj["forward_path"] = (enriched.get("route_data") or {}).get("forward_path") or []
+                obj["return_path"] = (enriched.get("route_data") or {}).get("return_path") or []
+                obj["actual_rf_path"] = (enriched.get("route_data") or {}).get("actual_rf_path") or []
                 obj["route_quality_hint"] = enriched.get("route_quality_hint")
                 obj["traceroute_payload_keys"] = enriched.get("traceroute_payload_keys") or []
                 obj["route_raw_present"] = bool(enriched.get("route_raw_present"))
@@ -4355,6 +4463,7 @@ def append_offline_log(rec: dict):
                     or route_text
                     or ""
                 )
+                obj["route_back_display"] = enriched.get("route_back_text_enriched") or ""
                 obj["route_display"] = route_display
 
                 # Si el enriquecimiento ha generado una ruta mejor que el texto anterior,
@@ -7099,10 +7208,15 @@ class MeshReceiver:
                         "snrTowards",
                         "routeBack",
                         "routeBackSnr",
+                        "route_back_snr",
                         "snrBack",
+                        "snr_back",
+                        "snr_towards",
                         "routing",
                         "traceroute",
                         "payload",
+                        "raw_payload",
+                        "payload_hex",
                     ):
                         try:
                             if decoded.get(k) is not None:
