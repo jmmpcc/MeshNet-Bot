@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.8.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v7.0.10-fix2.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -503,6 +503,7 @@ def _add_part_prefix_fit(part: str, idx: int, total: int, max_bytes: int) -> str
     body_fit = chunk[0] if chunk else body[:1]
     return prefix + body_fit
 
+
 # === [FIX APRS -> MeshCore] Limpieza de payload APRS para MeshCore ============
 # Objetivo:
 # - Cuando una trama APRS llega a Meshtastic y se refleja a MeshCore por canal,
@@ -532,6 +533,9 @@ def _aprs_coord_to_decimal(deg_s: str, min_s: str, hemi: str) -> float | None:
     """
     Convierte una coordenada APRS no comprimida a decimal.
 
+    Uso:
+        lat = _aprs_coord_to_decimal("41", "38.43", "N")
+
     Parámetros:
         deg_s:
             Grados como texto. Latitud: 2 dígitos. Longitud: 3 dígitos.
@@ -540,12 +544,10 @@ def _aprs_coord_to_decimal(deg_s: str, min_s: str, hemi: str) -> float | None:
         hemi:
             Hemisferio: N/S/E/W.
 
-    Devuelve:
-        float decimal con signo correcto, o None si no se puede convertir.
-
-    Ejemplo:
-        41 grados 38.43 minutos N -> 41.640500
-        000 grados 54.20 minutos W -> -0.903333
+    Funcionalidad:
+        - Convierte coordenadas APRS DDMM.mmN / DDDMM.mmW a decimal.
+        - Aplica signo negativo para hemisferios S y W.
+        - Devuelve None ante cualquier valor corrupto para no romper el broker 24/7.
     """
     try:
         deg = int(str(deg_s))
@@ -565,12 +567,16 @@ def _clean_aprs_position_text_for_meshcore(text: str) -> str:
     Uso:
         msg = _clean_aprs_position_text_for_meshcore(msg)
 
+    Parámetros:
+        text:
+            Texto original recibido desde Meshtastic/APRS o generado por una tarea.
+
     Funcionalidad:
-        - Detecta paquetes APRS no comprimidos que empiezan por '!DDMM.mmN/DDDMM.mmW>'.
+        - Detecta paquetes APRS no comprimidos que empiezan por '!DDMM.mmN/DDDMM.mmW'.
         - Elimina cabecera de posición, curso/velocidad y altitud APRS.
         - Conserva el comentario humano.
         - Si no existe URL de maps.google.com, la genera desde la posición APRS.
-        - Si el texto no parece APRS de posición, lo devuelve igual, salvo normalización
+        - Si el texto no parece APRS de posición, lo devuelve igual salvo normalización
           ligera de espacios.
 
     Motivo:
@@ -623,7 +629,6 @@ def _clean_aprs_position_text_for_meshcore(text: str) -> str:
         body = f"{body} {maps_url}".strip() if body else maps_url
 
     return body or raw
-
 
 class MeshCoreEmbeddedBridge:
     """
@@ -1341,7 +1346,6 @@ class MeshCoreEmbeddedBridge:
         """
         if not self.enable:
             return
-        
         msg = (text or "").strip()
         if not msg:
             return
@@ -1356,7 +1360,6 @@ class MeshCoreEmbeddedBridge:
         msg = _clean_aprs_position_text_for_meshcore(msg)
         if not msg:
             return
-
         # Evitar bucles: si este texto lo acabamos de inyectar desde MeshCore, no lo reenvíes.
         if self.was_recently_injected(int(ch), msg):
             return
@@ -2443,6 +2446,156 @@ def _traceroute_normalize_snr_list(value) -> list:
     return out
 
 
+
+def _traceroute_payload_bytes_candidates(*roots) -> list[bytes]:
+    """
+    Extrae candidatos binarios de payload para intentar decodificar RouteDiscovery.
+
+    Uso interno:
+        candidates = _traceroute_payload_bytes_candidates(pkt, decoded, rec)
+
+    Parámetros:
+        *roots:
+            Paquete RX, decoded y registro plano preliminar.
+
+    Funcionalidad:
+        - Busca payload en campos habituales del SDK Meshtastic.
+        - Soporta bytes reales, bytearray, listas de enteros, hex y base64.
+        - Acota tamaños para evitar consumo anómalo en funcionamiento 24/7.
+        - No transmite RF, no modifica estado global y no lanza excepción.
+    """
+    out: list[bytes] = []
+    seen: set[bytes] = set()
+
+    def _add(raw) -> None:
+        try:
+            if raw is None:
+                return
+            b = None
+            if isinstance(raw, bytes):
+                b = raw
+            elif isinstance(raw, bytearray):
+                b = bytes(raw)
+            elif isinstance(raw, (list, tuple)) and raw and all(isinstance(x, int) and 0 <= x <= 255 for x in raw[:512]):
+                b = bytes(raw[:512])
+            elif isinstance(raw, dict):
+                for key in ("bytes", "data", "payload", "raw", "hex", "base64", "b64"):
+                    if key in raw:
+                        _add(raw.get(key))
+                return
+            elif isinstance(raw, str):
+                text = raw.strip()
+                if not text:
+                    return
+                # Hex puro o con separadores sencillos.
+                hx = re.sub(r"[^0-9a-fA-F]", "", text)
+                if len(hx) >= 4 and len(hx) % 2 == 0 and len(hx) <= 4096:
+                    try:
+                        b = binascii.unhexlify(hx)
+                    except Exception:
+                        b = None
+                # Base64 como segundo intento.
+                if b is None and len(text) <= 4096:
+                    try:
+                        b = base64.b64decode(text, validate=True)
+                    except Exception:
+                        b = None
+
+            if b is None or not b:
+                return
+            if len(b) > 4096:
+                b = b[:4096]
+            if b not in seen:
+                seen.add(b)
+                out.append(b)
+        except Exception:
+            return
+
+    def _walk(obj, depth: int = 0) -> None:
+        if depth > 6:
+            return
+        try:
+            if isinstance(obj, dict):
+                for key in (
+                    "payload", "raw_payload", "payload_raw", "payloadBytes", "payload_bytes",
+                    "payloadHex", "payload_hex", "data", "raw", "bytes", "encrypted", "decodedPayload"
+                ):
+                    if key in obj:
+                        _add(obj.get(key))
+                for v in obj.values():
+                    if isinstance(v, (dict, list, tuple)):
+                        _walk(v, depth + 1)
+            elif isinstance(obj, (list, tuple)):
+                # Una lista simple de enteros puede ser el payload.
+                _add(obj)
+                for v in list(obj)[:80]:
+                    if isinstance(v, (dict, list, tuple)):
+                        _walk(v, depth + 1)
+            else:
+                for attr in ("payload", "raw_payload", "payloadBytes", "data"):
+                    try:
+                        if hasattr(obj, attr):
+                            _add(getattr(obj, attr))
+                    except Exception:
+                        pass
+        except Exception:
+            return
+
+    for root in roots:
+        _walk(root, 0)
+
+    return out[:12]
+
+
+def _traceroute_decode_route_discovery_payload(*roots) -> dict:
+    """
+    Decodifica protobuf Mesh RouteDiscovery desde payload binario si está disponible.
+
+    Uso interno:
+        decoded_rd = _traceroute_decode_route_discovery_payload(pkt, decoded, rec)
+
+    Funcionalidad:
+        - Replica la parte esencial de MeshView: obtener route, snr_towards,
+          route_back y snr_back desde el payload RouteDiscovery real.
+        - Usa meshtastic.protobuf.mesh_pb2.RouteDiscovery si está disponible.
+        - Devuelve {} si no hay librería, no hay payload o el payload no es RouteDiscovery.
+        - No altera TX/RX, colas, BBS, APRS, MeshCore ni bridge.
+    """
+    try:
+        try:
+            from meshtastic.protobuf import mesh_pb2  # type: ignore
+        except Exception:
+            import meshtastic.protobuf.mesh_pb2 as mesh_pb2  # type: ignore
+
+        route_cls = getattr(mesh_pb2, "RouteDiscovery", None)
+        if route_cls is None:
+            return {}
+
+        for payload in _traceroute_payload_bytes_candidates(*roots):
+            try:
+                msg = route_cls()
+                msg.ParseFromString(payload)
+                safe = _traceroute_safe_jsonable(msg, max_depth=6)
+                if not isinstance(safe, dict) or not safe:
+                    continue
+
+                # Validación mínima: debe contener alguna señal propia de RouteDiscovery.
+                keys_l = {str(k).lower() for k in safe.keys()}
+                if not any(k in keys_l for k in ("route", "snrtowards", "snr_towards", "routeback", "route_back", "snrback", "snr_back")):
+                    continue
+
+                safe["_decoded_from_payload"] = True
+                safe["_decoder"] = "mesh_pb2.RouteDiscovery"
+                safe["_payload_len"] = len(payload)
+                return safe
+            except Exception:
+                continue
+    except Exception:
+        return {}
+
+    return {}
+
+
 def _traceroute_route_text_from_nodes(
     route_nodes: list[str],
     route_snr: list | None = None,
@@ -2524,6 +2677,40 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
     if not isinstance(rec, dict):
         rec = {}
 
+    # Los registros sintéticos traceroute_started no son una ruta RF real.
+    # Antes se extraía el target del texto y aparecía como si fuese un único salto,
+    # contaminando el WebPanel con falsas rutas. Se marca explícitamente como inicio.
+    trace_event = str(rec.get("trace_event") or rec.get("event_type") or "").strip().lower()
+    if trace_event == "traceroute_started":
+        return {
+            "route_nodes": [],
+            "route_snr": [],
+            "route_back_nodes": [],
+            "route_back_snr": [],
+            "route_text_enriched": str(rec.get("text") or rec.get("route_text") or "").strip(),
+            "route_back_text_enriched": "",
+            "route_data": {
+                "route_nodes": [],
+                "snr_towards": [],
+                "route_back": [],
+                "snr_back": [],
+                "forward_path": [],
+                "return_path": [],
+                "actual_rf_path": [],
+            },
+            "traceroute_payload": {},
+            "traceroute_payload_keys": [],
+            "route_quality_hint": "start_marker_no_rf_route",
+            "routing_error_reason": None,
+            "route_raw_present": False,
+            "route_back_raw_present": False,
+            "snr_raw_present": False,
+            "snr_back_raw_present": False,
+        }
+
+    routing_error_reason = _traceroute_get_routing_error_reason(rec, decoded, pkt)
+    routing_error_norm = str(routing_error_reason or "").strip().upper()
+
     # Además de las estructuras dict originales, se recorren copias JSON-safe.
     # Esto permite ver campos ocultos dentro de objetos protobuf/SDK: route,
     # route_back, snr_towards y snr_back.
@@ -2531,6 +2718,12 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
     safe_decoded = _traceroute_safe_jsonable(decoded, max_depth=7)
     safe_rec = _traceroute_safe_jsonable(rec, max_depth=7)
     dicts = _traceroute_walk_dicts(pkt, decoded, rec, safe_pkt, safe_decoded, safe_rec)
+
+    # Fase v7.0.10: intento explícito de decodificación protobuf RouteDiscovery,
+    # equivalente funcional al flujo de MeshView, pero alimentado por el broker local.
+    route_discovery_decoded = _traceroute_decode_route_discovery_payload(pkt, decoded, rec)
+    if isinstance(route_discovery_decoded, dict) and route_discovery_decoded:
+        dicts.insert(0, route_discovery_decoded)
 
     route_raw = _traceroute_first_value(
         dicts,
@@ -2599,7 +2792,9 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
     route_snr = _traceroute_normalize_snr_list(snr_raw)
     route_back_snr = _traceroute_normalize_snr_list(snr_back_raw)
 
-    # Fallback: si no hay route estructurada, intenta sacar nodos del texto.
+    # Fallback textual SOLO si no estamos ante ROUTING_APP de error/ACK sin ruta.
+    # Ejemplo real observado: payload 1805 = MAX_RETRANSMIT y texto
+    # "traceroute !local -> !local". Eso no es una ruta: es un estado de routing.
     existing_text = (
         rec.get("route_text")
         or rec.get("text")
@@ -2607,7 +2802,13 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
         or decoded.get("route_text")
         or ""
     )
-    if not route_nodes and isinstance(existing_text, str):
+    may_use_text_fallback = True
+    if routing_error_norm and routing_error_norm not in {"NONE", "0", "NO_ERROR"}:
+        may_use_text_fallback = False
+    if str(rec.get("portnum") or decoded.get("portnum") or pkt.get("portnum") or "").upper() == "ROUTING_APP" and not route_raw and not route_back_raw:
+        may_use_text_fallback = False
+
+    if may_use_text_fallback and not route_nodes and isinstance(existing_text, str):
         found = re.findall(r"![0-9a-fA-F]{8}", existing_text)
         for n in found:
             nid = n.lower()
@@ -2654,6 +2855,9 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
         except Exception:
             pass
 
+    if isinstance(route_discovery_decoded, dict) and route_discovery_decoded:
+        payload_candidates["routeDiscoveryDecoded"] = route_discovery_decoded
+
     traceroute_payload = _traceroute_safe_jsonable(payload_candidates, max_depth=5)
 
     # Límite defensivo de tamaño en JSON embebido.
@@ -2697,7 +2901,11 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
     }
 
     quality_hint = "empty_route"
-    if route_nodes:
+    if routing_error_norm and routing_error_norm not in {"NONE", "0", "NO_ERROR"}:
+        quality_hint = f"routing_error_{routing_error_norm}"
+    elif routing_error_norm in {"NONE", "0", "NO_ERROR"} and not route_nodes and not route_back_nodes:
+        quality_hint = "routing_ack_without_route"
+    elif route_nodes:
         if len(route_nodes) >= 2 and route_nodes[0] == route_nodes[-1]:
             quality_hint = "self_loop"
         else:
@@ -2718,6 +2926,8 @@ def _traceroute_extract_enriched_route(pkt: dict, decoded: dict, rec: dict | Non
         "traceroute_payload": traceroute_payload,
         "traceroute_payload_keys": sorted(list(payload_candidates.keys())),
         "route_quality_hint": quality_hint,
+        "routing_error_reason": routing_error_reason,
+        "route_discovery_decoded": bool(route_discovery_decoded),
         "route_raw_present": route_raw is not None,
         "route_back_raw_present": route_back_raw is not None,
         "snr_raw_present": snr_raw is not None,
@@ -4055,14 +4265,21 @@ def _tasks_send_adapter(
                             else:
                                 _m = (getattr(mc, "ch_map", None) or {}).get(int(channel_i)) or {}
                                 _k = str(_m.get("kind") or "contact").strip().lower()
+                                # [FIX v7.0.10-fix1] Mantener el mismo saneamiento APRS
+                                # también en tareas programadas, que no pasan por forward_from_meshtastic().
+                                try:
+                                    _mc_message = _clean_aprs_position_text_for_meshcore(str(message_s))
+                                except Exception:
+                                    _mc_message = str(message_s)
+
                                 if _k in ("chan", "channel"):
                                     _mc_ch = _m.get("channel_idx")
                                     if _mc_ch is not None:
-                                        mc.enqueue_send_channel(int(_mc_ch), str(message_s))
+                                        mc.enqueue_send_channel(int(_mc_ch), _mc_message)
                                 else:
                                     _contact = _m.get("contact") or getattr(mc, "default_contact_prefix", None)
                                     if _contact:
-                                        mc.enqueue_send_contact(str(_contact), str(message_s))
+                                        mc.enqueue_send_contact(str(_contact), _mc_message)
                         else:
                             mc.forward_from_meshtastic(
                                 ch=int(channel_i),
@@ -4585,18 +4802,28 @@ def append_offline_log(rec: dict):
                 obj["return_path"] = (enriched.get("route_data") or {}).get("return_path") or []
                 obj["actual_rf_path"] = (enriched.get("route_data") or {}).get("actual_rf_path") or []
                 obj["route_quality_hint"] = enriched.get("route_quality_hint")
+                obj["routing_error_reason"] = enriched.get("routing_error_reason")
                 obj["traceroute_payload_keys"] = enriched.get("traceroute_payload_keys") or []
+                obj["route_discovery_decoded"] = bool(enriched.get("route_discovery_decoded"))
                 obj["route_raw_present"] = bool(enriched.get("route_raw_present"))
                 obj["route_back_raw_present"] = bool(enriched.get("route_back_raw_present"))
                 obj["snr_raw_present"] = bool(enriched.get("snr_raw_present"))
                 obj["snr_back_raw_present"] = bool(enriched.get("snr_back_raw_present"))
 
                 # route_display será el texto preferente para el WebPanel.
-                route_display = (
-                    enriched.get("route_text_enriched")
-                    or route_text
-                    or ""
-                )
+                qh = str(enriched.get("route_quality_hint") or "")
+                if qh.startswith("routing_error_"):
+                    route_display = f"Sin ruta RF: {qh.replace('routing_error_', '')}"
+                elif qh == "routing_ack_without_route":
+                    route_display = "Respuesta ROUTING_APP sin RouteDiscovery"
+                elif qh == "start_marker_no_rf_route":
+                    route_display = str(route_text or "traceroute iniciado")
+                else:
+                    route_display = (
+                        enriched.get("route_text_enriched")
+                        or route_text
+                        or ""
+                    )
                 obj["route_back_display"] = enriched.get("route_back_text_enriched") or ""
                 obj["route_display"] = route_display
 
@@ -4914,7 +5141,6 @@ class _BacklogServer(threading.Thread):
                 if not isinstance(text, str) or not text:
                     resp = {"ok": False, "error": "missing text"}
                     conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); return
-
                 # === [FIX APRS -> Meshtastic/MeshCore] Limpieza temprana de cabecera APRS ===
                 # Punto crítico:
                 #   SEND_TEXT es la entrada común usada por la pasarela APRS para inyectar
@@ -5064,6 +5290,10 @@ class _BacklogServer(threading.Thread):
             elif cmd == "MESHCORE_SEND":
                 params = req.get("params") or {}
                 text = (params.get("text") or "").strip()
+                try:
+                    text = _clean_aprs_position_text_for_meshcore(text)
+                except Exception:
+                    text = (params.get("text") or "").strip()
 
                 # Compat: kind opcional. Si no viene, inferimos por campos presentes.
                 kind = str(params.get("kind") or "").strip().lower()
