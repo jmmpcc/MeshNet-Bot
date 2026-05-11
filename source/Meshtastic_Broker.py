@@ -503,6 +503,128 @@ def _add_part_prefix_fit(part: str, idx: int, total: int, max_bytes: int) -> str
     body_fit = chunk[0] if chunk else body[:1]
     return prefix + body_fit
 
+# === [FIX APRS -> MeshCore] Limpieza de payload APRS para MeshCore ============
+# Objetivo:
+# - Cuando una trama APRS llega a Meshtastic y se refleja a MeshCore por canal,
+#   evitar reenviar la cabecera APRS cruda:
+#       !4138.43N/00054.20W>000/000/A=000111 ...
+# - Mantener únicamente el comentario útil y la URL de Google Maps.
+# - Reducir longitud para que MeshCore no parta la URL en la coma de coordenadas.
+#
+# Ejemplo entrada:
+#   !4138.43N/00054.20W>000/000/A=000111 QRV R70-R72 sdr:in91np.ddns.net:8073 Abierto https://maps.google.com/?q=41.640500,-0.903333
+#
+# Ejemplo salida:
+#   QRV R70-R72 sdr:in91np.ddns.net:8073 Abierto https://maps.google.com/?q=41.640500,-0.903333
+# ============================================================================
+
+_APRS_UNCOMPRESSED_POS_RE = re.compile(
+    r"^\s*!"
+    r"(?P<lat_deg>\d{2})(?P<lat_min>\d{2}\.\d+)(?P<lat_hemi>[NS])"
+    r"[/\\]"
+    r"(?P<lon_deg>\d{3})(?P<lon_min>\d{2}\.\d+)(?P<lon_hemi>[EW])"
+    r"(?P<symbol>.?)"
+    r"(?P<body>.*)$"
+)
+
+
+def _aprs_coord_to_decimal(deg_s: str, min_s: str, hemi: str) -> float | None:
+    """
+    Convierte una coordenada APRS no comprimida a decimal.
+
+    Parámetros:
+        deg_s:
+            Grados como texto. Latitud: 2 dígitos. Longitud: 3 dígitos.
+        min_s:
+            Minutos APRS con decimales.
+        hemi:
+            Hemisferio: N/S/E/W.
+
+    Devuelve:
+        float decimal con signo correcto, o None si no se puede convertir.
+
+    Ejemplo:
+        41 grados 38.43 minutos N -> 41.640500
+        000 grados 54.20 minutos W -> -0.903333
+    """
+    try:
+        deg = int(str(deg_s))
+        minutes = float(str(min_s))
+        value = float(deg) + (minutes / 60.0)
+        if str(hemi).upper() in ("S", "W"):
+            value = -value
+        return value
+    except Exception:
+        return None
+
+
+def _clean_aprs_position_text_for_meshcore(text: str) -> str:
+    """
+    Limpia un texto APRS de posición antes de reenviarlo a MeshCore.
+
+    Uso:
+        msg = _clean_aprs_position_text_for_meshcore(msg)
+
+    Funcionalidad:
+        - Detecta paquetes APRS no comprimidos que empiezan por '!DDMM.mmN/DDDMM.mmW>'.
+        - Elimina cabecera de posición, curso/velocidad y altitud APRS.
+        - Conserva el comentario humano.
+        - Si no existe URL de maps.google.com, la genera desde la posición APRS.
+        - Si el texto no parece APRS de posición, lo devuelve igual, salvo normalización
+          ligera de espacios.
+
+    Motivo:
+        MeshCore parte mensajes largos por límite de bytes. Si reenviamos la cabecera
+        APRS completa, la URL puede caer en una segunda parte o partirse justo en la coma
+        de latitud/longitud, quedando el enlace inutilizable.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    # Normalización mínima, sin tocar URLs ni coordenadas.
+    raw = re.sub(r"\s+", " ", raw).strip()
+
+    m = _APRS_UNCOMPRESSED_POS_RE.match(raw)
+    if not m:
+        return raw
+
+    lat = _aprs_coord_to_decimal(
+        m.group("lat_deg"),
+        m.group("lat_min"),
+        m.group("lat_hemi"),
+    )
+    lon = _aprs_coord_to_decimal(
+        m.group("lon_deg"),
+        m.group("lon_min"),
+        m.group("lon_hemi"),
+    )
+
+    body = str(m.group("body") or "").strip()
+
+    # En APRS típico tras el símbolo vienen curso/velocidad:
+    #   000/000
+    body = re.sub(r"^\s*\d{3}/\d{3}\s*", "", body).strip()
+
+    # Después puede venir altitud:
+    #   /A=000111
+    #   A=000111
+    body = re.sub(r"^\s*/?A=\d{6}\s*", "", body, flags=re.IGNORECASE).strip()
+
+    # Limpieza de separadores residuales.
+    body = body.lstrip(" /:-").strip()
+    body = re.sub(r"\s+", " ", body).strip()
+
+    # Si ya venía una URL de Google Maps, no la duplicamos.
+    has_maps_url = bool(re.search(r"https?://maps\.google\.", body, flags=re.IGNORECASE))
+
+    if not has_maps_url and lat is not None and lon is not None:
+        maps_url = f"https://maps.google.com/?q={lat:.6f},{lon:.6f}"
+        body = f"{body} {maps_url}".strip() if body else maps_url
+
+    return body or raw
+
+
 class MeshCoreEmbeddedBridge:
     """
     Pasarela MeshCore embebida en el broker.
@@ -1219,7 +1341,19 @@ class MeshCoreEmbeddedBridge:
         """
         if not self.enable:
             return
+        
         msg = (text or "").strip()
+        if not msg:
+            return
+
+        # [FIX APRS -> MeshCore]
+        # Si el mensaje procede de APRS y contiene cabecera de posición cruda,
+        # se limpia antes de construir el payload [MT:...].
+        # Esto evita:
+        #   1) mostrar datos APRS técnicos antes del texto útil;
+        #   2) alargar innecesariamente el mensaje;
+        #   3) que MeshCore parta la URL de Google Maps por la coma de lat/lon.
+        msg = _clean_aprs_position_text_for_meshcore(msg)
         if not msg:
             return
 
@@ -3750,7 +3884,7 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     except Exception as e:
         # Si falla el envío, reporta al CircuitBreaker y reencola con backoff
         try:
-            CIRCUIT_BREAKER.on_failure()
+            CIRCUIT_BREAKER.record_error()
         except Exception:
             pass
         try:
@@ -4780,6 +4914,39 @@ class _BacklogServer(threading.Thread):
                 if not isinstance(text, str) or not text:
                     resp = {"ok": False, "error": "missing text"}
                     conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")); return
+
+                # === [FIX APRS -> Meshtastic/MeshCore] Limpieza temprana de cabecera APRS ===
+                # Punto crítico:
+                #   SEND_TEXT es la entrada común usada por la pasarela APRS para inyectar
+                #   mensajes en la red Meshtastic.
+                #
+                # Antes:
+                #   El broker reenviaba a Meshtastic el paquete APRS completo:
+                #       !4138.43N/00054.20W>000/000/A=000111 QRV ...
+                #
+                # Después:
+                #   Si el texto es una posición APRS no comprimida, se elimina la cabecera
+                #   técnica y se conserva solamente el comentario útil + Google Maps:
+                #       QRV R70-R72 sdr:in91np.ddns.net:8073 Abierto https://maps.google.com/?q=...
+                #
+                # Ventaja:
+                #   - Meshtastic ya no recibe cabecera cruda APRS.
+                #   - MeshCore tampoco la recibe si el canal se refleja después.
+                #   - Se reduce longitud y se evita partir la URL por la coma de coordenadas.
+                try:
+                    text_clean = _clean_aprs_position_text_for_meshcore(text)
+                    if isinstance(text_clean, str) and text_clean.strip():
+                        text = text_clean.strip()
+                except Exception as e:
+                    # Seguridad 24/7: si el limpiador falla, se mantiene el texto original.
+                    try:
+                        _ctrl_log(
+                            "send_text_aprs_clean_error",
+                            f"[ctrl] SEND_TEXT APRS clean error: {type(e).__name__}: {e}",
+                            interval=10.0
+                        )
+                    except Exception:
+                        pass
 
                 try:
                     ch = int(params.get("ch") if params.get("ch") is not None else 0)
