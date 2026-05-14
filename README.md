@@ -30,6 +30,206 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 # MeshNet — Changelog Consolidado
 
+# CHANGELOG — Programación diaria MeshCore
+
+## v7.0.11-diario-meshcore
+
+### Añadido
+
+- Nuevo comando de Telegram `/diario_mc` para programar mensajes diarios hacia MeshCore por canal.
+- Nuevo comando de Telegram `/diario_mc_dm` para programar mensajes diarios directos hacia un contacto MeshCore.
+- Integración de `/diario_mc` como equivalente programado diario de `/enviar_mc`.
+- Integración de `/diario_mc_dm` como equivalente programado diario de `/enviar_mc_dm` / `/dm_mc`.
+- Soporte de varias horas en una sola orden, igual que `/diario`:
+
+```text
+/diario_mc 09:00,21:00 canal 2 Texto diario MeshCore
+/diario_mc_dm 09:00,21:00 6a18cb3d125b Texto diario directo MeshCore
+```
+
+- Soporte de agrupación mediante `grupo <id>` para facilitar cancelaciones masivas:
+
+```text
+/diario_mc 09:00 grupo avisos_mc canal 2 Texto diario MeshCore
+/diario_mc_dm 09:00 grupo avisos_dm 6a18cb3d125b Texto diario directo MeshCore
+```
+
+- Registro de los nuevos comandos en el menú oficial de Telegram:
+
+```text
+/diario_mc
+/diario_mc_dm
+```
+
+- Nuevo transporte lógico `meshcore` dentro del scheduler persistente `broker_task.py`.
+- Nueva distinción interna mediante `meta.meshcore_mode`:
+  - `channel`: envío MeshCore por canal.
+  - `dm`: envío MeshCore directo a contacto.
+- Nuevo helper interno `_meshcore_send_via_broker_ctrl()` para enviar tareas programadas hacia MeshCore reutilizando el broker.
+- Envío programado MeshCore mediante el comando ya existente del broker `MESHCORE_SEND`.
+- Compatibilidad con envío MeshCore por canal usando `kind="chan"` y `channel_idx`.
+- Compatibilidad con envío MeshCore directo usando `kind="contact"` y `contact_prefix`.
+- Troceo automático de mensajes largos antes de enviarlos a MeshCore.
+- Prefijo automático de partes para mensajes fragmentados:
+
+```text
+(1/3) texto...
+(2/3) texto...
+(3/3) texto...
+```
+
+- Reprogramación diaria automática conservando el comportamiento ya existente de `/diario`.
+- Persistencia en JSONL mediante el scheduler actual.
+- Compatibilidad con `/mis_diarios`, `/parar_diario` y `/parar_diario_grupo` sin cambios adicionales.
+
+### Conservado
+
+- No se modifica el comportamiento existente de `/diario`.
+- No se modifica el comportamiento existente de `/enviar_mc`.
+- No se modifica el comportamiento existente de `/enviar_mc_dm` ni `/dm_mc`.
+- No se modifica el comportamiento existente de `/mc_contactos`.
+- No se modifica `Meshtastic_Broker.py`.
+- No se abre ninguna conexión MeshCore nueva desde el bot o desde el scheduler.
+- No se duplica la lógica del motor MeshCore embebido.
+- No se altera `MESHCORE_ENGINE`.
+- No se altera `enqueue_send_channel()`.
+- No se altera `enqueue_send_contact()`.
+- No se modifica el sistema actual de cancelación de tareas diarias.
+- No se modifica la estructura base de `ScheduledTask`.
+
+### Detalles técnicos
+
+#### `/diario_mc`
+
+Programa un mensaje diario hacia un canal MeshCore.
+
+Sintaxis principal:
+
+```text
+/diario_mc <HH:MM[,HH:MM,...]> <chX|canal X> <texto>
+```
+
+Ejemplos:
+
+```text
+/diario_mc 09:00 ch2 Parte diario MeshCore
+/diario_mc 09:00 canal 2 Parte diario MeshCore
+/diario_mc 09:00,21:00 grupo avisos_mc canal 2 Parte diario MeshCore
+```
+
+La tarea queda identificada internamente con metadatos equivalentes a:
+
+```python
+meta = {
+    "via": "/diario_mc",
+    "repeat": "daily",
+    "daily_time": "09:00",
+    "transport": "meshcore",
+    "meshcore_mode": "channel",
+    "meshcore_channel_idx": 2,
+}
+```
+
+#### `/diario_mc_dm`
+
+Programa un mensaje diario directo hacia un contacto MeshCore.
+
+Sintaxis principal:
+
+```text
+/diario_mc_dm <HH:MM[,HH:MM,...]> <contact_prefix|[MC:prefix]> <texto>
+```
+
+Ejemplos:
+
+```text
+/diario_mc_dm 09:00 6a18cb3d125b Parte diario directo
+/diario_mc_dm 09:00 [MC:6a18cb3d125b] Parte diario directo
+/diario_mc_dm 09:00,21:00 grupo avisos_dm 6a18cb3d125b Parte diario directo
+```
+
+La tarea queda identificada internamente con metadatos equivalentes a:
+
+```python
+meta = {
+    "via": "/diario_mc_dm",
+    "repeat": "daily",
+    "daily_time": "09:00",
+    "transport": "meshcore",
+    "meshcore_mode": "dm",
+    "meshcore_contact": "6a18cb3d125b",
+}
+```
+
+### Ficheros modificados
+
+- `Telegram_Bot_Broker.py`
+- `broker_task.py`
+
+### Validación realizada
+
+Compilación de sintaxis Python:
+
+```bash
+python3 -m py_compile Telegram_Bot_Broker_diario_mc.py broker_task_diario_mc.py
+```
+
+Resultado:
+
+```text
+OK — sin errores de compilación.
+```
+
+### Instalación recomendada
+
+```bash
+cd ~/MeshNet-Bot
+
+cp Telegram_Bot_Broker.py Telegram_Bot_Broker.py.bak_diario_mc_$(date +%Y%m%d_%H%M%S)
+cp broker_task.py broker_task.py.bak_diario_mc_$(date +%Y%m%d_%H%M%S)
+
+cp Telegram_Bot_Broker_diario_mc.py Telegram_Bot_Broker.py
+cp broker_task_diario_mc.py broker_task.py
+
+python3 -m py_compile Telegram_Bot_Broker.py broker_task.py
+```
+
+Reinicio del bot:
+
+```bash
+docker restart meshnet-bot
+```
+
+O, si se ejecuta mediante servicio systemd:
+
+```bash
+sudo systemctl restart meshnet-bot
+```
+
+### Pruebas recomendadas
+
+```text
+/diario_mc 09:00 canal 2 Prueba diaria MeshCore canal
+/diario_mc_dm 09:00 6a18cb3d125b Prueba diaria MeshCore directo
+/mis_diarios
+```
+
+Comprobación de logs:
+
+```bash
+docker logs -f meshnet-bot
+docker logs -f meshnet-broker | grep -i meshcore
+```
+
+### Notas operativas
+
+- `/diario_mc` usa el canal MeshCore indicado por el usuario.
+- `/diario_mc_dm` envía directamente al contacto MeshCore indicado.
+- Las tareas quedan gestionadas por el mismo scheduler persistente que `/diario`.
+- Si el broker MeshCore no está disponible en el momento del envío, se mantiene el sistema de reintentos/backoff existente.
+- La cancelación individual y por grupo sigue usando los comandos ya existentes.
+
+
 ## [v7.0.2] — (12 de Abril de 2026)
 
 ### 📝 Changelog reciente (2026-04-12)
