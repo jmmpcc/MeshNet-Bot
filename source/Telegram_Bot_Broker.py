@@ -13454,6 +13454,8 @@ async def diario_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Parámetros no válidos.\n"
             "Ejemplos:\n"
             "  /diario_mc 09:00 ch2 Texto\n"
+            "  /diario_mc 09:00,10:00 grupo xxxxx canal x Texto\n"
+            "  /diario_mc 09:00,10:00 grupo xxxxx chx Texto\n"
             "  /diario_mc 09:00 canal 2 Texto"
         )
         return
