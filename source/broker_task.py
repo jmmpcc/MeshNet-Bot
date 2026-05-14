@@ -1,4 +1,4 @@
-# broker_tasks_v6.1.3 py
+# broker_tasks_v7.0.11 py
 # ─────────────────────────────────────────────────────────────────────────────
 # Gestor común de TAREAS programadas de envío para el ecosistema Meshtastic.
 # - Reutilizable desde el broker y el bot (sin duplicar código).
@@ -26,6 +26,82 @@ import socket
 # Zona horaria por defecto (tu entorno)
 DEFAULT_TZ = "Europe/Madrid"
 ISO_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _meshcore_send_via_broker_ctrl(*, kind: str, channel_idx: int | None = None, contact_prefix: str | None = None, text: str, timeout: float = 5.0) -> Dict[str, Any]:
+    """
+    Envía una orden MESHCORE_SEND al BacklogServer/Control del broker.
+
+    Uso interno desde el scheduler:
+      - kind="chan"    -> usa channel_idx de MeshCore.
+      - kind="contact" -> usa contact_prefix para DM MeshCore.
+
+    Parámetros:
+      - kind: "chan"/"channel" para canal MeshCore o "contact"/"dm" para directo.
+      - channel_idx: índice real de canal MeshCore cuando kind="chan".
+      - contact_prefix: prefijo de clave pública/contacto cuando kind="contact".
+      - text: texto ya normalizado/troceado que se debe encolar.
+      - timeout: tiempo máximo de conexión/lectura contra el control del broker.
+
+    Funcionalidad:
+      - No abre conexión MeshCore directa.
+      - Reutiliza el broker, que ya mantiene MESHCORE_ENGINE y su cola 24/7.
+      - Devuelve siempre dict: {"ok": bool, ...}, sin lanzar excepción salvo errores inesperados
+        que se capturan como {"ok": False, "error": "..."}.
+    """
+    msg = (text or "").strip()
+    if not msg:
+        return {"ok": False, "error": "missing text"}
+
+    k = (kind or "").strip().lower()
+    params: Dict[str, Any] = {"kind": k, "text": msg}
+
+    if k in ("chan", "channel", "ch"):
+        try:
+            params["channel_idx"] = int(channel_idx)  # type: ignore[arg-type]
+        except Exception:
+            return {"ok": False, "error": "missing channel_idx"}
+    elif k in ("contact", "dm"):
+        cp = (contact_prefix or "").strip()
+        if not cp:
+            return {"ok": False, "error": "missing contact_prefix"}
+        params["kind"] = "contact"
+        params["contact_prefix"] = cp
+    else:
+        return {"ok": False, "error": f"unsupported meshcore kind: {kind}"}
+
+    req = {"cmd": "MESHCORE_SEND", "params": params}
+    data = (json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8")
+
+    host = os.getenv("BROKER_CTRL_HOST", os.getenv("BROKER_HOST", "127.0.0.1")).strip() or "127.0.0.1"
+    try:
+        port = int(os.getenv("BROKER_CTRL_PORT", str(int(os.getenv("BROKER_PORT", "8765")) + 1)))
+    except Exception:
+        port = 8766
+
+    try:
+        with socket.create_connection((host, port), timeout=float(timeout)) as sock:
+            sock.sendall(data)
+            sock.settimeout(float(timeout))
+            buf = b""
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                if b"\n" in buf:
+                    break
+
+        raw = buf.decode("utf-8", "ignore").strip()
+        if not raw:
+            return {"ok": False, "error": "empty broker reply"}
+        try:
+            return json.loads(raw)
+        except Exception as e:
+            return {"ok": False, "error": f"bad broker json: {type(e).__name__}: {e}", "raw": raw[:300]}
+    except Exception as e:
+        return {"ok": False, "error": f"broker ctrl error: {type(e).__name__}: {e}"}
+
 
 # ── Zona horaria: zoneinfo (3.9+) o pytz como respaldo ───────────────────────
 try:
@@ -393,6 +469,59 @@ class _TaskManager:
                 self._fail_or_retry(t, error)
                 return
 
+
+
+        # --- SOLO MESHCORE: saltar MESH y mandar por control del broker hacia MESHCORE_ENGINE
+        if transport == "meshcore":
+            try:
+                meta = t.meta or {}
+                mc_mode = str(meta.get("meshcore_mode") or meta.get("meshcore_kind") or "channel").strip().lower()
+
+                # Reutilizamos el mismo troceo seguro por bytes que el envío Meshtastic.
+                # MeshCore admite cola propia en el broker, pero partir aquí evita payloads excesivos
+                # y mantiene trazabilidad por parte en el scheduler.
+                parts = split_text_for_meshtastic(t.message, MAX_PAYLOAD_BYTES)
+                if len(parts) > 1:
+                    self._logger.info(f"[Tasks] MeshCore: mensaje troceado en {len(parts)} partes por longitud")
+
+                packet_id = None
+                for i, part in enumerate(parts, 1):
+                    label = f" ({i}/{len(parts)})" if len(parts) > 1 else ""
+                    payload = part + label
+
+                    if mc_mode in ("dm", "contact", "direct"):
+                        contact_prefix = str(meta.get("meshcore_contact") or meta.get("contact_prefix") or t.destination or "").strip()
+                        res = _meshcore_send_via_broker_ctrl(
+                            kind="contact",
+                            contact_prefix=contact_prefix,
+                            text=payload,
+                        )
+                    else:
+                        res = _meshcore_send_via_broker_ctrl(
+                            kind="chan",
+                            channel_idx=int(t.channel),
+                            text=payload,
+                        )
+
+                    if not bool(res.get("ok")):
+                        raise RuntimeError(res.get("error") or str(res))
+
+                    # MeshCore devuelve encolado, no packet_id RF clásico. Guardamos marcador útil.
+                    packet_id = res.get("packet_id") or res.get("queued") or packet_id
+                    time.sleep(0.8)
+
+                if meta.get("repeat") == "daily":
+                    self._reschedule_daily(t)
+                else:
+                    self._mark_done(t.id, packet_id)
+
+                self._logger.info(f"[Tasks] DONE (MESHCORE-only) {t.id}")
+                return
+
+            except Exception as e:
+                error = f"MeshCore send failed: {type(e).__name__}: {e}"
+                self._fail_or_retry(t, error)
+                return
 
         # ── MOD: troceo previo del mensaje a payloads seguros
         parts = split_text_for_meshtastic(t.message, MAX_PAYLOAD_BYTES)

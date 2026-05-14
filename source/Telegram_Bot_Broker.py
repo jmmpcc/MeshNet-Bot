@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v7.0.0.0 py
+Telegram_Bot_Broker_v7.0.11 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -6108,6 +6108,12 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("estado", "Comprobar estado host/broker"),
         BotCommand("programar", "<YYYY-MM-DD HH:MM> <destino[:canal] | canal N> <texto...> Programar envío en fecha/hora"),
         BotCommand("diario", "<HH:MM[,HH:MM,...]> [mesh|aprs|ambos] [grupo <id>] <destino[:canal] | canal N | CALL|broadcast> [aprs <CALL|broadcast>:] <texto>  — Envío(s) diario(s)"),
+        BotCommand("diario_mc", "<HH:MM[,HH:MM,...]> [grupo <id>] <destino[:canal] | canal N | CALL|broadcast> <texto> — Envío(s) diario(s)"),
+     
+        BotCommand("diario_mc_dm", "<HH:MM[,HH:MM,...]> [grupo <id>] [MC:xxxxxxxxxxxxxx] <texto>  — Envío(s) diario(s)"),
+       
+
+
         BotCommand("mis_diarios", "Listar tareas diarias (/mis_diarios [pending|done|failed|canceled] [grupo <id>])"),
         BotCommand("parar_diario_grupo", "Detener todas las diarias de un grupo"),
         BotCommand("parar_diario", "Detener un envío diario por ID"),
@@ -13331,6 +13337,318 @@ async def diario_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.effective_message.reply_text(f"❌ No se pudo programar: {type(e).__name__}: {e}")
 
 
+# ==========================
+# /diario_mc y /diario_mc_dm — Programación diaria MeshCore
+# ==========================
+
+def _parse_daily_meshcore_hours(horas_spec: str) -> list[tuple[int, int, str]]:
+    """
+    Convierte una especificación de horas diaria en una lista validada.
+
+    Uso interno:
+      horas = _parse_daily_meshcore_hours("09:00,21:30")
+
+    Parámetros:
+      - horas_spec: cadena con una o varias horas separadas por coma en formato HH:MM.
+
+    Devuelve:
+      - Lista de tuplas (hh, mm, "HH:MM").
+      - Lista vacía si no hay ninguna hora válida.
+
+    Funcionalidad:
+      - No lanza excepción por tokens inválidos.
+      - Permite crear varias tareas diarias en una sola orden.
+      - Reutiliza la misma semántica horaria que /diario: si la hora de hoy ya pasó,
+        la primera ejecución queda para mañana.
+    """
+    out: list[tuple[int, int, str]] = []
+    for chunk in (horas_spec or "").split(","):
+        try:
+            hh, mm = [int(x) for x in chunk.strip().split(":", 1)]
+            if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                raise ValueError
+            out.append((hh, mm, f"{hh:02d}:{mm:02d}"))
+        except Exception:
+            continue
+    return out
+
+
+def _strip_daily_group_tokens(tokens: list[str]) -> tuple[list[str], Optional[str]]:
+    """
+    Extrae 'grupo <id>' de una lista de tokens sin alterar el resto del comando.
+
+    Uso interno:
+      tokens_limpios, group_id = _strip_daily_group_tokens(tokens)
+
+    Parámetros:
+      - tokens: argumentos restantes del comando después de la hora.
+
+    Devuelve:
+      - tokens_limpios: lista sin el par grupo/id.
+      - group_id: identificador normalizado o None.
+
+    Funcionalidad:
+      - Acepta grupo, group, grupo_id o group_id.
+      - Normaliza el identificador para que sea seguro en listados/cancelación.
+      - Mantiene compatibilidad con /mis_diarios y /parar_diario_grupo usando meta.daily_group_id.
+    """
+    gid = None
+    t = list(tokens or [])
+    i = 0
+    while i < len(t):
+        if str(t[i]).lower() in ("grupo", "group", "grupo_id", "group_id") and (i + 1) < len(t):
+            raw = str(t[i + 1]).strip()
+            gid = re.sub(r"[^a-zA-Z0-9_-]+", "-", raw).strip("-")[:40] or None
+            del t[i:i + 2]
+            continue
+        i += 1
+    return t, gid
+
+
+async def diario_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /diario_mc <HH:MM[,HH:MM,...]> [grupo <id>] <chX|X|canal X> <texto...>
+
+    Programa uno o varios envíos diarios hacia MeshCore por channel_idx, reutilizando
+    el mismo backend que /enviar_mc: el broker recibe MESHCORE_SEND y encola en
+    MESHCORE_ENGINE.
+
+    Ejemplos:
+      /diario_mc 09:00 ch2 Parte diario MeshCore
+      /diario_mc 09:00,21:00 grupo avisos_mc canal 2 Parte diario MeshCore
+      /diario_mc 08:30 2 Buenos días por MeshCore
+    """
+    if await _abort_if_cooldown(update, context):
+        return ConversationHandler.END
+
+    bump_stat(update.effective_user.id, update.effective_user.username or "", "diario_mc")
+
+    args = [a.strip() for a in (context.args or []) if a and a.strip()]
+    if len(args) < 3:
+        await update.effective_message.reply_text(
+            "Uso:\n"
+            "/diario_mc <HH:MM[,HH:MM,...]> [grupo <id>] <chX|X|canal X> <texto...>\n"
+            "Ejemplo: /diario_mc 09:00 grupo avisos_mc canal 2 Parte diario MeshCore"
+        )
+        return
+
+    horas_list = _parse_daily_meshcore_hours(args[0])
+    if not horas_list:
+        await update.effective_message.reply_text("Hora inválida. Usa HH:MM[,HH:MM,...] (00–23:59).")
+        return
+
+    tail, group_id = _strip_daily_group_tokens(args[1:])
+    if len(tail) < 2:
+        await update.effective_message.reply_text("Falta canal MeshCore y texto.")
+        return
+
+    if len(tail) >= 3 and tail[0].lower() == "canal":
+        channel_idx = _parse_mc_channel_token(str(tail[1]))
+        text = " ".join(tail[2:]).strip()
+    else:
+        channel_idx = _parse_mc_channel_token(str(tail[0]))
+        text = " ".join(tail[1:]).strip()
+
+    if channel_idx is None or not text:
+        await update.effective_message.reply_text(
+            "Parámetros no válidos.\n"
+            "Ejemplos:\n"
+            "  /diario_mc 09:00 ch2 Texto\n"
+            "  /diario_mc 09:00 canal 2 Texto"
+        )
+        return
+
+    texto_norm = _norm_mesh(text)
+    ok_len, err = _validate_len_or_block(texto_norm)
+    if not ok_len:
+        await update.effective_message.reply_text(err, parse_mode="HTML")
+        return
+
+    est_parts = len(_split_mesh(texto_norm, max_bytes=MAX_BYTES))
+    created = []
+
+    try:
+        now_local = datetime.now(TZ_EUROPE_MADRID)
+        for hh, mm, hhmm_txt in horas_list:
+            first_dt = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if first_dt <= now_local:
+                first_dt = first_dt + timedelta(days=1)
+            when_local_str = first_dt.strftime("%Y-%m-%d %H:%M")
+
+            meta = {
+                "scheduled_by": update.effective_user.username or str(update.effective_user.id),
+                "bot_est_parts": est_parts,
+                "via": "/diario_mc",
+                "repeat": "daily",
+                "daily_time": hhmm_txt,
+                "transport": "meshcore",
+                "meshcore_mode": "channel",
+                "meshcore_channel_idx": int(channel_idx),
+                "chat_id": update.effective_chat.id,
+                "reply_to": update.effective_message.message_id,
+            }
+            if group_id:
+                meta["daily_group_id"] = group_id
+
+            res = broker_tasks.schedule_message(
+                when_local=when_local_str,
+                channel=int(channel_idx),
+                message=texto_norm,
+                destination="meshcore:channel",
+                require_ack=False,
+                meta=meta,
+            )
+            if not (isinstance(res, dict) and res.get("ok")):
+                raise RuntimeError(res)
+            created.append(res["task"])
+
+        lines = [
+            "Tareas diarias MeshCore creadas:",
+            f"• Grupo: <code>{group_id or '-'}</code>",
+            f"• MeshCore channel_idx: <b>{escape(str(int(channel_idx)))}</b>",
+        ]
+        if est_parts > 1:
+            lines.append(f"• Partes estimadas: {est_parts}")
+
+        for t in created:
+            meta_t = t.get("meta") or {}
+            wutc = t.get("when_utc") or ""
+            dt_utc = None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                try:
+                    dt_utc = datetime.strptime(wutc, fmt).replace(tzinfo=UTC)
+                    break
+                except Exception:
+                    continue
+            first_local = dt_utc.astimezone(TZ_EUROPE_MADRID).strftime("%Y-%m-%d %H:%M") if dt_utc else wutc
+            lines.append(f"  - {meta_t.get('daily_time','--:--')} → ID <code>{t['id']}</code> (primera: {first_local} local)")
+
+        await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        await update.effective_message.reply_text(f"No se pudo programar /diario_mc: {type(e).__name__}: {e}")
+
+
+async def diario_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /diario_mc_dm <HH:MM[,HH:MM,...]> [grupo <id>] <contact_prefix|[MC:prefix]> <texto...>
+
+    Programa uno o varios envíos diarios directos hacia un contacto MeshCore,
+    reutilizando el mismo backend que /enviar_mc_dm: el broker recibe MESHCORE_SEND
+    con kind="contact" y encola en MESHCORE_ENGINE.
+
+    Ejemplos:
+      /diario_mc_dm 09:00 6a18cb3d125b Parte diario directo
+      /diario_mc_dm 09:00,21:00 grupo dm_mc [MC:6a18cb3d125b] Parte diario directo
+    """
+    if await _abort_if_cooldown(update, context):
+        return ConversationHandler.END
+
+    bump_stat(update.effective_user.id, update.effective_user.username or "", "diario_mc_dm")
+
+    msg_obj = update.effective_message
+    args = [a.strip() for a in (context.args or []) if a and a.strip()]
+    if len(args) < 3:
+        await msg_obj.reply_text(
+            "Uso:\n"
+            "/diario_mc_dm <HH:MM[,HH:MM,...]> [grupo <id>] <contact_prefix|[MC:prefix]> <texto...>\n"
+            "Ejemplo: /diario_mc_dm 09:00 grupo avisos_dm 6a18cb3d125b Parte diario directo"
+        )
+        return
+
+    horas_list = _parse_daily_meshcore_hours(args[0])
+    if not horas_list:
+        await msg_obj.reply_text("Hora inválida. Usa HH:MM[,HH:MM,...] (00–23:59).")
+        return
+
+    tail, group_id = _strip_daily_group_tokens(args[1:])
+    if len(tail) < 2:
+        await msg_obj.reply_text("Falta contacto MeshCore y texto.")
+        return
+
+    contact_prefix = _extract_mc_contact_prefix_from_text(tail[0])
+    text = " ".join(tail[1:]).strip()
+
+    if not contact_prefix or not text:
+        await msg_obj.reply_text(
+            "Parámetros no válidos.\n"
+            "Ejemplos:\n"
+            "  /diario_mc_dm 09:00 6a18cb3d125b Texto\n"
+            "  /diario_mc_dm 09:00 [MC:6a18cb3d125b] Texto"
+        )
+        return
+
+    texto_norm = _norm_mesh(text)
+    ok_len, err = _validate_len_or_block(texto_norm)
+    if not ok_len:
+        await msg_obj.reply_text(err, parse_mode="HTML")
+        return
+
+    est_parts = len(_split_mesh(texto_norm, max_bytes=MAX_BYTES))
+    created = []
+
+    try:
+        now_local = datetime.now(TZ_EUROPE_MADRID)
+        for hh, mm, hhmm_txt in horas_list:
+            first_dt = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if first_dt <= now_local:
+                first_dt = first_dt + timedelta(days=1)
+            when_local_str = first_dt.strftime("%Y-%m-%d %H:%M")
+
+            meta = {
+                "scheduled_by": update.effective_user.username or str(update.effective_user.id),
+                "bot_est_parts": est_parts,
+                "via": "/diario_mc_dm",
+                "repeat": "daily",
+                "daily_time": hhmm_txt,
+                "transport": "meshcore",
+                "meshcore_mode": "dm",
+                "meshcore_contact": contact_prefix,
+                "chat_id": update.effective_chat.id,
+                "reply_to": update.effective_message.message_id,
+            }
+            if group_id:
+                meta["daily_group_id"] = group_id
+
+            res = broker_tasks.schedule_message(
+                when_local=when_local_str,
+                channel=0,
+                message=texto_norm,
+                destination=contact_prefix,
+                require_ack=False,
+                meta=meta,
+            )
+            if not (isinstance(res, dict) and res.get("ok")):
+                raise RuntimeError(res)
+            created.append(res["task"])
+
+        lines = [
+            "Tareas diarias MeshCore DM creadas:",
+            f"• Grupo: <code>{group_id or '-'}</code>",
+            f"• Contacto: <code>{escape(contact_prefix)}</code>",
+        ]
+        if est_parts > 1:
+            lines.append(f"• Partes estimadas: {est_parts}")
+
+        for t in created:
+            meta_t = t.get("meta") or {}
+            wutc = t.get("when_utc") or ""
+            dt_utc = None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                try:
+                    dt_utc = datetime.strptime(wutc, fmt).replace(tzinfo=UTC)
+                    break
+                except Exception:
+                    continue
+            first_local = dt_utc.astimezone(TZ_EUROPE_MADRID).strftime("%Y-%m-%d %H:%M") if dt_utc else wutc
+            lines.append(f"  - {meta_t.get('daily_time','--:--')} → ID <code>{t['id']}</code> (primera: {first_local} local)")
+
+        await msg_obj.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        await msg_obj.reply_text(f"No se pudo programar /diario_mc_dm: {type(e).__name__}: {e}")
+
+
 async def mis_diarios_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /mis_diarios [estado] [grupo <group_id>]
@@ -15665,6 +15983,8 @@ def build_application() -> Application:
 
     app.add_handler(CommandHandler("programar", programar_cmd))
     app.add_handler(CommandHandler("diario", diario_cmd))
+    app.add_handler(CommandHandler("diario_mc", diario_mc_cmd))
+    app.add_handler(CommandHandler("diario_mc_dm", diario_mc_dm_cmd))
     app.add_handler(CommandHandler("mis_diarios", mis_diarios_cmd))
     app.add_handler(CommandHandler("parar_diario", parar_diario_cmd))
     app.add_handler(CommandHandler("parar_diario_grupo", parar_diario_grupo_cmd))
