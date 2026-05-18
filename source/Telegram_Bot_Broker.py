@@ -14556,6 +14556,31 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 else:
                     canal_str = f"{ch_num_txt}{star}"
 
+                # Mostrar también el canal original de MeshCore cuando el broker lo adjunta.
+                mc_chan_idx = None
+                try:
+                    mc_chan_idx = (
+                        pkt.get("meshcore_chan_idx")
+                        or summary.get("meshcore_chan_idx")
+                        or obj.get("meshcore_chan_idx")
+                    ) if isinstance(pkt, dict) else (summary.get("meshcore_chan_idx") or obj.get("meshcore_chan_idx"))
+                except Exception:
+                    mc_chan_idx = None
+                if mc_chan_idx is not None:
+                    try:
+                        canal_str = f"{canal_str} · mc:{int(mc_chan_idx)}"
+                    except Exception:
+                        canal_str = f"{canal_str} · mc:{mc_chan_idx}"
+                    try:
+                        mc_chan_tag = (
+                            pkt.get("meshcore_chan_tag")
+                            or summary.get("meshcore_chan_tag")
+                            or obj.get("meshcore_chan_tag")
+                        ) if isinstance(pkt, dict) else (summary.get("meshcore_chan_tag") or obj.get("meshcore_chan_tag"))
+                    except Exception:
+                        mc_chan_tag = None
+                    if isinstance(mc_chan_tag, str) and mc_chan_tag.strip():
+                        canal_str = f"{canal_str} ({mc_chan_tag.strip()})"
 
                 # Métricas de señal y hops (reutilizando tus funciones)
                 try:
@@ -14755,6 +14780,12 @@ async def replay_offline_messages(update: Update, chat_id: int, listen_chan: int
                 ch_name = None
 
         ch_label = f"{ch} ({ch_name})" if isinstance(ch_name, str) and ch_name.strip() else f"{ch}"
+        mc_chan_idx = evt.get("meshcore_chan_idx") or summary.get("meshcore_chan_idx")
+        if mc_chan_idx is not None:
+            ch_label = f"{ch_label} · mc:{mc_chan_idx}"
+            mc_chan_tag = evt.get("meshcore_chan_tag") or summary.get("meshcore_chan_tag")
+            if isinstance(mc_chan_tag, str) and mc_chan_tag.strip():
+                ch_label = f"{ch_label} ({mc_chan_tag.strip()})"
 
         head = (f"📩 [Canal {ch_label} | {port} | {frm_alias} {frm} → {to_alias} {to}\n "
                 f" RX: RSSI {rxr if rxr is not None else '?'}\n "

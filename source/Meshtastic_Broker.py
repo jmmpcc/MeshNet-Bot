@@ -404,6 +404,32 @@ def _mc_parse_chanidx_to_ch() -> dict[int, int]:
         out[a] = b
     return out
 
+def _mc_parse_chanidx_to_tag() -> dict[int, str]:
+    """
+    Mapa MeshCore channel_idx -> tag/nombre humano.
+    - MESHCORE_CHANIDX_TO_TAG: "2:EMERGENCIAS,3:COORD"
+    """
+    out: dict[int, str] = {}
+    raw = (os.getenv("MESHCORE_CHANIDX_TO_TAG") or "").strip()
+    if not raw:
+        return out
+    for part in raw.split(","):
+        p = (part or "").strip()
+        if not p:
+            continue
+        toks = [t.strip() for t in p.split(":", 1)]
+        if len(toks) < 2:
+            continue
+        try:
+            idx = int(toks[0])
+        except Exception:
+            continue
+        tag = (toks[1] or "").strip()
+        if not tag:
+            continue
+        out[idx] = tag
+    return out
+
 def _safe_meshcore_max_text_bytes() -> int:
     """
     Límite conservador (en BYTES UTF-8) para TX hacia MeshCore.
@@ -663,14 +689,17 @@ class MeshCoreEmbeddedBridge:
         self.chanidx_to_ch = _mc_parse_chanidx_to_ch()  # MeshCore channel_idx -> Meshtastic CH
 
         # Reverse map (MeshCore channel_idx -> tag lógico) para prefijos RX.
-        # Se alimenta desde MESHCORE_CHANNEL_MAP (mismos tags que usas en TX).
+        # Fuentes (prioridad):
+        #   1) MESHCORE_CHANIDX_TO_TAG (nuevo, independiente de mirroring)
+        #   2) tags definidos en MESHCORE_CHANNEL_MAP
         self.chanidx_to_tag: dict[int, str] = {}
         try:
+            self.chanidx_to_tag.update(_mc_parse_chanidx_to_tag())
             for _ch, m in (self.ch_map or {}).items():
                 if (m or {}).get("kind") == "chan":
                     ci = m.get("channel_idx")
                     tg = (m.get("tag") or "").strip()
-                    if ci is not None and tg:
+                    if ci is not None and tg and int(ci) not in self.chanidx_to_tag:
                         self.chanidx_to_tag[int(ci)] = tg
         except Exception:
             self.chanidx_to_tag = {}
@@ -955,6 +984,12 @@ class MeshCoreEmbeddedBridge:
                 )
 
                 out_txt = f"{head} {text_msg}"
+                mc_chan_tag = None
+                if kind == "chan" and chan_idx is not None:
+                    try:
+                        mc_chan_tag = (self.chanidx_to_tag or {}).get(int(chan_idx))
+                    except Exception:
+                        mc_chan_tag = None
 
 
                 # Inyectar a Meshtastic vía cola del broker (SENDQ)
@@ -982,6 +1017,7 @@ class MeshCoreEmbeddedBridge:
                         pubkey_prefix=pref,
                         kind=kind,
                         chan_idx=chan_idx,
+                        chan_tag=(mc_chan_tag or None),
                         from_alias=(alias or None),
                     )
 
@@ -4894,6 +4930,7 @@ def emit_meshcore_rx_to_hub_and_log(
     pubkey_prefix: str = "",
     kind: str = "contact",
     chan_idx: int | None = None,
+    chan_tag: str | None = None,
     from_alias: str | None = None,
 ) -> None:
     """
@@ -4942,6 +4979,7 @@ def emit_meshcore_rx_to_hub_and_log(
                     "meshcore": 1,
                     "meshcore_kind": kind,
                     "meshcore_chan_idx": chan_idx,
+                    "meshcore_chan_tag": ((chan_tag or "").strip() or None),
                     "meshcore_pubkey_prefix": (pubkey_prefix or "").strip() or None,
                 },
                 "ts": _now_s(),
@@ -4968,6 +5006,7 @@ def emit_meshcore_rx_to_hub_and_log(
                 "meshcore": 1,
                 "meshcore_kind": kind,
                 "meshcore_chan_idx": chan_idx,
+                "meshcore_chan_tag": ((chan_tag or "").strip() or None),
                 "meshcore_pubkey_prefix": (pubkey_prefix or "").strip() or None,
             }
         )
