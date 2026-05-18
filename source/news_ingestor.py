@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-#news_ingestor_v6.2.4.py
+# news_ingestor_v6.2.4.py  (host-side)
 
 import os
 import re
@@ -9,59 +9,60 @@ import json
 import sqlite3
 import hashlib
 import logging
-from datetime import datetime, timezone
+import argparse
+import sys
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
 import feedparser
 
-HTTP_TIMEOUT = (5, 15)  # connect, read
-MAX_ITEMS_PER_SOURCE = 40
+HTTP_TIMEOUT = (5, 30)  # connect, read
+MAX_ITEMS_PER_SOURCE = 10
+
+# ── Retención automática de noticias (días)
+# 0 = sin purga
+NEWS_RETENTION_DAYS = 5
 
 DEFAULT_RSS_SOURCES = [
 
-    # ─────────────────────────────────────────────
-    # Radioafición / Radio / SDR
-    {"source": "arrl_news", "url": "http://www.arrl.org/arrlletter?view=rss", "tags": "radio amateur"},
-    {"source": "amsat_news", "url": "https://www.amsat.org/feed/", "tags": "radio amateur satellite"},
-    {"source": "rs_sdr", "url": "https://www.rtl-sdr.com/feed/", "tags": "radio sdr"},
-    {"source": "qrp_labs", "url": "https://qrp-labs.com/feed", "tags": "radio electronics"},
-    {"source": "hamradio_dx", "url": "https://dxnews.com/feed/", "tags": "radio dx"},
-    {"source": "hackaday_rf", "url": "https://hackaday.com/tag/rf/feed/", "tags": "radio electronics"},
+    # 📡 Radioafición / HAM
+    {"source": "ure", "url": "https://www.ure.es/feed/", "tags": "ham"},
+    #{"source": "ure_noticias", "url": "https://www.ure.es/noticias/feed/", "tags": "ham"},
+    #{"source": "radioaficion_blog", "url": "https://radioaficion.blogspot.com/feeds/posts/default?alt=rss", "tags": "ham"},
+    #{"source": "radioaficion_digital", "url": "https://radioaficiondigital.com/feed/", "tags": "ham"},
 
-    # ─────────────────────────────────────────────
-    # Electrónica / Hardware
-    {"source": "hackaday", "url": "https://hackaday.com/feed/", "tags": "electronics hacking"},
-    {"source": "ee_times", "url": "https://www.eetimes.com/feed/", "tags": "electronics industry"},
-    {"source": "electronicsweekly", "url": "https://www.electronicsweekly.com/feed/", "tags": "electronics"},
-    {"source": "allaboutcircuits", "url": "https://www.allaboutcircuits.com/rss/", "tags": "electronics education"},
+    # 🔬 Ciencia (España)
+    {"source": "agencia_sinc", "url": "http://www.agenciasinc.es/feed/noticias", "tags": "ciencia"},
+    {"source": "csic", "url": "https://www.csic.es/es/rss.xml", "tags": "ciencia"},
+    {"source": "elpais_ciencia", "url": "https://elpais.com/rss/elpais/ciencia.xml", "tags": "ciencia"},
+    {"source": "abc_ciencia", "url": "https://www.abc.es/rss/feeds/abc_Ciencia.xml", "tags": "ciencia"},
 
-    # ─────────────────────────────────────────────
-    # Ciencia (general)
-    {"source": "science_mag", "url": "https://www.science.org/rss/news_current.xml", "tags": "science"},
-    {"source": "nature_news", "url": "https://www.nature.com/nature.rss", "tags": "science"},
-    {"source": "phys_org", "url": "https://phys.org/rss-feed/", "tags": "science"},
-    {"source": "newscientist", "url": "https://www.newscientist.com/feed/home/", "tags": "science"},
+    # ⚡ Electrónica
+    {"source": "redeweb", "url": "https://www.redeweb.com/feed/", "tags": "electronica"},
+    #{"source": "electronicapratica", "url": "https://www.electronicapratica.com/feed/", "tags": "electronica"},
 
-    # ─────────────────────────────────────────────
-    # Ciencia y divulgación en español
-    {"source": "agencia_sinc", "url": "https://www.agenciasinc.es/rss", "tags": "science es"},
-    {"source": "materia", "url": "https://elpais.com/rss/elpais/ciencia.xml", "tags": "science es"},
-    {"source": "muyinteresante_ciencia", "url": "https://feeds.feedburner.com/muyinteresante/ciencia", "tags": "science es"},
+    # 🖥️ Informática / Tecnología (Castellano)
 
-    # ─────────────────────────────────────────────
-    # Investigación española (oficial / institucional)
-    {"source": "csic_noticias", "url": "https://www.csic.es/es/rss.xml", "tags": "research es"},
-    {"source": "feci_noticias", "url": "https://www.fecyt.es/es/rss", "tags": "research es"},
-    {"source": "universia_investigacion", "url": "https://www.universia.net/es/rss/investigacion.xml", "tags": "research es"},
-    {"source": "uah_investigacion", "url": "https://www.uah.es/es/rss/investigacion.xml", "tags": "research es"},
+    {"source": "xataka", "url": "https://www.xataka.com/index.xml", "tags": "informatica"},
+    {"source": "genbeta", "url": "https://www.genbeta.com/index.xml", "tags": "informatica"},
+    {"source": "muycomputer", "url": "https://www.muycomputer.com/feed/", "tags": "informatica"},
+    #{"source": "computerhoy", "url": "https://www.computerhoy.com/rss.xml", "tags": "informatica"},
 
-    # ─────────────────────────────────────────────
-    # Investigación / tecnología aplicada
-    {"source": "ieee_spectrum", "url": "https://spectrum.ieee.org/rss/fulltext", "tags": "technology research"},
-    {"source": "mit_tech_review", "url": "https://www.technologyreview.com/feed/", "tags": "technology research"},
+    # 🔐 Seguridad / IT profesional
+    {"source": "incibe", "url": "https://www.incibe.es/feed/vulnerabilities", "tags": "ciberseguridad"},
+    #{"source": "eshacker", "url": "https://www.es-hacker.com/feeds/posts/default?alt=rss", "tags": "ciberseguridad"},
+
+    # ⚙️ Linux / Open Source
+    {"source": "muylinux", "url": "https://www.muylinux.com/feed/", "tags": "linux"},
+    {"source": "linuxadictos", "url": "https://www.linuxadictos.com/feed", "tags": "linux"},
+
+    # ⚙️ Astronomia
+    #{"source": "oan", "url": "https://www.oan.es/rss", "tags": "astronomia"},
+    {"source": "iac", "url": "https://www.iac.es/es/rss.xml", "tags": "astronomia"},
+    {"source": "eureka", "url": "https://danielmarin.naukas.com/feed/", "tags": "astronomia"},
+    
 ]
-
 
 
 def utc_now_iso() -> str:
@@ -88,6 +89,30 @@ def canonicalize_url(url: str) -> str:
         return urlunsplit(fragmentless)
     except Exception:
         return url.strip()
+
+def shorten_url(url: str) -> str:
+    """
+    Acorta URLs largas para uso en BBS (LoRa-friendly).
+    Usa is.gd sin API key.
+    Si falla, devuelve la URL original.
+    """
+    if not url or len(url) <= 40:
+        return url
+
+    try:
+        r = requests.get(
+            "https://is.gd/create.php",
+            params={"format": "simple", "url": url},
+            timeout=(4, 10),
+        )
+        if r.status_code == 200:
+            short = r.text.strip()
+            if short.startswith("http"):
+                return short
+    except Exception:
+        pass
+
+    return url
 
 
 def strip_html(text: str) -> str:
@@ -116,21 +141,43 @@ def parse_published(entry) -> str:
 
 
 def get_db_path() -> str:
-    base_dir = os.getenv("BBS_DB_PATH", "bot_data/bbs").strip()
+    """
+    Devuelve la ruta real de la DB de la BBS (host-side).
+    IMPORTANTE: en este proyecto la DB se llama 'bbs_data.db'
+    y convive con '-wal' y '-shm' en el mismo directorio.
+    """
+    base_dir = (os.getenv("BBS_DB_PATH", "bot_data/bbs") or "").strip() or "bot_data/bbs"
     os.makedirs(base_dir, exist_ok=True)
-    return os.path.join(base_dir, "bbs.sqlite")
+    return os.path.join(base_dir, "bbs_data.db")
 
 
 def db_connect(db_path: str) -> sqlite3.Connection:
     # timeout alto + busy_timeout para convivir con el servidor BBS (mismo SQLite) 24/7
     con = sqlite3.connect(db_path, timeout=30)
+    con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA synchronous=NORMAL;")
     con.execute("PRAGMA busy_timeout=5000;")
     return con
 
 
+def _table_columns(con: sqlite3.Connection, table: str) -> set:
+    cols = set()
+    try:
+        cur = con.execute(f"PRAGMA table_info({table});")
+        for row in cur.fetchall():
+            # row: cid, name, type, notnull, dflt_value, pk
+            cols.add(str(row[1]))
+    except Exception:
+        pass
+    return cols
+
+
 def db_init_news(con: sqlite3.Connection) -> None:
+    """
+    Inicializa tabla news.
+    Nota: si la tabla ya existía con otro esquema, CREATE TABLE IF NOT EXISTS no la cambia.
+    """
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS news (
@@ -155,13 +202,16 @@ def db_init_news(con: sqlite3.Connection) -> None:
 
 
 def fetch_feed(url: str) -> feedparser.FeedParserDict:
-    headers = {
-        "User-Agent": "MeshNet-BBS-NewsIngestor/1.0",
-        "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
-    }
-    r = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    return feedparser.parse(r.content)
+    headers = {"User-Agent": "MeshNet-BBS-NewsIngestor/1.0"}
+    last_exc = None
+    for _ in range(2):  # 1 reintento
+        try:
+            r = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            return feedparser.parse(r.content)
+        except Exception as e:
+            last_exc = e
+    raise last_exc
 
 
 def insert_news(con: sqlite3.Connection, item: dict) -> bool:
@@ -211,11 +261,104 @@ def setup_logging(db_path: str) -> None:
     )
 
 
-def main() -> int:
+def _get_retention_days() -> int:
+    """
+    Retención fija definida en código.
+    """
+    try:
+        return int(NEWS_RETENTION_DAYS) if int(NEWS_RETENTION_DAYS) > 0 else 0
+    except Exception:
+        return 0
+
+
+def purge_old_news(con: sqlite3.Connection, retention_days: int) -> int:
+    """
+    Borra registros antiguos para mantener solo noticias recientes.
+    Criterio:
+      - Si published_at existe: borra donde published_at < cutoff (y no vacío)
+      - Además, si published_at es vacío: borra por created_at < cutoff (si existe)
+    Devuelve número de filas borradas (aprox, suma de ambos deletes).
+    """
+    if retention_days <= 0:
+        return 0
+
+    cols = _table_columns(con, "news")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).replace(microsecond=0).isoformat()
+
+    deleted = 0
+    cur = con.cursor()
+
+    # 1) Por published_at (si existe)
+    if "published_at" in cols:
+        cur.execute(
+            "DELETE FROM news WHERE published_at <> '' AND published_at < ?;",
+            (cutoff,),
+        )
+        deleted += cur.rowcount
+
+    # 2) Fallback por created_at para filas sin published_at o esquema sin published_at
+    if "created_at" in cols:
+        if "published_at" in cols:
+            cur.execute(
+                "DELETE FROM news WHERE (published_at = '' OR published_at IS NULL) AND created_at <> '' AND created_at < ?;",
+                (cutoff,),
+            )
+        else:
+            cur.execute(
+                "DELETE FROM news WHERE created_at <> '' AND created_at < ?;",
+                (cutoff,),
+            )
+        deleted += cur.rowcount
+
+    con.commit()
+    return deleted
+
+
+def main(argv=None) -> int:
+
+    # ── CLI (modo compatible). Por defecto se ejecuta la ingesta (comportamiento histórico).
+    # Esto evita que un simple '--help' dispare una ingesta real (útil en despliegues 24/7).
+    if argv is None:
+        argv = sys.argv[1:]
+
+    parser = argparse.ArgumentParser(
+        prog="news_ingestor.py",
+        description="Ingesta RSS/Atom hacia la DB de BBS (tabla news).",
+    )
+    parser.add_argument("--list-sources", action="store_true", help="Muestra las fuentes configuradas y sale.")
+    parser.add_argument("--check-only", action="store_true", help="Valida accesibilidad de las fuentes (HTTP) y sale.")
+    args = parser.parse_args(argv)
+
     db_path = get_db_path()
     setup_logging(db_path)
 
     sources = load_sources()
+
+    if args.list_sources:
+        for src in sources:
+            print(f'{src.get("source","")}\t{src.get("tags","")}\t{src.get("url","")}', flush=True)
+        return 0
+
+    if args.check_only:
+        ok = 0
+        bad = 0
+        for src in sources:
+            name = src.get("source","")
+            url = src.get("url","")
+            try:
+                r = requests.get(url, headers={"User-Agent": "MeshNet-NewsIngestor/1.0"}, timeout=HTTP_TIMEOUT, allow_redirects=True)
+                if 200 <= r.status_code < 400:
+                    ok += 1
+                    print(f"OK\t{name}\t{r.status_code}\t{url}", flush=True)
+                else:
+                    bad += 1
+                    print(f"BAD\t{name}\t{r.status_code}\t{url}", flush=True)
+            except Exception as e:
+                bad += 1
+                print(f"BAD\t{name}\t{type(e).__name__}: {e}\t{url}", flush=True)
+        print(f"check-only: ok={ok} bad={bad}", flush=True)
+        return 0
+
     logging.info("news_ingestor start sources=%d db=%s", len(sources), db_path)
 
     inserted = 0
@@ -225,6 +368,12 @@ def main() -> int:
     con = db_connect(db_path)
     try:
         db_init_news(con)
+
+        # ── Purga automática por retención (antes de ingerir)
+        retention_days = _get_retention_days()
+        if retention_days > 0:
+            purged = purge_old_news(con, retention_days)
+            logging.info("news_ingestor retention purge days=%d deleted=%d", retention_days, purged)
 
         for src in sources:
             name = src["source"]
@@ -240,9 +389,12 @@ def main() -> int:
                     if not title:
                         continue
 
-                    link = canonicalize_url(getattr(e, "link", "") or "")
-                    if not link:
+                    link_raw = canonicalize_url(getattr(e, "link", "") or "")
+                    if not link_raw:
                         continue
+
+                    link = shorten_url(link_raw)
+
 
                     summary = strip_html(getattr(e, "summary", "") or getattr(e, "description", "") or "")
                     published = parse_published(e)
@@ -270,11 +422,21 @@ def main() -> int:
                 errors += 1
                 logging.exception("Error ingesting source=%s url=%s", name, url)
 
+        # ── Purga automática por retención (después de ingerir)
+        if retention_days > 0:
+            purged2 = purge_old_news(con, retention_days)
+            if purged2:
+                logging.info("news_ingestor retention post-purge days=%d deleted=%d", retention_days, purged2)
+
     finally:
         con.close()
 
     logging.info("news_ingestor done inserted=%d dup=%d errors=%d", inserted, dup, errors)
-    return 0 if errors == 0 else 1
+
+    # IMPORTANTE 24/7:
+    # Un feed roto (SSL/404/timeout) no debe marcar el servicio como "failed".
+    # Se registra en log/journal y el timer sigue funcionando.
+    return 0
 
 
 if __name__ == "__main__":
