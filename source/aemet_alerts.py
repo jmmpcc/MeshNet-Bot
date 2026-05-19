@@ -345,35 +345,42 @@ def _discover_feed_urls_from_info_page(html_text: str, base_url: str) -> list[st
     out.sort(key=lambda u: (0 if re.search(r"(rss|atom|cap|\.xml)", u, flags=re.I) else 1, len(u)))
     return out
 
-
 def _configured_feed_urls() -> list[str]:
     """
-    Devuelve las URLs fuente.
+    Devuelve las URLs fuente de avisos AEMET.
 
     Reglas:
     1) Si AEMET_ALERTS_FEED_URL está definido, se usa tal cual.
        Admite varias URLs separadas por coma o punto y coma.
-    2) Si está vacío, se usa la página oficial de RSS/Atom de avisos de España
-       y se intenta descubrir feed XML/CAP desde ahí.
+
+    2) Si está vacío, usa la página oficial de Aragón como fallback operativo
+       para evitar recorrer el índice nacional completo.
+
+    Nota 24/7:
+    - En producción se recomienda definir siempre AEMET_ALERTS_FEED_URL.
+    - Se limita el descubrimiento para evitar bloqueos por exceso de enlaces.
     """
     raw = _env_str("AEMET_ALERTS_FEED_URL", "")
     if raw:
-        urls = [u.strip() for u in raw.replace(";", ",").split(",") if u.strip()]
-        return urls
+        return [u.strip() for u in raw.replace(";", ",").split(",") if u.strip()]
 
-    # Fallback: página oficial informativa.
-    # Si no se encuentra feed dentro, se intentará parsear la propia página,
-    # pero normalmente será mejor definir AEMET_ALERTS_FEED_URL cuando tengamos
-    # el canal exacto de comunidad/provincia.
+    fallback = _env_str(
+        "AEMET_ALERTS_FALLBACK_INFO_URL",
+        "https://www.aemet.es/es/rss_info/avisos/arn",
+    )
+
     try:
-        page = _fetch_cached(DEFAULT_AEMET_INFO_URL)
-        urls = _discover_feed_urls_from_info_page(page, DEFAULT_AEMET_INFO_URL)
-        if urls:
-            return urls[:5]
-    except Exception:
-        pass
+        page = _fetch_cached(fallback)
+        urls = _discover_feed_urls_from_info_page(page, fallback)
 
-    return [DEFAULT_AEMET_INFO_URL]
+        max_urls = max(1, _env_int("AEMET_ALERTS_DISCOVER_MAX_URLS", 3))
+        if urls:
+            return urls[:max_urls]
+    except Exception as e:
+        if _env_int("AEMET_ALERTS_DEBUG", 0) >= 1:
+            print(f"[aemet_alerts] No se pudo descubrir feed desde {fallback}: {type(e).__name__}: {e}", flush=True)
+
+    return [fallback]
 
 
 # =============================================================================
@@ -1086,22 +1093,25 @@ def build_aemet_alert_text_from_meta(meta: Dict[str, Any]) -> str:
     # Cada aviso en línea separada. broker_task ya trocea por bytes si hace falta.
     return "\n".join(messages).strip()
 
-
 def debug_aemet_alerts(meta: Optional[Dict[str, Any]] = None) -> dict:
     """
     Diagnóstico manual.
 
-    Uso desde consola Python:
+    Uso:
         import aemet_alerts
         print(aemet_alerts.debug_aemet_alerts({"zone":"Zaragoza"}))
 
     Devuelve:
         Resumen de URLs, avisos totales y avisos filtrados.
+
+    Nota:
+        Esta función no transmite RF.
     """
     meta = dict(meta or {})
     urls = _configured_feed_urls()
     alerts = fetch_aemet_alerts()
     filtered = filter_aemet_alerts(alerts, meta)
+
     return {
         "ok": True,
         "urls": urls,

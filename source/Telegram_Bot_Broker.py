@@ -6113,11 +6113,11 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("mis_diarios", "Listar tareas diarias (/mis_diarios [pending|done|failed|canceled] [grupo <id>])"),
         BotCommand("parar_diario_grupo", "Detener todas las diarias de un grupo"),
         BotCommand("parar_diario", "Detener un envío diario por ID"),
-        BotCommand("baliza_clima", "Programar baliza meteorológica"),
+        BotCommand("baliza_clima", "cada <minutos> <mesh|meshcore> <destino> <ciudad> [lat=<lat> lon=<lon>] - Programar baliza meteorológica"),
         BotCommand("mis_balizas", "Ver balizas programadas"),
         BotCommand("parar_baliza", "Cancelar baliza programada"),
 
-        BotCommand("alerta_aemet", "Programar avisos oficiales AEMET por RF"),
+        BotCommand("alerta_aemet", "cada <MM> <mesh|meshcore> canal [x] <Zaragoza> Programar avisos AEMET por RF  "),
         BotCommand("mis_alertas_aemet", "Ver alertas AEMET programadas"),
         BotCommand("parar_alerta_aemet", "Cancelar una alerta AEMET programada"),
           
@@ -6300,329 +6300,310 @@ async def _send_html_chunks(update: Update, html_text: str, block_title: str = "
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /ayuda — Ayuda completa del bot (HTML-safe para Telegram).
-    Versión extendida, dividida automáticamente en partes si excede el límite de Telegram.
+    /ayuda — Ayuda completa del bot MeshNet Bot v7.0.12.
+
+    Funcionalidad:
+      - Genera una ayuda HTML-safe para Telegram.
+      - Documenta los comandos registrados actualmente en Telegram_Bot_Broker.py.
+      - Incluye ejemplos cortos y operativos.
+      - Divide automáticamente el texto mediante _send_html_chunks(), evitando superar
+        el límite de tamaño de mensajes de Telegram.
+
+    Uso:
+      /ayuda
     """
-    from telegram import constants
 
     s_intro = (
-        "<b>Ayuda — Bot Mesh v4.3</b>\n"
-        "Integración API Meshtastic con reserva CLI y broker JSONL. Estrategia API-first con reconexión automática.\n"
-        "El broker permite escuchar eventos y consultar histórico sin abrir nuevas conexiones al nodo.\n"
+        "<b>Ayuda — MeshNet Bot v7.0.12</b>\n"
+        "Bot de control para Meshtastic, MeshCore, APRS, BBS, programación de tareas, "
+        "avisos AEMET, balizas meteorológicas, auditorías y administración del broker.\n"
+        "Arquitectura API-first con broker persistente, control JSONL/BacklogServer y reconexión 24/7.\n"
     )
 
     s_conv = (
         "────────────────────────────────────────────────\n"
-        "<b>Convenciones y notas</b>\n"
-        "• <b>Destino</b>: número (de <code>/ver_nodos</code> o <code>/vecinos</code>), <code>!id</code>, alias, o "
-        "<code>broadcast</code>/<code>all</code>.\n"
-        "• <b>Canal</b>: sufijo <code>:N</code> (ej. <code>!c94a4b9a:0</code>, <code>alias:5</code>, <code>broadcast:1</code>) "
-        "o <code>canal N</code> con broadcast.\n"
-        "• <b>Frescura</b> (mins): minutos desde el último visto. En API: <code>last_heard</code>; en tablas: “mins”.\n"
-        "• <b>Reintentos</b>, <b>espera</b>, <b>backoff</b> disponibles en envíos.\n"
-        "• <b>ACK en broadcast</b>: éxito si al menos un nodo confirma dentro de la ventana.\n"
-        "• <b>Menú oficial</b>: botón Menú con opciones según rol (usuario/administrador).\n"
-        "• <b>Conexión</b>: una única conexión TCP persistente al nodo; múltiples clientes se conectan al broker local.\n"
+        "<b>Convenciones generales</b>\n"
+        "• <b>Destino Meshtastic</b>: número de lista, <code>!id</code>, alias, <code>broadcast</code> o <code>all</code>.\n"
+        "• <b>Canal Meshtastic</b>: <code>destino:N</code> o <code>canal N</code>.\n"
+        "• <b>Destino MeshCore canal</b>: <code>meshcore canal &lt;channel_idx&gt;</code>.\n"
+        "• <b>Destino MeshCore directo</b>: <code>meshcore dm &lt;contact_prefix&gt;</code>.\n"
+        "• <b>Estados de tarea</b>: <code>pending</code>, <code>done</code>, <code>failed</code>, <code>canceled</code>.\n"
+        "• <b>Zona horaria de programación</b>: <code>Europe/Madrid</code>.\n"
+        "• <b>ACK</b>: en unicast confirma recepción. En broadcast solo puede inferirse si algún nodo confirma.\n"
+        "• <b>Textos largos</b>: se validan y/o trocean según el transporte para proteger airtime LoRa.\n"
     )
 
-    s_mensajeria = (
+    s_menu = (
         "────────────────────────────────────────────────\n"
-        "<b>Mensajería</b>\n"
-        "• <code>/enviar &lt;destino[:canal]&gt; &lt;texto…&gt;</code> — Envío normal. Soporta <code>broadcast[:N]</code>.\n"
-        "  Ej.: <code>/enviar canal 0 Buenos dias</code> • <code>/enviar !b03df4cc:2 Hola</code>\n"
-        "• <code>/enviar_ack &lt;destino[:canal]&gt; &lt;texto…&gt; [reintentos=N espera=S backoff=X]</code> — Solicita ACK en unicast.\n"
-        "  En broadcast, se considera éxito si al menos un nodo confirma.\n"
-        "  Ej.: <code>/enviar_ack broadcast:1 reintentos=5 espera=10 backoff=1.5 Mensaje critico</code>\n"
-        "  Notas: Resultado muestra OK/KO del envío; Confirmacion indica alias o !id que confirmó si hubo ACK.\n"
+        "<b>Menú y ayuda</b>\n"
+        "• <code>/start</code> — Abre el menú principal.\n"
+        "• <code>/menu</code> — Muestra de nuevo el menú.\n"
+        "• <code>/ayuda</code> — Muestra esta ayuda completa.\n"
+        "• <code>/cancel</code> — Cancela una conversación activa, por ejemplo el flujo guiado de <code>/enviar</code>.\n"
+        "Ej.: <code>/menu</code>\n"
+    )
+
+    s_mensajeria_mesh = (
+        "────────────────────────────────────────────────\n"
+        "<b>Mensajería Meshtastic</b>\n"
+        "• <code>/enviar &lt;destino[:canal]&gt; &lt;texto&gt;</code> — Envía texto normal.\n"
+        "• <code>/enviar canal &lt;N&gt; &lt;texto&gt;</code> — Broadcast implícito por el canal indicado.\n"
+        "• <code>/enviar_ack &lt;destino[:canal]&gt; &lt;texto&gt; [reintentos=N espera=S backoff=X]</code> — Envía solicitando ACK.\n"
+        "Ej.: <code>/enviar canal 0 Buenos dias</code>\n"
+        "Ej.: <code>/enviar !b03df4cc:2 Mensaje directo</code>\n"
+        "Ej.: <code>/enviar_ack !b03df4cc:1 Confirmar enlace reintentos=4 espera=10 backoff=1.5</code>\n"
+    )
+
+    s_mensajeria_mc = (
+        "────────────────────────────────────────────────\n"
+        "<b>Mensajería MeshCore</b>\n"
+        "• <code>/enviar_mc &lt;canal_meshtastic&gt; &lt;texto&gt;</code> — Envía hacia MeshCore usando el mapeo Meshtastic→MeshCore configurado.\n"
+        "• <code>/enviar_mc canal &lt;channel_idx&gt; &lt;texto&gt;</code> — Envía a un canal MeshCore concreto.\n"
+        "• <code>/enviar_mc_dm &lt;contact_prefix|[MC:prefix]&gt; &lt;texto&gt;</code> — Envía directo a un contacto MeshCore.\n"
+        "• <code>/dm_mc</code> — Alias de <code>/enviar_mc_dm</code>.\n"
+        "• <code>/mc_contactos</code> — Lista contactos MeshCore disponibles si el broker los expone.\n"
+        "Ej.: <code>/enviar_mc canal 1 Aviso por MeshCore</code>\n"
+        "Ej.: <code>/enviar_mc 4 Mensaje usando mapa CH→MeshCore</code>\n"
+        "Ej.: <code>/enviar_mc_dm 6a18cb3d125b Mensaje directo</code>\n"
     )
 
     s_programacion = (
         "────────────────────────────────────────────────\n"
-        "<b>Programación de envíos</b>\n"
-        "• <code>/programar YYYY-MM-DD HH:MM destino[:canal] | canal N texto… [ack]</code>\n"
-        "  Programa un envío en hora local Europe/Madrid. <code>ack</code> al final fuerza ACK (solo unicast).\n"
-        "  Ej.: <code>/programar 2025-09-02 09:30 canal 0 broadcast Buenos dias a todos</code>\n"
-        "        <code>/programar 2025-09-02 21:45 !b03df4cc:1 Aviso critico ack</code>\n"
-        "• <code>/tareas [pending|done|failed|canceled]</code> — Lista tareas (por defecto pending).\n"
-        "• <code>/cancelar_tarea TASK_ID</code> — Cancela una tarea por ID.\n"
-        "<b>Atajos</b>\n"
-        "• <code>/en &lt;cantidad&gt; &lt;unidad&gt; &lt;destino[:canal] | canal N&gt; &lt;texto…&gt; [ack]</code>\n"
-        "  Programa relativo. Unidades: s, m, h, d. Ej.: <code>/en 45 m canal 0 Reunir datos</code>\n"
-        "• <code>/manana HH:MM &lt;destino[:canal] | canal N&gt; &lt;texto…&gt; [ack]</code>\n"
-        "  Programa para mañana a la hora indicada. Ej.: <code>/manana 08:15 canal 0 Recordatorio</code>\n"
+        "<b>Programación de envíos Meshtastic</b>\n"
+        "• <code>/programar YYYY-MM-DD HH:MM [canal N] &lt;destino|texto&gt; [texto] [ack]</code> — Programa un envío puntual.\n"
+        "• <code>/en &lt;cantidad&gt; &lt;unidad&gt; [canal N] &lt;destino|texto&gt; [texto] [ack]</code> — Programa relativo. Unidades: <code>s</code>, <code>m</code>, <code>h</code>, <code>d</code>.\n"
+        "• <code>/manana HH:MM [canal N] &lt;destino|texto&gt; [texto] [ack]</code> — Programa para mañana.\n"
+        "• <code>/tareas [estado]</code> — Lista tareas.\n"
+        "• <code>/cancelar_tarea &lt;task_id&gt;</code> — Cancela una tarea.\n"
+        "Ej.: <code>/programar 2026-05-20 09:30 canal 0 Buenos dias</code>\n"
+        "Ej.: <code>/programar 2026-05-20 21:45 !b03df4cc:1 Aviso critico ack</code>\n"
+        "Ej.: <code>/en 45 m canal 0 Reunir datos</code>\n"
+        "Ej.: <code>/manana 08:15 canal 0 Recordatorio</code>\n"
     )
 
     s_diario = (
         "────────────────────────────────────────────────\n"
-        "<b>Programación diaria</b>\n"
-        "• <code>/diario &lt;HH:MM[,HH:MM…]&gt; [mesh|aprs|ambos] [grupo &lt;id&gt;] "
-        "&lt;destino[:canal] | canal N | CALL|broadcast&gt; [aprs &lt;CALL|broadcast&gt;:] &lt;texto…&gt;</code>\n"
-        "   Repite el envío todos los días a las horas indicadas (zona <i>Europe/Madrid</i>).\n"
-        "\n"
-        "<u>Modos de transporte</u>:\n"
-        "• <code>mesh</code>  → Solo malla Meshtastic.\n"
-        "• <code>aprs</code>  → Solo APRS (pasarela). Usa <code>CALL</code> (p.ej. <code>EA2XXX-10</code>) o <code>broadcast</code>.\n"
-        "• <code>ambos</code> → Envío por MESH y, además, reenvío por APRS.\n"
-        "   En modo ambos puedes fijar destino APRS con el token <code>aprs &lt;CALL|broadcast&gt;</code> en la línea.\n"
-        "\n"
-        "<u>Gestión</u>:\n"
-        "• <code>/mis_diarios [pending|done|failed|canceled] [grupo &lt;group_id&gt;]</code> → Listar (con texto, transporte y grupo).\n"
-        "• <code>/parar_diario &lt;task_id&gt;</code> → Detener una tarea diaria por ID.\n"
-        "• <code>/parar_diario_grupo &lt;group_id&gt;</code> → Detener todas las diarias del grupo.\n"
-        "\n"
-        "<u>Ejemplos</u>:\n"
-        "• <code>/diario 08:30 mesh canal 0 Parte diario</code>\n"
-        "• <code>/diario 22:00 aprs EB2EAS-11: Mensaje de prueba</code>\n"
-        "• <code>/diario 07:45 ambos canal 1 aprs broadcast Aviso general</code>\n"
-        "• <code>/diario 08:30,14:00,21:45 ambos grupo mantenimiento canal 2 aprs broadcast Aviso en tres horarios</code>\n"
-        "• <code>/mis_diarios pending grupo daily-mantenimiento</code>\n"
-        "• <code>/parar_diario_grupo daily-mantenimiento</code>\n"
+        "<b>Programación diaria Meshtastic/APRS</b>\n"
+        "• <code>/diario &lt;HH:MM[,HH:MM...]&gt; [mesh|aprs|ambos] [grupo &lt;id&gt;] &lt;destino&gt; [aprs &lt;CALL|broadcast&gt;:] &lt;texto&gt;</code>\n"
+        "  Repite el envío todos los días.\n"
+        "• <code>/mis_diarios [estado] [grupo &lt;id&gt;]</code> — Lista tareas diarias.\n"
+        "• <code>/parar_diario &lt;task_id&gt;</code> — Detiene una diaria.\n"
+        "• <code>/parar_diario_grupo &lt;grupo&gt;</code> — Detiene todas las diarias de un grupo.\n"
+        "Ej.: <code>/diario 08:30 mesh canal 0 Parte diario</code>\n"
+        "Ej.: <code>/diario 22:00 aprs EB2ABC-10: Mensaje APRS diario</code>\n"
+        "Ej.: <code>/diario 07:45 ambos grupo avisos canal 1 aprs broadcast Aviso general</code>\n"
+        "Ej.: <code>/mis_diarios pending grupo avisos</code>\n"
     )
 
-
-    s_telemetria = (
+    s_diario_mc = (
         "────────────────────────────────────────────────\n"
-        "<b>Telemetría enriquecida</b>\n"
-        "• <code>/telemetria [!id|alias] [max_n|timeout] [timeout]</code>\n"
-        "  Sin destino: lista telemetría reciente. Con destino: filtra ese nodo. <code>max_n</code> limita muestras o usa <code>timeout</code> (s).\n"
-        "  Campos habituales si existen: bateria (%/V), temperatura (°C), humedad (%), presion (hPa), altitud (m), solar (V), carga (mA), RSSI (dBm), SNR (dB).\n"
-        "  Notas: no aplica broadcast; si el canal esperado no entrega en tiempo, reintento breve sin filtro de canal.\n"
-        "  Ej.: <code>/telemetria !9eeb1328 20</code> • <code>/telemetria nodo_juan 8 6</code>\n"
+        "<b>Programación diaria MeshCore</b>\n"
+        "• <code>/diario_mc &lt;HH:MM[,HH:MM...]&gt; [grupo &lt;id&gt;] canal &lt;channel_idx&gt; &lt;texto&gt;</code> — Diario a canal MeshCore.\n"
+        "• <code>/diario_mc_dm &lt;HH:MM[,HH:MM...]&gt; [grupo &lt;id&gt;] &lt;contact_prefix|[MC:prefix]&gt; &lt;texto&gt;</code> — Diario directo MeshCore.\n"
+        "Ej.: <code>/diario_mc 09:00 grupo avisos_mc canal 2 Parte diario MeshCore</code>\n"
+        "Ej.: <code>/diario_mc 08:00,14:00 canal 1 Parte en dos horarios</code>\n"
+        "Ej.: <code>/diario_mc_dm 09:00 grupo avisos_dm 6a18cb3d125b Parte directo</code>\n"
+        "Ej.: <code>/diario_mc_dm 09:00 [MC:6a18cb3d125b] Mensaje directo</code>\n"
+    )
+
+    s_clima = (
+        "────────────────────────────────────────────────\n"
+        "<b>Baliza meteorológica dinámica</b>\n"
+        "• <code>/baliza_clima cada &lt;minutos&gt; mesh canal &lt;N&gt; &lt;ciudad&gt; [lat=&lt;lat&gt; lon=&lt;lon&gt;]</code>\n"
+        "• <code>/baliza_clima cada &lt;minutos&gt; meshcore canal &lt;idx&gt; &lt;ciudad&gt; [lat=&lt;lat&gt; lon=&lt;lon&gt;]</code>\n"
+        "• <code>/baliza_clima cada &lt;minutos&gt; meshcore dm &lt;contact_prefix&gt; &lt;ciudad&gt; [lat=&lt;lat&gt; lon=&lt;lon&gt;]</code>\n"
+        "• <code>/baliza_clima diario &lt;HH:MM[,HH:MM...]&gt; &lt;mesh|meshcore&gt; &lt;destino&gt; &lt;ciudad&gt;</code>\n"
+        "• <code>/mis_balizas [estado]</code> — Lista balizas.\n"
+        "• <code>/parar_baliza &lt;task_id&gt;</code> — Detiene una baliza.\n"
+        "Contenido generado en ejecución: hora local, temperatura, humedad relativa y estado meteorológico.\n"
+        "Ej.: <code>/baliza_clima cada 60 mesh canal 4 Zaragoza</code>\n"
+        "Ej.: <code>/baliza_clima cada 60 meshcore canal 1 Zaragoza</code>\n"
+        "Ej.: <code>/baliza_clima diario 08:00,12:00 meshcore canal 1 Zaragoza</code>\n"
+    )
+
+    s_aemet = (
+        "────────────────────────────────────────────────\n"
+        "<b>Avisos oficiales AEMET</b>\n"
+        "• <code>/alerta_aemet cada &lt;minutos&gt; mesh canal &lt;N&gt; &lt;zona&gt; [provincia=&lt;provincia&gt;] [region=&lt;region&gt;]</code>\n"
+        "• <code>/alerta_aemet cada &lt;minutos&gt; meshcore canal &lt;idx&gt; &lt;zona&gt; [provincia=&lt;provincia&gt;] [region=&lt;region&gt;]</code>\n"
+        "• <code>/alerta_aemet cada &lt;minutos&gt; meshcore dm &lt;contact_prefix&gt; &lt;zona&gt;</code>\n"
+        "• <code>/mis_alertas_aemet [estado]</code> — Lista vigilancias AEMET.\n"
+        "• <code>/parar_alerta_aemet &lt;task_id&gt;</code> — Detiene una vigilancia AEMET.\n"
+        "La tarea consulta avisos oficiales y solo transmite cuando hay avisos nuevos o cambios relevantes.\n"
+        "Ej.: <code>/alerta_aemet cada 30 mesh canal 4 Zaragoza provincia=Zaragoza region=Aragón</code>\n"
+        "Ej.: <code>/alerta_aemet cada 30 meshcore canal 1 Zaragoza</code>\n"
+    )
+
+    s_aprs = (
+        "────────────────────────────────────────────────\n"
+        "<b>APRS</b>\n"
+        "• <code>/aprs canal N &lt;texto&gt;</code> — Envía status APRS desde un canal lógico.\n"
+        "• <code>/aprs N &lt;texto&gt;</code> — Forma abreviada con canal.\n"
+        "• <code>/aprs &lt;CALL|broadcast&gt;: &lt;texto&gt;</code> — Mensaje APRS a indicativo o broadcast/status.\n"
+        "• <code>/aprs en &lt;min|m1,m2,...&gt; canal N &lt;texto&gt;</code> — Programa salida APRS diferida.\n"
+        "• <code>/aprs_on</code> — Activa gateway APRS→Mesh.\n"
+        "• <code>/aprs_off</code> — Desactiva gateway APRS→Mesh.\n"
+        "• <code>/aprsis_push on|off|status</code> — Controla mirror/push APRS-IS si está configurado.\n"
+        "• <code>/aprs_status</code> — Estado de APRS/gateway.\n"
+        "Ej.: <code>/aprs broadcast: Saludos desde MeshNet</code>\n"
+        "Ej.: <code>/aprs EB2ABC-10: Hola desde la malla</code>\n"
+        "Ej.: <code>/aprs canal 1 EB7XYZ-7: Estoy operativo</code>\n"
+        "Desde APRS RF hacia malla: <code>[CH 1] texto</code>, <code>[CANAL4] texto</code>, <code>[CH 3+10] texto diferido</code>.\n"
     )
 
     s_nodos = (
         "────────────────────────────────────────────────\n"
-        "<b>Nodos</b>\n"
-        "• <code>/ver_nodos [N|false]</code> — Lista enriquecida con RSSI, SNR, ruta y calidad. <code>false</code> imprime rapido.\n"
-        "  -> Se incluyen hops reales cuando hay metadatos: <code>hops = hop_limit - hop_start</code>.\n"
+        "<b>Nodos, vecinos y canales</b>\n"
+        "• <code>/ver_nodos [N|false]</code> — Lista nodos vistos. <code>false</code> usa salida rápida.\n"
+        "• <code>/ver_nodos_b [N] [timeout]</code> — Lista nodos del peer/nodo B si existe tabla B.\n"
+        "• <code>/refrescar_nodos [api|cli] [N] [timeout]</code> — Refresca tabla de nodos.\n"
+        "• <code>/vecinos [max_n] [timeout] [hops_mode]</code> — Vecinos por broker/backlog.\n"
+        "• <code>/vecinos5</code> — Alias dinámico de vecinos con filtro de hops según el número del comando.\n"
+        "• <code>/vecinos_b</code> — Vecinos del peer/nodo B.\n"
+        "• <code>/canales</code> — Muestra canales/configuración conocida.\n"
+        "Ej.: <code>/ver_nodos 50</code>\n"
+        "Ej.: <code>/refrescar_nodos api 50</code>\n"
+        "Ej.: <code>/vecinos 30 4 all</code>\n"
+        "Ej.: <code>/vecinos &gt;=2</code>\n"
     )
 
-    s_refresnodos = (
-        "\n\n<b>Refresco de tabla</b>\n"
-        "• <code>/refrescar_nodos</code>  (auto)\n"
-        "• <code>/refrescar_nodos api 50</code>  (API-only, 50 máx.)\n"
-        "• <code>/refrescar_nodos cli 100 12</code>  (CLI-only, 100 máx., 12s timeout)\n"
-    )
-
-    s_vecinos = (
-        "<b>🧭 /vecinos [max_n] [timeout] [hops_mode]</b>\n\n"
-        "Lista vecinos directos o indirectos, usando el broker o (opcionalmente) la CLI.\n\n"
-        "<b>Parámetros:</b>\n"
-        "• <code>max_n</code> — máximo de nodos a mostrar (defecto: 20).\n"
-        "• <code>timeout</code> — espera al broker en segundos (defecto: 4.0).\n"
-        "• <code>hops_mode</code> — filtra por hops:\n"
-        "   • 0 (defecto) → directos (hops=0)\n"
-        "   • 1 → vecinos a 1 salto\n"
-        "   • >0 / >=1 / 1+ / indirectos → solo indirectos\n"
-        "   • all / * / todos → sin filtro (todos)\n"
-        "<b>🧭 /vecinos>=[hops] o /vecinos[hops]</b>\n\n"
-        "<b>Ejemplos:</b>\n"
-        "• <code>/vecinos</code> → directos en últimos 60 min (20 máx).\n"
-        "• <code>/vecinos 30</code> → directos en últimos 30 min.\n"
-        "• <code>/vecinos all</code> → todos los vecinos (ignora hops).\n"
-        "• <code>/vecinos>=2</code> → muestra vecinos con más o igual a 2 hops.\n"
-    )
-   
     s_rutas = (
         "────────────────────────────────────────────────\n"
-        "<b>Rutas</b>\n"
-        "• <code>/traceroute &lt;!id|alias&gt;  [timeout_s] segundos de espera</code> — Traza ruta por API/CLI. \n"
-        "  Ej.: <code>/traceroute !33691d30 </code>\n"
+        "<b>Rutas, telemetría y LoRa</b>\n"
+        "• <code>/traceroute &lt;!id|alias&gt; [timeout_s]</code> — Traza ruta a un nodo.\n"
+        "• <code>/rt &lt;!id|alias&gt; [timeout_s]</code> — Alias de <code>/traceroute</code>.\n"
+        "• <code>/traceroute_status</code> — Últimos resultados de traceroute si están disponibles.\n"
+        "• <code>/telemetria [!id|alias] [max_n|timeout] [timeout]</code> — Telemetría reciente o consulta dirigida.\n"
+        "• <code>/lora status</code> — Estado de opciones LoRa.\n"
+        "• <code>/lora ignore_incoming on|off</code> — Ignora/acepta RX RF.\n"
+        "• <code>/lora ignore_mqtt on|off</code> — Ignora/acepta MQTT.\n"
+        "• <code>/lora set ignore_incoming=on ignore_mqtt=off</code> — Ajuste múltiple.\n"
+        "Ej.: <code>/traceroute !33691d30 60</code>\n"
+        "Ej.: <code>/telemetria !9eeb1328 20</code>\n"
+        "Ej.: <code>/lora status</code>\n"
     )
 
-    s_cobertura = (
+    s_posicion = (
         "────────────────────────────────────────────────\n"
-        "<b>Mapa de cobertura</b>\n"
-        "• <code>/cobertura [!id|alias] [Xh] [entorno] 'entorno' {urbano, suburbano, abierto}. Por defecto: urbano</code> — Genera un mapa HTML con heatmap y círculos desde posiciones históricas.\n"
-        "  Sin destino: /cobertura  todos los nodos. Con destino: solo ese nodo. Por defecto, últimas 24 h.\n"
-        "  Ej.: <code>/cobertura 12h</code> • <code>/cobertura !xxxxxxx 48h suburbano</code>\n"
-        "       <code>/cobertura !xxxxxxxxx</code> • <code>/cobertura !xxxxxxx abierto</code>\n"
-        "  Salida: enlace KML descargable. Los puntos muestran alias si está disponible.\n"
+        "<b>Posiciones y cobertura</b>\n"
+        "• <code>/position &lt;N&gt; [min]</code> — Últimas posiciones, distancia desde HOME_LAT/HOME_LON y enlace Maps.\n"
+        "• <code>/position_mapa &lt;kml|gpx&gt; [N] [min]</code> — Exporta posiciones recientes a KML/GPX.\n"
+        "• <code>/cobertura [!id|alias] [Xh] [urbano|suburbano|abierto]</code> — Genera mapa de cobertura desde backlog/posiciones.\n"
+        "Ej.: <code>/position 10 60</code>\n"
+        "Ej.: <code>/position_mapa kml 50 1440</code>\n"
+        "Ej.: <code>/cobertura 24h</code>\n"
+        "Ej.: <code>/cobertura !9ef0c2cc 48h abierto</code>\n"
     )
 
     s_escucha = (
         "────────────────────────────────────────────────\n"
-        "<b>Escucha y broker</b>\n"
-        "• <code>/escuchar [N|all]</code> — Suscribe a <code>TEXT_MESSAGE_APP</code> desde el broker. <code>N</code>=canal lógico; <code>all</code>=todos.\n"
-        "  Incluye metadatos cuando existen: <code>rx_rssi</code>, <code>rx_snr</code>, <code>hop_limit</code>, <code>hop_start</code>, <code>relay_node</code>.\n"
+        "<b>Escucha y notificaciones</b>\n"
+        "• <code>/escuchar [N|all]</code> — Escucha mensajes TEXT_MESSAGE_APP del broker en un canal o todos.\n"
         "• <code>/parar_escucha</code> — Detiene la escucha.\n"
-        "Notas\n"
-        "• La escucha no bloquea envíos. El broker reconecta si cae la sesión con el nodo.\n"
-        "• Cuando la escucha está parada, los mensajes entrantes se registran en el backlog para reenvío posterior.\n"
+        "• <code>/notificaciones on|off|estado</code> — Activa/desactiva avisos automáticos de nuevos nodos.\n"
+        "• <code>/notify</code> y <code>/notifs</code> — Alias de <code>/notificaciones</code>.\n"
+        "Ej.: <code>/escuchar all</code>\n"
+        "Ej.: <code>/escuchar 4</code>\n"
+        "Ej.: <code>/notificaciones estado</code>\n"
     )
 
-    s_lora = (
+    s_bbs = (
         "────────────────────────────────────────────────\n"
-        "<b>Configuración LoRa (/lora)</b>\n"
-        "• <code>/lora status</code> — Muestra <code>lora.ignore_incoming</code> y <code>lora.ignore_mqtt</code>.\n"
-        "• <code>/lora ignore_incoming on|off</code> — Ignorar o aceptar recepción RF.\n"
-        "• <code>/lora ignore_mqtt on|off</code> — Ignorar o aceptar envío a MQTT.\n"
-        "• <code>/lora set ignore_incoming=on ignore_mqtt=off</code> — Ajuste múltiple.\n"
-        "Si la API no expone setters, se aplica reserva con <code>meshtastic --set lora.*</code>.\n"
-    )
-
-    s_estado = (
-        "────────────────────────────────────────────────\n"
-        "<b>Estado y administración</b>\n"
-        "• <code>/estado</code> — Comprueba host, puerto, broker y latencias básicas.\n"
-        "  Si el puerto de control UDP está disponible, también muestra <code>mgr_paused</code>, "
-        "<code>tx_blocked</code> y <code>cooldown</code>.\n"
-        "• <code>/broker_status</code> — Estado interno del broker (conexión al nodo, <i>manager paused</i>, "
-        "TX guard, cooldown, versión y nodo objetivo). Añade <code>raw</code> para ver JSON crudo.\n"
-    )
-
-    s_broker_admin = (
-        "────────────────────────────────────────────────\n"
-        "<b>Control del broker</b>\n"
-        "• <code>/broker_resume</code> — Limpia el cooldown y hace <i>resume()</i> del manager. "
-        "Úsalo si ves envíos bloqueados por <code>TX_BLOCKED</code> o el broker quedó en <code>mgr_paused</code>.\n"
-        "• <code>/force_reconnect [grace_s]</code> — Reinicia el pool de conexiones, limpia <code>TX_BLOCKED</code> y el cooldown, "
-        "y reintenta conexión en limpio. <code>grace_s</code> (opcional) establece una ventana de gracia para evitar "
-        "escalado si vuelve a caer de inmediato.\n"
-        "\n"
-        "<b>Ejemplos:</b>\n"
-        "• <code>/broker_status</code>\n"
-        "• <code>/broker_status raw</code>\n"
-        "• <code>/broker_resume</code>\n"
-        "• <code>/force_reconnect</code>\n"
-        "• <code>/force_reconnect 30</code>\n"
-        "\n"
-        "<b>Notas:</b>\n"
-        "• Requiere que el bot tenga acceso al puerto de control UDP del broker "
-        "(variables <code>BROKER_CTRL_HOST</code> y <code>BROKER_CTRL_PORT</code>, p.ej. <code>broker</code> y <code>8766</code>).\n"
-        "• Tras ejecutar, puedes verificar el estado con <code>/broker_status</code> o volver a <code>/estado</code>.\n"
-    )
-
-
-    s_params = (
-        "────────────────────────────────────────────────\n"
-        "<b>Parámetros comunes</b>\n"
-        "• <code>reintentos=N</code>  • <code>espera=S</code> (segundos)  • <code>backoff=X</code>  • <code>maxhops=H</code>\n"
-    )
-
-    s_errores = (
-        "────────────────────────────────────────────────\n"
-        "<b>Errores frecuentes</b>\n"
-        "• KO: Timed out waiting for connection completion — Reintentar. Confirmar que el broker no monopoliza la conexión.\n"
-        "• Unexpected OSError … terminating meshtastic reader — Caída de socket; el broker reconecta. Revisar red/IP del nodo.\n"
-        "• Aviso: No hay pool TCP inicializado — Inicializar pool al arrancar y definir <code>MESHTASTIC_HOST/PORT</code>.\n"
-        "• Broadcast sin ACK — Puede haberse retransmitido igualmente; la ausencia de ACK no implica fallo RF.\n"
-    )
-
-    s_ejemplos = (
-        "────────────────────────────────────────────────\n"
-        "<b>Ejemplos</b>\n"
-        "• <code>/enviar canal 0 Hola a todos</code>\n"
-        "• <code>/enviar !9eeb1328:2 Mensaje directo</code>\n"
-        "• <code>/enviar_ack !077f73a7 Requiere confirmacion</code>\n"
-        "• <code>/en 45m canal 0 Aviso en 45 minutos</code>\n"
-        "• <code>/mañana 08:15 canal 0 Recordatorio</code>\n"
-        "• <code>/diario 08:15 mesh canal 0 Recordatorio</code>\n"
-        "• <code>/mis_diarios pending</code>\n"
-        "• <code>/telemetria !9eeb1328 20</code>\n"
-        "• <code>/vecinos 10 60</code>\n"
-        "• <code>/traceroute !33691d30 60</code>\n"
-        "• <code>/cobertura 24</code>\n"
-        "• <code>/lora status</code>\n"
-    )
-
-    s_cli = (
-        "────────────────────────────────────────────────\n"
-        "<b>Broker por línea de comandos</b>\n"
-        "• Programar: <code>python Meshtastic_Broker_v5.8.py schedule --when \"2025-09-02 09:30\" --channel 0 --dest broadcast --msg \"Buenos dias\"</code>\n"
-        "• Listar:    <code>python Meshtastic_Broker_v5.8.py tasks --status pending</code>\n"
-        "• Cancelar:  <code>python Meshtastic_Broker_v5.8.py cancel --id TASK_ID</code>\n"
-    )
-
-    s_aprs = (
-        "📡 <b>APRS</b>\n"
-        "Envía desde la malla a APRS-IS o a un indicativo concreto.\n\n"
-        "<b>Formatos:</b>\n"
-        "• <code>/aprs canal N &lt;texto&gt;</code>\n"
-        "• <code>/aprs N &lt;texto&gt;</code>\n"
-        "• <code>/aprs &lt;CALL|broadcast&gt;: &lt;texto&gt;</code>\n"
-        "• <code>/aprs en &lt;min|m1,m2,&gt; canal N &lt;texto&gt;</code>\n"
-        "  (Si no indicas canal, usa el por defecto del bot)\n\n"
-        "<b>Ejemplos:</b>\n"
-        "• <code>/aprs broadcast: Saludos desde la red Meshtastic</code>\n"
-        "• <code>/aprs EB2ABC-10: Hola EB2ABC, QSO en 144.800</code>\n"
-        "• <code>/aprs canal 1 EB7XYZ-7: Estoy operativo en sierra</code>\n\n"
-        "• <code>/aprs 1 EB7XYZ-7: Estoy operativo en sierra</code>\n\n"
-        "<b>Notas:</b>\n"
-        "• <code>broadcast</code> envía como <i>status</i> APRS (no a un destinatario concreto).\n"
-        "• <code>CALL</code> envía como <i>message</i> APRS a ese indicativo (p.ej. EB2XXX-7).\n"
-        "• Se respetan los límites de tamaño APRS: el bot divide en varias tramas si hace falta.\n"
-        "\n"
-        "────────────────────────────────────────────────\n"
-        "<b>APRS desde RF → malla Meshtastic</b>\n"
-        "Desde APRS (walkie, cliente APRS) puedes inyectar mensajes en la malla usando etiquetas en el comentario:\n"
-        "\n"
-        "<b>Envío inmediato a la malla</b>\n"
-        "• <code>[CH n] texto</code>\n"
-        "• <code>[CANAL n] texto</code>\n"
-        "Ejemplos:\n"
-        "• <code>[CH 1] Hola a todos</code>\n"
-        "• <code>[CANAL4] Revisión enlace oeste</code>\n"
-        "El texto se envía inmediatamente al canal Mesh <code>n</code>.\n"
-        "\n"
-        "<b>Envío programado desde APRS</b>\n"
-        "• <code>[CH n+M] texto</code>  (M = minutos de retraso)\n"
-        "Ejemplos:\n"
-        "• <code>[CH 3+10] Aviso en 10 minutos</code>\n"
-        "• <code>[CANAL1+5] Recordatorio breve</code>\n"
-        "El gateway APRS programa el envío localmente y, pasado el tiempo, manda el mensaje al canal Mesh.\n"
-        "\n"
-        "<b>Control del gateway APRS→Mesh</b>\n"
-        "Solo desde indicativos autorizados en <code>APRS_ALLOWED_SOURCES</code>:\n"
-        "• <code>[CH 0] APRS ON</code>   → habilita el reenvío APRS → Mesh\n"
-        "• <code>[CH 0] APRS OFF</code>  → deshabilita temporalmente el reenvío\n"
-        "Cualquier otro texto en <code>[CH 0]</code> se ignora por seguridad.\n"
-        "\n"
-        "<b>Posiciones APRS → enlace de mapa</b>\n"
-        "Cuando el paquete APRS lleva coordenadas, el gateway añade un enlace clicable:\n"
-        "• <code>https://maps.google.com/?q=lat,lon</code>\n"
-        "junto con el comentario APRS si existe.\n"
-        "Ejemplo de lo que verá la malla:\n"
-        "• <code>qrv R70-R72 sdr:in91np.ddns.net:8073 Abierto https://maps.google.com/?q=41.638500,-0.903833</code>\n"
+        "<b>BBS y noticias</b>\n"
+        "• <code>/bbs noticias</code> — Lista noticias de la BBS.\n"
+        "• <code>/bbs noticias &lt;N&gt;</code> — Muestra las últimas N noticias.\n"
+        "• <code>/bbs noticias cat</code> — Lista categorías detectadas.\n"
+        "• <code>/bbs noticias cat &lt;tag&gt; [page]</code> — Noticias filtradas por categoría.\n"
+        "• <code>/bbs noticias &lt;tag&gt; last &lt;N&gt;</code> — Últimas N noticias de una categoría.\n"
+        "• <code>/bbs noticias ver &lt;id&gt;</code> — Lee una noticia.\n"
+        "• <code>/bbs boletines</code> — Lista boletines.\n"
+        "• <code>/bbs boletines ver &lt;id&gt;</code> — Lee un boletín.\n"
+        "• <code>/bbs boletines add ASUNTO | TEXTO</code> — Publica boletín desde Telegram; requiere admin.\n"
+        "• <code>/bbs link &lt;codigo&gt;</code> — Resuelve shortlink si existe en la tabla de shortlinks.\n"
+        "Comandos RF de BBS: <code>#BBS &lt;BBS_CALLSIGN&gt; MENU</code> en canal público, o <code>#BBS MENU</code> por DM al nodo BBS.\n"
+        "Ej.: <code>/bbs noticias 10</code>\n"
+        "Ej.: <code>/bbs noticias cat ciberseguridad last 5</code>\n"
+        "Ej.: <code>/bbs boletines add Mantenimiento | Reinicio previsto a las 22:00</code>\n"
     )
 
     s_auditorias = (
         "────────────────────────────────────────────────\n"
         "<b>Auditorías de red</b>\n"
-        "• <code>/auditoria_red [horas]</code>\n"
-        "  Diagnóstico rápido usando cobertura/posiciones recientes.\n"
-        "  • Calcula por vecino: SNR (p50/p90/avg), hops (avg/máx), RSSI medio y muestras válidas.\n"
-        "  • Sugiere configuración para tu nodo: rol (CLIENT/CLIENT_MUTE/ROUTER), potencia TX, <i>hop_limit</i>, baliza y telemetría.\n"
-        "  • Adjunta CSV (métricas por vecino) y JSON (resumen + recomendación).\n"
-        "  • Por defecto analiza 72 h. Ej.: <code>/auditoria_red 48</code>\n"
-        "\n"
-        "• <code>/auditoria_integral [horas]</code>\n"
-        "  Auditoría completa con carga de canal y mapa de calor.\n"
-        "  • Analiza: <code>coverage.jsonl</code>, <code>positions.jsonl</code>, <code>messages.jsonl</code>, "
-        "<code>telemetry.jsonl</code>, <code>broker_offline_log.jsonl</code> (si existen).\n"
-        "  • Incluye: SNR/RSSI/hops, duplicados, payload medio, distribución por aplicación, estimación de <i>airtime</i>/duty-cycle LoRa.\n"
-        "  • Genera: CSV de vecinos, CSV de recomendaciones por vecino, JSON integral y mapa de calor HTML.\n"
-        "  • Por defecto 72 h. Ej.: <code>/auditoria_integral 168</code>\n"
-        "\n"
-        "• <code>/auditoria_impacto [horas] [!node_id]</code>\n"
-        "  Auditoría de impacto del nodo sobre la malla.\n"
-        "  • Rol observado (por comportamiento): mobile, router, edge, repeater_like, mixed.\n"
-        "  • Impacto: positivo / neutro / degradante + impact_score 0..100.\n"
-        "  • Huella estimada: airtime_ms, airtime_share, msgs_total.\n"
-        "  • Señales de relay: relay_seen (si el backlog aporta via/relay_node).\n"
-        "  • Por defecto usa <code>HOME_NODE_ID</code>. Ej.: <code>/auditoria_impacto 72 !9ef0c2cc</code>\n"
-        "\n"
-        "<u>Notas</u>:\n"
-        "• Umbrales por variables de entorno: <code>AUD_*</code> (p.ej. <code>AUD_HOPS_MAX</code>, "
-        "<code>AUD_P90_STRONG</code>, <code>AUD_BEACON_R</code>, <code>AUD_BEACON_C</code>…).\n"
-        "• Nodo por defecto para impacto: <code>HOME_NODE_ID</code>.\n"
-        "• Salidas en <code>bot_data/reportes/</code>. El mapa HTML se guarda también ahí (o en <code>BOT_MAPS_DIR</code> si está definido).\n"
+        "• <code>/auditoria_red [horas]</code> — Diagnóstico rápido: SNR, RSSI, hops, vecinos y recomendaciones.\n"
+        "• <code>/auditoria_integral [horas]</code> — Auditoría completa con carga de canal, duplicados, airtime y mapa de calor.\n"
+        "• <code>/auditoria_impacto [horas] [!node_id]</code> — Impacto de un nodo sobre la malla. Usa HOME_NODE_ID por defecto.\n"
+        "Ej.: <code>/auditoria_red 48</code>\n"
+        "Ej.: <code>/auditoria_integral 168</code>\n"
+        "Ej.: <code>/auditoria_impacto 72 !9ef0c2cc</code>\n"
+    )
+
+    s_estado = (
+        "────────────────────────────────────────────────\n"
+        "<b>Estado y administración del broker</b>\n"
+        "• <code>/estado</code> — Estado básico del nodo, broker TCP y control interno.\n"
+        "• <code>/broker_status [raw|json]</code> — Estado interno completo del broker.\n"
+        "• <code>/bridge_status</code> — Estado del bridge embebido A↔B.\n"
+        "• <code>/brige_status</code> — Alias compatible con typo histórico.\n"
+        "• <code>/broker_resume</code> — Limpia cooldown y reanuda el manager.\n"
+        "• <code>/force_reconnect [grace_s]</code> — Fuerza reconexión limpia del broker/pool.\n"
+        "• <code>/reconectar</code> — Reconexión administrativa del nodo/broker.\n"
+        "Ej.: <code>/broker_status raw</code>\n"
+        "Ej.: <code>/bridge_status</code>\n"
+        "Ej.: <code>/force_reconnect 30</code>\n"
+    )
+
+    s_admin = (
+        "────────────────────────────────────────────────\n"
+        "<b>Administración Telegram</b>\n"
+        "• <code>/estadistica</code> — Estadísticas de uso; solo admin.\n"
+        "• <code>/bloquear &lt;id1,id2,...&gt;</code> — Bloquea usuarios Telegram; solo admin.\n"
+        "• <code>/desbloquear &lt;id1,id2,...&gt;</code> — Desbloquea usuarios Telegram; solo admin.\n"
+        "Ej.: <code>/bloquear 123456789</code>\n"
+        "Ej.: <code>/desbloquear 123456789</code>\n"
+    )
+
+    s_params = (
+        "────────────────────────────────────────────────\n"
+        "<b>Parámetros útiles</b>\n"
+        "• <code>reintentos=N</code> — Número de reintentos de envío.\n"
+        "• <code>espera=S</code> — Espera en segundos para ACK/confirmación.\n"
+        "• <code>backoff=X</code> — Multiplicador de espera entre reintentos.\n"
+        "• <code>lat=...</code> y <code>lon=...</code> — Coordenadas manuales para baliza climática.\n"
+        "• <code>provincia=...</code>, <code>region=...</code>, <code>zona=...</code> — Filtros de avisos AEMET.\n"
+    )
+
+    s_errores = (
+        "────────────────────────────────────────────────\n"
+        "<b>Errores y diagnósticos frecuentes</b>\n"
+        "• <code>Timed out waiting for connection completion</code> — Revisar conectividad del nodo y estado del broker.\n"
+        "• <code>TX_BLOCKED</code> o cooldown persistente — Usar <code>/broker_status</code>, después <code>/broker_resume</code> o <code>/force_reconnect</code>.\n"
+        "• Sin ACK en broadcast — No implica necesariamente fallo RF; broadcast no confirma como unicast.\n"
+        "• Sin datos en posiciones/cobertura — Revisar <code>positions.jsonl</code>, backlog y que lleguen tramas POSITION_APP.\n"
+        "• APRS sin salida — Revisar <code>/aprs_status</code>, KISS, Soundmodem y variables APRS.\n"
     )
 
     full = "\n\n".join([
-        s_intro, s_conv, s_mensajeria, s_programacion, s_diario, s_telemetria, s_nodos, s_refresnodos, s_vecinos,
-        s_rutas, s_cobertura, s_escucha, s_lora, s_estado, s_broker_admin,  s_params, s_errores,
-        s_ejemplos, s_cli, s_aprs, s_auditorias
+        s_intro,
+        s_conv,
+        s_menu,
+        s_mensajeria_mesh,
+        s_mensajeria_mc,
+        s_programacion,
+        s_diario,
+        s_diario_mc,
+        s_clima,
+        s_aemet,
+        s_aprs,
+        s_nodos,
+        s_rutas,
+        s_posicion,
+        s_escucha,
+        s_bbs,
+        s_auditorias,
+        s_estado,
+        s_admin,
+        s_params,
+        s_errores,
     ])
 
     await _send_html_chunks(update, full, block_title="Ayuda")
