@@ -27,6 +27,19 @@ import socket
 DEFAULT_TZ = "Europe/Madrid"
 ISO_FMT = "%Y-%m-%d %H:%M:%S"
 
+class TaskNoTransmissionNeeded(Exception):
+    """
+    Excepción interna del scheduler para tareas dinámicas que se ejecutan
+    correctamente pero no necesitan transmitir nada.
+
+    Uso:
+        raise TaskNoTransmissionNeeded("sin avisos nuevos")
+
+    Funcionalidad:
+        - Evita marcar como fallo una tarea periódica AEMET cuando no hay avisos nuevos.
+        - Permite reprogramar la tarea como éxito silencioso.
+    """
+    pass
 
 def _meshcore_send_via_broker_ctrl(*, kind: str, channel_idx: int | None = None, contact_prefix: str | None = None, text: str, timeout: float = 5.0) -> Dict[str, Any]:
     """
@@ -450,6 +463,12 @@ class _TaskManager:
         #    Para tareas normales devuelve t.message sin alterar el flujo existente.
         try:
             message_to_send = self._resolve_task_message(t)
+        except TaskNoTransmissionNeeded as e:
+            # Ejecución correcta sin transmisión.
+            # Caso principal: alerta AEMET periódica sin avisos nuevos.
+            self._logger.info(f"[Tasks] SKIP TX {t.id}: {e}")
+            self._complete_success(t, None)
+            return
         except Exception as e:
             error = f"dynamic message failed: {type(e).__name__}: {e}"
             self._fail_or_retry(t, error)
@@ -592,20 +611,30 @@ class _TaskManager:
 
         Funcionalidad:
         - Para tareas normales, devuelve t.message sin cambios.
-        - Para meta.task_type == 'weather_beacon', construye el texto en tiempo real
-          usando weather_beacon.py. Así la temperatura y la humedad no quedan
-          congeladas en el momento de programar la tarea.
+        - Para meta.task_type == 'weather_beacon', construye el texto meteorológico
+          en tiempo real usando weather_beacon.py.
+        - Para meta.task_type == 'aemet_alert', consulta avisos oficiales AEMET
+          y devuelve texto solo si hay aviso nuevo. Si no hay nada nuevo,
+          lanza TaskNoTransmissionNeeded para reprogramar sin transmitir.
         """
         meta = t.meta or {}
         task_type = str(meta.get("task_type") or "").strip().lower()
-        if task_type != "weather_beacon":
-            return str(t.message or "")
 
-        from weather_beacon import build_weather_beacon_text_from_meta
-        msg = build_weather_beacon_text_from_meta(meta)
-        if not msg:
-            raise RuntimeError("weather_beacon devolvió mensaje vacío")
-        return _normalize_text_for_mesh(msg)
+        if task_type == "weather_beacon":
+            from weather_beacon import build_weather_beacon_text_from_meta
+            msg = build_weather_beacon_text_from_meta(meta)
+            if not msg:
+                raise RuntimeError("weather_beacon devolvió mensaje vacío")
+            return _normalize_text_for_mesh(msg)
+
+        if task_type == "aemet_alert":
+            from aemet_alerts import build_aemet_alert_text_from_meta
+            msg = build_aemet_alert_text_from_meta(meta)
+            if not msg:
+                raise TaskNoTransmissionNeeded("sin avisos AEMET nuevos")
+            return _normalize_text_for_mesh(msg)
+
+        return str(t.message or "")
 
     def _complete_success(self, t: ScheduledTask, packet_id: Optional[Any]) -> None:
         """

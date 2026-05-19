@@ -6109,14 +6109,19 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("programar", "<YYYY-MM-DD HH:MM> <destino[:canal] | canal N> <texto...> Programar envío en fecha/hora"),
         BotCommand("diario", "<HH:MM[,HH:MM,...]> [mesh|aprs|ambos] [grupo <id>] <destino[:canal] | canal N | CALL|broadcast> [aprs <CALL|broadcast>:] <texto>  — Envío(s) diario(s)"),
         BotCommand("diario_mc", "<HH:MM[,HH:MM,...]> [grupo <id>] <destino[:canal] | canal N | CALL|broadcast> <texto> — Envío(s) diario(s)"),
-     
         BotCommand("diario_mc_dm", "<HH:MM[,HH:MM,...]> [grupo <id>] [MC:xxxxxxxxxxxxxx] <texto>  — Envío(s) diario(s)"),
-       
-
-
         BotCommand("mis_diarios", "Listar tareas diarias (/mis_diarios [pending|done|failed|canceled] [grupo <id>])"),
         BotCommand("parar_diario_grupo", "Detener todas las diarias de un grupo"),
         BotCommand("parar_diario", "Detener un envío diario por ID"),
+        BotCommand("baliza_clima", "Programar baliza meteorológica"),
+        BotCommand("mis_balizas", "Ver balizas programadas"),
+        BotCommand("parar_baliza", "Cancelar baliza programada"),
+
+        BotCommand("alerta_aemet", "Programar avisos oficiales AEMET por RF"),
+        BotCommand("mis_alertas_aemet", "Ver alertas AEMET programadas"),
+        BotCommand("parar_alerta_aemet", "Cancelar una alerta AEMET programada"),
+          
+     
         BotCommand("en", "<minutos|m1,m2,...> <destino[:canal] | canal N> <texto…> Programar envío en +minutos"),
         BotCommand("manana", "<HH:MM> <destino[:canal] | canal N> <texto…> Programar envío mañana a HH:MM"),
         BotCommand("tareas", "Listar tareas programadas /tareas [pending|done|failed|canceled]"),
@@ -13462,6 +13467,340 @@ async def parar_baliza_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 # ==========================
+# /alerta_aemet — Avisos oficiales AEMET programados
+# ==========================
+
+_AEMET_ALERT_USAGE = (
+    "Uso:\n"
+    "/alerta_aemet cada <minutos> <mesh|meshcore> <destino> <zona> [provincia=<provincia>] [region=<region>]\n\n"
+    "Destinos:\n"
+    "- mesh canal <N>\n"
+    "- meshcore canal <channel_idx>\n"
+    "- meshcore dm <contact_prefix>\n\n"
+    "Ejemplos:\n"
+    "/alerta_aemet cada 30 mesh canal 4 Zaragoza\n"
+    "/alerta_aemet cada 30 meshcore canal 1 Zaragoza\n"
+    "/alerta_aemet cada 30 meshcore dm 6a18cb3d Zaragoza\n"
+    "/alerta_aemet cada 30 mesh canal 4 Zaragoza provincia=Zaragoza region=Aragón"
+)
+
+
+def _aemet_alert_pop_named_tokens(tokens: list[str]) -> tuple[list[str], dict]:
+    """
+    Extrae parámetros nombrados desde los tokens del comando.
+
+    Uso:
+        rest, opts = _aemet_alert_pop_named_tokens(tokens)
+
+    Parámetros soportados:
+        provincia=<texto>
+        province=<texto>
+        region=<texto>
+        comunidad=<texto>
+        zona=<texto>
+        zone=<texto>
+
+    Devuelve:
+        - rest: tokens que forman la zona si no se dio zona=<...>
+        - opts: diccionario con zone/province/region si se han informado.
+
+    Nota:
+        No rompe nombres compuestos si se pasan como texto normal:
+            /alerta_aemet cada 30 mesh canal 4 Cinco Villas
+    """
+    rest: list[str] = []
+    opts: dict = {}
+
+    for t in tokens or []:
+        raw = str(t or "").strip()
+        low = raw.lower()
+
+        if low.startswith("provincia=") or low.startswith("province="):
+            opts["province"] = raw.split("=", 1)[1].strip()
+            continue
+
+        if low.startswith("region=") or low.startswith("comunidad=") or low.startswith("ccaa="):
+            opts["region"] = raw.split("=", 1)[1].strip()
+            continue
+
+        if low.startswith("zona=") or low.startswith("zone="):
+            opts["zone"] = raw.split("=", 1)[1].strip()
+            continue
+
+        rest.append(raw)
+
+    return rest, opts
+
+
+async def alerta_aemet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Programa una vigilancia periódica de avisos oficiales AEMET.
+
+    Sintaxis:
+        /alerta_aemet cada <minutos> mesh canal <N> <zona>
+        /alerta_aemet cada <minutos> meshcore canal <idx> <zona>
+        /alerta_aemet cada <minutos> meshcore dm <contact_prefix> <zona>
+
+    Funcionalidad:
+        - Crea una tarea periódica en broker_task.
+        - La tarea no envía nada si no hay avisos nuevos.
+        - Si hay aviso nuevo, broker_task lo envía por el transporte elegido.
+        - No modifica /baliza_clima ni las tareas normales.
+    """
+    if await _abort_if_cooldown(update, context):
+        return ConversationHandler.END
+
+    msg = update.effective_message
+
+    try:
+        bump_stat(update.effective_user.id, update.effective_user.username or "", "alerta_aemet")
+    except Exception:
+        pass
+
+    args = [a.strip() for a in (context.args or []) if a and a.strip()]
+    if len(args) < 6:
+        await msg.reply_text(_AEMET_ALERT_USAGE)
+        return
+
+    mode = args[0].lower()
+    if mode not in ("cada", "intervalo", "interval"):
+        await msg.reply_text(_AEMET_ALERT_USAGE)
+        return
+
+    try:
+        interval_minutes = int(args[1])
+    except Exception:
+        await msg.reply_text("Intervalo no válido. Ejemplo: /alerta_aemet cada 30 mesh canal 4 Zaragoza")
+        return
+
+    min_interval = int(os.getenv("AEMET_ALERTS_MIN_INTERVAL_MIN", "30") or "30")
+    interval_minutes = max(min_interval, interval_minutes)
+
+    transport = args[2].lower()
+    if transport not in ("mesh", "meshcore"):
+        await msg.reply_text("Transporte no válido. Usa mesh o meshcore.")
+        return
+
+    idx = 3
+
+    # Destino según transporte.
+    channel = int(globals().get("BROKER_CHANNEL", 0))
+    destination = "broadcast"
+    meshcore_mode = None
+    meshcore_channel_idx = None
+    meshcore_contact = None
+
+    if transport == "mesh":
+        if idx + 1 >= len(args) or args[idx].lower() not in ("canal", "ch", "channel"):
+            await msg.reply_text("Para mesh usa: mesh canal <N> <zona>")
+            return
+        try:
+            channel = int(args[idx + 1])
+        except Exception:
+            await msg.reply_text("Canal Meshtastic no válido.")
+            return
+        idx += 2
+
+    elif transport == "meshcore":
+        if idx >= len(args):
+            await msg.reply_text("Para meshcore usa: meshcore canal <idx> <zona> o meshcore dm <contacto> <zona>")
+            return
+
+        dst_kind = args[idx].lower()
+
+        if dst_kind in ("canal", "ch", "channel"):
+            if idx + 1 >= len(args):
+                await msg.reply_text("Falta channel_idx de MeshCore.")
+                return
+            try:
+                meshcore_channel_idx = int(args[idx + 1])
+            except Exception:
+                await msg.reply_text("channel_idx de MeshCore no válido.")
+                return
+            meshcore_mode = "channel"
+            idx += 2
+
+        elif dst_kind in ("dm", "contacto", "contact", "directo"):
+            if idx + 1 >= len(args):
+                await msg.reply_text("Falta contacto/prefix MeshCore.")
+                return
+            meshcore_contact = args[idx + 1].strip()
+            meshcore_mode = "dm"
+            idx += 2
+
+        else:
+            await msg.reply_text("Destino MeshCore no válido. Usa canal <idx> o dm <contacto>.")
+            return
+
+    zone_tokens = args[idx:]
+    zone_tokens, named = _aemet_alert_pop_named_tokens(zone_tokens)
+
+    zone = (
+        named.get("zone")
+        or " ".join(zone_tokens).strip()
+        or os.getenv("AEMET_ALERTS_DEFAULT_ZONE", "Zaragoza")
+    )
+
+    province = named.get("province") or os.getenv("AEMET_ALERTS_DEFAULT_PROVINCE", zone)
+    region = named.get("region") or os.getenv("AEMET_ALERTS_DEFAULT_REGION", "")
+
+    placeholder_message = "AEMET_ALERT_DYNAMIC"
+
+    base_meta = {
+        "scheduled_by": update.effective_user.username or str(update.effective_user.id),
+        "via": "/alerta_aemet",
+        "task_type": "aemet_alert",
+        "transport": transport,
+        "zone": zone,
+        "location": zone,
+        "province": province,
+        "region": region,
+        "timezone": os.getenv("AEMET_ALERTS_TZ", "Europe/Madrid"),
+        "repeat": "interval",
+        "interval_minutes": int(interval_minutes),
+        "chat_id": update.effective_chat.id,
+        "reply_to": update.effective_message.message_id,
+    }
+
+    if transport == "meshcore":
+        base_meta["meshcore_mode"] = meshcore_mode
+        if meshcore_mode == "channel":
+            base_meta["meshcore_channel_idx"] = int(meshcore_channel_idx)
+        else:
+            base_meta["meshcore_contact"] = meshcore_contact
+
+    try:
+        now_local = datetime.now(TZ_EUROPE_MADRID)
+        first_dt = now_local + timedelta(minutes=interval_minutes)
+        when_local_str = first_dt.strftime("%Y-%m-%d %H:%M")
+
+        res = broker_tasks.schedule_message(
+            when_local=when_local_str,
+            channel=int(channel),
+            message=placeholder_message,
+            destination=destination,
+            require_ack=False,
+            meta=base_meta,
+        )
+
+        if not (isinstance(res, dict) and res.get("ok")):
+            raise RuntimeError(res)
+
+        task = res.get("task") or {}
+
+        lines = [
+            "Vigilancia AEMET programada:",
+            f"Zona: {zone}",
+            f"Provincia: {province or '-'}",
+            f"Región: {region or '-'}",
+            f"Intervalo: cada {interval_minutes} min",
+            f"Transporte: {transport}",
+        ]
+
+        if transport == "mesh":
+            lines.append(f"Meshtastic canal: {channel}")
+        else:
+            if meshcore_mode == "channel":
+                lines.append(f"MeshCore canal: {meshcore_channel_idx}")
+            else:
+                lines.append(f"MeshCore DM: {meshcore_contact}")
+
+        lines.append(f"ID: {task.get('id')}")
+        lines.append("Solo transmitirá si hay avisos AEMET nuevos o repetición permitida por cooldown.")
+
+        await msg.reply_text("\n".join(lines))
+
+    except Exception as e:
+        await msg.reply_text(f"No se pudo programar alerta AEMET: {type(e).__name__}: {e}")
+
+
+async def mis_alertas_aemet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /mis_alertas_aemet [pending|done|failed|canceled]
+
+    Lista tareas AEMET creadas con /alerta_aemet.
+    """
+    if await _abort_if_cooldown(update, context):
+        return ConversationHandler.END
+
+    try:
+        bump_stat(update.effective_user.id, update.effective_user.username or "", "mis_alertas_aemet")
+    except Exception:
+        pass
+
+    args = [a.strip().lower() for a in (context.args or []) if a and a.strip()]
+    status = args[0] if args and args[0] in ("pending", "done", "failed", "canceled") else "pending"
+
+    try:
+        res = broker_tasks.list_tasks(status=status)
+        rows = res.get("tasks") or [] if isinstance(res, dict) else []
+
+        alerts = []
+        for r in rows:
+            meta = r.get("meta") or {}
+            if str(meta.get("task_type") or "").lower() == "aemet_alert":
+                alerts.append(r)
+
+        if not alerts:
+            await update.effective_message.reply_text(f"No hay alertas AEMET con estado {status}.")
+            return
+
+        lines = [f"Alertas AEMET ({status}):"]
+        for r in alerts[:60]:
+            meta = r.get("meta") or {}
+            tid = r.get("id", "")
+            zone = meta.get("zone") or meta.get("location") or "-"
+            province = meta.get("province") or "-"
+            transport = meta.get("transport") or "mesh"
+            rep = f"cada {meta.get('interval_minutes')} min"
+
+            if transport == "meshcore":
+                if meta.get("meshcore_mode") == "dm":
+                    dst = f"MC DM {meta.get('meshcore_contact')}"
+                else:
+                    dst = f"MC canal {meta.get('meshcore_channel_idx')}"
+            else:
+                dst = f"Mesh canal {r.get('channel')}"
+
+            lines.append(f"- {tid} | {rep} | {transport} | {dst} | {zone} / {province}")
+
+        await update.effective_message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        await update.effective_message.reply_text(f"Error listando alertas AEMET: {type(e).__name__}: {e}")
+
+
+async def parar_alerta_aemet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /parar_alerta_aemet <task_id>
+
+    Cancela una alerta AEMET programada.
+    """
+    if await _abort_if_cooldown(update, context):
+        return ConversationHandler.END
+
+    try:
+        bump_stat(update.effective_user.id, update.effective_user.username or "", "parar_alerta_aemet")
+    except Exception:
+        pass
+
+    args = [a.strip() for a in (context.args or []) if a and a.strip()]
+    if not args:
+        await update.effective_message.reply_text("Uso: /parar_alerta_aemet <task_id>")
+        return
+
+    task_id = args[0]
+
+    try:
+        res = broker_tasks.cancel(task_id)
+        if isinstance(res, dict) and res.get("ok"):
+            await update.effective_message.reply_text(f"Alerta AEMET cancelada: {task_id}")
+        else:
+            await update.effective_message.reply_text(f"No se pudo cancelar la alerta AEMET: {task_id}")
+    except Exception as e:
+        await update.effective_message.reply_text(f"Error cancelando alerta AEMET: {type(e).__name__}: {e}")
+
+# ==========================
 # /diario — Programar diariamente a una hora un mensaje
 # ==========================
 
@@ -16414,6 +16753,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("mis_balizas", mis_balizas_cmd))
     app.add_handler(CommandHandler("parar_baliza", parar_baliza_cmd))
 
+    app.add_handler(CommandHandler("alerta_aemet", alerta_aemet_cmd))
+    app.add_handler(CommandHandler("mis_alertas_aemet", mis_alertas_aemet_cmd))
+    app.add_handler(CommandHandler("parar_alerta_aemet", parar_alerta_aemet_cmd))
 
     # Handlers de los dos comandos
     app.add_handler(CommandHandler("en", en_cmd))
