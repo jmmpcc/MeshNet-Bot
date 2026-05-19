@@ -725,22 +725,27 @@ def _parse_rss_atom_alerts(root: ET.Element, source_url: str) -> list[AemetAlert
 
     return out
 
-
 def parse_aemet_alerts_from_text(text: str, source_url: str = "") -> list[AemetAlert]:
     """
     Parsea una respuesta AEMET:
     - CAP XML
     - RSS XML
     - Atom XML
-    - HTML simple con enlaces a XML/CAP si no es XML
 
-    Devuelve lista de avisos normalizados.
+    Seguridad 24/7:
+    - Por defecto NO recorre páginas HTML índice.
+    - Las páginas /rss_info/avisos/... de AEMET pueden ser páginas HTML de enlaces,
+      no feeds XML directos.
+    - Evita bloqueos por descubrimiento recursivo de enlaces.
+    - Si se desea probar el descubrimiento HTML manualmente, activar:
+        AEMET_ALERTS_PARSE_HTML_LINKS=1
     """
     text = text or ""
     root = _xml_root(text)
-
+ 
     if root is not None:
         local = _tag_name(root)
+
         if local == "alert" or _findall_by_local(root, "info"):
             cap = _parse_cap_alert(root, source_link=source_url)
             if cap:
@@ -750,9 +755,16 @@ def parse_aemet_alerts_from_text(text: str, source_url: str = "") -> list[AemetA
         if alerts:
             return alerts
 
-    # Fallback HTML: descubrir XML/CAP enlazados y parsearlos.
+        return []
+
+    # HTML desactivado por defecto para producción 24/7.
+    if not _env_bool("AEMET_ALERTS_PARSE_HTML_LINKS", "0"):
+        return []
+
     alerts: list[AemetAlert] = []
-    for url in _discover_feed_urls_from_info_page(text, source_url or DEFAULT_AEMET_INFO_URL)[:8]:
+    max_links = max(0, _env_int("AEMET_ALERTS_HTML_MAX_LINKS", 2))
+
+    for url in _discover_feed_urls_from_info_page(text, source_url or DEFAULT_AEMET_INFO_URL)[:max_links]:
         try:
             sub = _fetch_cached(url)
             alerts.extend(parse_aemet_alerts_from_text(sub, source_url=url))
