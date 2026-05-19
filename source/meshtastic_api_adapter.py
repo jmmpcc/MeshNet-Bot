@@ -1,6 +1,6 @@
 # meshtastic_api_adapter.py
 # -*- coding: utf-8 -*-
-# Version v6.2.2
+# Version v7.0.12
 
 """
 Capa 'API-first' para Meshtastic.

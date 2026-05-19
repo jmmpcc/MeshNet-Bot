@@ -1,6 +1,6 @@
 # tcpinterface_persistent.py
 # Pool persistente para meshtastic.tcp_interface.TCPInterface
-# V6.3
+# v7.0.12
 # Objetivo en este proyecto:
 # - Mantener UNA única conexión TCP por (host,port) dentro del proceso.
 # - Evitar tormentas de reconexión y carreras cuando conviven varios componentes.

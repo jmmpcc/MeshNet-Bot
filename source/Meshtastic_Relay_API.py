@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Version v6.1.3
+# Version v7.0.12
 """
-Meshtastic Relay Checker – versión portable y robusta.
+Meshtastic Relay Checker – Version v7.0.12 versión portable y robusta.
 
 Funciones principales (resumen):
     sincronizar_nodos_y_guardar(path=FICHERO_SALIDA)

@@ -1,4 +1,4 @@
-# v6.2.4 uditoria_red.py
+# v7.0.12 uditoria_red.py
 import os, json, csv, math, time, hashlib, logging
 from datetime import datetime, timezone
 from statistics import fmean

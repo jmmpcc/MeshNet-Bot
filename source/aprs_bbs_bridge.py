@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+# v7.0.12
 """
 APRS <-> BBS Bridge (APRS-IS)
 --------------------------------

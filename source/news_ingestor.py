@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# news_ingestor_v6.2.4.py  (host-side)
+# news_ingestor_v7.0.12.py  (host-side)
 
 import os
 import re

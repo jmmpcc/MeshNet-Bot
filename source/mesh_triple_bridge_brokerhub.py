@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-mesh_triple_bridge.py  v7.0.0 — Pasarela externa A↔B y A↔C usando TCP Meshtastic.
+mesh_triple_bridge.py  v7.0.12 — Pasarela externa A↔B y A↔C usando TCP Meshtastic.
 
 Modo tcp:
 - Abre TCP directo a A, B y C.

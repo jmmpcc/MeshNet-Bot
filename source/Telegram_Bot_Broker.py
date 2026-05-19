@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v7.0.11 py
+Telegram_Bot_Broker_v7.0.12 py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -13072,6 +13072,395 @@ async def manana_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     else:
         await update.effective_message.reply_text("❌ No se pudo programar el mensaje.")
 
+
+# ==========================
+# /baliza_clima — Baliza meteorológica programada
+# ==========================
+
+_WEATHER_BEACON_USAGE = (
+    "Uso:\n"
+    "/baliza_clima cada <minutos> <mesh|meshcore> <destino> <ciudad> [lat=<lat> lon=<lon>]\n"
+    "/baliza_clima diario <HH:MM[,HH:MM]> <mesh|meshcore> <destino> <ciudad> [lat=<lat> lon=<lon>]\n\n"
+    "Destinos:\n"
+    "- mesh canal <N>\n"
+    "- meshcore canal <channel_idx>\n"
+    "- meshcore dm <contact_prefix>\n\n"
+    "Ejemplos:\n"
+    "/baliza_clima cada 60 mesh canal 4 Zaragoza\n"
+    "/baliza_clima cada 60 meshcore canal 1 Zaragoza\n"
+    "/baliza_clima cada 60 meshcore dm 6a18cb3d Zaragoza\n"
+    "/baliza_clima diario 08:00,12:00 meshcore canal 1 Zaragoza"
+)
+
+
+def _weather_beacon_pop_lat_lon(tokens: list[str]) -> tuple[list[str], dict]:
+    """
+    Extrae lat/lon de tokens tipo lat=41.6488 lon=-0.8891.
+
+    Uso:
+        rest, coords = _weather_beacon_pop_lat_lon(tokens)
+
+    Devuelve:
+        - rest: tokens sin lat/lon
+        - coords: {'lat': float, 'lon': float} si ambos existen y son válidos.
+    """
+    rest: list[str] = []
+    lat = None
+    lon = None
+    for t in tokens or []:
+        raw = str(t or "").strip()
+        low = raw.lower()
+        if low.startswith("lat="):
+            try:
+                lat = float(raw.split("=", 1)[1].replace(",", "."))
+            except Exception:
+                lat = None
+            continue
+        if low.startswith("lon=") or low.startswith("lng="):
+            try:
+                lon = float(raw.split("=", 1)[1].replace(",", "."))
+            except Exception:
+                lon = None
+            continue
+        rest.append(raw)
+
+    coords = {}
+    if lat is not None and lon is not None:
+        coords["lat"] = float(lat)
+        coords["lon"] = float(lon)
+    return rest, coords
+
+
+def _weather_beacon_parse_hhmm_list(spec: str) -> list[tuple[int, int, str]]:
+    """
+    Convierte '08:00,12:30' en [(8,0,'08:00'), (12,30,'12:30')].
+    Ignora entradas inválidas.
+    """
+    out: list[tuple[int, int, str]] = []
+    for chunk in str(spec or "").split(","):
+        try:
+            hh, mm = [int(x) for x in chunk.strip().split(":", 1)]
+            if 0 <= hh <= 23 and 0 <= mm <= 59:
+                out.append((hh, mm, f"{hh:02d}:{mm:02d}"))
+        except Exception:
+            continue
+    return out
+
+
+async def baliza_clima_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Programa una baliza meteorológica dinámica.
+
+    Modos:
+      /baliza_clima cada <minutos> mesh canal <N> <ciudad> [lat=<lat> lon=<lon>]
+      /baliza_clima cada <minutos> meshcore canal <idx> <ciudad> [lat=<lat> lon=<lon>]
+      /baliza_clima cada <minutos> meshcore dm <contacto> <ciudad> [lat=<lat> lon=<lon>]
+      /baliza_clima diario <HH:MM[,HH:MM]> ...
+
+    La tarea guarda solo metadatos. El texto se calcula en cada ejecución desde
+    weather_beacon.py, incluyendo hora, temperatura, humedad relativa y estado.
+    """
+    if await _abort_if_cooldown(update, context):
+        return ConversationHandler.END
+
+    try:
+        bump_stat(update.effective_user.id, update.effective_user.username or "", "baliza_clima")
+    except Exception:
+        pass
+
+    msg = update.effective_message
+    args = [str(a).strip() for a in (context.args or []) if str(a).strip()]
+    if len(args) < 5:
+        await msg.reply_text(_WEATHER_BEACON_USAGE)
+        return
+
+    mode = args[0].lower()
+    idx = 1
+    interval_minutes = None
+    horas_list: list[tuple[int, int, str]] = []
+
+    if mode in ("cada", "intervalo", "cada_min", "every"):
+        try:
+            interval_minutes = int(args[1])
+        except Exception:
+            await msg.reply_text("Minutos no válidos. Ejemplo: /baliza_clima cada 60 meshcore canal 1 Zaragoza")
+            return
+        min_interval = int(os.getenv("WEATHER_BEACON_MIN_INTERVAL_MIN", "30") or "30")
+        if interval_minutes < min_interval:
+            await msg.reply_text(f"Intervalo demasiado bajo. Mínimo configurado: {min_interval} minutos.")
+            return
+        idx = 2
+    elif mode in ("diario", "daily"):
+        horas_list = _weather_beacon_parse_hhmm_list(args[1])
+        if not horas_list:
+            await msg.reply_text("Hora inválida. Usa HH:MM[,HH:MM].")
+            return
+        idx = 2
+    else:
+        await msg.reply_text(_WEATHER_BEACON_USAGE)
+        return
+
+    if idx >= len(args):
+        await msg.reply_text(_WEATHER_BEACON_USAGE)
+        return
+
+    transport_token = args[idx].lower()
+    idx += 1
+
+    if transport_token in ("mesh", "meshtastic"):
+        transport = "mesh"
+    elif transport_token in ("meshcore", "mc"):
+        transport = "meshcore"
+    else:
+        await msg.reply_text("Transporte no válido. Usa mesh o meshcore.")
+        return
+
+    # Destino según transporte.
+    channel = int(globals().get("BROKER_CHANNEL", 0))
+    destination = "broadcast"
+    meshcore_mode = None
+    meshcore_channel_idx = None
+    meshcore_contact = None
+
+    if transport == "mesh":
+        if idx + 1 >= len(args) or args[idx].lower() not in ("canal", "ch"):
+            await msg.reply_text("Para mesh usa: mesh canal <N> <ciudad>")
+            return
+        try:
+            channel = int(args[idx + 1])
+        except Exception:
+            await msg.reply_text("Canal Meshtastic no válido.")
+            return
+        idx += 2
+
+    elif transport == "meshcore":
+        if idx >= len(args):
+            await msg.reply_text("Para meshcore usa: meshcore canal <idx> <ciudad> o meshcore dm <contacto> <ciudad>")
+            return
+        dst_kind = args[idx].lower()
+        if dst_kind in ("canal", "ch", "channel"):
+            if idx + 1 >= len(args):
+                await msg.reply_text("Falta channel_idx de MeshCore.")
+                return
+            try:
+                meshcore_channel_idx = int(args[idx + 1])
+            except Exception:
+                await msg.reply_text("channel_idx de MeshCore no válido.")
+                return
+            meshcore_mode = "channel"
+            idx += 2
+        elif dst_kind in ("dm", "contacto", "contact", "directo"):
+            if idx + 1 >= len(args):
+                await msg.reply_text("Falta contacto/prefix MeshCore.")
+                return
+            meshcore_contact = args[idx + 1].strip()
+            meshcore_mode = "dm"
+            idx += 2
+        else:
+            await msg.reply_text("Destino MeshCore no válido. Usa canal <idx> o dm <contacto>.")
+            return
+
+    city_tokens = args[idx:]
+    city_tokens, coords = _weather_beacon_pop_lat_lon(city_tokens)
+    city = " ".join(city_tokens).strip() or os.getenv("WEATHER_BEACON_DEFAULT_CITY", "Zaragoza")
+
+    # Mensaje placeholder: el texto real lo genera weather_beacon.py al ejecutar.
+    placeholder_message = "WEATHER_BEACON_DYNAMIC"
+    template = os.getenv(
+        "WEATHER_BEACON_TEMPLATE",
+        "Son las {hora} h. La temperatura en {ciudad} es de {temp} °C, humedad {humedad}% y {estado}.",
+    )
+
+    base_meta = {
+        "scheduled_by": update.effective_user.username or str(update.effective_user.id),
+        "via": "/baliza_clima",
+        "task_type": "weather_beacon",
+        "transport": transport,
+        "city": city,
+        "location": city,
+        "timezone": os.getenv("WEATHER_BEACON_TZ", "Europe/Madrid"),
+        "template": template,
+        "chat_id": update.effective_chat.id,
+        "reply_to": update.effective_message.message_id,
+    }
+    base_meta.update(coords)
+
+    if transport == "meshcore":
+        base_meta["meshcore_mode"] = meshcore_mode
+        if meshcore_mode == "channel":
+            base_meta["meshcore_channel_idx"] = int(meshcore_channel_idx)
+        else:
+            base_meta["meshcore_contact"] = meshcore_contact
+
+    created = []
+    try:
+        now_local = datetime.now(TZ_EUROPE_MADRID)
+
+        if interval_minutes is not None:
+            first_dt = now_local + timedelta(minutes=int(interval_minutes))
+            when_local_str = first_dt.strftime("%Y-%m-%d %H:%M")
+            meta = dict(base_meta)
+            meta["repeat"] = "interval"
+            meta["interval_minutes"] = int(interval_minutes)
+
+            res = broker_tasks.schedule_message(
+                when_local=when_local_str,
+                channel=int(channel),
+                message=placeholder_message,
+                destination=destination,
+                require_ack=False,
+                meta=meta,
+            )
+            if not (isinstance(res, dict) and res.get("ok")):
+                raise RuntimeError(res)
+            created.append(res["task"])
+
+        else:
+            for hh, mm, hhmm_txt in horas_list:
+                first_dt = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if first_dt <= now_local:
+                    first_dt = first_dt + timedelta(days=1)
+                when_local_str = first_dt.strftime("%Y-%m-%d %H:%M")
+                meta = dict(base_meta)
+                meta["repeat"] = "daily"
+                meta["daily_time"] = hhmm_txt
+
+                res = broker_tasks.schedule_message(
+                    when_local=when_local_str,
+                    channel=int(channel),
+                    message=placeholder_message,
+                    destination=destination,
+                    require_ack=False,
+                    meta=meta,
+                )
+                if not (isinstance(res, dict) and res.get("ok")):
+                    raise RuntimeError(res)
+                created.append(res["task"])
+
+        lines = [
+            "Baliza climática programada:",
+            f"Transporte: {transport}",
+            f"Ciudad: {city}",
+            "Contenido: hora, temperatura, humedad relativa y estado",
+        ]
+        if transport == "mesh":
+            lines.append(f"Meshtastic canal: {channel}")
+        else:
+            if meshcore_mode == "channel":
+                lines.append(f"MeshCore canal: {meshcore_channel_idx}")
+            else:
+                lines.append(f"MeshCore DM: {meshcore_contact}")
+        for t in created:
+            meta_t = t.get("meta") or {}
+            if meta_t.get("repeat") == "interval":
+                lines.append(f"Cada {meta_t.get('interval_minutes')} min -> ID {t.get('id')}")
+            else:
+                lines.append(f"{meta_t.get('daily_time')} -> ID {t.get('id')}")
+        await msg.reply_text("\n".join(lines))
+
+    except Exception as e:
+        await msg.reply_text(f"No se pudo programar la baliza: {type(e).__name__}: {e}")
+
+
+async def mis_balizas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /mis_balizas [pending|done|failed|canceled]
+    Lista tareas meteorológicas creadas con /baliza_clima.
+    """
+    if await _abort_if_cooldown(update, context):
+        return ConversationHandler.END
+
+    try:
+        bump_stat(update.effective_user.id, update.effective_user.username or "", "mis_balizas")
+    except Exception:
+        pass
+
+    args = [a.strip().lower() for a in (context.args or []) if a and a.strip()]
+    status = args[0] if args and args[0] in ("pending", "done", "failed", "canceled") else "pending"
+
+    try:
+        res = broker_tasks.list_tasks(status=status)
+        rows = res.get("tasks") or [] if isinstance(res, dict) else []
+        balizas = []
+        for r in rows:
+            meta = r.get("meta") or {}
+            if str(meta.get("task_type") or "").lower() == "weather_beacon":
+                balizas.append(r)
+
+        if not balizas:
+            await update.effective_message.reply_text(f"No hay balizas climáticas con estado {status}.")
+            return
+
+        lines = [f"Balizas climáticas ({status}):"]
+        for r in balizas[:60]:
+            meta = r.get("meta") or {}
+            tid = r.get("id", "")
+            city = meta.get("city") or meta.get("location") or "-"
+            transport = meta.get("transport") or "mesh"
+            repeat = meta.get("repeat") or "-"
+            if repeat == "interval":
+                rep = f"cada {meta.get('interval_minutes')} min"
+            elif repeat == "daily":
+                rep = f"diario {meta.get('daily_time', '--:--')}"
+            else:
+                rep = repeat
+            if transport == "meshcore":
+                if meta.get("meshcore_mode") == "dm":
+                    dst = f"MC DM {meta.get('meshcore_contact')}"
+                else:
+                    dst = f"MC canal {meta.get('meshcore_channel_idx')}"
+            else:
+                dst = f"Mesh canal {r.get('channel')}"
+            lines.append(f"- {tid} | {rep} | {transport} | {dst} | {city}")
+
+        await update.effective_message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.effective_message.reply_text(f"Error listando balizas: {type(e).__name__}: {e}")
+
+
+async def parar_baliza_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /parar_baliza <task_id>
+    Cancela una baliza climática programada.
+    """
+    if await _abort_if_cooldown(update, context):
+        return ConversationHandler.END
+
+    try:
+        bump_stat(update.effective_user.id, update.effective_user.username or "", "parar_baliza")
+    except Exception:
+        pass
+
+    task_id = (context.args[0].strip() if context.args else "")
+    if not task_id:
+        await update.effective_message.reply_text("Uso: /parar_baliza <task_id>")
+        return
+
+    try:
+        # Comprobación informativa: no bloquea la cancelación si falla.
+        try:
+            res_all = broker_tasks.list_tasks()
+            found = None
+            for r in (res_all.get("tasks") or []):
+                if r.get("id") == task_id:
+                    found = r
+                    break
+            if found:
+                meta = found.get("meta") or {}
+                if str(meta.get("task_type") or "").lower() != "weather_beacon":
+                    await update.effective_message.reply_text("Aviso: la tarea no parece una baliza climática. Se intentará cancelar igualmente.")
+        except Exception:
+            pass
+
+        res = broker_tasks.cancel(task_id)
+        if isinstance(res, dict) and res.get("ok"):
+            await update.effective_message.reply_text(f"Baliza {task_id} cancelada.")
+        else:
+            await update.effective_message.reply_text(f"No se pudo cancelar {task_id}: {res}")
+    except Exception as e:
+        await update.effective_message.reply_text(f"Error cancelando baliza: {type(e).__name__}: {e}")
+
+
 # ==========================
 # /diario — Programar diariamente a una hora un mensaje
 # ==========================
@@ -13649,7 +14038,6 @@ async def diario_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     except Exception as e:
         await msg_obj.reply_text(f"No se pudo programar /diario_mc_dm: {type(e).__name__}: {e}")
-
 
 async def mis_diarios_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -16021,6 +16409,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("mis_diarios", mis_diarios_cmd))
     app.add_handler(CommandHandler("parar_diario", parar_diario_cmd))
     app.add_handler(CommandHandler("parar_diario_grupo", parar_diario_grupo_cmd))
+
+    app.add_handler(CommandHandler("baliza_clima", baliza_clima_cmd))
+    app.add_handler(CommandHandler("mis_balizas", mis_balizas_cmd))
+    app.add_handler(CommandHandler("parar_baliza", parar_baliza_cmd))
 
 
     # Handlers de los dos comandos

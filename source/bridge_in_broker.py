@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-bridge_in_broker.py V6.2.2 — Pasarela A<->B embebida en el broker usando lógica "peer-safe".
+bridge_in_broker.py V7.0.12 — Pasarela A<->B embebida en el broker usando lógica "peer-safe".
 
 Problemas reales observados:
 - Error falso: 'Timed out waiting for connection completion' aunque el TCP real esté vivo.

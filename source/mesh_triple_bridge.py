@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-mesh_triple_bridge.py  (versión de prueba: selección de peers)
+mesh_triple_bridge.py  v7.0.12 (versión de prueba: selección de peers)
 
 Pasarela 3-way (A + B + C):
   - Nodo A: "hub" (normalmente el nodo que usa el broker)

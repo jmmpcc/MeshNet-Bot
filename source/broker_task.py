@@ -1,4 +1,4 @@
-# broker_tasks_v7.0.11 py
+# broker_tasks_v7.0.12 py - weather_beacon dynamic + MeshCore-only scheduler
 # ─────────────────────────────────────────────────────────────────────────────
 # Gestor común de TAREAS programadas de envío para el ecosistema Meshtastic.
 # - Reutilizable desde el broker y el bot (sin duplicar código).
@@ -441,27 +441,25 @@ class _TaskManager:
     def _process_task(self, t: ScheduledTask):
         self._logger.info(f"[Tasks] Ejecutando {t.id} ch={t.channel} dest={t.destination} intento={t.attempts+1}")
         ok, packet_id, error = False, None, None
-      
-        transport = (t.meta or {}).get("transport", "mesh").lower()  # 'mesh' | 'aprs' | 'both'
-        aprs_dest = (t.meta or {}).get("aprs_dest") or t.destination
 
-        # 1) Resolver/usar sender
-        send = self._send_callable or self._auto_detect_sender()
-        if not send:
-            error = "No hay sender configurado (configure_sender) y no se pudo autodetectar."
+        meta = t.meta or {}
+        transport = str(meta.get("transport", "mesh") or "mesh").strip().lower()
+        aprs_dest = meta.get("aprs_dest") or t.destination
+
+        # 1) Resolver mensaje dinámico si la tarea lo requiere.
+        #    Para tareas normales devuelve t.message sin alterar el flujo existente.
+        try:
+            message_to_send = self._resolve_task_message(t)
+        except Exception as e:
+            error = f"dynamic message failed: {type(e).__name__}: {e}"
             self._fail_or_retry(t, error)
             return
 
-        # --- SOLO APRS: saltar MESH y mandar por pasarela APRS
+        # 2) Transporte APRS-only ya existente. Se mantiene, pero usando el texto resuelto.
         if transport == "aprs":
             try:
-                self._aprs_forward_via_udp(dest=aprs_dest, text=t.message)
-                # Repetición diaria (si aplica)
-                meta = t.meta or {}
-                if meta.get("repeat") == "daily":
-                    self._reschedule_daily(t)
-                else:
-                    self._mark_done(t.id, None)
+                self._aprs_forward_via_udp(dest=aprs_dest, text=message_to_send)
+                self._complete_success(t, None)
                 self._logger.info(f"[Tasks] DONE (APRS-only) {t.id}")
                 return
             except Exception as e:
@@ -469,66 +467,31 @@ class _TaskManager:
                 self._fail_or_retry(t, error)
                 return
 
-
-
-        # --- SOLO MESHCORE: saltar MESH y mandar por control del broker hacia MESHCORE_ENGINE
+        # 3) Transporte MeshCore-only. No exige sender Meshtastic y no usa canal puente.
         if transport == "meshcore":
             try:
-                meta = t.meta or {}
-                mc_mode = str(meta.get("meshcore_mode") or meta.get("meshcore_kind") or "channel").strip().lower()
-
-                # Reutilizamos el mismo troceo seguro por bytes que el envío Meshtastic.
-                # MeshCore admite cola propia en el broker, pero partir aquí evita payloads excesivos
-                # y mantiene trazabilidad por parte en el scheduler.
-                parts = split_text_for_meshtastic(t.message, MAX_PAYLOAD_BYTES)
-                if len(parts) > 1:
-                    self._logger.info(f"[Tasks] MeshCore: mensaje troceado en {len(parts)} partes por longitud")
-
-                packet_id = None
-                for i, part in enumerate(parts, 1):
-                    label = f" ({i}/{len(parts)})" if len(parts) > 1 else ""
-                    payload = part + label
-
-                    if mc_mode in ("dm", "contact", "direct"):
-                        contact_prefix = str(meta.get("meshcore_contact") or meta.get("contact_prefix") or t.destination or "").strip()
-                        res = _meshcore_send_via_broker_ctrl(
-                            kind="contact",
-                            contact_prefix=contact_prefix,
-                            text=payload,
-                        )
-                    else:
-                        res = _meshcore_send_via_broker_ctrl(
-                            kind="chan",
-                            channel_idx=int(t.channel),
-                            text=payload,
-                        )
-
-                    if not bool(res.get("ok")):
-                        raise RuntimeError(res.get("error") or str(res))
-
-                    # MeshCore devuelve encolado, no packet_id RF clásico. Guardamos marcador útil.
-                    packet_id = res.get("packet_id") or res.get("queued") or packet_id
-                    time.sleep(0.8)
-
-                if meta.get("repeat") == "daily":
-                    self._reschedule_daily(t)
-                else:
-                    self._mark_done(t.id, packet_id)
-
-                self._logger.info(f"[Tasks] DONE (MESHCORE-only) {t.id}")
+                self._meshcore_forward_via_ctrl(meta=meta, text=message_to_send)
+                self._complete_success(t, None)
+                self._logger.info(f"[Tasks] DONE (MeshCore-only) {t.id}")
                 return
-
             except Exception as e:
                 error = f"MeshCore send failed: {type(e).__name__}: {e}"
                 self._fail_or_retry(t, error)
                 return
 
-        # ── MOD: troceo previo del mensaje a payloads seguros
-        parts = split_text_for_meshtastic(t.message, MAX_PAYLOAD_BYTES)
+        # 4) Resto de transportes: Meshtastic normal.
+        #    Se conserva transport='both' como MESH+APRS para no romper /diario actual.
+        #    Para MESH+MeshCore se añaden alias explícitos nuevos.
+        send = self._send_callable or self._auto_detect_sender()
+        if not send:
+            error = "No hay sender configurado (configure_sender) y no se pudo autodetectar."
+            self._fail_or_retry(t, error)
+            return
+
+        parts = split_text_for_meshtastic(message_to_send, MAX_PAYLOAD_BYTES)
         if len(parts) > 1:
             self._logger.info(f"[Tasks] Mensaje troceado en {len(parts)} partes por longitud")
 
-        # 2) Envío por partes (si falla una parte → backoff de la tarea completa)
         try:
             sent_any = False
             for i, part in enumerate(parts, 1):
@@ -551,19 +514,16 @@ class _TaskManager:
                         else:
                             raise RuntimeError(error)
 
-                    # Parte OK
                     sent_any = True
                     packet_id = res.get("packet_id") or packet_id
-                    # Pausa corta entre partes para no estresar el socket
                     time.sleep(0.8)
 
                 except Exception as e_part:
                     ok = False
                     error = f"{type(e_part).__name__}: {e_part}"
-                    raise  # salimos del bucle y tratamos como fallo de tarea
+                    raise
 
-            # Si todas las partes fueron bien
-            ok = True
+            ok = bool(sent_any)
 
         except Exception as e:
             ok = False
@@ -571,32 +531,32 @@ class _TaskManager:
                 error = f"{type(e).__name__}: {e}"
 
         if ok:
-            # [NUEVO] Si la tarea es de transporte APRS, reenvía también por UDP a la pasarela
+            # transport='both' se mantiene exactamente como estaba: MESH + APRS.
             try:
-                if (t.meta or {}).get("transport", "mesh").lower() == "both":
-                    self._aprs_forward_via_udp(dest=t.destination, text=t.message)
+                if transport == "both":
+                    self._aprs_forward_via_udp(dest=aprs_dest, text=message_to_send)
             except Exception as _e_aprs:
                 self._logger.warning(f"[Tasks→APRS] Error en post-send APRS: {type(_e_aprs).__name__}: {_e_aprs}")
-       
-            # === Repetición diaria, si aplica
-            meta = t.meta or {}
-            if meta.get("repeat") == "daily":
-                self._reschedule_daily(t)
-                return
 
-            self._mark_done(t.id, packet_id)
+            # Nuevos alias explícitos para MESH + MeshCore, sin alterar 'both'.
+            try:
+                if transport in ("mesh_meshcore", "meshcore_mesh", "mesh+meshcore", "meshcore+mesh", "ambos_mc"):
+                    self._meshcore_forward_via_ctrl(meta=meta, text=message_to_send)
+            except Exception as _e_mc:
+                # En modo combinado, Meshtastic ya salió OK. Se registra, pero no se marca fallo para no duplicar RF.
+                self._logger.warning(f"[Tasks→MeshCore] Error post-send MeshCore: {type(_e_mc).__name__}: {_e_mc}")
+
+            self._complete_success(t, packet_id)
             self._logger.info(f"[Tasks] DONE {t.id} • packet_id={packet_id}")
             return
 
-
-        # 3) Si hay error de conexión/timeout (no resuelto arriba), reintentar a nivel de tarea
+        # 5) Si hay error de conexión/timeout, reintentar a nivel de tarea.
         if self._looks_like_conn_timeout(error):
             reconn = self._reconnect_callable or self._auto_detect_reconnect()
             if reconn:
                 try:
                     if reconn():
                         self._logger.warning("[Tasks] Reconexión OK, reintentando envío completo…")
-                        # Reintento del mensaje completo (volverá a partir en partes)
                         try:
                             res2_ok = True
                             packet_id = None
@@ -610,7 +570,7 @@ class _TaskManager:
                                 packet_id = r.get("packet_id") or packet_id
                                 time.sleep(0.8)
                             if res2_ok:
-                                self._mark_done(t.id, packet_id)
+                                self._complete_success(t, packet_id)
                                 self._logger.info(f"[Tasks] DONE tras reconexión {t.id} • packet_id={packet_id}")
                                 return
                         except Exception as e2:
@@ -620,8 +580,157 @@ class _TaskManager:
                 except Exception as e:
                     self._logger.exception(f"[Tasks] Excepción reconectando: {e}")
 
-        # 4) Backoff / fail
+        # 6) Backoff / fail
         self._fail_or_retry(t, error)
+
+    def _resolve_task_message(self, t: ScheduledTask) -> str:
+        """
+        Devuelve el texto real que se debe transmitir.
+
+        Uso:
+            message = self._resolve_task_message(t)
+
+        Funcionalidad:
+        - Para tareas normales, devuelve t.message sin cambios.
+        - Para meta.task_type == 'weather_beacon', construye el texto en tiempo real
+          usando weather_beacon.py. Así la temperatura y la humedad no quedan
+          congeladas en el momento de programar la tarea.
+        """
+        meta = t.meta or {}
+        task_type = str(meta.get("task_type") or "").strip().lower()
+        if task_type != "weather_beacon":
+            return str(t.message or "")
+
+        from weather_beacon import build_weather_beacon_text_from_meta
+        msg = build_weather_beacon_text_from_meta(meta)
+        if not msg:
+            raise RuntimeError("weather_beacon devolvió mensaje vacío")
+        return _normalize_text_for_mesh(msg)
+
+    def _complete_success(self, t: ScheduledTask, packet_id: Optional[Any]) -> None:
+        """
+        Cierra correctamente una ejecución exitosa.
+
+        Uso:
+            self._complete_success(t, packet_id)
+
+        Funcionalidad:
+        - Si repeat='daily', conserva la lógica anterior de reprogramación diaria.
+        - Si repeat='interval', reprograma la tarea cada N minutos.
+        - Si no hay repetición, marca la tarea como done.
+        """
+        meta = t.meta or {}
+        repeat = str(meta.get("repeat") or "").strip().lower()
+        if repeat == "daily":
+            self._reschedule_daily(t)
+            return
+        if repeat == "interval":
+            self._reschedule_interval(t)
+            return
+        self._mark_done(t.id, packet_id)
+
+    def _reschedule_interval(self, t: ScheduledTask) -> None:
+        """
+        Reprograma una tarea periódica por intervalo.
+
+        Campos meta:
+          repeat='interval'
+          interval_minutes=N
+
+        La siguiente ejecución se calcula desde 'ahora' para evitar ráfagas de
+        recuperación si el sistema estuvo apagado durante mucho tiempo.
+        """
+        try:
+            meta = t.meta or {}
+            interval_min = int(meta.get("interval_minutes") or meta.get("every_minutes") or 60)
+            min_interval = int(os.getenv("WEATHER_BEACON_MIN_INTERVAL_MIN", "30") or "30")
+            interval_min = max(min_interval, interval_min)
+
+            next_utc_dt = datetime.now(timezone.utc) + timedelta(minutes=interval_min)
+            next_utc = next_utc_dt.strftime(ISO_FMT)
+
+            with self._lock:
+                rows = self._read_all()
+                for r in rows:
+                    if r["id"] == t.id:
+                        r["last_run_ts"] = time.time()
+                        r["when_utc"] = next_utc
+                        r["status"] = "pending"
+                        r["attempts"] = 0
+                        r["last_error"] = None
+                        r["next_try_utc"] = None
+                        r.setdefault("meta", {})
+                        r["meta"]["repeat"] = "interval"
+                        r["meta"]["interval_minutes"] = interval_min
+                        r["meta"]["repeat_count"] = int(r["meta"].get("repeat_count") or 0) + 1
+                self._rewrite(rows)
+
+            self._logger.info(f"[Tasks] Reprogramada (interval {interval_min} min) {t.id} → {next_utc} UTC")
+        except Exception as e:
+            self._logger.exception(f"[Tasks] _reschedule_interval: {e}")
+
+    def _meshcore_forward_via_ctrl(self, meta: Dict[str, Any], text: str) -> None:
+        """
+        Envía un texto directamente al MeshCore embebido usando el control del broker.
+
+        Parámetros meta:
+          meshcore_mode='channel'|'chan'|'dm'|'contact'
+          meshcore_channel_idx=N       si modo canal
+          meshcore_contact='prefix'    si modo DM/contacto
+
+        Diseño:
+        - No usa el canal puente Meshtastic.
+        - No abre conexiones MeshCore desde el scheduler.
+        - Reutiliza el endpoint de control MESHCORE_SEND ya existente en el broker.
+        """
+        meta = meta or {}
+        msg = str(text or "").strip()
+        if not msg:
+            raise RuntimeError("missing text")
+
+        mode = str(meta.get("meshcore_mode") or meta.get("mc_mode") or "channel").strip().lower()
+        params: Dict[str, Any] = {"text": msg}
+
+        if mode in ("dm", "contact", "direct", "privado"):
+            contact = str(meta.get("meshcore_contact") or meta.get("contact_prefix") or meta.get("mc_contact") or "").strip()
+            if not contact:
+                raise RuntimeError("missing meshcore_contact")
+            params.update({"kind": "contact", "contact_prefix": contact})
+        else:
+            ch_raw = meta.get("meshcore_channel_idx", meta.get("channel_idx", meta.get("mc_channel_idx", None)))
+            if ch_raw is None:
+                raise RuntimeError("missing meshcore_channel_idx")
+            params.update({"kind": "chan", "channel_idx": int(ch_raw)})
+
+        payload = {"cmd": "MESHCORE_SEND", "params": params}
+        host = os.getenv("BROKER_CTRL_HOST", os.getenv("BROKER_HOST", "127.0.0.1")).strip() or "127.0.0.1"
+        try:
+            port = int(os.getenv("BROKER_CTRL_PORT", str(int(os.getenv("BROKER_PORT", "8765")) + 1)))
+        except Exception:
+            port = 8766
+
+        data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        timeout = float(os.getenv("WEATHER_BEACON_MESHCORE_CTRL_TIMEOUT", "5") or "5")
+
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.sendall(data)
+            sock.settimeout(timeout)
+            buf = b""
+            while b"\n" not in buf:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+
+        raw = (buf.decode("utf-8", errors="replace") or "").strip()
+        if not raw:
+            raise RuntimeError("empty MESHCORE_SEND response")
+        try:
+            resp = json.loads(raw.splitlines()[0])
+        except Exception as e:
+            raise RuntimeError(f"bad MESHCORE_SEND json: {e}: {raw[:120]}") from e
+        if not bool(resp.get("ok")):
+            raise RuntimeError(resp.get("error") or resp)
 
     def _aprs_forward_via_udp(self, dest: str, text: str) -> None:
         """
