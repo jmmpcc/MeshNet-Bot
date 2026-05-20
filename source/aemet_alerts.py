@@ -242,17 +242,10 @@ def _http_get_text(url: str, timeout_sec: float) -> str:
     """
     Descarga texto por HTTP/HTTPS con user-agent propio.
 
-    Parámetros:
-        url:
-            URL RSS/Atom/CAP o página informativa AEMET.
-        timeout_sec:
-            Timeout máximo.
-
-    Devuelve:
-        Texto decodificado.
-
-    Lanza:
-        RuntimeError si no hay URL o si la respuesta no es válida.
+    Versión 24/7:
+    - No usa resp.read() sin límite.
+    - Lee por bloques con límite máximo.
+    - Evita bloqueos si el servidor tarda en cerrar la conexión.
     """
     url = (url or "").strip()
     if not url:
@@ -263,21 +256,48 @@ def _http_get_text(url: str, timeout_sec: float) -> str:
         headers={
             "User-Agent": "MeshNetBot-AEMET-Alerts/7.0.13",
             "Accept": "application/xml,text/xml,application/rss+xml,application/atom+xml,text/html;q=0.8,*/*;q=0.5",
+            "Connection": "close",
         },
     )
 
-    with urllib.request.urlopen(req, timeout=float(timeout_sec)) as resp:
-        raw = resp.read()
+    max_bytes = max(8192, _env_int("AEMET_ALERTS_MAX_DOWNLOAD_BYTES", 262144))
+    timeout_sec = max(2.0, float(timeout_sec or 10.0))
+
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        try:
+            resp.fp.raw._sock.settimeout(timeout_sec)
+        except Exception:
+            pass
+
+        chunks = []
+        total = 0
+
+        while total < max_bytes:
+            try:
+                chunk = resp.read(min(16384, max_bytes - total))
+            except TimeoutError:
+                break
+            except Exception:
+                break
+
+            if not chunk:
+                break
+
+            chunks.append(chunk)
+            total += len(chunk)
+
+        raw = b"".join(chunks)
+
         charset = "utf-8"
         ctype = resp.headers.get("Content-Type", "") if resp.headers else ""
         m = re.search(r"charset=([^;\s]+)", ctype, flags=re.I)
         if m:
             charset = m.group(1).strip()
+
         try:
             return raw.decode(charset, errors="replace")
         except Exception:
             return raw.decode("utf-8", errors="replace")
-
 
 def _fetch_cached(url: str) -> str:
     """
@@ -345,42 +365,35 @@ def _discover_feed_urls_from_info_page(html_text: str, base_url: str) -> list[st
     out.sort(key=lambda u: (0 if re.search(r"(rss|atom|cap|\.xml)", u, flags=re.I) else 1, len(u)))
     return out
 
+
 def _configured_feed_urls() -> list[str]:
     """
-    Devuelve las URLs fuente de avisos AEMET.
+    Devuelve las URLs fuente.
 
     Reglas:
     1) Si AEMET_ALERTS_FEED_URL está definido, se usa tal cual.
        Admite varias URLs separadas por coma o punto y coma.
-
-    2) Si está vacío, usa la página oficial de Aragón como fallback operativo
-       para evitar recorrer el índice nacional completo.
-
-    Nota 24/7:
-    - En producción se recomienda definir siempre AEMET_ALERTS_FEED_URL.
-    - Se limita el descubrimiento para evitar bloqueos por exceso de enlaces.
+    2) Si está vacío, se usa la página oficial de RSS/Atom de avisos de España
+       y se intenta descubrir feed XML/CAP desde ahí.
     """
     raw = _env_str("AEMET_ALERTS_FEED_URL", "")
     if raw:
-        return [u.strip() for u in raw.replace(";", ",").split(",") if u.strip()]
+        urls = [u.strip() for u in raw.replace(";", ",").split(",") if u.strip()]
+        return urls
 
-    fallback = _env_str(
-        "AEMET_ALERTS_FALLBACK_INFO_URL",
-        "https://www.aemet.es/es/rss_info/avisos/arn",
-    )
-
+    # Fallback: página oficial informativa.
+    # Si no se encuentra feed dentro, se intentará parsear la propia página,
+    # pero normalmente será mejor definir AEMET_ALERTS_FEED_URL cuando tengamos
+    # el canal exacto de comunidad/provincia.
     try:
-        page = _fetch_cached(fallback)
-        urls = _discover_feed_urls_from_info_page(page, fallback)
-
-        max_urls = max(1, _env_int("AEMET_ALERTS_DISCOVER_MAX_URLS", 3))
+        page = _fetch_cached(DEFAULT_AEMET_INFO_URL)
+        urls = _discover_feed_urls_from_info_page(page, DEFAULT_AEMET_INFO_URL)
         if urls:
-            return urls[:max_urls]
-    except Exception as e:
-        if _env_int("AEMET_ALERTS_DEBUG", 0) >= 1:
-            print(f"[aemet_alerts] No se pudo descubrir feed desde {fallback}: {type(e).__name__}: {e}", flush=True)
+            return urls[:5]
+    except Exception:
+        pass
 
-    return [fallback]
+    return [DEFAULT_AEMET_INFO_URL]
 
 
 # =============================================================================
@@ -725,6 +738,7 @@ def _parse_rss_atom_alerts(root: ET.Element, source_url: str) -> list[AemetAlert
 
     return out
 
+
 def parse_aemet_alerts_from_text(text: str, source_url: str = "") -> list[AemetAlert]:
     """
     Parsea una respuesta AEMET:
@@ -737,12 +751,10 @@ def parse_aemet_alerts_from_text(text: str, source_url: str = "") -> list[AemetA
     - Las páginas /rss_info/avisos/... de AEMET pueden ser páginas HTML de enlaces,
       no feeds XML directos.
     - Evita bloqueos por descubrimiento recursivo de enlaces.
-    - Si se desea probar el descubrimiento HTML manualmente, activar:
-        AEMET_ALERTS_PARSE_HTML_LINKS=1
     """
     text = text or ""
     root = _xml_root(text)
- 
+
     if root is not None:
         local = _tag_name(root)
 
@@ -772,7 +784,6 @@ def parse_aemet_alerts_from_text(text: str, source_url: str = "") -> list[AemetA
             continue
 
     return alerts
-
 
 def fetch_aemet_alerts() -> list[AemetAlert]:
     """
@@ -1105,25 +1116,22 @@ def build_aemet_alert_text_from_meta(meta: Dict[str, Any]) -> str:
     # Cada aviso en línea separada. broker_task ya trocea por bytes si hace falta.
     return "\n".join(messages).strip()
 
+
 def debug_aemet_alerts(meta: Optional[Dict[str, Any]] = None) -> dict:
     """
     Diagnóstico manual.
 
-    Uso:
+    Uso desde consola Python:
         import aemet_alerts
         print(aemet_alerts.debug_aemet_alerts({"zone":"Zaragoza"}))
 
     Devuelve:
         Resumen de URLs, avisos totales y avisos filtrados.
-
-    Nota:
-        Esta función no transmite RF.
     """
     meta = dict(meta or {})
     urls = _configured_feed_urls()
     alerts = fetch_aemet_alerts()
     filtered = filter_aemet_alerts(alerts, meta)
-
     return {
         "ok": True,
         "urls": urls,
