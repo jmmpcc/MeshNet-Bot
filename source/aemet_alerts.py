@@ -799,11 +799,29 @@ def fetch_aemet_alerts() -> list[AemetAlert]:
                 print(f"[aemet_alerts] Error leyendo {url}: {type(e).__name__}: {e}", flush=True)
             continue
 
+    # Eliminar entradas informativas de AEMET que indican ausencia de avisos.
+    # AEMET publica en los RSS de zona entradas tipo:
+    #   "Estado completo de avisos para ... No hay avisos para ..."
+    # No son alertas operativas y no deben pasar a la fase de filtrado/envío.
+    operative_alerts: list[AemetAlert] = []
+    for a in alerts:
+        raw = _normalize_for_match(" ".join([
+            a.title or "",
+            a.summary or "",
+            a.raw_text or "",
+        ]))
+
+        if "no hay avisos" in raw:
+            continue
+
+        operative_alerts.append(a)
+
     # Dedup por hash de alerta en la misma ejecución.
     unique: dict[str, AemetAlert] = {}
-    for a in alerts:
+    for a in operative_alerts:
         h = _make_alert_hash(a)
         unique[h] = a
+
     return list(unique.values())
 
 
