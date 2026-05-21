@@ -6113,11 +6113,11 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("mis_diarios", "Listar tareas diarias (/mis_diarios [pending|done|failed|canceled] [grupo <id>])"),
         BotCommand("parar_diario_grupo", "Detener todas las diarias de un grupo"),
         BotCommand("parar_diario", "Detener un envío diario por ID"),
-        BotCommand("baliza_clima", "cada <minutos> <mesh|meshcore> <destino> <ciudad> [lat=<lat> lon=<lon>] - Programar baliza meteorológica"),
+        BotCommand("baliza_clima", "cada <minutos> <mesh|meshcore> canal [x] <destino> [Zaragoza|Huesca|Teruel] [lat=<lat> lon=<lon>] - Programar baliza meteorológica"),
         BotCommand("mis_balizas", "Ver balizas programadas"),
         BotCommand("parar_baliza", "Cancelar baliza programada"),
 
-        BotCommand("alerta_aemet", "cada <MM> <mesh|meshcore> canal [x] <Zaragoza> Programar avisos AEMET por RF  "),
+        BotCommand("alerta_aemet", "cada <MM> <mesh|meshcore> canal [x] <destino> [Zaragoza|Huesca|Teruel] Programar avisos AEMET por RF  "),
         BotCommand("mis_alertas_aemet", "Ver alertas AEMET programadas"),
         BotCommand("parar_alerta_aemet", "Cancelar una alerta AEMET programada"),
           
