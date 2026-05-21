@@ -772,6 +772,73 @@ class MeshCoreEmbeddedBridge:
             "default_contact_ch": self.default_contact_ch,
         }
 
+    def list_contacts(self, limit: int = 80) -> list[dict]:
+        """
+        Devuelve contactos conocidos por la sesión MeshCore embebida.
+
+        Nota: en versiones recientes de la librería meshcore, el cache de
+        contactos puede quedarse en "pending" hasta forzar ensure/flush.
+        Esta rutina lo intenta de forma best-effort y normaliza la salida.
+        """
+        try:
+            max_n = max(1, min(500, int(limit)))
+        except Exception:
+            max_n = 80
+
+        mc = self._mc
+        if mc is None:
+            return []
+
+        # Best-effort para forzar volcado de contactos pendientes en cache.
+        try:
+            if hasattr(mc, "ensure_contacts"):
+                mc.ensure_contacts()
+        except Exception:
+            pass
+        try:
+            if hasattr(mc, "flush_pending_contacts"):
+                mc.flush_pending_contacts()
+        except Exception:
+            pass
+
+        try:
+            items = mc.get_contacts() if hasattr(mc, "get_contacts") else getattr(mc, "contacts", [])
+        except Exception:
+            items = []
+
+        if isinstance(items, dict):
+            items = list(items.values())
+
+        out = []
+        seen = set()
+        for c in (items or []):
+            try:
+                if isinstance(c, dict):
+                    prefix = c.get("prefix") or c.get("key_prefix") or c.get("pubkey_prefix") or c.get("id") or c.get("key")
+                    name = c.get("name") or c.get("alias") or c.get("label")
+                    last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("seen") or c.get("ts")
+                else:
+                    prefix = getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None) or getattr(c, "prefix", None) or getattr(c, "id", None)
+                    name = getattr(c, "name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
+                    last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "seen", None)
+
+                prefix = (str(prefix).strip() if prefix is not None else "")
+                if not prefix or prefix in seen:
+                    continue
+                seen.add(prefix)
+
+                out.append({
+                    "prefix": prefix,
+                    "name": (str(name).strip() if name is not None else "") or None,
+                    "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
+                })
+                if len(out) >= max_n:
+                    break
+            except Exception:
+                continue
+
+        return out
+
     def start(self) -> None:
         if not self.enable:
             if _env_truthy("MESHCORE_ENABLE", "0") and not _MESHCORE_AVAILABLE:
