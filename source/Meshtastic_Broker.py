@@ -5535,6 +5535,9 @@ class _BacklogServer(threading.Thread):
                     except Exception as e:
                         resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                return
+
             # --- NUEVO: envío de texto vía lado B del bridge ---
             elif cmd == "SEND_TEXT_VIA":
                 params = req.get("params") or {}
