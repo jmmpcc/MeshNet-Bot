@@ -303,6 +303,7 @@ class _TaskManager:
         self._lock = threading.RLock()
         self._send_callable: Optional[Callable[[int, str, str, bool], Dict[str, Any]]] = None
         self._reconnect_callable: Optional[Callable[[], bool]] = None
+        self._pending_aemet_alerts: Dict[str, dict] = {}
         #self._ensure_file()
 
     # ── Configuración pública ────────────────────────────────────────────────
@@ -467,6 +468,7 @@ class _TaskManager:
             # Ejecución correcta sin transmisión.
             # Caso principal: alerta AEMET periódica sin avisos nuevos.
             self._logger.info(f"[Tasks] SKIP TX {t.id}: {e}")
+            self._pending_aemet_alerts.pop(t.id, None)
             self._complete_success(t, None)
             return
         except Exception as e:
@@ -478,6 +480,7 @@ class _TaskManager:
         if transport == "aprs":
             try:
                 self._aprs_forward_via_udp(dest=aprs_dest, text=message_to_send)
+                self._confirm_dynamic_success(t)
                 self._complete_success(t, None)
                 self._logger.info(f"[Tasks] DONE (APRS-only) {t.id}")
                 return
@@ -490,6 +493,7 @@ class _TaskManager:
         if transport == "meshcore":
             try:
                 self._meshcore_forward_via_ctrl(meta=meta, text=message_to_send)
+                self._confirm_dynamic_success(t)
                 self._complete_success(t, None)
                 self._logger.info(f"[Tasks] DONE (MeshCore-only) {t.id}")
                 return
@@ -565,6 +569,7 @@ class _TaskManager:
                 # En modo combinado, Meshtastic ya salió OK. Se registra, pero no se marca fallo para no duplicar RF.
                 self._logger.warning(f"[Tasks→MeshCore] Error post-send MeshCore: {type(_e_mc).__name__}: {_e_mc}")
 
+            self._confirm_dynamic_success(t)
             self._complete_success(t, packet_id)
             self._logger.info(f"[Tasks] DONE {t.id} • packet_id={packet_id}")
             return
@@ -589,6 +594,7 @@ class _TaskManager:
                                 packet_id = r.get("packet_id") or packet_id
                                 time.sleep(0.8)
                             if res2_ok:
+                                self._confirm_dynamic_success(t)
                                 self._complete_success(t, packet_id)
                                 self._logger.info(f"[Tasks] DONE tras reconexión {t.id} • packet_id={packet_id}")
                                 return
@@ -628,13 +634,39 @@ class _TaskManager:
             return _normalize_text_for_mesh(msg)
 
         if task_type == "aemet_alert":
-            from aemet_alerts import build_aemet_alert_text_from_meta
-            msg = build_aemet_alert_text_from_meta(meta)
+            from aemet_alerts import build_aemet_alert_result_from_meta
+            meta_for_alert = dict(meta)
+            meta_for_alert.setdefault("channel", t.channel)
+            meta_for_alert.setdefault("mesh_channel", t.channel)
+            result = build_aemet_alert_result_from_meta(meta_for_alert)
+            msg = str((result or {}).get("text") or "")
             if not msg:
+                self._pending_aemet_alerts.pop(t.id, None)
                 raise TaskNoTransmissionNeeded("sin avisos AEMET nuevos")
+            result["meta"] = meta_for_alert
+            self._pending_aemet_alerts[t.id] = result
             return _normalize_text_for_mesh(msg)
 
         return str(t.message or "")
+
+    def _confirm_dynamic_success(self, t: ScheduledTask) -> None:
+        """
+        Confirma estados externos de tareas dinámicas tras un envío correcto.
+        Si la confirmación falla, no se marca la tarea como fallida porque la RF
+        ya salió; el peor caso aceptable es repetir el aviso en otro ciclo.
+        """
+        meta = t.meta or {}
+        task_type = str(meta.get("task_type") or "").strip().lower()
+        if task_type != "aemet_alert":
+            return
+        result = self._pending_aemet_alerts.pop(t.id, None)
+        if not result:
+            return
+        try:
+            from aemet_alerts import mark_aemet_alerts_sent_from_result
+            mark_aemet_alerts_sent_from_result(result, result.get("meta") or meta)
+        except Exception as e:
+            self._logger.warning(f"[Tasks→AEMET] No se pudo confirmar dedupe tras TX: {type(e).__name__}: {e}")
 
     def _complete_success(self, t: ScheduledTask, packet_id: Optional[Any]) -> None:
         """
@@ -672,7 +704,13 @@ class _TaskManager:
         try:
             meta = t.meta or {}
             interval_min = int(meta.get("interval_minutes") or meta.get("every_minutes") or 60)
-            min_interval = int(os.getenv("WEATHER_BEACON_MIN_INTERVAL_MIN", "30") or "30")
+            task_type = str(meta.get("task_type") or "").strip().lower()
+            if task_type == "aemet_alert":
+                min_interval = int(os.getenv("AEMET_ALERTS_MIN_INTERVAL_MIN", "30") or "30")
+            elif task_type == "weather_beacon":
+                min_interval = int(os.getenv("WEATHER_BEACON_MIN_INTERVAL_MIN", "30") or "30")
+            else:
+                min_interval = 1
             interval_min = max(min_interval, interval_min)
 
             next_utc_dt = datetime.now(timezone.utc) + timedelta(minutes=interval_min)
