@@ -5559,11 +5559,11 @@ class _BacklogServer(threading.Thread):
 
                 try:
                     # Este helper se encarga de reflejar el paquete hacia el lado B
-                    bridge_mirror_outgoing_from_broker(
-                        payload={"type": "text", "text": text, "channel": ch},
-                        direction="A2B"  # semántica: enviamos desde A hacia B
-                    )
-                    resp = {"ok": True, "mirrored": True, "via": "B"}
+                    mirrored = bool(bridge_mirror_outgoing_from_broker(int(ch), text))
+                    if mirrored:
+                        resp = {"ok": True, "mirrored": True, "via": "B"}
+                    else:
+                        resp = {"ok": False, "error": "bridge_not_running_or_mirror_rejected"}
                 except Exception as e:
                     resp = {"ok": False, "error": f"bridge_send_failed: {type(e).__name__}: {e}"}
 
