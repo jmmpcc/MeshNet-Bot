@@ -790,16 +790,27 @@ class MeshCoreEmbeddedBridge:
             return []
 
         # Best-effort para forzar volcado de contactos pendientes en cache.
-        try:
-            if hasattr(mc, "ensure_contacts"):
-                mc.ensure_contacts()
-        except Exception:
-            pass
-        try:
-            if hasattr(mc, "flush_pending_contacts"):
-                mc.flush_pending_contacts()
-        except Exception:
-            pass
+        def _call_maybe_awaitable(method_name: str) -> None:
+            fn = getattr(mc, method_name, None)
+            if not callable(fn):
+                return
+            try:
+                res = fn()
+                if asyncio.iscoroutine(res):
+                    try:
+                        asyncio.run(res)
+                    except RuntimeError:
+                        # Si ya hay un loop en este hilo, evita warnings de
+                        # "coroutine was never awaited" cerrando explícitamente.
+                        try:
+                            res.close()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        _call_maybe_awaitable("ensure_contacts")
+        _call_maybe_awaitable("flush_pending_contacts")
 
         try:
             items = mc.get_contacts() if hasattr(mc, "get_contacts") else getattr(mc, "contacts", [])
