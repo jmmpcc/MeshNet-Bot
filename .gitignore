@@ -2,4 +2,8 @@
 marcar_proyecto_whitespace.py
 leer_marca_whitespace.py
 
+.env
+.env.*
+!.env_example
+
 __pycache__/

@@ -989,22 +989,65 @@ def _select_new_alerts(alerts: list[AemetAlert], meta: dict) -> list[AemetAlert]
         if len(selected) >= max_per_run:
             break
 
-    if selected:
-        for a in selected:
-            h = _make_alert_hash(a)
-            sent[h] = {
-                "sent_ts": now,
-                "level": a.level,
-                "event": a.event,
-                "zone": a.zone,
-                "start": a.start,
-                "end": a.end,
-                "title": a.title[:160],
-            }
+    return selected
+
+
+def _alert_state_record(a: AemetAlert) -> dict:
+    return {
+        "hash": _make_alert_hash(a),
+        "level": a.level,
+        "event": a.event,
+        "zone": a.zone,
+        "start": a.start,
+        "end": a.end,
+        "title": a.title[:160],
+    }
+
+
+def mark_aemet_alerts_sent(alert_records: list[dict], meta: dict) -> None:
+    """
+    Confirma en el estado local que los avisos se han transmitido correctamente.
+
+    Se llama desde broker_task.py solo después de que el transporte elegido haya
+    terminado sin error. Así, un fallo de RF/MeshCore no consume el aviso ni
+    bloquea el siguiente reintento por cooldown/repeat_hours.
+    """
+    if not alert_records:
+        return
+
+    state_path = _env_str("AEMET_ALERTS_STATE_PATH", os.path.join("bot_data", "aemet_alerts_state.json"))
+    state = _cleanup_state(_read_json(state_path))
+    scopes = state.setdefault("scopes", {})
+    scope = _state_scope(meta or {})
+    data = scopes.setdefault(scope, {"sent": {}, "last_sent_ts": 0})
+    sent = data.setdefault("sent", {})
+    now = int(time.time())
+
+    changed = False
+    for rec in alert_records:
+        if not isinstance(rec, dict):
+            continue
+        h = str(rec.get("hash") or "").strip()
+        if not h:
+            continue
+        sent[h] = {
+            "sent_ts": now,
+            "level": rec.get("level") or "",
+            "event": rec.get("event") or "",
+            "zone": rec.get("zone") or "",
+            "start": rec.get("start") or "",
+            "end": rec.get("end") or "",
+            "title": str(rec.get("title") or "")[:160],
+        }
+        changed = True
+
+    if changed:
         data["last_sent_ts"] = now
         _write_json_atomic(state_path, state)
 
-    return selected
+
+def mark_aemet_alerts_sent_from_result(result: dict, meta: dict) -> None:
+    mark_aemet_alerts_sent((result or {}).get("alerts") or [], meta or {})
 
 
 # =============================================================================
@@ -1091,48 +1134,65 @@ def _format_one_alert(a: AemetAlert, meta: dict) -> str:
     return _clip_text(msg, max_chars)
 
 
-def build_aemet_alert_text_from_meta(meta: Dict[str, Any]) -> str:
+def build_aemet_alert_result_from_meta(meta: Dict[str, Any]) -> dict:
     """
-    Construye el texto RF de avisos AEMET para una tarea programada.
+    Construye el texto RF de avisos AEMET y devuelve los avisos pendientes.
 
     Uso:
-        text = build_aemet_alert_text_from_meta(task.meta)
+        result = build_aemet_alert_result_from_meta(task.meta)
 
     Parámetros:
         meta:
             Diccionario persistido por broker_task.schedule_message.
 
     Devuelve:
-        - Texto listo para transmitir si hay avisos nuevos.
-        - "" si no hay avisos nuevos o si está desactivado.
+        - {"text": "...", "alerts": [...]} si hay avisos nuevos.
+        - {"text": "", "alerts": []} si no hay avisos nuevos o si está desactivado.
 
     Importante:
-        Esta función NO envía RF. Solo devuelve texto.
+        Esta función NO envía RF y NO marca avisos como enviados.
     """
     meta = dict(meta or {})
 
     if not _env_bool("AEMET_ALERTS_ENABLED", "1"):
-        return ""
+        return {"text": "", "alerts": []}
 
     alerts = fetch_aemet_alerts()
     if not alerts:
-        return ""
+        return {"text": "", "alerts": []}
 
     filtered = filter_aemet_alerts(alerts, meta)
     if not filtered:
-        return ""
+        return {"text": "", "alerts": []}
 
     selected = _select_new_alerts(filtered, meta)
     if not selected:
-        return ""
+        return {"text": "", "alerts": []}
 
     messages = [_format_one_alert(a, meta) for a in selected]
     messages = [m for m in messages if m.strip()]
     if not messages:
-        return ""
+        return {"text": "", "alerts": []}
 
     # Cada aviso en línea separada. broker_task ya trocea por bytes si hace falta.
-    return "\n".join(messages).strip()
+    return {
+        "text": "\n".join(messages).strip(),
+        "alerts": [_alert_state_record(a) for a in selected],
+    }
+
+
+def build_aemet_alert_text_from_meta(meta: Dict[str, Any]) -> str:
+    """
+    Compatibilidad con usos antiguos: construye texto y confirma dedupe al crear.
+
+    El scheduler principal usa build_aemet_alert_result_from_meta() para confirmar
+    el estado solo después de un envío correcto.
+    """
+    result = build_aemet_alert_result_from_meta(meta)
+    text = str(result.get("text") or "").strip()
+    if text:
+        mark_aemet_alerts_sent_from_result(result, meta)
+    return text
 
 
 def debug_aemet_alerts(meta: Optional[Dict[str, Any]] = None) -> dict:
