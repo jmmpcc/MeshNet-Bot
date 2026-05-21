@@ -492,13 +492,32 @@ class _TaskManager:
         # 3) Transporte MeshCore-only. No exige sender Meshtastic y no usa canal puente.
         if transport == "meshcore":
             try:
-                self._meshcore_forward_via_ctrl(meta=meta, text=message_to_send)
+                resp = self._meshcore_forward_via_ctrl(meta=meta, text=message_to_send)
+
+                # Confirmación dinámica:
+                # En MeshCore-only la respuesta del broker significa "aceptado en cola",
+                # no TX físico final confirmado. Se conserva la reprogramación normal,
+                # pero el log debe ser QUEUED, no DONE.
                 self._confirm_dynamic_success(t)
                 self._complete_success(t, None)
-                self._logger.info(f"[Tasks] DONE (MeshCore-only) {t.id}")
+
+                queued = True
+                path = "meshcore-queue"
+                tx_id = ""
+
+                if isinstance(resp, dict):
+                    queued = bool(resp.get("queued", True))
+                    path = str(resp.get("path") or "meshcore-queue")
+                    tx_id = str(resp.get("tx_id") or "").strip()
+
+                suffix = f" • tx_id={tx_id}" if tx_id else ""
+                self._logger.info(
+                    f"[Tasks] QUEUED (MeshCore-only) {t.id} • queued={queued} • path={path}{suffix}"
+                )
                 return
+
             except Exception as e:
-                error = f"MeshCore send failed: {type(e).__name__}: {e}"
+                error = f"MeshCore queue failed: {type(e).__name__}: {e}"
                 self._fail_or_retry(t, error)
                 return
 
@@ -634,20 +653,26 @@ class _TaskManager:
             return _normalize_text_for_mesh(msg)
 
         if task_type == "aemet_alert":
-            from aemet_alerts import build_aemet_alert_result_from_meta
-            meta_for_alert = dict(meta)
-            meta_for_alert.setdefault("channel", t.channel)
-            meta_for_alert.setdefault("mesh_channel", t.channel)
-            result = build_aemet_alert_result_from_meta(meta_for_alert)
-            msg = str((result or {}).get("text") or "")
+            from aemet_alerts import build_aemet_alert_text_from_meta
+            msg = build_aemet_alert_text_from_meta(meta)
             if not msg:
-                self._pending_aemet_alerts.pop(t.id, None)
                 raise TaskNoTransmissionNeeded("sin avisos AEMET nuevos")
-            result["meta"] = meta_for_alert
-            self._pending_aemet_alerts[t.id] = result
-            return _normalize_text_for_mesh(msg)
 
-        return str(t.message or "")
+            msg = _normalize_text_for_mesh(msg)
+
+            # Diagnóstico específico: AEMET puede generar textos más largos y delicados
+            # que una baliza normal. Se registra tamaño real en bytes para correlacionar
+            # con errores MeshCore tipo no_event_received.
+            try:
+                transport = str(meta.get("transport") or "").strip().lower()
+                msg_bytes = len(msg.encode("utf-8", errors="ignore"))
+                self._logger.info(
+                    f"[Tasks] AEMET texto resuelto transport={transport} chars={len(msg)} bytes={msg_bytes}"
+                )
+            except Exception:
+                pass
+
+            return msg
 
     def _confirm_dynamic_success(self, t: ScheduledTask) -> None:
         """
@@ -736,7 +761,7 @@ class _TaskManager:
         except Exception as e:
             self._logger.exception(f"[Tasks] _reschedule_interval: {e}")
 
-    def _meshcore_forward_via_ctrl(self, meta: Dict[str, Any], text: str) -> None:
+    def _meshcore_forward_via_ctrl(self, meta: Dict[str, Any], text: str) -> Dict[str, Any]:
         """
         Envía un texto directamente al MeshCore embebido usando el control del broker.
 
@@ -798,6 +823,8 @@ class _TaskManager:
             raise RuntimeError(f"bad MESHCORE_SEND json: {e}: {raw[:120]}") from e
         if not bool(resp.get("ok")):
             raise RuntimeError(resp.get("error") or resp)
+
+        return resp
 
     def _aprs_forward_via_udp(self, dest: str, text: str) -> None:
         """

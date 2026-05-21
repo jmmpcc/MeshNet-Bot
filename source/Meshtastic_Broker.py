@@ -721,6 +721,17 @@ class MeshCoreEmbeddedBridge:
         self._retry_spool: deque[tuple[object, str, int]] = deque(maxlen=self._retry_spool_max)
         self._retry_spool_drop_count = 0
 
+        # Reintentos reales de TX MeshCore.
+        # Solo afecta al backend MeshCore embebido. No toca Meshtastic, APRS, BBS ni bridge.
+        self._tx_max_retries = max(
+            0,
+            int((os.getenv("MESHCORE_TX_MAX_RETRIES", "3") or "3").strip() or 3),
+        )
+        self._tx_retry_backoff_sec = max(
+            0.5,
+            float((os.getenv("MESHCORE_TX_RETRY_BACKOFF_SEC", "3") or "3").strip() or 3.0),
+        )
+
         # === Prefijo RX MeshCore -> Meshtastic ===
         # Estilos:
         #   tech    -> [MC:<prefix>] (debug)
@@ -1156,7 +1167,15 @@ class MeshCoreEmbeddedBridge:
 
             # === [LOG TX MeshCore] ===
             try:
-                print(f"[meshcore-embedded TX] dst={dst} retry={retry_count} text='{msg[:120]}'", flush=True)
+                try:
+                    msg_bytes = len(str(msg or "").encode("utf-8", errors="ignore"))
+                    print(
+                        f"[meshcore-embedded TX] dst={dst} retry={retry_count} "
+                        f"chars={len(str(msg or ''))} bytes={msg_bytes} text='{str(msg or '')[:120]}'",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -1212,12 +1231,36 @@ class MeshCoreEmbeddedBridge:
                 # Despublicar la cola de sesión para que nuevos enqueues no apunten aquí.
                 _old_q = self._tx_q
                 self._tx_q = None
-                if retry_count < 1:
+                if retry_count < self._tx_max_retries:
+                    next_retry = retry_count + 1
                     try:
-                        self._spool_append((dst, msg, retry_count + 1), why="tx_retry")
-                        print("[meshcore-embedded] TX persistido para retry=1 tras reconexión", flush=True)
+                        self._spool_append((dst, msg, next_retry), why="tx_retry")
+                        print(
+                            f"[meshcore-embedded] TX persistido para retry={next_retry} "
+                            f"tras reconexión max={self._tx_max_retries}",
+                            flush=True,
+                        )
                     except Exception:
                         pass
+
+                    # Pausa corta antes de romper sesión/reconectar.
+                    # Evita bucles agresivos cuando MeshCore devuelve no_event_received repetidamente.
+                    try:
+                        await _aio.sleep(float(self._tx_retry_backoff_sec))
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        print(
+                            f"[meshcore-embedded] TX descartado tras agotar retries "
+                            f"retry={retry_count} max={self._tx_max_retries} "
+                            f"error={self._last_err}",
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
+
+
                 # Preservar también el resto de pendientes de la cola actual
                 # para evitar pérdida bajo ráfagas + reconexión.
                 try:
@@ -1359,12 +1402,41 @@ class MeshCoreEmbeddedBridge:
                     )
 
 
-    def enqueue_send_contact(self, contact_prefix: str, text: str) -> None:
+    def enqueue_send_contact(self, contact_prefix: str, text: str, tx_id: str | None = None) -> str | None:
+        """
+        Encola un TX MeshCore hacia contacto/DM.
+
+        Uso:
+            tx_id = self.enqueue_send_contact(contact_prefix, text)
+
+        Parámetros:
+            contact_prefix:
+                Prefijo de clave pública/contacto MeshCore.
+            text:
+                Texto a transmitir.
+            tx_id:
+                Identificador opcional de trazabilidad. Si no se indica, se genera uno.
+
+        Funcionalidad:
+            - Si MeshCore está conectado, encola en la cola activa.
+            - Si MeshCore no está sano o está reconectando, persiste en retry_spool.
+            - Devuelve tx_id para que MESHCORE_SEND pueda responder al cliente.
+            - No confirma TX físico; solo confirma encolado/persistencia.
+        """
         if not self.enable:
-            return
+            return None
+
         msg = (text or "").strip()
         if not msg:
-            return
+            return None
+
+        tx_id = (
+            tx_id
+            or hashlib.sha1(
+                f"{time.time()}|contact|{contact_prefix}|{msg}".encode("utf-8", errors="ignore")
+            ).hexdigest()[:12]
+        )
+
         try:
             loop = None
             tx_q = None
@@ -1372,32 +1444,75 @@ class MeshCoreEmbeddedBridge:
                 healthy = bool(self._connected)
                 loop = self._loop
                 tx_q = self._tx_q
-            # Si la sesión no está sana (incluye ventana de reconexión),
-            # persistir al spool en vez de usar una _tx_q potencialmente efímera.
+
+            item = (str(contact_prefix), msg, 0)
+
             if (not healthy) or (not loop) or (not tx_q):
-                self._spool_append((str(contact_prefix), msg, 0), why="enqueue_contact_deferred")
+                self._spool_append(item, why="enqueue_contact_deferred")
                 if self.log_enqueue:
-                    print(f"[meshcore] enqueue deferred -> contact={str(contact_prefix)} (sesión no activa)", flush=True)
-                return
+                    print(
+                        f"[meshcore] enqueue deferred -> contact={str(contact_prefix)} "
+                        f"tx_id={tx_id} (sesión no activa)",
+                        flush=True,
+                    )
+                return tx_id
+
             if self.log_enqueue:
                 try:
-                    n = len(msg.encode('utf-8', errors='ignore'))
+                    n = len(msg.encode("utf-8", errors="ignore"))
                 except Exception:
                     n = len(msg)
-                print(f"[meshcore] enqueue -> contact={str(contact_prefix)} len={n}", flush=True)
-            loop.call_soon_threadsafe(tx_q.put_nowait, (str(contact_prefix), msg))
+                print(
+                    f"[meshcore] enqueue -> contact={str(contact_prefix)} len={n} tx_id={tx_id}",
+                    flush=True,
+                )
+
+            loop.call_soon_threadsafe(tx_q.put_nowait, item)
+            return tx_id
+
         except Exception:
             try:
                 self._spool_append((str(contact_prefix), msg, 0), why="enqueue_contact_fallback")
+                return tx_id
             except Exception:
-                pass
+                return None
 
-    def enqueue_send_channel(self, channel_idx: int, text: str) -> None:
+   
+    def enqueue_send_channel(self, channel_idx: int, text: str, tx_id: str | None = None) -> str | None:
+        """
+        Encola un TX MeshCore hacia un canal MeshCore.
+
+        Uso:
+            tx_id = self.enqueue_send_channel(channel_idx, text)
+
+        Parámetros:
+            channel_idx:
+                Índice real del canal MeshCore.
+            text:
+                Texto a transmitir.
+            tx_id:
+                Identificador opcional de trazabilidad. Si no se indica, se genera uno.
+
+        Funcionalidad:
+            - Si MeshCore está conectado, encola en la cola activa.
+            - Si MeshCore no está sano o está reconectando, persiste en retry_spool.
+            - Devuelve tx_id para que MESHCORE_SEND pueda responder al cliente.
+            - No confirma TX físico; solo confirma encolado/persistencia.
+        """
         if not self.enable:
-            return
+            return None
+
         msg = (text or "").strip()
         if not msg:
-            return
+            return None
+
+        tx_id = (
+            tx_id
+            or hashlib.sha1(
+                f"{time.time()}|chan|{channel_idx}|{msg}".encode("utf-8", errors="ignore")
+            ).hexdigest()[:12]
+        )
+
         try:
             loop = None
             tx_q = None
@@ -1405,25 +1520,42 @@ class MeshCoreEmbeddedBridge:
                 healthy = bool(self._connected)
                 loop = self._loop
                 tx_q = self._tx_q
-            # Si la sesión no está sana (incluye ventana de reconexión),
-            # persistir al spool en vez de usar una _tx_q potencialmente efímera.
+
+            dst = {"kind": "chan", "channel_idx": int(channel_idx)}
+            item = (dst, msg, 0)
+
             if (not healthy) or (not loop) or (not tx_q):
-                self._spool_append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0), why="enqueue_chan_deferred")
+                self._spool_append(item, why="enqueue_chan_deferred")
                 if self.log_enqueue:
-                    print(f"[meshcore] enqueue deferred -> chan_idx={int(channel_idx)} (sesión no activa)", flush=True)
-                return
+                    print(
+                        f"[meshcore] enqueue deferred -> chan_idx={int(channel_idx)} "
+                        f"tx_id={tx_id} (sesión no activa)",
+                        flush=True,
+                    )
+                return tx_id
+
             if self.log_enqueue:
                 try:
-                    n = len(msg.encode('utf-8', errors='ignore'))
+                    n = len(msg.encode("utf-8", errors="ignore"))
                 except Exception:
                     n = len(msg)
-                print(f"[meshcore] enqueue -> chan_idx={int(channel_idx)} len={n}", flush=True)
-            loop.call_soon_threadsafe(tx_q.put_nowait, ({"kind": "chan", "channel_idx": int(channel_idx)}, msg))
+                print(
+                    f"[meshcore] enqueue -> chan_idx={int(channel_idx)} len={n} tx_id={tx_id}",
+                    flush=True,
+                )
+
+            loop.call_soon_threadsafe(tx_q.put_nowait, item)
+            return tx_id
+
         except Exception:
             try:
-                self._spool_append(({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0), why="enqueue_chan_fallback")
+                self._spool_append(
+                    ({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0),
+                    why="enqueue_chan_fallback",
+                )
+                return tx_id
             except Exception:
-                pass
+                return None
 
     def _fingerprint(self, ch: int, text: str) -> str:
         return f"{int(ch)}|{hashlib.sha1(text.encode('utf-8', errors='ignore')).hexdigest()}"
@@ -5450,8 +5582,15 @@ class _BacklogServer(threading.Thread):
                             conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                             return
 
-                        mc.enqueue_send_channel(int(channel_idx), text)
-                        resp = {"ok": True, "queued": True, "kind": "chan", "channel_idx": int(channel_idx)}
+                        tx_id = mc.enqueue_send_channel(int(channel_idx), text)
+                        resp = {
+                            "ok": True,
+                            "queued": True,
+                            "path": "meshcore-queue",
+                            "kind": "chan",
+                            "channel_idx": int(channel_idx),
+                            "tx_id": tx_id,
+                        }
 
                     else:
                         # DM/contacto
@@ -5460,8 +5599,15 @@ class _BacklogServer(threading.Thread):
                             conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                             return
 
-                        mc.enqueue_send_contact(contact_prefix, text)
-                        resp = {"ok": True, "queued": True, "kind": "contact", "contact_prefix": contact_prefix}
+                        tx_id = mc.enqueue_send_contact(contact_prefix, text)
+                        resp = {
+                            "ok": True,
+                            "queued": True,
+                            "path": "meshcore-queue",
+                            "kind": "contact",
+                            "contact_prefix": contact_prefix,
+                            "tx_id": tx_id,
+                        }
 
                 except Exception as e:
                     resp = {"ok": False, "error": f"meshcore_send_failed: {type(e).__name__}: {e}"}

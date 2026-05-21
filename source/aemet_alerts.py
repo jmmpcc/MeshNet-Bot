@@ -224,6 +224,100 @@ def _ascii_safe(s: str) -> str:
     t = "".join(ch if 32 <= ord(ch) <= 126 else " " for ch in t)
     return _norm_spaces(t)
 
+def _clip_text_bytes_safe(s: str, max_bytes: int) -> str:
+    """
+    Recorta texto por bytes UTF-8 sin romper caracteres.
+
+    Uso:
+        txt = _clip_text_bytes_safe(txt, 140)
+
+    Parámetros:
+        s:
+            Texto original.
+        max_bytes:
+            Límite máximo en bytes UTF-8.
+
+    Funcionalidad:
+        - MeshCore trabaja de forma más sensible al tamaño real en bytes que al número
+          de caracteres.
+        - Evita cortar en mitad de un carácter multibyte.
+        - Intenta cortar en espacio para no dejar palabras partidas.
+        - No añade sufijos ni caracteres extra.
+    """
+    txt = _norm_spaces(s)
+    if not txt:
+        return ""
+
+    max_bytes = max(40, int(max_bytes or 140))
+
+    if len(txt.encode("utf-8", errors="ignore")) <= max_bytes:
+        return txt
+
+    lo, hi = 1, len(txt)
+    best = 1
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        part = txt[:mid]
+        if len(part.encode("utf-8", errors="ignore")) <= max_bytes:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    cut = best
+    sp = txt.rfind(" ", 0, cut + 1)
+    if sp >= max(20, int(cut * 0.65)):
+        cut = sp
+
+    return txt[:cut].strip()
+
+
+def _aemet_meshcore_safe_text(msg: str) -> str:
+    """
+    Genera una variante segura para TX MeshCore de avisos AEMET.
+
+    Uso:
+        msg = _aemet_meshcore_safe_text(msg)
+
+    Funcionalidad:
+        - Convierte a ASCII si AEMET_ALERTS_MESHCORE_ASCII_SAFE=1.
+        - Elimina secuencias poco útiles o problemáticas como '-?'.
+        - Normaliza espacios.
+        - Recorta por bytes, no por caracteres.
+        - Mantiene el mensaje informativo pero reduce riesgo de no_event_received
+          por payload largo o caracteres delicados.
+    """
+    txt = _norm_spaces(msg)
+
+    # Limpieza específica de finales/intervalos incompletos observados:
+    # "11:31-?" -> "11:31"
+    txt = re.sub(r"(\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2})-\?", r"\1", txt)
+
+    # Evita finales cortados tipo "23-" si el resumen fue recortado.
+    txt = re.sub(r"\s+\d{1,2}-$", "", txt).strip()
+
+    # Sustituye expresiones largas frecuentes.
+    replacements = {
+        "temperaturas": "temp.",
+        "temperatura máxima": "temp. max.",
+        "temperatura minima": "temp. min.",
+        "temperatura mínima": "temp. min.",
+        "Aviso de": "Aviso:",
+        "nivel amarillo": "amarillo",
+        "nivel naranja": "naranja",
+        "nivel rojo": "rojo",
+        "Vigente": "Vig.",
+    }
+    for a, b in replacements.items():
+        txt = txt.replace(a, b)
+
+    if _env_bool("AEMET_ALERTS_MESHCORE_ASCII_SAFE", "1"):
+        txt = _ascii_safe(txt)
+
+    max_bytes = _env_int("AEMET_ALERTS_MESHCORE_MAX_BYTES", 135)
+    return _clip_text_bytes_safe(txt, max_bytes)
+
 
 def _clip_text(s: str, max_chars: int) -> str:
     t = _norm_spaces(s)
@@ -1126,6 +1220,13 @@ def _format_one_alert(a: AemetAlert, meta: dict) -> str:
         detalle=detail,
         titulo=a.title,
     )
+
+    # Variante específica para MeshCore:
+    # AEMET genera textos más largos y con más caracteres especiales que una baliza normal.
+    # Si el destino es MeshCore, se aplica recorte por bytes y saneo conservador.
+    transport = str(meta.get("transport") or "").strip().lower()
+    if transport == "meshcore":
+        return _aemet_meshcore_safe_text(msg)
 
     if _env_bool("AEMET_ALERTS_ASCII_SAFE", "0"):
         msg = _ascii_safe(msg)
