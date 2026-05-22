@@ -3478,6 +3478,7 @@ _pool_reconnected_recently = False
 
 # === [NUEVO] Marcas de conexión para backoff por caída temprana ===
 _LAST_CONNECT_TS = 0.0     # se fija en _on_connection
+_LAST_DISCONNECT_TS = 0.0  # se fija al entrar en _on_disconnect
 
 import os
 try:
@@ -4321,18 +4322,25 @@ def _iface_ready_reason() -> tuple[bool, str]:
             return False, "disconnected"
 
         if not bool(globals().get("_IS_CONNECTED", False)):
-            # En 24/7 hemos visto desincronización del flag global pese a tener
-            # interfaz viva; no bloquear TX salvo durante conexión activa/pausa.
+            # No forzar resync del flag aquí para no revivir estado connected
+            # durante una desconexión real en curso.
             if bool(globals().get("_CONNECTING", False)):
                 return False, "not_connected"
             if hasattr(mgr, "is_paused") and mgr.is_paused():
                 return False, "paused"
 
-            # Si hay iface válida y no estamos conectando, permitir y resinc.
-            # Evita bucle dequeue/requeue cuando el callback de conexión llega
-            # desordenado o lo pisa un evento espurio.
-            globals()["_IS_CONNECTED"] = True
-            return True, "flag_resync_iface_present"
+            now = time.time()
+            last_disc = float(globals().get("_LAST_DISCONNECT_TS") or 0.0)
+            last_conn = float(globals().get("_LAST_CONNECT_TS") or 0.0)
+
+            # Si estamos justo tras un disconnect o no hay conexión posterior
+            # registrada, mantener bloqueo.
+            if (last_disc > 0.0 and (now - last_disc) <= 8.0) or (last_disc > 0.0 and last_conn <= last_disc):
+                return False, "disconnect_in_progress"
+
+            # Si hay iface y no hay señales de disconnect activo, permitir TX
+            # sin mutar _IS_CONNECTED desde este path de lectura.
+            return True, "flag_desync_iface_present"
 
         return True, ""
 
@@ -8266,7 +8274,14 @@ class MeshReceiver:
        
         self.hub.broadcast_line(_json_dumps({"type": "status", "status": "disconnected", "ts": _now_s()}) + "\n")
 
-        # 1) Estado mínimo consistente: limpiar owner + marcar no conectado
+        # 1) Estado mínimo consistente: marcar sello de desconexión, limpiar owner
+        #    y marcar no conectado.
+        try:
+            globals()["_LAST_DISCONNECT_TS"] = time.time()
+        except Exception:
+            pass
+
+        # 1.1) Estado de ownership + conectividad
         try:
             globals()["_CON_OWNER_ID"] = None
             globals()["_CON_OWNER_TS"] = 0.0
