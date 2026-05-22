@@ -1234,25 +1234,28 @@ def _aemet_short_detail(a: AemetAlert) -> str:
 
     return "Aviso meteorológico"
 
-
 def _format_one_alert(a: AemetAlert, meta: dict) -> str:
     """
-    Formatea UN aviso AEMET en una sola línea corta para RF.
+    Construye el texto RF de un aviso AEMET.
 
-    Uso interno:
+    Uso:
         msg = _format_one_alert(alerta, meta)
 
     Parámetros:
         a:
-            Aviso AEMET normalizado.
+            Objeto AemetAlert ya filtrado.
         meta:
-            Metadatos de la tarea programada.
+            Diccionario de la tarea programada. Puede contener zona, ciudad,
+            provincia, región, timezone y parámetros personalizados.
 
     Funcionalidad:
-        - Genera un texto compacto para Meshtastic/MeshCore/APRS.
-        - Evita que Companion reciba mensajes partidos tipo (1/2), (2/2).
-        - Mantiene compatibilidad con AEMET_ALERTS_TEMPLATE si se define en .env.
-        - Por defecto usa una plantilla corta y no el resumen largo de AEMET.
+        - Genera un mensaje AEMET entendible para RF.
+        - Evita salidas pobres del tipo '22/05 10:38-?'.
+        - Sustituye fin desconocido por 'fin no indicado'.
+        - Añade detalle útil aunque el RSS/CAP venga escueto.
+        - Respeta AEMET_ALERTS_TEMPLATE si existe, pero permite una plantilla
+          robusta por defecto.
+        - Mantiene límite AEMET_ALERTS_MAX_CHARS para no saturar LoRa/MeshCore.
     """
     zone = str(
         meta.get("zone")
@@ -1263,40 +1266,75 @@ def _format_one_alert(a: AemetAlert, meta: dict) -> str:
     ).strip()
 
     nivel = (a.level or "aviso").upper()
-    fenomeno = a.event or "fenómeno"
+    fenomeno = _norm_spaces(a.event or "fenómeno adverso")
+
     inicio = _fmt_dt_short(a.start, meta)
     fin = _fmt_dt_short(a.end, meta)
 
-    # Detalle RF corto. No usar directamente a.summary porque AEMET genera textos largos.
-    detail = _aemet_short_detail(a)
+    if not inicio or inicio == "?":
+        inicio = "inicio no indicado"
+
+    if not fin or fin == "?":
+        fin = "fin no indicado"
+
+    detail = a.summary or a.title or _env_str(
+        "AEMET_ALERTS_DEFAULT_DETAIL",
+        "Precaución en desplazamientos, antenas, mástiles y nodos exteriores.",
+    )
+    detail = _strip_html(detail)
+
+    # Evita detalles vacíos o redundantes.
+    if not detail:
+        detail = "Precaución en desplazamientos, antenas, mástiles y nodos exteriores."
+
+    # Limpieza defensiva de textos muy largos o administrativos.
+    detail = re.sub(r"\s+", " ", detail).strip()
+    detail = detail.replace("Estado completo de avisos para", "Avisos para").strip()
+
+    # Si el detalle solo repite título/fenómeno, añade recomendación operativa.
+    title_norm = _normalize_for_match(a.title)
+    detail_norm = _normalize_for_match(detail)
+    if not detail_norm or detail_norm == title_norm or len(detail_norm) < 12:
+        detail = "Precaución en nodos exteriores, antenas, mástiles y desplazamientos."
 
     red_as_emergency = _env_bool("AEMET_ALERTS_RED_AS_EMERGENCY", "1")
+
     if red_as_emergency and (a.level or "").lower() == "rojo":
-        template = _env_str(
-            "AEMET_ALERTS_EMERGENCY_TEMPLATE",
-            "EMERGENCIA AEMET {zona}: {detalle}. {inicio}-{fin}. Revisar nodos exteriores.",
+        default_template = (
+            "EMERGENCIA AEMET {zona}: {fenomeno}. "
+            "Desde {inicio}. Fin {fin}. {detalle}"
         )
+        template = _env_str("AEMET_ALERTS_EMERGENCY_TEMPLATE", default_template)
     else:
-        template = _env_str(
-            "AEMET_ALERTS_TEMPLATE",
-            "AEMET {nivel} {zona}: {detalle}. {inicio}-{fin}.",
+        default_template = (
+            "AEMET {nivel} {zona}: {fenomeno}. "
+            "Desde {inicio}. Fin {fin}. {detalle}"
+        )
+        template = _env_str("AEMET_ALERTS_TEMPLATE", default_template)
+
+    try:
+        msg = template.format(
+            nivel=nivel,
+            zona=zone,
+            fenomeno=fenomeno,
+            inicio=inicio,
+            fin=fin,
+            detalle=detail,
+            titulo=a.title,
+        )
+    except Exception:
+        # Fallback 24/7 si una plantilla .env está mal escrita.
+        msg = (
+            f"AEMET {nivel} {zone}: {fenomeno}. "
+            f"Desde {inicio}. Fin {fin}. {detail}"
         )
 
-    msg = template.format(
-        nivel=nivel,
-        zona=zone,
-        fenomeno=fenomeno,
-        inicio=inicio,
-        fin=fin,
-        detalle=detail,
-        titulo=a.title,
-    )
+    msg = _norm_spaces(msg)
 
     if _env_bool("AEMET_ALERTS_ASCII_SAFE", "0"):
         msg = _ascii_safe(msg)
 
-    # Límite pensado para que normalmente quepa en una sola trama MeshCore.
-    max_chars = _env_int("AEMET_ALERTS_MAX_CHARS", 135)
+    max_chars = _env_int("AEMET_ALERTS_MAX_CHARS", 180)
     return _clip_text(msg, max_chars)
 
 def build_aemet_alert_result_from_meta(meta: Dict[str, Any]) -> dict:
