@@ -1165,23 +1165,28 @@ class MeshCoreEmbeddedBridge:
             except Exception:
                 continue
 
-            # === [LOG TX MeshCore] ===
             try:
+                # --- [PATCH] Split por bytes UTF-8 para no perder / truncar mensajes largos ---
+                max_b = _safe_meshcore_max_text_bytes()
+                # En reintentos, reducir de forma adaptativa el tamaño máximo por parte.
+                # Motivo: algunos enlaces/firmwares devuelven `no_event_received` con
+                # payloads que en primer intento entran "justos".
+                if retry_count > 0:
+                    # 1º retry: -20 bytes, 2º: -40, ... con suelo conservador.
+                    max_b = max(80, int(max_b) - (20 * int(retry_count)))
+
+                # === [LOG TX MeshCore] ===
                 try:
                     msg_bytes = len(str(msg or "").encode("utf-8", errors="ignore"))
                     print(
                         f"[meshcore-embedded TX] dst={dst} retry={retry_count} "
-                        f"chars={len(str(msg or ''))} bytes={msg_bytes} text='{str(msg or '')[:120]}'",
+                        f"chars={len(str(msg or ''))} bytes={msg_bytes} max_part_bytes={max_b} "
+                        f"text='{str(msg or '')[:120]}'",
                         flush=True,
                     )
                 except Exception:
                     pass
-            except Exception:
-                pass
 
-            try:
-                # --- [PATCH] Split por bytes UTF-8 para no perder / truncar mensajes largos ---
-                max_b = _safe_meshcore_max_text_bytes()
                 parts = _split_text_chunks_utf8(msg, max_b)
 
                 # Si hay más de una parte, añadir (i/n) garantizando que sigue cabiendo en bytes
