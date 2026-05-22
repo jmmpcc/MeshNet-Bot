@@ -819,6 +819,50 @@ docker compose -f docker-compose.rpi.yml up -d
 docker compose -f docker-compose.rpi.yml logs -f broker
 ```
 
+### Diagnóstico rápido: `[Errno 113] No route to host` hacia `MESHTASTIC_HOST:4403`
+
+Si en el broker aparece algo como:
+
+- `Conectando a Meshtastic en 192.168.1.127:4403…`
+- `Fallo al crear interface (tcp): [Errno 113] No route to host`
+
+el problema **no suele ser del bot**, sino de **ruta/red IP entre la Raspberry (host Docker) y el nodo Meshtastic**.
+
+Comprobaciones recomendadas en la Raspberry (host):
+
+```bash
+# 1) Ver IP/ruta del host
+ip route
+
+# 2) Ver si la IP del nodo responde
+ping -c 4 192.168.1.127
+
+# 3) Verificar puerto Meshtastic TCP (debe estar abierto)
+nc -vz 192.168.1.127 4403
+
+# 4) Probar desde el namespace de red del broker
+CID=$(docker compose -f docker-compose.rpi.yml ps -q broker)
+docker exec -it "$CID" sh -lc 'ip route; nc -vz 192.168.1.127 4403'
+```
+
+Causas típicas:
+
+- `MESHTASTIC_HOST` incorrecto o IP cambiada por DHCP.
+- Nodo apagado/reiniciando o sin servicio TCP Meshtastic en `4403`.
+- Raspberry en otra VLAN/subred sin ruta hacia `192.168.1.127`.
+- Aislamiento Wi‑Fi/AP o reglas firewall que bloquean tráfico lateral LAN.
+
+Acciones:
+
+1. Fijar IP estática/reserva DHCP al nodo y actualizar `MESHTASTIC_HOST` en `.env`.
+2. Confirmar en la app/CLI de Meshtastic que el nodo tiene habilitado el acceso TCP.
+3. Reiniciar servicios tras cambios:
+   ```bash
+   docker compose -f docker-compose.rpi.yml down
+   docker compose -f docker-compose.rpi.yml up -d
+   ```
+4. Si usas USB directo en la Raspberry, cambia a `MESH_TRANSPORT=usb` y define `MESH_USB_PORT=/dev/ttyACM0` para evitar dependencia de la red IP.
+
 ## Bot
 ```bash
 docker compose -f docker-compose.rpi.yml logs -f bot
