@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.12.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v7.0.13.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -4285,23 +4285,27 @@ def _iface_ready_reason() -> tuple[bool, str]:
     """
     Devuelve (ready, reason): False si la TX hacia Meshtastic no debe ejecutarse.
 
-    Uso:
-        ready, reason = _iface_ready_reason()
+    Ajuste quirúrgico v7.0.12:
+    - Se recupera el criterio funcional de v7.0.10-fix2.
+    - La existencia de la interfaz principal del broker vuelve a ser el criterio real
+      de disponibilidad de TX, siempre que no haya pausa ni cooldown.
+    - _IS_CONNECTED deja de ser una barrera dura porque puede quedar desincronizado
+      cuando el evento pubsub "meshtastic.connection.established" se descarta como
+      interfaz secundaria, aunque mgr.iface ya sea válido.
 
-    Funcionalidad:
-        - Respeta pausa manual del broker.
-        - Respeta cooldown tras caída de conexión.
-        - Verifica que exista interfaz principal.
-        - Verifica que el broker haya marcado conexión estable mediante _IS_CONNECTED.
-        - Evita transmitir durante estados intermedios de reconexión donde puede existir
-          un objeto iface, pero el lector Meshtastic todavía no está operativo.
+    Motivo:
+    - El fallo observado era:
+        SEND_TEXT recv -> SEND_TEXT dequeued -> TX en espera — not_connected
+    - Eso ocurre porque mgr.iface existe, pero _IS_CONNECTED permanece False.
+    - En la versión que funcionaba no existía ese bloqueo por _IS_CONNECTED.
 
     No afecta:
-        - Handshake interno del SDK.
-        - Recepción MeshCore.
-        - Envíos MeshCore-only.
-        - APRS externo.
-        - BBS.
+    - Pausa manual del broker.
+    - Cooldown tras caída real.
+    - MeshCore-only.
+    - APRS.
+    - BBS.
+    - Bridge embebido.
     """
     try:
         mgr = globals().get("BROKER_IFACE_MGR")
@@ -4316,18 +4320,23 @@ def _iface_ready_reason() -> tuple[bool, str]:
         if c and hasattr(c, "is_active") and c.is_active():
             return False, "cooldown"
 
+        # Criterio recuperado de la versión funcional:
+        # si existe interfaz principal, la cola puede intentar transmitir.
         iface = getattr(mgr, "iface", None)
+
+        if iface is None and hasattr(mgr, "get_iface"):
+            try:
+                iface = mgr.get_iface()
+            except Exception:
+                iface = None
+
         if iface is None:
             return False, "disconnected"
-
-        if not bool(globals().get("_IS_CONNECTED", False)):
-            return False, "not_connected"
 
         return True, ""
 
     except Exception:
         return False, "unknown"
-
 
 def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     """
