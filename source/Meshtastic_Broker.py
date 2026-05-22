@@ -4256,77 +4256,218 @@ class _BacklogWorker(threading.Thread):
                 time.sleep(0.5)
 
 _worker_instance = None
+
 def start_backlog_worker():
+    """
+    Compatibilidad histórica.
+
+    Uso:
+        start_backlog_worker()
+
+    Funcionalidad:
+        - No arranca un segundo worker sobre SENDQ.
+        - SENDQ ya tiene su propio hilo interno mediante SENDQ.start().
+        - Evita un bucle inútil porque SendQueue no expone métodos take() ni get().
+        - Mantiene la llamada existente en main() sin romper arranque ni estructura.
+
+    Motivo:
+        En la arquitectura actual, la cola real es broker_resilience.SendQueue.
+        Esa cola procesa internamente sus mensajes con su propio hilo _run().
+        Mantener _BacklogWorker activo no aporta funcionalidad y puede consumir CPU.
+    """
     global _worker_instance
     if _worker_instance is None:
-        _worker_instance = _BacklogWorker()
-        _worker_instance.start()
+        _worker_instance = "disabled_sendq_internal_worker_already_running"
+    return
 
 
 def _iface_ready_reason() -> tuple[bool, str]:
     """
-    Devuelve (ready, reason): False si la TX no es oportuna ahora.
-    Razones: paused | cooldown | disconnected
+    Devuelve (ready, reason): False si la TX hacia Meshtastic no debe ejecutarse.
+
+    Uso:
+        ready, reason = _iface_ready_reason()
+
+    Funcionalidad:
+        - Respeta pausa manual del broker.
+        - Respeta cooldown tras caída de conexión.
+        - Verifica que exista interfaz principal.
+        - Verifica que el broker haya marcado conexión estable mediante _IS_CONNECTED.
+        - Evita transmitir durante estados intermedios de reconexión donde puede existir
+          un objeto iface, pero el lector Meshtastic todavía no está operativo.
+
+    No afecta:
+        - Handshake interno del SDK.
+        - Recepción MeshCore.
+        - Envíos MeshCore-only.
+        - APRS externo.
+        - BBS.
     """
     try:
         mgr = globals().get("BROKER_IFACE_MGR")
-        c   = globals().get("COOLDOWN")
-        if mgr and hasattr(mgr, "is_paused") and mgr.is_paused():
+        c = globals().get("COOLDOWN")
+
+        if mgr is None:
+            return False, "manager_missing"
+
+        if hasattr(mgr, "is_paused") and mgr.is_paused():
             return False, "paused"
+
         if c and hasattr(c, "is_active") and c.is_active():
             return False, "cooldown"
-        # conectado si hay iface viva
+
         iface = getattr(mgr, "iface", None)
         if iface is None:
             return False, "disconnected"
+
+        if not bool(globals().get("_IS_CONNECTED", False)):
+            return False, "not_connected"
+
         return True, ""
+
     except Exception:
         return False, "unknown"
 
 
 def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
     """
-    msg: {"channel":int, "text":str, "destination":None|"!id", "require_ack":bool}
-    Respeta CircuitBreaker y sólo intenta TX cuando la interfaz está lista.
-    Si no lo está, reencola con backoff y sale.
-    """
-    # --- Log al desencolar (diagnóstico) ---
-    try:
-        _ch   = int(msg.get("channel", 0) or 0)
-        _dest = msg.get("destination") or "broadcast"
-        _txt  = str(msg.get("text") or "")
-        _ctrl_log("send_text_dequeued", f"[ctrl] SEND_TEXT dequeued ch={_ch} dest={_dest} len={len(_txt.encode('utf-8'))}", interval=5.0)
-    except Exception as _e:
-        _ctrl_log("send_text_deq_err", f"[ctrl] SEND_TEXT dequeue log error: {type(_e).__name__}: {_e}", interval=5.0)
+    Envía un mensaje de SENDQ hacia Meshtastic usando la ruta existente
+    _tasks_send_adapter().
 
-    # --- CircuitBreaker: si está abierto, reencola y aplica backoff (evita busy-loop) ---
-    if not CIRCUIT_BREAKER.can_attempt():
+    Uso:
+        _safe_send_to_radio_via_iface_or_fallback(msg)
+
+    Parámetros esperados en msg:
+        {
+            "channel": int,
+            "text": str,
+            "destination": None | "broadcast" | "!nodeid",
+            "require_ack": bool,
+            "type": "text",
+            "no_bridge": bool opcional,
+            "origin": str opcional,
+            "meta": dict opcional
+        }
+
+    Funcionalidad:
+        - Si Meshtastic está listo, envía igual que antes.
+        - Si está desconectado, en cooldown o pausado, reencola con backoff progresivo.
+        - Evita bucle rápido dequeue/requeue durante caídas TCP.
+        - Mantiene intactas las protecciones de BBS y bridge mediante no_bridge/origin/meta.
+    """
+    if not isinstance(msg, dict):
+        return False
+
+    now = time.time()
+
+    # ---------------------------------------------------------
+    # 0) Backoff diferido por mensaje.
+    # Si el mensaje fue reencolado con _next_try_ts, no volver a intentarlo
+    # inmediatamente. Esto evita el bucle:
+    #   dequeue -> disconnected -> requeue -> dequeue -> disconnected...
+    # ---------------------------------------------------------
+    try:
+        next_try = float(msg.get("_next_try_ts", 0.0) or 0.0)
+    except Exception:
+        next_try = 0.0
+
+    if next_try > now:
         try:
             SENDQ.offer(msg, coalesce=False)
         except Exception:
             pass
-        _ctrl_log("circuit_open", "[ctrl] CircuitBreaker abierto. TX pausada temporalmente; reintentará.", interval=5.0)
+
         try:
-            time.sleep(0.35)  # backoff para que el worker no haga spin
+            time.sleep(min(1.5, max(0.2, next_try - now)))
         except Exception:
             pass
+
         return False
 
-    # --- Comprobación de estado de interfaz del broker ---
+    # ---------------------------------------------------------
+    # 1) Log de desencolado
+    # ---------------------------------------------------------
+    try:
+        _ch = int(msg.get("channel", 0) or 0)
+        _dest = msg.get("destination") or "broadcast"
+        _txt = str(msg.get("text") or "")
+        _ctrl_log(
+            "send_text_dequeued",
+            f"[ctrl] SEND_TEXT dequeued ch={_ch} dest={_dest} len={len(_txt.encode('utf-8'))}",
+            interval=5.0,
+        )
+    except Exception as _e:
+        _ctrl_log(
+            "send_text_deq_err",
+            f"[ctrl] SEND_TEXT dequeue log error: {type(_e).__name__}: {_e}",
+            interval=5.0,
+        )
+
+    # ---------------------------------------------------------
+    # 2) CircuitBreaker abierto
+    # ---------------------------------------------------------
+    if not CIRCUIT_BREAKER.can_attempt():
+        try:
+            wait_count = int(msg.get("_wait_retry", 0) or 0) + 1
+            msg["_wait_retry"] = wait_count
+            msg["_next_try_ts"] = time.time() + min(30.0, 2.0 + wait_count)
+            SENDQ.offer(msg, coalesce=False)
+        except Exception:
+            pass
+
+        _ctrl_log(
+            "circuit_open",
+            "[ctrl] CircuitBreaker abierto. TX pausada temporalmente; reintentará con backoff.",
+            interval=5.0,
+        )
+
+        try:
+            time.sleep(1.0)
+        except Exception:
+            pass
+
+        return False
+
+    # ---------------------------------------------------------
+    # 3) Interfaz no lista
+    # ---------------------------------------------------------
     ready, reason = _iface_ready_reason()
     if not ready:
         try:
+            wait_count = int(msg.get("_wait_retry", 0) or 0) + 1
+            msg["_wait_retry"] = wait_count
+
+            # Backoff moderado:
+            # 1º: 4s, 2º: 6s, 3º: 8s... máximo 30s.
+            delay = min(30.0, 2.0 + (wait_count * 2.0))
+            msg["_next_try_ts"] = time.time() + delay
+
             SENDQ.offer(msg, coalesce=False)
         except Exception:
             pass
-        _ctrl_log("tx_wait", f"[ctrl] TX en espera — {reason}. Reintentará al reconectar.", interval=5.0)
+
+        _ctrl_log(
+            "tx_wait",
+            f"[ctrl] TX en espera — {reason}. Reintentará con backoff.",
+            interval=5.0,
+        )
+
         try:
-            time.sleep(0.35)
+            time.sleep(1.0)
         except Exception:
             pass
+
         return False
 
-    # --- Interfaz lista: ejecutar ruta de envío real ---
+    # ---------------------------------------------------------
+    # 4) Interfaz lista: limpiar marcas internas y enviar
+    # ---------------------------------------------------------
+    try:
+        msg.pop("_wait_retry", None)
+        msg.pop("_next_try_ts", None)
+    except Exception:
+        pass
+
     try:
         r = _tasks_send_adapter(
             ch=int(msg.get("channel", 0) or 0),
@@ -4336,27 +4477,45 @@ def _safe_send_to_radio_via_iface_or_fallback(msg: dict) -> bool:
             no_bridge=bool(msg.get("no_bridge", False)),
             origin=(msg.get("origin") or ""),
             meta=(msg.get("meta") if isinstance(msg.get("meta"), dict) else None),
-            timeout_s=None
+            timeout_s=None,
         )
+
         ok = bool(r.get("ok")) if isinstance(r, dict) else bool(r)
         if not ok:
             raise RuntimeError(r.get("error") if isinstance(r, dict) else "tx_failed")
+
+        try:
+            CIRCUIT_BREAKER.record_success()
+        except Exception:
+            pass
+
         return True
+
     except Exception as e:
-        # Si falla el envío, reporta al CircuitBreaker y reencola con backoff
         try:
             CIRCUIT_BREAKER.record_error()
         except Exception:
             pass
+
         try:
+            wait_count = int(msg.get("_wait_retry", 0) or 0) + 1
+            msg["_wait_retry"] = wait_count
+            msg["_next_try_ts"] = time.time() + min(45.0, 5.0 + (wait_count * 3.0))
             SENDQ.offer(msg, coalesce=False)
         except Exception:
             pass
-        _ctrl_log("tx_fail", f"[ctrl] TX fallo: {type(e).__name__}: {e}. Reencolado.", interval=5.0)
+
+        _ctrl_log(
+            "tx_fail",
+            f"[ctrl] TX fallo: {type(e).__name__}: {e}. Reencolado con backoff.",
+            interval=5.0,
+        )
+
         try:
-            time.sleep(0.35)
+            time.sleep(1.0)
         except Exception:
             pass
+
         return False
 
 
@@ -6744,10 +6903,18 @@ def _create_meshtastic_interface(host: str, port: int, verbose: bool = False):
             raise
 
     # Default: tcp
-    host_for_iface = f"{host}:{port}" if port and port != 4403 else host
     if verbose:
         print(f"[receiver] Transporte TCP → {host}:{port}", flush=True)
-    return TCPInterface(hostname=host_for_iface)
+
+    # Ruta preferente:
+    # - En este broker, TCPInterface suele estar parcheado por el shim hacia TCPInterfacePool.
+    # - El shim acepta hostname y port, evitando crear strings tipo "host:port".
+    try:
+        return TCPInterface(hostname=str(host), port=int(port or 4403))
+    except TypeError:
+        # Compatibilidad con SDKs antiguos que no acepten 'port'.
+        host_for_iface = f"{host}:{port}" if port and int(port) != 4403 else str(host)
+        return TCPInterface(hostname=host_for_iface)
 
 class InterfaceManager:
     """
