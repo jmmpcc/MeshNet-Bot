@@ -4321,7 +4321,18 @@ def _iface_ready_reason() -> tuple[bool, str]:
             return False, "disconnected"
 
         if not bool(globals().get("_IS_CONNECTED", False)):
-            return False, "not_connected"
+            # En 24/7 hemos visto desincronización del flag global pese a tener
+            # interfaz viva; no bloquear TX salvo durante conexión activa/pausa.
+            if bool(globals().get("_CONNECTING", False)):
+                return False, "not_connected"
+            if hasattr(mgr, "is_paused") and mgr.is_paused():
+                return False, "paused"
+
+            # Si hay iface válida y no estamos conectando, permitir y resinc.
+            # Evita bucle dequeue/requeue cuando el callback de conexión llega
+            # desordenado o lo pisa un evento espurio.
+            globals()["_IS_CONNECTED"] = True
+            return True, "flag_resync_iface_present"
 
         return True, ""
 
