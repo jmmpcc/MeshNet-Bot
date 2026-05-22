@@ -489,9 +489,19 @@ class _TaskManager:
                 self._fail_or_retry(t, error)
                 return
 
-        # 3) Transporte MeshCore-only. No exige sender Meshtastic y no usa canal puente.
+                # 3) Transporte MeshCore-only. No exige sender Meshtastic y no usa canal puente.
         if transport == "meshcore":
             try:
+                # Protección 24/7:
+                # Si la tarea MeshCore-only llega sin texto real, no es un fallo recuperable.
+                # Reintentar no lo va a solucionar porque no depende de red, MeshCore ni broker.
+                # Se cancela para evitar el bucle permanente de FAILED cada pocos minutos.
+                if not str(message_to_send or "").strip():
+                    error = "MeshCore-only task without text"
+                    self._logger.error(f"[Tasks] CANCELED {t.id} • {error}")
+                    self.cancel(t.id)
+                    return
+
                 resp = self._meshcore_forward_via_ctrl(meta=meta, text=message_to_send)
 
                 # Confirmación dinámica:
@@ -518,6 +528,15 @@ class _TaskManager:
 
             except Exception as e:
                 error = f"MeshCore queue failed: {type(e).__name__}: {e}"
+
+                # Error estructural no recuperable:
+                # "missing text" significa que la tarea está incompleta/corrupta.
+                # No debe pasar por _fail_or_retry porque entraría en bucle.
+                if "missing text" in str(error).lower():
+                    self._logger.error(f"[Tasks] CANCELED {t.id} • {error}")
+                    self.cancel(t.id)
+                    return
+
                 self._fail_or_retry(t, error)
                 return
 

@@ -1179,7 +1179,81 @@ def _fmt_dt_short(s: str, meta: dict) -> str:
     return raw[:16]
 
 
+def _aemet_short_detail(a: AemetAlert) -> str:
+    """
+    Construye un detalle AEMET corto y estable para RF.
+
+    Uso interno:
+        detalle = _aemet_short_detail(alerta)
+
+    Parámetros:
+        a:
+            AemetAlert ya normalizado.
+
+    Funcionalidad:
+        - Evita reenviar descripciones largas de AEMET.
+        - Elimina frases redundantes tipo "Aviso de ... de nivel amarillo".
+        - Reduce fenómenos frecuentes a una frase corta.
+        - Mantiene el mensaje apto para LoRa/MeshCore sin depender del troceo posterior.
+    """
+    event = (a.event or "").strip().lower()
+    level = (a.level or "").strip().lower()
+    raw = _strip_html(a.summary or a.title or "")
+    raw_norm = _normalize_for_match(raw)
+
+    if "temperatura" in raw_norm or event == "temperaturas":
+        if "maxima" in raw_norm or "maximas" in raw_norm or "calor" in raw_norm:
+            return "Temp. máxima"
+        if "minima" in raw_norm or "minimas" in raw_norm or "frio" in raw_norm or "helada" in raw_norm:
+            return "Temp. mínima"
+        return "Temperaturas"
+
+    if "tormenta" in raw_norm or event == "tormentas":
+        return "Tormentas"
+
+    if "lluvia" in raw_norm or "precipitacion" in raw_norm or event == "lluvia":
+        return "Lluvia"
+
+    if "viento" in raw_norm or "racha" in raw_norm or event == "viento":
+        return "Viento"
+
+    if "nieve" in raw_norm or event == "nieve":
+        return "Nieve"
+
+    if "costero" in raw_norm or "oleaje" in raw_norm or event == "costeros":
+        return "Fenómeno costero"
+
+    if "niebla" in raw_norm or event == "niebla":
+        return "Niebla"
+
+    if event and event != "fenómeno adverso":
+        return event.capitalize()
+
+    if level and level != "desconocido":
+        return f"Aviso {level}"
+
+    return "Aviso meteorológico"
+
+
 def _format_one_alert(a: AemetAlert, meta: dict) -> str:
+    """
+    Formatea UN aviso AEMET en una sola línea corta para RF.
+
+    Uso interno:
+        msg = _format_one_alert(alerta, meta)
+
+    Parámetros:
+        a:
+            Aviso AEMET normalizado.
+        meta:
+            Metadatos de la tarea programada.
+
+    Funcionalidad:
+        - Genera un texto compacto para Meshtastic/MeshCore/APRS.
+        - Evita que Companion reciba mensajes partidos tipo (1/2), (2/2).
+        - Mantiene compatibilidad con AEMET_ALERTS_TEMPLATE si se define en .env.
+        - Por defecto usa una plantilla corta y no el resumen largo de AEMET.
+    """
     zone = str(
         meta.get("zone")
         or meta.get("city")
@@ -1189,26 +1263,23 @@ def _format_one_alert(a: AemetAlert, meta: dict) -> str:
     ).strip()
 
     nivel = (a.level or "aviso").upper()
-    fenomeno = a.event or "fenómeno adverso"
+    fenomeno = a.event or "fenómeno"
     inicio = _fmt_dt_short(a.start, meta)
     fin = _fmt_dt_short(a.end, meta)
 
-    detail = a.summary or a.title or _env_str(
-        "AEMET_ALERTS_DEFAULT_DETAIL",
-        "Precaución en desplazamientos, antenas, mástiles y nodos exteriores.",
-    )
-    detail = _strip_html(detail)
+    # Detalle RF corto. No usar directamente a.summary porque AEMET genera textos largos.
+    detail = _aemet_short_detail(a)
 
     red_as_emergency = _env_bool("AEMET_ALERTS_RED_AS_EMERGENCY", "1")
     if red_as_emergency and (a.level or "").lower() == "rojo":
         template = _env_str(
             "AEMET_ALERTS_EMERGENCY_TEMPLATE",
-            "EMERGENCIA AEMET {zona}: {fenomeno}. Vigente {inicio}-{fin}. Revisar nodos exteriores, antenas y alimentación.",
+            "EMERGENCIA AEMET {zona}: {detalle}. {inicio}-{fin}. Revisar nodos exteriores.",
         )
     else:
         template = _env_str(
             "AEMET_ALERTS_TEMPLATE",
-            "AEMET {nivel} {zona}: {fenomeno}. Vigente {inicio}-{fin}. {detalle}",
+            "AEMET {nivel} {zona}: {detalle}. {inicio}-{fin}.",
         )
 
     msg = template.format(
@@ -1221,19 +1292,12 @@ def _format_one_alert(a: AemetAlert, meta: dict) -> str:
         titulo=a.title,
     )
 
-    # Variante específica para MeshCore:
-    # AEMET genera textos más largos y con más caracteres especiales que una baliza normal.
-    # Si el destino es MeshCore, se aplica recorte por bytes y saneo conservador.
-    transport = str(meta.get("transport") or "").strip().lower()
-    if transport == "meshcore":
-        return _aemet_meshcore_safe_text(msg)
-
     if _env_bool("AEMET_ALERTS_ASCII_SAFE", "0"):
         msg = _ascii_safe(msg)
 
-    max_chars = _env_int("AEMET_ALERTS_MAX_CHARS", 180)
+    # Límite pensado para que normalmente quepa en una sola trama MeshCore.
+    max_chars = _env_int("AEMET_ALERTS_MAX_CHARS", 135)
     return _clip_text(msg, max_chars)
-
 
 def build_aemet_alert_result_from_meta(meta: Dict[str, Any]) -> dict:
     """
@@ -1284,16 +1348,57 @@ def build_aemet_alert_result_from_meta(meta: Dict[str, Any]) -> dict:
 
 def build_aemet_alert_text_from_meta(meta: Dict[str, Any]) -> str:
     """
-    Compatibilidad con usos antiguos: construye texto y confirma dedupe al crear.
+    Construye el texto RF de avisos AEMET para una tarea programada.
 
-    El scheduler principal usa build_aemet_alert_result_from_meta() para confirmar
-    el estado solo después de un envío correcto.
+    Uso:
+        text = build_aemet_alert_text_from_meta(task.meta)
+
+    Parámetros:
+        meta:
+            Diccionario persistido por broker_task.schedule_message.
+
+    Devuelve:
+        - Texto listo para transmitir si hay aviso nuevo.
+        - "" si no hay avisos nuevos o si está desactivado.
+
+    Funcionalidad:
+        - Consulta avisos oficiales AEMET.
+        - Filtra por zona/provincia/región.
+        - Selecciona avisos nuevos según estado persistente.
+        - Devuelve SOLO UN aviso por ejecución, para evitar tramas partidas
+          y mensajes confusos en Companion.
+        - No envía RF directamente.
     """
-    result = build_aemet_alert_result_from_meta(meta)
-    text = str(result.get("text") or "").strip()
-    if text:
-        mark_aemet_alerts_sent_from_result(result, meta)
-    return text
+    meta = dict(meta or {})
+
+    if not _env_bool("AEMET_ALERTS_ENABLED", "1"):
+        return ""
+
+    alerts = fetch_aemet_alerts()
+    if not alerts:
+        return ""
+
+    filtered = filter_aemet_alerts(alerts, meta)
+    if not filtered:
+        return ""
+
+    selected = _select_new_alerts(filtered, meta)
+    if not selected:
+        return ""
+
+    # Cambio quirúrgico:
+    # Antes se formateaban varios avisos y se unían con "\n".
+    # Eso provocaba que MeshCore/Companion mostrase (1/2), (2/2).
+    # Ahora solo se transmite el aviso más relevante por ejecución.
+    first = selected[0]
+
+    msg = _format_one_alert(first, meta)
+    msg = _norm_spaces(msg)
+
+    if not msg:
+        return ""
+
+    return msg
 
 
 def debug_aemet_alerts(meta: Optional[Dict[str, Any]] = None) -> dict:
