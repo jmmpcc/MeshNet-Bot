@@ -249,6 +249,20 @@ VOICE_STT_CHANNEL  = int(os.getenv("VOICE_STT_CHANNEL",  str(int(os.getenv("BROK
 VOICE_WHISPER_MODEL = os.getenv("VOICE_WHISPER_MODEL", "tiny").strip()
 VOICE_PIPER_VOICE   = os.getenv("VOICE_PIPER_VOICE", "es_ES-sharvard-medium").strip()
 
+def _parse_voice_channels(raw: str, default: int) -> list[int]:
+    """Parsea 'VOICE_STT_CHANNELS=0,1,2' a [0,1,2]. Si está vacío usa [default]."""
+    result = []
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit():
+            result.append(int(part))
+    return result if result else [default]
+
+VOICE_STT_CHANNELS: list[int] = _parse_voice_channels(
+    os.getenv("VOICE_STT_CHANNELS", ""),
+    VOICE_STT_CHANNEL,
+)
+
 # Estado TTS por chat (override de VOICE_TTS_ENABLED); persiste solo en memoria
 _tts_chat_enabled: Dict[int, bool] = {}
 
@@ -6236,15 +6250,20 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await estadistica_cmd(update, context)
 
     elif data.startswith("voz_send:"):
-        key = data[len("voz_send:"):]
+        parts = data[len("voz_send:"):].split(":", 1)
+        key = parts[0]
+        ch  = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else VOICE_STT_CHANNEL
         texto = _pending_voice.pop(key, None)
         if not texto:
             await query.edit_message_text("⚠️ Transcripción expirada. Envía la nota de voz de nuevo.")
             return
-        ch = VOICE_STT_CHANNEL
         r = _broker_send_text(ch, texto, None, False)
+        ch_label = CHANNEL_NAME_BY_INDEX.get(ch, f"Canal {ch}")
         if r.get("ok"):
-            await query.edit_message_text(f"✅ Enviado al mesh (canal {ch}):\n<code>{escape(texto)}</code>", parse_mode="HTML")
+            await query.edit_message_text(
+                f"✅ Enviado al mesh ({ch_label}):\n<code>{escape(texto)}</code>",
+                parse_mode="HTML",
+            )
         else:
             await query.edit_message_text(f"❌ Error al enviar: {r.get('error', 'desconocido')}")
 
@@ -6255,6 +6274,31 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECCIÓN: Voz STT/TTS
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def _voice_channel_kbd(key: str) -> InlineKeyboardMarkup:
+    """
+    Construye el teclado inline de selección de canal para confirmar el envío
+    de una transcripción. Los canales disponibles se toman de VOICE_STT_CHANNELS
+    (lista de índices) y los nombres de CHANNEL_NAME_BY_INDEX.
+    Máximo 2 botones por fila; última fila siempre lleva el botón Cancelar.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    current_row: list[InlineKeyboardButton] = []
+
+    for ch in VOICE_STT_CHANNELS:
+        label = CHANNEL_NAME_BY_INDEX.get(ch)
+        btn_text = f"📡 {label}" if label else f"📡 Canal {ch}"
+        current_row.append(InlineKeyboardButton(btn_text, callback_data=f"voz_send:{key}:{ch}"))
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+
+    if current_row:
+        rows.append(current_row)
+
+    rows.append([InlineKeyboardButton("❌ Cancelar", callback_data="voz_cancelar")])
+    return InlineKeyboardMarkup(rows)
+
 
 async def voice_note_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -6322,15 +6366,11 @@ async def voice_note_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 _pending_voice.pop(oldest, None)
             _pending_voice[key] = texto
 
-            kbd = InlineKeyboardMarkup([[
-                InlineKeyboardButton("📡 Enviar al mesh", callback_data=f"voz_send:{key}"),
-                InlineKeyboardButton("❌ Cancelar",       callback_data="voz_cancelar"),
-            ]])
             await status_msg.edit_text(
                 f"🎙️ <b>Transcripción:</b>\n<code>{escape(texto)}</code>\n\n"
-                f"¿Enviar al mesh en canal {VOICE_STT_CHANNEL}?",
+                f"Elige el canal de envío:",
                 parse_mode="HTML",
-                reply_markup=kbd,
+                reply_markup=_voice_channel_kbd(key),
             )
 
     except Exception as e:
