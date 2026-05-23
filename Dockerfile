@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopenblas-dev liblapack-dev \
     libssl-dev libffi-dev \
     rustc cargo \
+    ffmpeg espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 
 # Importante en buildx/multi-arch: asegurar wheel/pip modernos

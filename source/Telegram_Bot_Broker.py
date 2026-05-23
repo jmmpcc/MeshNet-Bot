@@ -53,6 +53,14 @@ from html import escape
 
 from coverage_backlog import build_coverage_from_backlog, build_coverage_combined # NUEVO/ACTUALIZADO v1.1
 
+# === Módulo de voz STT/TTS (opcional; se desactiva si no está instalado) ===
+try:
+    import voice_processor as _vp
+    _VOICE_MOD_OK = True
+except Exception:
+    _vp = None  # type: ignore[assignment]
+    _VOICE_MOD_OK = False
+
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 async def maybe_await(obj):
@@ -232,6 +240,21 @@ METRICS_LISTEN_SEC = float(os.getenv("METRICS_LISTEN_SEC", "5.0"))
 # === NUEVO: bandera global para forzar modo API-only en /ver_nodos ===
 _TRUTHY = {"1","true","t","yes","y","on"}
 NODES_FORCE_API_ONLY = str(os.getenv("NODES_FORCE_API_ONLY","0")).lower() in _TRUTHY
+
+# === Voz STT/TTS ═══════════════════════════════════════════════════════════
+VOICE_STT_ENABLED  = str(os.getenv("VOICE_STT_ENABLED",  "1")).lower() in _TRUTHY
+VOICE_TTS_ENABLED  = str(os.getenv("VOICE_TTS_ENABLED",  "0")).lower() in _TRUTHY
+VOICE_STT_AUTOSEND = str(os.getenv("VOICE_STT_AUTOSEND", "0")).lower() in _TRUTHY
+VOICE_STT_CHANNEL  = int(os.getenv("VOICE_STT_CHANNEL",  str(int(os.getenv("BROKER_CHANNEL", "0")))))
+VOICE_WHISPER_MODEL = os.getenv("VOICE_WHISPER_MODEL", "tiny").strip()
+VOICE_PIPER_VOICE   = os.getenv("VOICE_PIPER_VOICE", "es_ES-sharvard-medium").strip()
+
+# Estado TTS por chat (override de VOICE_TTS_ENABLED); persiste solo en memoria
+_tts_chat_enabled: Dict[int, bool] = {}
+
+# Transcripciones pendientes de confirmar: key (str) → texto (str)
+_pending_voice: Dict[str, str] = {}
+_pending_voice_max = 20  # máximo entradas para evitar leak
 
 # ── Guardas del job de notificación ───────────────────────────────────────
 _NOTIFY_JOB_STARTED = False
@@ -6140,7 +6163,8 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("notificaciones", "Activar/Desactivar avisos de tareas"),
         BotCommand("bloquear", "Bloquea ids /bloquear <id1, id2,...> Bloquea IDs indicados /bloquear lista Lista IDs actuales"),
         BotCommand("desbloquear", "Desbloquea IDs /desbloquear <id1,id2,...>"),
-        BotCommand("bridge_status", "Comprueba como está el brige operativo")
+        BotCommand("bridge_status", "Comprueba como está el brige operativo"),
+        BotCommand("voz", "STT/TTS: /voz [on|off] — estado y control de síntesis de voz"),
     ]
     await app.bot.set_my_commands(default_cmds, scope=BotCommandScopeDefault())
 
@@ -6210,6 +6234,153 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     elif data == "estadistica":
         await estadistica_cmd(update, context)
+
+    elif data.startswith("voz_send:"):
+        key = data[len("voz_send:"):]
+        texto = _pending_voice.pop(key, None)
+        if not texto:
+            await query.edit_message_text("⚠️ Transcripción expirada. Envía la nota de voz de nuevo.")
+            return
+        ch = VOICE_STT_CHANNEL
+        r = _broker_send_text(ch, texto, None, False)
+        if r.get("ok"):
+            await query.edit_message_text(f"✅ Enviado al mesh (canal {ch}):\n<code>{escape(texto)}</code>", parse_mode="HTML")
+        else:
+            await query.edit_message_text(f"❌ Error al enviar: {r.get('error', 'desconocido')}")
+
+    elif data == "voz_cancelar":
+        await query.edit_message_text("❌ Envío cancelado.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECCIÓN: Voz STT/TTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def voice_note_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Recibe una nota de voz de Telegram, la transcribe offline con Whisper
+    y —según configuración— envía el texto al mesh o pide confirmación.
+    Solo admins. Si VOICE_STT_ENABLED=0 o faster-whisper no está instalado,
+    responde con aviso sin afectar el resto del bot.
+    """
+    uid = update.effective_user.id if update.effective_user else None
+    if uid not in ADMIN_IDS:
+        return
+
+    if not VOICE_STT_ENABLED:
+        await update.message.reply_text("⚠️ Transcripción desactivada (VOICE_STT_ENABLED=0).")
+        return
+
+    if not _VOICE_MOD_OK or not _vp.is_stt_available():
+        await update.message.reply_text(
+            "⚠️ STT no disponible. Instala <code>faster-whisper</code> y <code>ffmpeg</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    voice = update.message.voice
+    if not voice:
+        return
+
+    dur = voice.duration or 0
+    if dur > 120:
+        await update.message.reply_text("⚠️ Nota de voz demasiado larga (máx. 2 minutos).")
+        return
+
+    status_msg = await update.message.reply_text("🎙️ Transcribiendo…")
+    try:
+        tg_file   = await context.bot.get_file(voice.file_id)
+        ogg_bytes = bytes(await tg_file.download_as_bytearray())
+
+        loop  = asyncio.get_event_loop()
+        texto = await loop.run_in_executor(None, _vp.transcribe, ogg_bytes)
+
+        if not texto:
+            await status_msg.edit_text("⚠️ Sin habla detectada en la nota de voz.")
+            return
+
+        if VOICE_STT_AUTOSEND:
+            ch = VOICE_STT_CHANNEL
+            r  = _broker_send_text(ch, texto, None, False)
+            if r.get("ok"):
+                await status_msg.edit_text(
+                    f"🎙️ <b>Transcripción enviada al mesh (canal {ch}):</b>\n<code>{escape(texto)}</code>",
+                    parse_mode="HTML",
+                )
+            else:
+                await status_msg.edit_text(
+                    f"🎙️ <b>Transcripción:</b>\n<code>{escape(texto)}</code>\n\n"
+                    f"❌ Error al enviar: {r.get('error', 'desconocido')}",
+                    parse_mode="HTML",
+                )
+        else:
+            # Guardar texto pendiente con clave única; limpiar si hay demasiados
+            import uuid
+            key = uuid.uuid4().hex[:12]
+            if len(_pending_voice) >= _pending_voice_max:
+                oldest = next(iter(_pending_voice))
+                _pending_voice.pop(oldest, None)
+            _pending_voice[key] = texto
+
+            kbd = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📡 Enviar al mesh", callback_data=f"voz_send:{key}"),
+                InlineKeyboardButton("❌ Cancelar",       callback_data="voz_cancelar"),
+            ]])
+            await status_msg.edit_text(
+                f"🎙️ <b>Transcripción:</b>\n<code>{escape(texto)}</code>\n\n"
+                f"¿Enviar al mesh en canal {VOICE_STT_CHANNEL}?",
+                parse_mode="HTML",
+                reply_markup=kbd,
+            )
+
+    except Exception as e:
+        logger.error("[voice] Error en transcripción: %s", e)
+        try:
+            await status_msg.edit_text(f"❌ Error en transcripción: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+async def voz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /voz [on|off] — Activa o desactiva la síntesis de voz (TTS) para mensajes
+    entrantes del mesh en este chat. Sin argumento muestra el estado actual.
+    """
+    uid     = update.effective_user.id if update.effective_user else None
+    chat_id = update.effective_chat.id
+    if uid not in ADMIN_IDS:
+        return
+
+    args = context.args or []
+    if not args:
+        estado = _tts_chat_enabled.get(chat_id, VOICE_TTS_ENABLED)
+        stt_ok  = _VOICE_MOD_OK and _vp.is_stt_available()
+        tts_ok  = _VOICE_MOD_OK and _vp.is_tts_available()
+        ffmpeg  = _VOICE_MOD_OK and _vp.ffmpeg_available()
+        await update.message.reply_text(
+            f"🔊 <b>Estado de voz:</b>\n"
+            f"• STT (voz→mesh): {'✅ disponible' if stt_ok else '❌ no disponible'} | {'activado' if VOICE_STT_ENABLED else 'desactivado'}\n"
+            f"• TTS (mesh→voz): {'✅ disponible' if tts_ok else '❌ no disponible'} | {'activado' if estado else 'desactivado'} en este chat\n"
+            f"• ffmpeg: {'✅' if ffmpeg else '❌ no encontrado'}\n"
+            f"• Modelo Whisper: <code>{VOICE_WHISPER_MODEL}</code>\n"
+            f"• Voz Piper: <code>{VOICE_PIPER_VOICE}</code>\n"
+            f"• Canal envío STT: {VOICE_STT_CHANNEL}\n\n"
+            f"Usa <code>/voz on</code> o <code>/voz off</code> para cambiar TTS en este chat.",
+            parse_mode="HTML",
+        )
+        return
+
+    val = args[0].lower() in _TRUTHY
+    _tts_chat_enabled[chat_id] = val
+
+    if val and (_VOICE_MOD_OK and not _vp.is_tts_available()):
+        await update.message.reply_text(
+            "⚠️ TTS activado pero ningún motor disponible. Instala <code>piper-tts</code> o <code>pyttsx3</code>.",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text(f"🔊 TTS {'activado' if val else 'desactivado'} para este chat.")
+
 
 # ---- Básicos
 
@@ -15356,6 +15527,15 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 except Exception as e:
                     log(f"❗ Error enviando mensaje del broker a chat {chat_id}: {e}")
 
+                # TTS: si está activado para este chat, enviar también nota de voz
+                if _tts_chat_enabled.get(chat_id, VOICE_TTS_ENABLED) and texto and _VOICE_MOD_OK:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        ogg  = await loop.run_in_executor(None, _vp.synthesize, texto[:300])
+                        await context.bot.send_voice(chat_id=chat_id, voice=ogg)
+                    except Exception as tts_e:
+                        log(f"⚠️ TTS error en chat {chat_id}: {tts_e}")
+
         except asyncio.CancelledError:
             # La task fue cancelada explícitamente
             break
@@ -16809,6 +16989,10 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(filters.REPLY & ~filters.COMMAND, on_forcereply_text))
     app.add_handler(MessageHandler(filters.Regex(r"^/vecinos\d+$"), vecinosX_cmd))
+
+    # Voz STT/TTS
+    app.add_handler(CommandHandler("voz", voz_cmd))
+    app.add_handler(MessageHandler(filters.VOICE & ~filters.COMMAND, voice_note_handler))
   
     return app
 
