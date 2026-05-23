@@ -52,9 +52,14 @@ def _ogg_to_wav(ogg_bytes: bytes) -> str:
         f.write(ogg_bytes)
         in_path = f.name
     out_path = in_path.replace(".ogg", ".wav")
-    _run_ffmpeg(["-i", in_path, "-ar", "16000", "-ac", "1", out_path])
-    os.unlink(in_path)
-    return out_path
+    try:
+        _run_ffmpeg(["-i", in_path, "-ar", "16000", "-ac", "1", out_path])
+    finally:
+        try:
+            os.unlink(in_path)
+        except OSError:
+            pass
+    return out_path  # caller (transcribe) limpia out_path en su propio finally
 
 
 def _wav_to_ogg(wav_bytes: bytes) -> bytes:
@@ -63,12 +68,16 @@ def _wav_to_ogg(wav_bytes: bytes) -> bytes:
         f.write(wav_bytes)
         in_path = f.name
     out_path = in_path.replace(".wav", ".ogg")
-    _run_ffmpeg(["-i", in_path, "-c:a", "libopus", "-b:a", "24k", out_path])
-    os.unlink(in_path)
-    with open(out_path, "rb") as f:
-        data = f.read()
-    os.unlink(out_path)
-    return data
+    try:
+        _run_ffmpeg(["-i", in_path, "-c:a", "libopus", "-b:a", "24k", out_path])
+        with open(out_path, "rb") as f:
+            return f.read()
+    finally:
+        for p in (in_path, out_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
 
 # ── STT (voz → texto) ─────────────────────────────────────────────────────────

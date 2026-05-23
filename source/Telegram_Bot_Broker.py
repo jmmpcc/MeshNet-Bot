@@ -6250,6 +6250,9 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await estadistica_cmd(update, context)
 
     elif data.startswith("voz_send:"):
+        if not query.from_user or query.from_user.id not in ADMIN_IDS:
+            await query.answer("⛔ Solo los administradores pueden enviar al mesh.", show_alert=True)
+            return
         parts = data[len("voz_send:"):].split(":", 1)
         key = parts[0]
         ch  = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else VOICE_STT_CHANNEL
