@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.13.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v7.0.14.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -31,6 +31,7 @@ import selectors
 import socket
 import threading
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
@@ -5456,6 +5457,44 @@ class _BacklogServer(threading.Thread):
         self._sock = None
         self._stop = threading.Event()
 
+        # === [FIX 24/7] Protección contra agotamiento de hilos ==================
+        # Problema observado:
+        #   BacklogServer creaba un hilo nuevo por cada conexión entrante. Si el
+        #   WebPanel/Bot/APRS/scheduler lanzaban muchas consultas o alguna quedaba
+        #   viva hasta timeout, el proceso podía llegar a:
+        #       RuntimeError: can't start new thread
+        #
+        # Solución:
+        #   - limitar handlers simultáneos con BoundedSemaphore;
+        #   - rechazar conexiones de control de forma explícita si está saturado;
+        #   - cerrar siempre el socket aceptado;
+        #   - liberar siempre el slot del semáforo aunque _handle_client falle.
+        #
+        # Variables opcionales .env:
+        #   BACKLOG_MAX_CLIENT_THREADS=24      número máximo de handlers concurrentes
+        #   BACKLOG_CLIENT_TIMEOUT_SEC=10      timeout por cliente aceptado
+        #   BACKLOG_LISTEN_BACKLOG=32          cola kernel listen()
+        try:
+            self._max_client_threads = max(4, int(os.getenv("BACKLOG_MAX_CLIENT_THREADS", "24") or "24"))
+        except Exception:
+            self._max_client_threads = 24
+
+        try:
+            self._client_timeout_sec = max(3.0, float(os.getenv("BACKLOG_CLIENT_TIMEOUT_SEC", "10") or "10"))
+        except Exception:
+            self._client_timeout_sec = 10.0
+
+        try:
+            self._listen_backlog = max(16, int(os.getenv("BACKLOG_LISTEN_BACKLOG", "32") or "32"))
+        except Exception:
+            self._listen_backlog = 32
+
+        self._client_sem = threading.BoundedSemaphore(self._max_client_threads)
+        self._active_clients = 0
+        self._active_lock = threading.Lock()
+        self._busy_drop_count = 0
+        self._thread_start_error_count = 0
+
     def stop(self):
         self._stop.set()
         try:
@@ -5469,21 +5508,156 @@ class _BacklogServer(threading.Thread):
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._sock.bind((self.host, self.port))
-            self._sock.listen(16)
-            print(f"ℹ️ BacklogServer escuchando en {self.host}:{self.port}", flush=True)
+            self._sock.listen(self._listen_backlog)
+            print(
+                f"ℹ️ BacklogServer escuchando en {self.host}:{self.port} "
+                f"max_clients={self._max_client_threads} timeout={self._client_timeout_sec}s backlog={self._listen_backlog}",
+                flush=True,
+            )
             while not self._stop.is_set():
+                conn = None
+                addr = None
+                acquired = False
                 try:
                     self._sock.settimeout(1.0)
                     try:
                         conn, addr = self._sock.accept()
                     except socket.timeout:
                         continue
-                    threading.Thread(target=self._handle_client, args=(conn, addr), daemon=True).start()
+
+                    # Si todos los handlers están ocupados, no intentamos crear
+                    # otro hilo. Respondemos error controlado y cerramos.
+                    acquired = self._client_sem.acquire(blocking=False)
+                    if not acquired:
+                        self._reject_busy(conn, addr)
+                        conn = None
+                        continue
+
+                    th = threading.Thread(
+                        target=self._handle_client_guarded,
+                        args=(conn, addr),
+                        daemon=True,
+                        name="backlog-client",
+                    )
+                    th.start()
+                    conn = None  # queda bajo responsabilidad del handler
+
+                except OSError as e:
+                    # Cierre normal durante stop(): no ensuciar log.
+                    if self._stop.is_set():
+                        break
+                    if acquired:
+                        self._release_client_slot()
+                    self._safe_close_conn(conn)
+                    print(f"⚠️ BacklogServer accept/socket error: {type(e).__name__}: {e}", flush=True)
+
+                except RuntimeError as e:
+                    # Caso crítico observado: can't start new thread.
+                    if acquired:
+                        self._release_client_slot()
+                    self._safe_close_conn(conn)
+                    self._thread_start_error_count += 1
+                    print(
+                        f"⚠️ BacklogServer thread start error: {type(e).__name__}: {e} "
+                        f"active={self._get_active_clients()} max={self._max_client_threads} "
+                        f"thread_errors={self._thread_start_error_count}",
+                        flush=True,
+                    )
+
                 except Exception as e:
-                    print(f"⚠️ BacklogServer accept error: {e}", flush=True)
+                    if acquired:
+                        self._release_client_slot()
+                    self._safe_close_conn(conn)
+                    print(f"⚠️ BacklogServer accept error: {type(e).__name__}: {e}", flush=True)
         except Exception as e:
-            print(f"⚠️ BacklogServer run error: {e}", flush=True)
+            print(f"⚠️ BacklogServer run error: {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
+
+    def _handle_client_guarded(self, conn: socket.socket, addr):
+        """
+        Wrapper 24/7 alrededor de _handle_client().
+
+        Uso interno:
+            threading.Thread(target=self._handle_client_guarded, args=(conn, addr), daemon=True).start()
+
+        Funcionalidad:
+            - Incrementa/decrementa contador de clientes activos.
+            - Ejecuta la lógica existente sin modificar comandos.
+            - Libera SIEMPRE el slot del semáforo.
+            - Cierra SIEMPRE el socket aunque _handle_client ya lo haya cerrado.
+        """
+        with self._active_lock:
+            self._active_clients += 1
+        try:
+            try:
+                conn.settimeout(float(self._client_timeout_sec))
+            except Exception:
+                pass
+            self._handle_client(conn, addr)
+        finally:
+            self._safe_close_conn(conn)
+            with self._active_lock:
+                self._active_clients = max(0, self._active_clients - 1)
+            self._release_client_slot()
+
+    def _release_client_slot(self) -> None:
+        """Libera un slot de cliente del BacklogServer de forma tolerante a errores."""
+        try:
+            self._client_sem.release()
+        except ValueError:
+            # Ya estaba liberado; no debe romper producción.
+            pass
+        except Exception:
+            pass
+
+    def _get_active_clients(self) -> int:
+        """Devuelve el número aproximado de handlers activos."""
+        try:
+            with self._active_lock:
+                return int(self._active_clients)
+        except Exception:
+            return -1
+
+    def _safe_close_conn(self, conn) -> None:
+        """Cierre defensivo de sockets aceptados."""
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    def _reject_busy(self, conn: socket.socket, addr) -> None:
+        """
+        Rechaza una conexión cuando el BacklogServer está saturado.
+
+        Devuelve JSON para que el cliente pueda registrar 'backlog_busy' en vez de
+        quedarse colgado hasta timeout. No crea hilos nuevos.
+        """
+        self._busy_drop_count += 1
+        try:
+            resp = {
+                "ok": False,
+                "error": "backlog_busy",
+                "active_clients": self._get_active_clients(),
+                "max_clients": int(self._max_client_threads),
+                "busy_drops": int(self._busy_drop_count),
+            }
+            conn.settimeout(1.0)
+            conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+        except Exception:
+            pass
+        finally:
+            self._safe_close_conn(conn)
+            try:
+                if self._busy_drop_count == 1 or self._busy_drop_count % 25 == 0:
+                    print(
+                        f"⚠️ BacklogServer BUSY: rechazo controlado "
+                        f"active={self._get_active_clients()} max={self._max_client_threads} drops={self._busy_drop_count}",
+                        flush=True,
+                    )
+            except Exception:
+                pass
 
     def _handle_client(self, conn: socket.socket, addr):
         try:
