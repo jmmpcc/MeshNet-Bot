@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram_Bot_Broker_v7.0.12 py
+Telegram_Bot_Broker_v7.0.14-A.py
 -----------------------------
 Bot de Telegram integrado con Meshtastic y un Broker TCP opcional.
 Conexión preferente a Meshtastic_Relay_API si está disponible; si no, fallback a la CLI 'meshtastic'.
@@ -2445,6 +2445,66 @@ def _broker_send_text(ch: int, text: str, dest: str | None, ack: bool) -> dict:
 
 # === [NUEVO] Helper para consultar estado profundo del broker por el puerto de control UDP ===
 import os, socket, json
+
+
+
+# === [NUEVO v7.0.14] Estado operativo del nodo A Meshtastic ==================
+def _broker_a_down_notice(channel: int | None = None) -> str | None:
+    """
+    Comprueba si el nodo A Meshtastic está conectado según BROKER_STATUS.
+
+    Uso:
+        notice = _broker_a_down_notice(canal)
+        if notice:
+            return notice, None
+
+    Parámetros:
+        channel:
+            Canal Meshtastic solicitado. Se usa solo para componer el aviso.
+
+    Funcionalidad:
+        - Consulta el BacklogServer/control del broker.
+        - Si el broker responde y connected=False, devuelve un texto claro para Telegram.
+        - Si no se puede consultar el broker, devuelve None para no bloquear comandos por
+          falsos negativos.
+        - No afecta a /enviar_mc ni /enviar_mc_dm, que usan MESHCORE_SEND y no dependen
+          del nodo A.
+    """
+    try:
+        st = _broker_rpc("BROKER_STATUS")
+    except Exception:
+        return None
+
+    if not isinstance(st, dict) or not st.get("ok"):
+        return None
+
+    connected = bool(st.get("connected"))
+    if connected:
+        return None
+
+    status = str(st.get("status") or "running")
+    host = str(st.get("node_host") or _mesh_runtime_host() or "?")
+    try:
+        port = int(st.get("node_port") or _mesh_runtime_port() or 0)
+    except Exception:
+        port = 0
+    rem = int(st.get("cooldown_remaining") or 0)
+    ch_txt = "?" if channel is None else str(int(channel))
+
+    if status == "paused":
+        state_txt = "pausado o en cooldown"
+    elif rem > 0:
+        state_txt = f"en proceso de reconexión/cooldown ({rem}s)"
+    else:
+        state_txt = "caído o en proceso de arranque"
+
+    port_txt = f":{port}" if port > 0 else ""
+    return (
+        f"KO: Nodo A Meshtastic TCP {state_txt}. "
+        f"No se transmite por el canal Meshtastic {ch_txt}. "
+        f"Objetivo A={host}{port_txt}. "
+        f"Los envíos directos por MeshCore deben hacerse con /enviar_mc o /enviar_mc_dm."
+    )
 
 def _send_broker_ctrl(cmd: str, extra: dict | None = None, timeout: float = 1.5):
     """
@@ -14744,7 +14804,7 @@ async def on_send_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         if not traceroute_ok:
             forced_flag = True
 
-    out = send_text_message(node_id, texto_final, canal=canal)
+    out, pid = send_text_message(node_id, texto_final, canal=canal)
     respuestas = await quick_broker_listen(node_id, canal, SEND_LISTEN_SEC)
 
     dest_txt = "broadcast" if node_id is None else node_id

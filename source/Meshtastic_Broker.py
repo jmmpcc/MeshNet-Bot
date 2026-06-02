@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.14.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker_v7.0.14_B.py Incluye servidor BBS Meshtastic server corregiso por DM
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -380,6 +380,107 @@ def _check_and_reconnect_embedded_b(iface_a=None, reason: str = "") -> dict:
         out["action"] = "error"
         out["details"] = f"bridge_check_error: {type(e).__name__}: {e}"
         print(f"[broker] Check embedded B ({why}) bridge ERROR: {type(e).__name__}: {e}", flush=True)
+        return out
+
+
+# === [NUEVO v7.0.14] Arranque autónomo de B MeshCore ==========================
+def _start_meshcore_embedded_autonomous(reason: str = "startup") -> dict:
+    """
+    Arranca/verifica MeshCore embebido sin depender de que el nodo A Meshtastic
+    haya establecido conexión TCP.
+
+    Uso:
+        _start_meshcore_embedded_autonomous("broker.startup")
+        _start_meshcore_embedded_autonomous("connection.established")
+
+    Parámetros:
+        reason:
+            Texto de diagnóstico para log. No afecta al funcionamiento.
+
+    Funcionalidad:
+        - Si MESHCORE_ENABLE=0, no hace nada.
+        - Si BRIDGE_ENABLED=1 y MESHCORE_ENABLE=1, respeta la prioridad histórica
+          del bridge Meshtastic y no arranca MeshCore para evitar doble backend B.
+        - Si la librería meshcore no está disponible, informa y sale sin romper
+          el broker.
+        - Crea MESHCORE_ENGINE si todavía no existe.
+        - Si el engine existe pero no está sano, llama a start(). El propio engine
+          mantiene su supervisor/reconexión 24/7.
+        - No necesita iface_a ni conexión TCP con el nodo A.
+
+    Devuelve:
+        dict normalizado con ok/backend/action/details/status.
+    """
+    why = (reason or "startup").strip()
+    out = {
+        "ok": True,
+        "backend": "meshcore",
+        "reason": why,
+        "action": "noop",
+        "details": None,
+        "status": None,
+    }
+
+    try:
+        meshcore_enabled = _env_truthy("MESHCORE_ENABLE", "0")
+        bridge_enabled = _env_truthy("BRIDGE_ENABLED", "0")
+
+        if not meshcore_enabled:
+            out["action"] = "skip"
+            out["details"] = "MESHCORE_ENABLE=0"
+            return out
+
+        if bridge_enabled:
+            out["action"] = "skip"
+            out["details"] = "BRIDGE_ENABLED=1 tiene prioridad sobre MESHCORE_ENABLE=1"
+            print(
+                f"[meshcore] arranque autónomo omitido ({why}): BRIDGE_ENABLED=1 tiene prioridad",
+                flush=True,
+            )
+            return out
+
+        if not _MESHCORE_AVAILABLE:
+            out["ok"] = False
+            out["action"] = "error"
+            out["details"] = f"meshcore_not_available: {_MESHCORE_IMPORT_ERROR or 'unknown'}"
+            print(
+                f"[meshcore] arranque autónomo no disponible ({why}): {out['details']}",
+                flush=True,
+            )
+            return out
+
+        global MESHCORE_ENGINE
+        if MESHCORE_ENGINE is None:
+            MESHCORE_ENGINE = MeshCoreEmbeddedBridge()
+            out["action"] = "created"
+
+        healthy = False
+        try:
+            healthy = bool(MESHCORE_ENGINE.is_healthy())
+        except Exception:
+            healthy = False
+
+        if not healthy:
+            MESHCORE_ENGINE.start()
+            out["action"] = "start" if out["action"] == "noop" else "create_start"
+            out["details"] = "meshcore_autonomous_start_requested"
+        else:
+            out["action"] = "already_ok"
+            out["details"] = "meshcore_healthy"
+
+        try:
+            out["status"] = MESHCORE_ENGINE.status() if MESHCORE_ENGINE else None
+        except Exception as e:
+            out["status"] = {"status_error": f"{type(e).__name__}: {e}"}
+
+        print(f"[meshcore] arranque/verificación autónoma ({why}): {out}", flush=True)
+        return out
+
+    except Exception as e:
+        out["ok"] = False
+        out["action"] = "error"
+        out["details"] = f"{type(e).__name__}: {e}"
+        print(f"[meshcore] arranque autónomo ERROR ({why}): {type(e).__name__}: {e}", flush=True)
         return out
 
 def _mc_parse_chanidx_to_ch() -> dict[int, int]:
@@ -9313,16 +9414,11 @@ def main():
                 meshcore_enabled = False
 
             # ---- MeshCore embebido ----
+            # v7.0.14: la creación/arranque real se delega en el helper autónomo.
+            # Así este hook queda como verificación en reconexión de A, pero B ya puede
+            # haber arrancado antes aunque A no haya conectado nunca.
             if meshcore_enabled:
-                try:
-                    global MESHCORE_ENGINE
-                    if MESHCORE_ENGINE is None:
-                        MESHCORE_ENGINE = MeshCoreEmbeddedBridge()
-                    if not MESHCORE_ENGINE.is_healthy():
-                        MESHCORE_ENGINE.start()
-                    print("[meshcore] embebido status:", (MESHCORE_ENGINE.status() if MESHCORE_ENGINE else {}), flush=True)
-                except Exception as e:
-                    print(f"[meshcore] ⚠️ no se pudo iniciar/verificar embebido: {type(e).__name__}: {e}", flush=True)
+                _start_meshcore_embedded_autonomous("connection.established")
 
             # ---- Bridge Meshtastic embebido ----
             if bridge_enabled:
@@ -9354,7 +9450,11 @@ def main():
     # Suscribir el hook al evento de conexión establecida
     pub.subscribe(_start_or_verify_embedded_on_connection, "meshtastic.connection.established")
 
-
+    # === [NUEVO v7.0.14] Arranque autónomo de B MeshCore =====================
+    # Punto crítico: si A Meshtastic no establece TCP, el evento
+    # "meshtastic.connection.established" no se produce. Por tanto, MeshCore B
+    # debe arrancar aquí, de forma independiente, antes de lanzar/reintentar A.
+    _start_meshcore_embedded_autonomous("broker.startup.autonomous")
 
     # Lanzar primera conexión
     iface_mgr.signal_disconnect()
