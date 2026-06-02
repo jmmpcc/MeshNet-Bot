@@ -5596,6 +5596,31 @@ class _BacklogServer(threading.Thread):
         self._busy_drop_count = 0
         self._thread_start_error_count = 0
 
+        # === [FIX 24/7 WEBPANEL] Protección específica para consultas FETCH_BACKLOG ===
+        # El WebPanel puede lanzar varias consultas simultáneas/continuas contra el puerto
+        # de control. Si alguna consulta FETCH_BACKLOG pide demasiado histórico o usa el
+        # formato antiguo con parámetros en raíz, cada handler queda leyendo JSONL más tiempo
+        # del necesario. Estos límites impiden que una vista web degrade el broker.
+        #
+        # Variables opcionales .env:
+        #   BACKLOG_FETCH_MAX_LIMIT=500        límite duro de filas por FETCH_BACKLOG
+        #   BACKLOG_FETCH_DEFAULT_LIMIT=200    límite si el cliente no envía limit válido
+        #   BACKLOG_FETCH_DEFAULT_WINDOW_SEC=900 ventana si no llega since_ts/until_ts
+        try:
+            self._fetch_max_limit = max(50, int(os.getenv("BACKLOG_FETCH_MAX_LIMIT", "500") or "500"))
+        except Exception:
+            self._fetch_max_limit = 500
+
+        try:
+            self._fetch_default_limit = max(20, int(os.getenv("BACKLOG_FETCH_DEFAULT_LIMIT", "200") or "200"))
+        except Exception:
+            self._fetch_default_limit = 200
+
+        try:
+            self._fetch_default_window_sec = max(0, int(os.getenv("BACKLOG_FETCH_DEFAULT_WINDOW_SEC", "900") or "900"))
+        except Exception:
+            self._fetch_default_window_sec = 900
+
     def stop(self):
         self._stop.set()
         try:
@@ -5612,7 +5637,9 @@ class _BacklogServer(threading.Thread):
             self._sock.listen(self._listen_backlog)
             print(
                 f"ℹ️ BacklogServer escuchando en {self.host}:{self.port} "
-                f"max_clients={self._max_client_threads} timeout={self._client_timeout_sec}s backlog={self._listen_backlog}",
+                f"max_clients={self._max_client_threads} timeout={self._client_timeout_sec}s "
+                f"backlog={self._listen_backlog} fetch_max={self._fetch_max_limit} "
+                f"fetch_default_limit={self._fetch_default_limit} fetch_default_window={self._fetch_default_window_sec}s",
                 flush=True,
             )
             while not self._stop.is_set():
@@ -5762,7 +5789,9 @@ class _BacklogServer(threading.Thread):
 
     def _handle_client(self, conn: socket.socket, addr):
         try:
-            conn.settimeout(15.0)
+            # No fijar 15s rígidos: se usa el timeout configurable del BacklogServer.
+            # Esto evita que consultas del WebPanel mantengan handlers ocupados demasiado tiempo.
+            conn.settimeout(float(getattr(self, "_client_timeout_sec", 10.0)))
             data = b""
             while True:
                 b = conn.recv(65536)
@@ -5783,16 +5812,49 @@ class _BacklogServer(threading.Thread):
             cmd = (req.get("cmd") or "").upper()
             params = req.get("params") or {}
 
-            # --- FETCH_BACKLOG (igual que tenías) ---
+            # --- FETCH_BACKLOG (blindado para WebPanel / clientes antiguos) ---
             if cmd == "FETCH_BACKLOG":
-                since_ts = params.get("since_ts")
-                until_ts = params.get("until_ts")
-                channel  = params.get("channel")
-                portnums = params.get("portnums") or ["TEXT_MESSAGE_APP"]
-                limit    = params.get("limit") or 1000
+                # Compatibilidad: algunos clientes antiguos enviaban since_ts/limit/portnums
+                # en la raíz del JSON en vez de dentro de params. Antes eso se ignoraba,
+                # provocando lecturas más grandes del histórico. Se aceptan ambos formatos.
+                p = params if isinstance(params, dict) else {}
+
+                def _first_param(name: str, default=None):
+                    if name in p:
+                        return p.get(name)
+                    return req.get(name, default)
+
+                since_ts = _first_param("since_ts", None)
+                until_ts = _first_param("until_ts", None)
+                channel  = _first_param("channel", None)
+                portnums = _first_param("portnums", None) or ["TEXT_MESSAGE_APP"]
+
+                # Límite defensivo: evita peticiones masivas desde el WebPanel.
+                try:
+                    raw_limit = int(_first_param("limit", self._fetch_default_limit) or self._fetch_default_limit)
+                except Exception:
+                    raw_limit = int(self._fetch_default_limit)
+                limit = max(1, min(int(raw_limit), int(self._fetch_max_limit)))
+
+                # Si el cliente no manda ventana temporal, se aplica una ventana reciente
+                # para no leer todo el JSONL histórico en cada refresco del WebPanel.
+                # Poner BACKLOG_FETCH_DEFAULT_WINDOW_SEC=0 restaura el comportamiento antiguo.
+                if since_ts is None and until_ts is None and int(self._fetch_default_window_sec) > 0:
+                    try:
+                        since_ts = int(time.time()) - int(self._fetch_default_window_sec)
+                    except Exception:
+                        since_ts = None
 
                 out = list(_iter_backlog_jsonl(since_ts, until_ts, channel, portnums, limit))
-                resp = {"ok": True, "data": out}
+                resp = {
+                    "ok": True,
+                    "data": out,
+                    "count": len(out),
+                    "limit": int(limit),
+                    "since_ts": since_ts,
+                    "until_ts": until_ts,
+                    "truncated": bool(raw_limit > limit),
+                }
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                 return
             
@@ -6165,14 +6227,29 @@ class _BacklogServer(threading.Thread):
                 return
 
             # --- control del broker (pausa/reanuda/estado/desconexion) ---
-            elif cmd in {"BROKER_PAUSE", "BROKER_RESUME", "BROKER_STATUS", "BRIDGE_STATUS", "BROKER_DISCONNECT", "FORCE_RECONNECT", "BROKER_QUIT"}:
+            elif cmd in {"BROKER_PAUSE", "BROKER_RESUME", "BROKER_STATUS", "BACKLOG_STATUS", "BRIDGE_STATUS", "BROKER_DISCONNECT", "FORCE_RECONNECT", "BROKER_QUIT"}:
 
                 mgr = globals().get("BROKER_IFACE_MGR")
                 if not mgr:
                     resp = {"ok": False, "error": "iface manager not ready"}
                 else:
                     try:
-                        if cmd == "BROKER_PAUSE":
+                        if cmd == "BACKLOG_STATUS":
+                            resp = {
+                                "ok": True,
+                                "status": "running",
+                                "active_clients": self._get_active_clients(),
+                                "max_clients": int(self._max_client_threads),
+                                "busy_drops": int(self._busy_drop_count),
+                                "thread_start_errors": int(self._thread_start_error_count),
+                                "client_timeout_sec": float(self._client_timeout_sec),
+                                "listen_backlog": int(self._listen_backlog),
+                                "fetch_max_limit": int(self._fetch_max_limit),
+                                "fetch_default_limit": int(self._fetch_default_limit),
+                                "fetch_default_window_sec": int(self._fetch_default_window_sec),
+                            }
+
+                        elif cmd == "BROKER_PAUSE":
                             # Cierra iface y bloquea reconexión hasta resume()
                             mgr.pause()
                             resp = {"ok": True, "status": "paused"}
@@ -6350,6 +6427,11 @@ class _BacklogServer(threading.Thread):
                                 # opcionales de diagnóstico (si los tienes a mano):
                                 "mgr_paused": bool(is_paused),
                                 "tx_blocked": bool(TX_BLOCKED.is_set()) if 'TX_BLOCKED' in globals() else False,
+                                # Diagnóstico del BacklogServer para detectar presión del WebPanel/Bot.
+                                "backlog_active_clients": self._get_active_clients(),
+                                "backlog_max_clients": int(self._max_client_threads),
+                                "backlog_busy_drops": int(self._busy_drop_count),
+                                "backlog_thread_errors": int(self._thread_start_error_count),
                             }
 
                             # [TRAZA extra (debug de referencia)]:
