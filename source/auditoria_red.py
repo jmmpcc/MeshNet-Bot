@@ -1,5 +1,5 @@
-# v7.0.12 uditoria_red.py
-import os, json, csv, math, time, hashlib, logging
+# v7.0.14 uditoria_red.py
+import os, json, csv, math, time, hashlib, logging, re
 from datetime import datetime, timezone
 from statistics import fmean
 from typing import Any, Dict, List, Optional, Set
@@ -50,9 +50,81 @@ PATH_COV   = os.getenv("BOT_COVERAGE_PATH",    "bot_data/coverage.jsonl")
 PATH_TEL   = os.getenv("BOT_TELEMETRY_PATH",   "bot_data/telemetry.jsonl")  # opcional
 PATH_OFF   = os.getenv("BOT_OFFLINE_LOG_PATH", "bot_data/broker_offline_log.jsonl")
 
-# Nodo principal (tu nodo/gateway) para comparativas de impacto.
-# Debe ser un ID Meshtastic estilo "!9ef0c2cc".
-HOME_NODE_ID = (os.getenv("HOME_NODE_ID", "") or "").strip()
+# Nodo principal (tu nodo/gateway).
+# - En auditoria_impacto se conserva como referencia del nodo propio.
+# - En auditoria_red/auditoria_integral se usa para excluir el nodo propio de
+#   los informes, porque esos informes deben reflejar únicamente nodos externos
+#   vistos por nuestro nodo.
+def _aud_norm_node_id(v: Any) -> str:
+    """
+    Normaliza IDs Meshtastic para comparación robusta.
+
+    Uso:
+        nid = _aud_norm_node_id(valor)
+
+    Parámetros:
+        v:
+            ID recibido desde JSONL, nodos.txt o variable de entorno. Acepta:
+            - "!9ef0c2cc"
+            - "9ef0c2cc"
+            - entero decimal de Meshtastic
+            - cadena decimal equivalente al node_num
+
+    Funcionalidad:
+        Devuelve siempre "!xxxxxxxx" cuando el valor representa un node_id
+        Meshtastic válido. Si el valor no es comparable, devuelve cadena vacía
+        o el texto normalizado como último recurso.
+    """
+    if v is None:
+        return ""
+
+    if isinstance(v, int):
+        if 0 <= int(v) <= 0xFFFFFFFF:
+            return f"!{int(v):08x}"
+        return ""
+
+    s = str(v).strip().lower()
+    if not s or s in {"?", "none", "null", "broadcast"}:
+        return ""
+
+    # Evita falsos positivos con orígenes virtuales tipo APRS:EA2XXX o MC:...
+    if s.startswith(("aprs:", "mc:")):
+        return ""
+
+    m = re.search(r"![0-9a-f]{8}\b", s)
+    if m:
+        return m.group(0)
+
+    if re.fullmatch(r"[0-9a-f]{8}", s):
+        return f"!{s}"
+
+    if re.fullmatch(r"\d+", s):
+        try:
+            n = int(s)
+            if 0 <= n <= 0xFFFFFFFF:
+                return f"!{n:08x}"
+        except Exception:
+            return ""
+
+    return s
+
+
+HOME_NODE_ID = _aud_norm_node_id(os.getenv("HOME_NODE_ID", ""))
+
+
+def _is_home_node_id(v: Any) -> bool:
+    """
+    Devuelve True si 'v' coincide con HOME_NODE_ID.
+
+    Uso:
+        if _is_home_node_id(nid):
+            continue
+
+    Funcionalidad:
+        Centraliza la comparación para que el filtrado sea uniforme en
+        auditoría de red, auditoría integral, CSV, JSON y mapas.
+    """
+    return bool(HOME_NODE_ID and _aud_norm_node_id(v) == HOME_NODE_ID)
 
 OUT_DIR         = os.getenv("BOT_REPORTS_DIR", "bot_data/reportes")
 HEATMAP_OUTDIR  = os.getenv("BOT_MAPS_DIR", OUT_DIR)
@@ -304,6 +376,67 @@ def _extract_metrics(row: Dict[str, Any]) -> Dict[str, Any]:
             "via": (str(via).strip() if isinstance(via, str) and via.strip() else None)}
 
 
+def _row_is_from_home_node(row: Dict[str, Any]) -> bool:
+    """
+    Indica si un evento JSONL procede del nodo propio HOME_NODE_ID.
+
+    Uso:
+        if _row_is_from_home_node(row):
+            continue
+
+    Parámetros:
+        row:
+            Evento leído desde coverage.jsonl, positions.jsonl, telemetry.jsonl
+            o broker_offline_log.jsonl.
+
+    Funcionalidad:
+        Revisa campos de origen habituales del proyecto, incluidos formatos
+        planos y anidados. No usa campos ambiguos como "id" para evitar
+        confundir IDs de mensaje con IDs de nodo.
+    """
+    if not HOME_NODE_ID or not isinstance(row, dict):
+        return False
+
+    candidates: List[Any] = [
+        row.get("from_id"),
+        row.get("node_id"),
+        row.get("nid"),
+        row.get("from"),
+        row.get("fromId"),
+        row.get("fromIdShort"),
+        row.get("from_num"),
+        row.get("nodeNum"),
+    ]
+
+    for container_key in ("packet", "decoded", "summary"):
+        obj = row.get(container_key)
+        if isinstance(obj, dict):
+            candidates.extend([
+                obj.get("from_id"),
+                obj.get("node_id"),
+                obj.get("nid"),
+                obj.get("from"),
+                obj.get("fromId"),
+                obj.get("fromIdShort"),
+                obj.get("from_num"),
+                obj.get("nodeNum"),
+            ])
+
+            dec = obj.get("decoded")
+            if isinstance(dec, dict):
+                candidates.extend([
+                    dec.get("from_id"),
+                    dec.get("node_id"),
+                    dec.get("nid"),
+                    dec.get("from"),
+                    dec.get("fromId"),
+                    dec.get("fromIdShort"),
+                    dec.get("from_num"),
+                    dec.get("nodeNum"),
+                ])
+
+    return any(_is_home_node_id(v) for v in candidates)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Utilidades internas
@@ -312,7 +445,7 @@ def _ensure_outdir():
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs(HEATMAP_OUTDIR, exist_ok=True)
 
-def _collect_rows(hours: int) -> List[Dict[str, Any]]:
+def _collect_rows(hours: int, exclude_home_node: bool = True) -> List[Dict[str, Any]]:
     cutoff = time.time() - hours*3600
     rows: List[Dict[str, Any]] = []
     rows += _read_jsonl(PATH_COV)
@@ -324,8 +457,13 @@ def _collect_rows(hours: int) -> List[Dict[str, Any]]:
         try:
             ts = r.get("ts") or r.get("timestamp") or r.get("time")
             if isinstance(ts, str): ts = _safe_iso_to_ts(ts)
-            if ts is None: continue
-            if float(ts) >= cutoff: out.append(r)
+            if ts is None:
+                continue
+            if float(ts) < cutoff:
+                continue
+            if exclude_home_node and _row_is_from_home_node(r):
+                continue
+            out.append(r)
         except:
             pass
     return out
@@ -348,6 +486,8 @@ def _build_neighbors(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         m = _extract_metrics(r)
         nid = m.get("nid")
         if not nid:
+            continue
+        if _is_home_node_id(nid):
             continue
 
         # Filtro: solo vecinos (hops 0–1 por defecto)
@@ -1022,6 +1162,8 @@ def _presence_profile(rows: List[Dict[str, Any]], hours: int) -> Dict[str, Dict[
         m = _extract_metrics(r)
         if not m["nid"]:
             continue
+        if _is_home_node_id(m["nid"]):
+            continue
         if m["ts"] < cutoff:
             continue
         if m["hops"] is not None and m["hops"] > HOPS_NEIGHBOR_MAX:
@@ -1090,6 +1232,8 @@ def _generate_heatmap(base_name: str, hours: int) -> Optional[str]:
 
     for r in _read_jsonl(PATH_COV) + _read_jsonl(PATH_POS):
         m = _extract_metrics(r)
+        if _is_home_node_id(m.get("nid")):
+            continue
         if m["ts"] < cutoff: 
             continue
         if m["lat"] is None or m["lon"] is None: 
@@ -1342,6 +1486,8 @@ async def auditoria_red_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         synthetic = []
         for nid, extra in _nodos_by_id.items():
+            if _is_home_node_id(nid):
+                continue
             snr = _f(extra.get("snr_db"))
             hops = _i(extra.get("hops"))
             # tras construir `synthetic.append({...})`, usa este cuerpo completo:
@@ -1464,6 +1610,8 @@ async def auditoria_integral_cmd(update: Update, context: ContextTypes.DEFAULT_T
 
         synthetic = []
         for nid, extra in _nodos_by_id.items():
+            if _is_home_node_id(nid):
+                continue
             snr  = _f(extra.get("snr_db"))
             hops = _i(extra.get("hops"))
             synthetic.append({
@@ -1622,43 +1770,109 @@ async def auditoria_integral_cmd(update: Update, context: ContextTypes.DEFAULT_T
             pass
 
 
-
 async def auditoria_impacto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /auditoria_impacto [horas=72] [!node_id]
-    Auditoría operacional del impacto de un nodo sobre la malla:
-      - rol observado (por comportamiento)
-      - impacto (positivo/neutro/degradante) con score 0..100
-      - flags y motivos
-    Si no se indica !node_id, se usa HOME_NODE_ID.
+    /auditoria_impacto [horas=72] !node_id
+
+    Auditoría operacional del impacto de un nodo EXTERNO sobre la malla.
+
+    Uso:
+        /auditoria_impacto !9ef0c2cc
+        /auditoria_impacto 72 !9ef0c2cc
+        /auditoria_impacto 24 !9ef0c2cc
+
+    Parámetros:
+        horas:
+            Ventana de análisis en horas. Si no se indica, usa WINDOW_H.
+        node_id:
+            ID Meshtastic del nodo externo a auditar. Debe tener formato !xxxxxxxx.
+
+    Funcionalidad:
+        - Recoge eventos recientes desde las fuentes JSONL ya usadas por auditoría_red.
+        - Calcula vecinos visibles por el gateway local.
+        - Estima carga global del canal.
+        - Cuenta apariciones como relay/via.
+        - Calcula movilidad aproximada del nodo auditado.
+        - Calcula airtime estimado del nodo auditado.
+        - Genera informe JSON en OUT_DIR.
+        - Envía resumen por Telegram y adjunta el JSON.
+
+    Nota:
+        Esta auditoría NO debe usar por defecto HOME_NODE_ID, porque los informes de
+        auditoría deben referirse a nodos externos vistos por nuestro nodo.
     """
+    
     args = context.args or []
+
+    # ------------------------------------------------------------
+    # 1) Parseo robusto de argumentos
+    # ------------------------------------------------------------
+    hours = WINDOW_H
+    node_id = None
+
     try:
-        tok0 = args[0] if args else None
-        hours = _parse_window_to_hours(tok0, WINDOW_H)
+        if len(args) >= 1:
+            arg0 = str(args[0]).strip()
+
+            # Permite:
+            #   /auditoria_impacto !9ef0c2cc
+            #   /auditoria_impacto 9ef0c2cc
+            #   /auditoria_impacto 2666574540
+            n0 = _aud_norm_node_id(arg0)
+            if n0 and n0.startswith("!"):
+                node_id = n0
+                hours = WINDOW_H
+            else:
+                # Permite:
+                #   /auditoria_impacto 72 !9ef0c2cc
+                #   /auditoria_impacto 72 9ef0c2cc
+                #   /auditoria_impacto 72 2666574540
+                hours = _parse_window_to_hours(arg0, WINDOW_H)
+
+                if len(args) >= 2:
+                    arg1 = str(args[1]).strip()
+                    n1 = _aud_norm_node_id(arg1)
+                    if n1 and n1.startswith("!"):
+                        node_id = n1
     except Exception:
         hours = WINDOW_H
+        node_id = None
 
-    # Segundo argumento opcional: node_id explícito
-    node_id = None
-    if len(args) >= 2 and isinstance(args[1], str) and args[1].strip().startswith('!'):
-        node_id = args[1].strip()
-    elif len(args) >= 1 and isinstance(args[0], str) and args[0].strip().startswith('!'):
-        # permite /auditoria_impacto !id (sin horas)
-        node_id = args[0].strip()
-        hours = WINDOW_H
-    else:
-        node_id = HOME_NODE_ID
-
+    # ------------------------------------------------------------
+    # 2) Validación obligatoria de nodo externo
+    # ------------------------------------------------------------
     if not node_id:
         await update.effective_message.reply_text(
-            "auditoria_impacto: HOME_NODE_ID no definido y no se indicó !node_id.\nEjemplo: /auditoria_impacto 72 !9ef0c2cc",
+            "auditoria_impacto: falta el nodo externo a auditar.\n"
+            "Uso: /auditoria_impacto 72 !9ef0c2cc",
             disable_web_page_preview=True
         )
         return
 
+    # Normalización mínima del ID.
+    node_id = node_id.strip().lower()
+    if not node_id.startswith("!"):
+        node_id = "!" + node_id
+
+    # Evita auditar el nodo local si HOME_NODE_ID está definido.
+    home_id = (HOME_NODE_ID or "").strip().lower()
+    if home_id and not home_id.startswith("!"):
+        home_id = "!" + home_id
+
+    if home_id and node_id == home_id:
+        await update.effective_message.reply_text(
+            "auditoria_impacto: el nodo indicado es HOME_NODE_ID.\n"
+            "Esta auditoría debe aplicarse a nodos externos vistos por el gateway.",
+            disable_web_page_preview=True
+        )
+        return
+
+    # ------------------------------------------------------------
+    # 3) Carga de datos de auditoría
+    # ------------------------------------------------------------
     _ensure_outdir()
-    rows = _collect_rows(hours)
+
+    rows = _collect_rows(hours, exclude_home_node=False)
     if not rows:
         await update.effective_message.reply_text(
             "Sin datos en la ventana solicitada.\n" + _file_diag(hours),
@@ -1666,7 +1880,9 @@ async def auditoria_impacto_cmd(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    # Vecinos directos (respecto a este broker/nodo local)
+    # ------------------------------------------------------------
+    # 4) Vecinos visibles por el gateway local
+    # ------------------------------------------------------------
     T = _build_neighbors(rows)
     nei = _summarize_neighbors(T)
 
@@ -1674,9 +1890,12 @@ async def auditoria_impacto_cmd(update: Update, context: ContextTypes.DEFAULT_TY
     if _nodos_by_id:
         _enriquecer_con_nodos_txt(nei, _nodos_by_id)
 
-    # Métricas globales + impacto del nodo
+    # ------------------------------------------------------------
+    # 5) Métricas globales e impacto del nodo
+    # ------------------------------------------------------------
     load = _channel_load_estimate(rows, hours)
     relay_counts = _relay_seen_counts(rows, hours)
+
     impact = _impact_assessment(
         node_id=node_id,
         nei_list=nei,
@@ -1688,51 +1907,75 @@ async def auditoria_impacto_cmd(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not impact:
         await update.effective_message.reply_text(
-            f'auditoria_impacto: sin datos suficientes para {node_id}',
+            f"auditoria_impacto: sin datos suficientes para {node_id}",
             disable_web_page_preview=True
         )
         return
 
-    ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-    base = f'auditoria_impacto_{ts}'
-    out_json = os.path.join(OUT_DIR, f'{base}.json')
+    # ------------------------------------------------------------
+    # 6) Persistencia del informe JSON
+    # ------------------------------------------------------------
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    base = f"auditoria_impacto_{node_id.lstrip('!')}_{ts}"
+    out_json = os.path.join(OUT_DIR, f"{base}.json")
 
     payload = {
-        'generated_at': ts,
-        'window_hours': hours,
-        'node_id': node_id,
-        'impact': impact,
-        'channel_load': load,
+        "generated_at": ts,
+        "window_hours": int(hours),
+        "node_id": node_id,
+        "home_node_id": home_id or None,
+        "impact": impact,
+        "channel_load": load,
+        "note": (
+            "neighbors_count representa vecinos visibles por el gateway local, "
+            "no necesariamente vecinos directos propios del nodo auditado."
+        ),
     }
+
     try:
-        with open(out_json, 'w', encoding='utf-8') as f:
-            import json
+        with open(out_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
     except Exception:
-        pass
+        out_json = ""
 
-    m = impact['metrics']
-    duty_pct = float(load.get('duty_window', 0.0)) * 100.0
-    dup_pct = float(load.get('dup_ratio', 0.0)) * 100.0
+    # ------------------------------------------------------------
+    # 7) Resumen Telegram
+    # ------------------------------------------------------------
+    m = impact.get("metrics", {})
+    duty_pct = float(load.get("duty_window", 0.0)) * 100.0
+    dup_pct = float(load.get("dup_ratio", 0.0)) * 100.0
+
+    flags_txt = ", ".join(impact.get("flags") or []) if impact.get("flags") else "-"
+    reasons_txt = "; ".join(impact.get("reasons") or []) if impact.get("reasons") else "-"
 
     msg = (
-        f"Auditoría de impacto ({hours} h) — {impact['node_id']}\n"
-        f"Rol observado: {impact['observed_role']} (conf {impact['role_confidence']})\n"
-        f"Impacto: {impact['impact_label']} ({impact['impact_score']}/100)\n\n"
+        f"Auditoría de impacto ({hours} h) — {impact.get('node_id', node_id)}\n"
+        f"Rol observado: {impact.get('observed_role', '?')} "
+        f"(conf {impact.get('role_confidence', '?')})\n"
+        f"Impacto: {impact.get('impact_label', '?')} "
+        f"({impact.get('impact_score', '?')}/100)\n\n"
         "Métricas:\n"
-        f"• vecinos_directos: {m['neighbors_count']} | relay_seen: {m['relay_seen']} | movilidad≈{m['mobility_km']} km\n"
-        f"• airtime_nodo: {m['airtime_ms']} ms ({m['airtime_share']*100:.1f}% de la ventana) | msgs: {m['msgs_total']}\n"
+        f"• vecinos visibles gateway: {m.get('neighbors_count', 0)} | "
+        f"relay_seen: {m.get('relay_seen', 0)} | "
+        f"movilidad≈{m.get('mobility_km', 0)} km\n"
+        f"• airtime_nodo: {m.get('airtime_ms', 0)} ms "
+        f"({float(m.get('airtime_share', 0.0)) * 100:.1f}% de la ventana) | "
+        f"msgs: {m.get('msgs_total', 0)}\n"
         f"• canal_global: duty {duty_pct:.2f}% | duplicados {dup_pct:.2f}%\n"
-        f"• flags: {', '.join(impact['flags']) if impact['flags'] else '-'}\n"
-        f"• motivos: {'; '.join(impact['reasons']) if impact['reasons'] else '-'}"
+        f"• flags: {flags_txt}\n"
+        f"• motivos: {reasons_txt}"
     )
 
     await update.effective_message.reply_text(msg, disable_web_page_preview=True)
 
-    if os.path.exists(out_json):
+    # ------------------------------------------------------------
+    # 8) Adjuntar JSON si se generó correctamente
+    # ------------------------------------------------------------
+    if out_json and os.path.exists(out_json):
         try:
-            from telegram import InputFile
-            with open(out_json, 'rb') as f:
-                await update.effective_message.reply_document(InputFile(f, filename=os.path.basename(out_json)))
+            with open(out_json, "rb") as f:
+                await update.effective_message.reply_document(
+                    InputFile(f, filename=os.path.basename(out_json))
+                )
         except Exception:
             pass

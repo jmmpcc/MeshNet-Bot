@@ -6191,6 +6191,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("cobertura", "Mapa de cobertura: heatmap + circulos. cobertura [!id|alias] [Xh] [entorno]"),
         BotCommand("auditoria_red", "Auditoría rápida de red (SNR/hops/recomendaciones)"),
         BotCommand("auditoria_integral", "Auditoría completa de la red (carga LoRa y tráfico)"),
+        BotCommand("auditoria_impacto", "Impacto de un nodo sobre la malla: /auditoria_impacto [horas] [!id]"),
         BotCommand("canales", "Ver canales configurados en el nodo"),
         BotCommand("aprs", "/aprs [en] [min1,min2,..] | [canal N] texto | /aprs N texto | /aprs CALL: texto"),
         BotCommand("aprs_on", "Activa el gate APRS→Mesh (tráfico recibido en APRS SE reenviará a la malla)"),
