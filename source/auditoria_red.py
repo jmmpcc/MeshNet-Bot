@@ -318,63 +318,366 @@ def _safe_iso_to_ts(x):
     except:
         return None
 
-
 def _extract_metrics(row: Dict[str, Any]) -> Dict[str, Any]:
-    ts = row.get("ts") or row.get("timestamp") or row.get("time")
-    if isinstance(ts, str): ts = _safe_iso_to_ts(ts)
-    if ts is None: ts = time.time()
+    """
+    Extrae métricas normalizadas de un evento JSONL del proyecto.
 
-    snr = row.get("snr") or (row.get("rx") or {}).get("snr") or (row.get("radio") or {}).get("snr")
-    try: snr = float(snr) if snr is not None else None
-    except: snr = None
+    Uso:
+        m = _extract_metrics(row)
 
-    rssi = row.get("rssi") or (row.get("rx") or {}).get("rssi")
-    try: rssi = float(rssi) if rssi is not None else None
-    except: rssi = None
+    Parámetros:
+        row:
+            Evento procedente de coverage.jsonl, positions.jsonl, telemetry.jsonl
+            o broker_offline_log.jsonl.
 
-    hops = row.get("hops") or (row.get("route") or {}).get("hops") or row.get("hop_count")
-    try: hops = int(hops) if hops is not None else None
-    except: hops = None
+    Funcionalidad:
+        - Normaliza timestamp.
+        - Extrae node_id de campos planos y anidados.
+        - Normaliza node_id a formato !xxxxxxxx cuando es posible.
+        - Lee SNR/RSSI en formatos antiguos y actuales:
+            snr, rx_snr, rssi, rx_rssi, decoded.snr, packet.decoded.snr...
+        - Calcula hops si vienen como:
+            hops, hop_count, route.hops, hop_start/hop_limit.
+        - Extrae app/portnum.
+        - Extrae posición desde campos planos, position, decoded.position o packet.decoded.position.
+        - Extrae relay/via para auditoría de impacto.
+    """
 
-    nid = row.get("from_id") or row.get("node_id") or row.get("nid") or row.get("from") or "?"
-    alias = row.get("alias") or row.get("from_alias") or row.get("name")
-    app = (row.get("decoded") or {}).get("portnum") or row.get("portnum") or row.get("type") or "?"
+    def _first(*vals):
+        for v in vals:
+            if v is not None:
+                return v
+        return None
 
-    pl  = row.get("payload_len") or row.get("len") or None
-    try: pl = int(pl) if pl is not None else None
-    except: pl = None
+    def _dig(obj: Any, *keys: str) -> Any:
+        cur = obj
+        for k in keys:
+            if not isinstance(cur, dict):
+                return None
+            cur = cur.get(k)
+        return cur
 
-    pos = (row.get("position") or (row.get("decoded") or {}).get("position") or row.get("pos") or {})
-    lat = pos.get("lat") or pos.get("latitude") or pos.get("latitudeI")
-    lon = pos.get("lon") or pos.get("lng") or pos.get("longitude") or pos.get("longitudeI")
+    def _to_float_safe(v: Any) -> Optional[float]:
+        try:
+            if v is None:
+                return None
+            return float(str(v).strip().replace(",", "."))
+        except Exception:
+            return None
+
+    def _to_int_safe(v: Any) -> Optional[int]:
+        try:
+            if v is None:
+                return None
+            return int(float(str(v).strip()))
+        except Exception:
+            return None
+
+    packet = row.get("packet") if isinstance(row.get("packet"), dict) else {}
+    decoded = row.get("decoded") if isinstance(row.get("decoded"), dict) else {}
+    packet_decoded = packet.get("decoded") if isinstance(packet.get("decoded"), dict) else {}
+    summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+
+    # ------------------------------------------------------------
+    # Timestamp
+    # ------------------------------------------------------------
+    ts = _first(
+        row.get("ts"),
+        row.get("rx_time"),
+        row.get("timestamp"),
+        row.get("time"),
+        row.get("rxTime"),
+        packet.get("rxTime"),
+        packet.get("rx_time"),
+        summary.get("ts"),
+    )
+
+    if isinstance(ts, str):
+        ts = _safe_iso_to_ts(ts)
+
+    if ts is None:
+        ts = time.time()
+
     try:
-        if isinstance(lat, int) and abs(lat) > 18000000: lat = lat/1e7
-        if isinstance(lon, int) and abs(lon) > 18000000: lon = lon/1e7
-        lat = float(lat) if lat is not None else None
-        lon = float(lon) if lon is not None else None
-    except:
+        ts = float(ts)
+    except Exception:
+        ts = time.time()
+
+    # ------------------------------------------------------------
+    # Nodo origen
+    # ------------------------------------------------------------
+    raw_nid = _first(
+        row.get("from_id"),
+        row.get("from_str"),
+        row.get("node_id"),
+        row.get("nid"),
+        row.get("from"),
+        row.get("fromId"),
+        row.get("fromIdShort"),
+        row.get("from_num"),
+        row.get("nodeNum"),
+        packet.get("fromId"),
+        packet.get("fromIdShort"),
+        packet.get("from"),
+        packet.get("from_num"),
+        packet.get("nodeNum"),
+        decoded.get("fromId"),
+        decoded.get("from"),
+        packet_decoded.get("fromId"),
+        packet_decoded.get("from"),
+        summary.get("from"),
+        summary.get("from_id"),
+    )
+
+    nid = _aud_norm_node_id(raw_nid)
+    if not nid:
+        nid = str(raw_nid or "?").strip()
+
+    # ------------------------------------------------------------
+    # Alias
+    # ------------------------------------------------------------
+    alias = _first(
+        row.get("alias"),
+        row.get("from_alias"),
+        row.get("sender_alias"),
+        row.get("name"),
+        row.get("user"),
+        summary.get("from_alias"),
+        summary.get("alias"),
+        decoded.get("from_alias"),
+        packet_decoded.get("from_alias"),
+    )
+
+    # ------------------------------------------------------------
+    # App / Portnum
+    # ------------------------------------------------------------
+    app = _first(
+        decoded.get("portnum"),
+        decoded.get("portnum_name"),
+        packet_decoded.get("portnum"),
+        packet_decoded.get("portnum_name"),
+        row.get("portnum"),
+        row.get("portnum_name"),
+        row.get("type"),
+        summary.get("portnum"),
+        summary.get("type"),
+    ) or "?"
+
+    app = str(app)
+
+    # ------------------------------------------------------------
+    # SNR / RSSI
+    # ------------------------------------------------------------
+    snr = _first(
+        row.get("snr"),
+        row.get("rx_snr"),
+        row.get("rxSnr"),
+        row.get("lastSnr"),
+        _dig(row, "rx", "snr"),
+        _dig(row, "radio", "snr"),
+        decoded.get("snr"),
+        decoded.get("rx_snr"),
+        packet_decoded.get("snr"),
+        packet_decoded.get("rx_snr"),
+        summary.get("snr"),
+        summary.get("rx_snr"),
+    )
+    snr = _to_float_safe(snr)
+
+    rssi = _first(
+        row.get("rssi"),
+        row.get("rx_rssi"),
+        row.get("rxRssi"),
+        row.get("rssiDbm"),
+        row.get("lastRssi"),
+        _dig(row, "rx", "rssi"),
+        _dig(row, "radio", "rssi"),
+        decoded.get("rssi"),
+        decoded.get("rx_rssi"),
+        packet_decoded.get("rssi"),
+        packet_decoded.get("rx_rssi"),
+        summary.get("rssi"),
+        summary.get("rx_rssi"),
+    )
+    rssi = _to_float_safe(rssi)
+
+    # ------------------------------------------------------------
+    # Hops
+    # ------------------------------------------------------------
+    hops = _first(
+        row.get("hops"),
+        row.get("hop_count"),
+        row.get("hopCount"),
+        _dig(row, "route", "hops"),
+        decoded.get("hops"),
+        decoded.get("hop_count"),
+        packet_decoded.get("hops"),
+        packet_decoded.get("hop_count"),
+        summary.get("hops"),
+    )
+    hops = _to_int_safe(hops)
+
+    # Si no hay hops directo, calcularlo desde hop_start/hop_limit.
+    # En Meshtastic: hops_real = hop_start - hop_limit.
+    if hops is None:
+        hop_start = _first(
+            row.get("hop_start"),
+            row.get("hopStart"),
+            packet.get("hopStart"),
+            packet.get("hop_start"),
+            decoded.get("hop_start"),
+            decoded.get("hopStart"),
+            packet_decoded.get("hop_start"),
+            packet_decoded.get("hopStart"),
+        )
+        hop_limit = _first(
+            row.get("hop_limit"),
+            row.get("hopLimit"),
+            packet.get("hopLimit"),
+            packet.get("hop_limit"),
+            decoded.get("hop_limit"),
+            decoded.get("hopLimit"),
+            packet_decoded.get("hop_limit"),
+            packet_decoded.get("hopLimit"),
+        )
+
+        hs = _to_int_safe(hop_start)
+        hl = _to_int_safe(hop_limit)
+
+        if hs is not None and hl is not None:
+            hops = max(0, hs - hl)
+
+    # ------------------------------------------------------------
+    # Payload length
+    # ------------------------------------------------------------
+    pl = _first(
+        row.get("payload_len"),
+        row.get("payloadLen"),
+        row.get("len"),
+        row.get("length"),
+        decoded.get("payload_len"),
+        packet_decoded.get("payload_len"),
+        summary.get("payload_len"),
+    )
+    pl = _to_int_safe(pl)
+
+    # ------------------------------------------------------------
+    # Posición
+    # ------------------------------------------------------------
+    pos = {}
+    for candidate in (
+        row.get("position"),
+        decoded.get("position"),
+        packet_decoded.get("position"),
+        row.get("pos"),
+        decoded.get("pos"),
+        packet_decoded.get("pos"),
+    ):
+        if isinstance(candidate, dict):
+            pos = candidate
+            break
+
+    lat = _first(
+        row.get("lat"),
+        row.get("latitude"),
+        row.get("latitude_i"),
+        row.get("latitudeI"),
+        pos.get("lat"),
+        pos.get("latitude"),
+        pos.get("latitude_i"),
+        pos.get("latitudeI"),
+        decoded.get("latitude"),
+        decoded.get("latitude_i"),
+        packet_decoded.get("latitude"),
+        packet_decoded.get("latitude_i"),
+    )
+
+    lon = _first(
+        row.get("lon"),
+        row.get("lng"),
+        row.get("longitude"),
+        row.get("longitude_i"),
+        row.get("longitudeI"),
+        pos.get("lon"),
+        pos.get("lng"),
+        pos.get("longitude"),
+        pos.get("longitude_i"),
+        pos.get("longitudeI"),
+        decoded.get("longitude"),
+        decoded.get("longitude_i"),
+        packet_decoded.get("longitude"),
+        packet_decoded.get("longitude_i"),
+    )
+
+    try:
+        if isinstance(lat, int) and abs(lat) > 18000000:
+            lat = lat / 1e7
+        if isinstance(lon, int) and abs(lon) > 18000000:
+            lon = lon / 1e7
+        lat = _to_float_safe(lat)
+        lon = _to_float_safe(lon)
+    except Exception:
         lat, lon = None, None
 
-    mid = row.get("id") or row.get("msg_id")
+    # ------------------------------------------------------------
+    # Message ID
+    # ------------------------------------------------------------
+    mid = _first(
+        row.get("id"),
+        row.get("msg_id"),
+        row.get("packet_id"),
+        row.get("rx_id"),
+        packet.get("id"),
+        packet.get("packet_id"),
+        decoded.get("id"),
+        packet_decoded.get("id"),
+    )
+
     if mid is None:
         raw = f"{nid}|{int(ts)}|{app}|{pl}".encode("utf-8", "ignore")
         mid = hashlib.blake2s(raw, digest_size=8).hexdigest()
 
-    # Campos adicionales (no rompen compatibilidad):
-    # - via/relay_node: para inferencia de rol e impacto (si el backlog lo aporta)
-    via = row.get("via") or row.get("relay_node")
-    if via is None:
-        try:
-            dec = row.get("decoded") or {}
-            if isinstance(dec, dict):
-                via = dec.get("via") or dec.get("relay_node") or (dec.get("route") or {}).get("relay_node")
-        except Exception:
-            via = None
+    # ------------------------------------------------------------
+    # Relay / via
+    # ------------------------------------------------------------
+    via = _first(
+        row.get("via"),
+        row.get("relay_node"),
+        row.get("relayNode"),
+        row.get("next_hop"),
+        row.get("nextHop"),
+        decoded.get("via"),
+        decoded.get("relay_node"),
+        decoded.get("relayNode"),
+        packet_decoded.get("via"),
+        packet_decoded.get("relay_node"),
+        packet_decoded.get("relayNode"),
+        _dig(decoded, "route", "relay_node"),
+        _dig(packet_decoded, "route", "relay_node"),
+    )
 
-    return {"ts": float(ts), "nid": str(nid), "alias": alias, "snr": snr, "rssi": rssi,
-            "hops": hops, "app": app, "pl": pl, "lat": lat, "lon": lon, "mid": mid,
-            "via": (str(via).strip() if isinstance(via, str) and via.strip() else None)}
+    via_norm = _aud_norm_node_id(via)
+    if via_norm:
+        via = via_norm
+    elif isinstance(via, str) and via.strip():
+        via = via.strip()
+    else:
+        via = None
 
+    return {
+        "ts": float(ts),
+        "nid": nid,
+        "alias": alias,
+        "snr": snr,
+        "rssi": rssi,
+        "hops": hops,
+        "app": app,
+        "pl": pl,
+        "lat": lat,
+        "lon": lon,
+        "mid": mid,
+        "via": via,
+    }
 
 def _row_is_from_home_node(row: Dict[str, Any]) -> bool:
     """
@@ -1770,6 +2073,7 @@ async def auditoria_integral_cmd(update: Update, context: ContextTypes.DEFAULT_T
             pass
 
 
+
 async def auditoria_impacto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /auditoria_impacto [horas=72] !node_id
@@ -1798,10 +2102,12 @@ async def auditoria_impacto_cmd(update: Update, context: ContextTypes.DEFAULT_TY
         - Envía resumen por Telegram y adjunta el JSON.
 
     Nota:
-        Esta auditoría NO debe usar por defecto HOME_NODE_ID, porque los informes de
-        auditoría deben referirse a nodos externos vistos por nuestro nodo.
+        Esta auditoría no debe auditar automáticamente HOME_NODE_ID.
+        Si solo se indica una ventana, por ejemplo:
+            /auditoria_impacto 72
+        se interpreta como ventana horaria incompleta y se solicita el nodo externo.
     """
-    
+
     args = context.args or []
 
     # ------------------------------------------------------------
@@ -1814,16 +2120,19 @@ async def auditoria_impacto_cmd(update: Update, context: ContextTypes.DEFAULT_TY
         if len(args) >= 1:
             arg0 = str(args[0]).strip()
 
-            # Permite:
+            # Caso A:
             #   /auditoria_impacto !9ef0c2cc
             #   /auditoria_impacto 9ef0c2cc
-            #   /auditoria_impacto 2666574540
-            n0 = _aud_norm_node_id(arg0)
-            if n0 and n0.startswith("!"):
-                node_id = n0
+            #
+            # Importante:
+            #   No tratar un número puro como node_id en el primer argumento,
+            #   porque /auditoria_impacto 72 significa "72 horas", no "!00000048".
+            if arg0.startswith("!") or re.fullmatch(r"[0-9a-fA-F]{8}", arg0):
+                node_id = _aud_norm_node_id(arg0)
                 hours = WINDOW_H
+
             else:
-                # Permite:
+                # Caso B:
                 #   /auditoria_impacto 72 !9ef0c2cc
                 #   /auditoria_impacto 72 9ef0c2cc
                 #   /auditoria_impacto 72 2666574540
@@ -1834,6 +2143,7 @@ async def auditoria_impacto_cmd(update: Update, context: ContextTypes.DEFAULT_TY
                     n1 = _aud_norm_node_id(arg1)
                     if n1 and n1.startswith("!"):
                         node_id = n1
+
     except Exception:
         hours = WINDOW_H
         node_id = None
@@ -1844,20 +2154,25 @@ async def auditoria_impacto_cmd(update: Update, context: ContextTypes.DEFAULT_TY
     if not node_id:
         await update.effective_message.reply_text(
             "auditoria_impacto: falta el nodo externo a auditar.\n"
+            "Uso:\n"
+            "/auditoria_impacto !9ef0c2cc\n"
+            "/auditoria_impacto 72 !9ef0c2cc",
+            disable_web_page_preview=True
+        )
+        return
+
+    node_id = _aud_norm_node_id(node_id)
+
+    if not node_id or not node_id.startswith("!"):
+        await update.effective_message.reply_text(
+            "auditoria_impacto: node_id no válido.\n"
             "Uso: /auditoria_impacto 72 !9ef0c2cc",
             disable_web_page_preview=True
         )
         return
 
-    # Normalización mínima del ID.
-    node_id = node_id.strip().lower()
-    if not node_id.startswith("!"):
-        node_id = "!" + node_id
-
     # Evita auditar el nodo local si HOME_NODE_ID está definido.
-    home_id = (HOME_NODE_ID or "").strip().lower()
-    if home_id and not home_id.startswith("!"):
-        home_id = "!" + home_id
+    home_id = HOME_NODE_ID
 
     if home_id and node_id == home_id:
         await update.effective_message.reply_text(
@@ -1872,7 +2187,10 @@ async def auditoria_impacto_cmd(update: Update, context: ContextTypes.DEFAULT_TY
     # ------------------------------------------------------------
     _ensure_outdir()
 
+    # En impacto mantenemos contexto completo de canal.
+    # La protección para no auditar HOME_NODE_ID ya está arriba.
     rows = _collect_rows(hours, exclude_home_node=False)
+
     if not rows:
         await update.effective_message.reply_text(
             "Sin datos en la ventana solicitada.\n" + _file_diag(hours),

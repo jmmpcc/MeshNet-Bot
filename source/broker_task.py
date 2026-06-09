@@ -197,17 +197,39 @@ def _tz_get_for_dt(tz_name: str, dt_naive: datetime):
 # ─────────────────────────────────────────────────────────────────────────────
 MAX_PAYLOAD_BYTES = 180  # margen seguro típico para Meshtastic (UTF-8 por paquete)
 
-def _normalize_text_for_mesh(s: str) -> str:
+def _normalize_text_for_mesh(s: Any) -> str:
     """
-    Normaliza comillas tipográficas, guiones largos y espacios no separables.
-    Reduce espacios múltiples. Mantiene acentos (UTF-8 OK).
+    Normaliza texto para transmisión por Mesh/Meshtastic.
+
+    Uso:
+        texto = _normalize_text_for_mesh(valor)
+
+    Parámetros:
+        s:
+            Texto original. Puede llegar como str, None u otro tipo por robustez.
+
+    Funcionalidad:
+        - Evita errores si llega None desde una tarea corrupta o incompleta.
+        - Convierte valores no string a texto.
+        - Normaliza comillas tipográficas, guiones largos, puntos suspensivos y espacios no separables.
+        - Compacta espacios múltiples.
+        - Mantiene acentos porque Meshtastic/MeshCore trabajan con UTF-8.
+
+    Devuelve:
+        Texto normalizado. Si no hay contenido válido, devuelve cadena vacía.
     """
+    if s is None:
+        return ""
+
+    s = str(s)
+
     rep = {
         '“': '"', '”': '"',
         '’': "'", '‘': "'",
         '—': '-', '–': '-',
         '…': '...', '\u00A0': ' ',
     }
+
     s = s.translate(str.maketrans(rep))
     s = re.sub(r'\s+', ' ', s).strip()
     return s
@@ -476,6 +498,14 @@ class _TaskManager:
             self._fail_or_retry(t, error)
             return
 
+        # Protección final: ninguna tarea debe llegar al troceador con texto vacío.
+        # Si ocurre, la tarea está incompleta/corrupta y se gestiona como fallo controlado,
+        # no como excepción global del scheduler.
+        if not str(message_to_send or "").strip():
+            error = "resolved task message is empty"
+            self._fail_or_retry(t, error)
+            return
+
         # 2) Transporte APRS-only ya existente. Se mantiene, pero usando el texto resuelto.
         if transport == "aprs":
             try:
@@ -653,26 +683,38 @@ class _TaskManager:
         Uso:
             message = self._resolve_task_message(t)
 
+        Parámetros:
+            t:
+                Tarea programada ScheduledTask que contiene:
+                - message: texto persistido de la tarea normal.
+                - meta: metadatos opcionales para tareas dinámicas.
+
         Funcionalidad:
-        - Para tareas normales, devuelve t.message sin cambios.
-        - Para meta.task_type == 'weather_beacon', construye el texto meteorológico
-          en tiempo real usando weather_beacon.py.
-        - Para meta.task_type == 'aemet_alert', consulta avisos oficiales AEMET
-          y devuelve texto solo si hay aviso nuevo. Si no hay nada nuevo,
-          lanza TaskNoTransmissionNeeded para reprogramar sin transmitir.
+            - Para tareas normales, devuelve t.message normalizado.
+            - Para meta.task_type == 'weather_beacon', construye el texto meteorológico
+              en tiempo real usando weather_beacon.py.
+            - Para meta.task_type == 'aemet_alert', consulta avisos oficiales AEMET
+              y devuelve texto solo si hay aviso nuevo.
+            - Si no hay avisos AEMET nuevos, lanza TaskNoTransmissionNeeded para
+              reprogramar sin transmitir.
+            - Si una tarea normal llega sin texto, lanza RuntimeError controlado
+              para que no llegue None al troceador.
         """
         meta = t.meta or {}
         task_type = str(meta.get("task_type") or "").strip().lower()
 
         if task_type == "weather_beacon":
             from weather_beacon import build_weather_beacon_text_from_meta
+
             msg = build_weather_beacon_text_from_meta(meta)
             if not msg:
                 raise RuntimeError("weather_beacon devolvió mensaje vacío")
+
             return _normalize_text_for_mesh(msg)
 
         if task_type == "aemet_alert":
             from aemet_alerts import build_aemet_alert_text_from_meta
+
             msg = build_aemet_alert_text_from_meta(meta)
             if not msg:
                 raise TaskNoTransmissionNeeded("sin avisos AEMET nuevos")
@@ -692,6 +734,16 @@ class _TaskManager:
                 pass
 
             return msg
+
+        # TAREA NORMAL:
+        # Este return es obligatorio. Si falta, Python devuelve None y la tarea
+        # acaba llegando vacía al flujo de envío.
+        msg = _normalize_text_for_mesh(getattr(t, "message", ""))
+
+        if not msg:
+            raise RuntimeError("scheduled task without message text")
+
+        return msg
 
     def _confirm_dynamic_success(self, t: ScheduledTask) -> None:
         """
