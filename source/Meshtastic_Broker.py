@@ -1106,7 +1106,14 @@ class MeshCoreEmbeddedBridge:
         self._stop.clear()
         self._thread = threading.Thread(target=self._runner, name="meshcore-embedded", daemon=True)
         self._thread.start()
-        print(f"[meshcore] embebido habilitado mode={self.mode}", flush=True)
+        direction_mode = (os.getenv("BRIDGE_DIRECTION_MODE") or "").strip().lower()
+        if direction_mode == "meshcore_a_meshtastic_embedded_b":
+            print(
+                f"[bridge] habilitado A=MeshCore ({self.mode}) -> B=Meshtastic embebido en broker",
+                flush=True,
+            )
+        else:
+            print(f"[meshcore] embebido habilitado mode={self.mode}", flush=True)
 
     def is_healthy(self) -> bool:
         """
@@ -9455,6 +9462,20 @@ def main():
         getattr(args, "bridge_config", None),
         verbose=bool(getattr(args, "verbose", False)),
     )
+
+    # En el perfil invertido, nodes.B es el Meshtastic embebido que controla el
+    # broker. Aplicamos su host resuelto al argumento runtime para que el JSON
+    # sea realmente autoritativo sin afectar a los perfiles históricos.
+    _bridge_runtime = globals().get("BRIDGE_CONFIG_RUNTIME") or {}
+    if (
+        _bridge_runtime.get("applied")
+        and _bridge_runtime.get("profile") == "meshcore_a_meshtastic_embedded_b"
+    ):
+        _mesh_b_host = (os.getenv("B_HOST") or os.getenv("MESHTASTIC_HOST") or "").strip()
+        if _mesh_b_host:
+            args.host = _mesh_b_host
+            if bool(getattr(args, "verbose", False)):
+                print(f"[bridge-config] nodo B Meshtastic aplicado a --host={args.host}", flush=True)
 
     # === [NUEVO] Modo sin heartbeat si el usuario lo pide
     if args.no_heartbeat:

@@ -1,0 +1,73 @@
+{
+  "enabled": true,
+  "profile": "meshcore_a_meshtastic_embedded_b",
+  "hub": {
+    "mode": "tcp"
+  },
+  "nodes": {
+    "A": {
+      "name": "Nodo A MeshCore principal",
+      "host": "192.168.1.23",
+      "port": 5000,
+      "role": "hub",
+      "protocol": "meshcore",
+      "connection": "tcp"
+    },
+    "B": {
+      "name": "Nodo B Meshtastic embebido",
+      "host": "192.168.1.22",
+      "port": 4403,
+      "role": "peer",
+      "protocol": "meshtastic",
+      "connection": "broker"
+    },
+    "C": {
+      "name": "Nodo C externo",
+      "host": "",
+      "port": 4403,
+      "role": "peer",
+      "protocol": "meshtastic",
+      "connection": "tcp"
+    }
+  },
+  "peers": [
+    "B"
+  ],
+  "maps": {
+    "A2B": "2:6,1:1",
+    "B2A": "6:2,1:1",
+    "A2C": "",
+    "C2A": ""
+  },
+  "traffic": {
+    "forward_text": true,
+    "forward_position": false,
+    "forward_telemetry": false,
+    "require_ack": false,
+    "block_bbs": true,
+    "block_bbs_force": true
+  },
+  "limits": {
+    "rate_limit_per_side": 25,
+    "dedup_ttl_sec": 45,
+    "peer_suppress_sec": 75,
+    "tx_queue_max": 300,
+    "retry_schedule_sec": [
+      2,
+      6,
+      15
+    ],
+    "a2b_retries": 3,
+    "b2a_retries": 2
+  },
+  "tags": {
+    "default": "[BRIDGE]",
+    "A2B": "[BRIDGE MC A→MT B]",
+    "B2A": "[BRIDGE MT B→MC A]",
+    "A2C": "[BRIDGE A>C]",
+    "C2A": "[BRIDGE C>A]"
+  },
+  "meshcore": {
+    "channel_tags": "2:MESH2CORE,1:ZGZ"
+  }
+}

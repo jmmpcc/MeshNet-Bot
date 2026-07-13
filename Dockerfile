@@ -29,6 +29,7 @@ RUN python -m pip install --no-cache-dir \
 
 # Código
 COPY source/*.py /app/source/
+COPY source/*.json /app/source/
 COPY docker/entrypoint_broker.sh /usr/local/bin/
 COPY docker/entrypoint_bot.sh    /usr/local/bin/
 RUN chmod +x /usr/local/bin/entrypoint_broker.sh /usr/local/bin/entrypoint_bot.sh

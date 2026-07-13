@@ -27,6 +27,7 @@ services:
     # Datos persistentes de bot/broker (backlogs, mapas, auditorías, etc.)
     volumes:
       - ./bot_data:/app/bot_data:rw
+      - ./bridge_config.json:/app/bot_data/bridge_config.json:ro
      
     stop_grace_period: 15s
 
