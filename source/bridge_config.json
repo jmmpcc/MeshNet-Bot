@@ -1,0 +1,64 @@
+{
+  "enabled": true,
+  "profile": "embedded_b",
+  "hub": {
+    "mode": "broker"
+  },
+  "nodes": {
+    "A": {
+      "name": "Nodo A Meshtastic principal",
+      "host": "192.168.1.22",
+      "port": 4403,
+      "role": "hub"
+    },
+    "B": {
+      "name": "Nodo B secundario",
+      "host": "192.168.1.23",
+      "port": 4403,
+      "role": "peer"
+    },
+    "C": {
+      "name": "Nodo C externo",
+      "host": "",
+      "port": 4403,
+      "role": "peer"
+    }
+  },
+  "peers": [
+    "B"
+  ],
+  "maps": {
+    "A2B": "0:0",
+    "B2A": "0:0",
+    "A2C": "",
+    "C2A": ""
+  },
+  "traffic": {
+    "forward_text": true,
+    "forward_position": false,
+    "forward_telemetry": false,
+    "require_ack": false,
+    "block_bbs": true,
+    "block_bbs_force": true
+  },
+  "limits": {
+    "rate_limit_per_side": 8,
+    "dedup_ttl_sec": 45,
+    "peer_suppress_sec": 75,
+    "tx_queue_max": 300,
+    "retry_schedule_sec": [
+      2,
+      6,
+      15
+    ],
+    "a2b_retries": 3,
+    "b2a_retries": 2
+  },
+  "tags": {
+    "default": "[BRIDGE]",
+    "A2B": "[BRIDGE A>B]",
+    "B2A": "[BRIDGE B>A]",
+    "A2C": "[BRIDGE A>C]",
+    "C2A": "[BRIDGE C>A]"
+  }
+}

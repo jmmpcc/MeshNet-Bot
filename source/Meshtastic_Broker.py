@@ -82,6 +82,139 @@ def _env_truthy(name: str, default: str = "0") -> bool:
     v = (os.getenv(name, default) or default).strip().lower()
     return v in {"1", "true", "on", "si", "sí", "y", "yes"}
 
+
+# === [NUEVO v7.0.14A] Configuración externa segura del Bridge ===============
+def _resolve_bridge_config_path(cli_path: Optional[str] = None) -> Path:
+    """
+    Resuelve la ruta de bridge_config.json sin modificar el sistema.
+
+    Prioridad:
+      1) Parámetro CLI --bridge-config
+      2) Variable BRIDGE_CONFIG_PATH
+      3) BOT_DATA_DIR/bridge_config.json
+      4) bot_data/bridge_config.json relativo al directorio actual
+
+    Uso:
+        path = _resolve_bridge_config_path(args.bridge_config)
+
+    Esta función no valida ni lee el JSON. Solo calcula una ruta razonable para
+    despliegue Docker/Raspberry y para ejecución local.
+    """
+    if cli_path:
+        return Path(cli_path).expanduser()
+
+    env_path = (os.getenv("BRIDGE_CONFIG_PATH") or "").strip()
+    if env_path:
+        return Path(env_path).expanduser()
+
+    bot_data_dir = (os.getenv("BOT_DATA_DIR") or "").strip()
+    if bot_data_dir:
+        return (Path(bot_data_dir).expanduser() / "bridge_config.json")
+
+    # En contenedor el patrón habitual es /app/bot_data. En local, bot_data/.
+    if Path("/app/bot_data").exists():
+        return Path("/app/bot_data/bridge_config.json")
+
+    return Path("bot_data/bridge_config.json")
+
+
+def _apply_bridge_config_runtime_once(cli_path: Optional[str] = None, verbose: bool = False) -> dict:
+    """
+    Aplica bridge_config.json como overlay seguro sobre os.environ.
+
+    Uso:
+        _apply_bridge_config_runtime_once(args.bridge_config, verbose=args.verbose)
+
+    Parámetros:
+        cli_path:
+            Ruta opcional recibida desde --bridge-config.
+        verbose:
+            Si True, muestra más detalle diagnóstico.
+
+    Funcionalidad:
+        - Si el fichero no existe, no hace nada y mantiene .env actual.
+        - Si el módulo bridge_config.py no está disponible, no rompe el broker.
+        - Si el JSON no valida, no aplica nada y mantiene .env actual.
+        - Si valida, aplica las variables runtime resueltas a os.environ.
+
+    Motivo de diseño:
+        El broker actual ya decide BRIDGE_ENABLED, MESHCORE_ENABLE, mapas, límites
+        y bloqueo BBS leyendo variables de entorno. Aplicar un overlay validado
+        permite introducir configuración por JSON sin reescribir funciones que
+        ya están probadas 24/7.
+    """
+    path = _resolve_bridge_config_path(cli_path)
+    out = {
+        "ok": False,
+        "applied": False,
+        "path": str(path),
+        "profile": None,
+        "details": None,
+        "warnings": [],
+        "errors": [],
+    }
+
+    if not path.exists():
+        out["ok"] = True
+        out["details"] = "missing_config_using_env"
+        if verbose or _env_truthy("BRIDGE_CONFIG_VERBOSE", "0"):
+            print(f"[bridge-config] no existe {path}; se usa configuración .env actual", flush=True)
+        return out
+
+    try:
+        from bridge_config import load_bridge_config, validate_bridge_config  # type: ignore
+    except Exception as e:
+        out["details"] = f"import_error: {type(e).__name__}: {e}"
+        print(f"[bridge-config] ⚠️ no se pudo importar bridge_config.py; se usa .env actual: {type(e).__name__}: {e}", flush=True)
+        return out
+
+    try:
+        cfg = load_bridge_config(path, allow_missing=False)
+        result = validate_bridge_config(cfg, env=os.environ)
+    except Exception as e:
+        out["details"] = f"load_or_validate_exception: {type(e).__name__}: {e}"
+        print(f"[bridge-config] ⚠️ no se pudo leer/validar {path}; se usa .env actual: {type(e).__name__}: {e}", flush=True)
+        return out
+
+    out["warnings"] = list(getattr(result, "warnings", []) or [])
+    out["errors"] = list(getattr(result, "errors", []) or [])
+
+    if not getattr(result, "ok", False):
+        out["details"] = "validation_failed_using_env"
+        print(f"[bridge-config] ⚠️ configuración inválida en {path}; se usa .env actual", flush=True)
+        for err in out["errors"]:
+            print(f"[bridge-config]   ERROR: {err}", flush=True)
+        for warn in out["warnings"]:
+            print(f"[bridge-config]   AVISO: {warn}", flush=True)
+        return out
+
+    runtime = getattr(result, "runtime", {}) or {}
+    env_map = runtime.get("env", {}) or {}
+    if not isinstance(env_map, dict):
+        out["details"] = "runtime_env_missing_using_env"
+        print(f"[bridge-config] ⚠️ runtime env no disponible; se usa .env actual", flush=True)
+        return out
+
+    for key, value in env_map.items():
+        os.environ[str(key)] = str(value)
+
+    out["ok"] = True
+    out["applied"] = True
+    out["profile"] = runtime.get("profile")
+    out["details"] = runtime.get("bridge_kind")
+
+    print(
+        f"[bridge-config] ✅ aplicado {path} "
+        f"profile={out['profile']} kind={out['details']} peers={runtime.get('peers')}",
+        flush=True,
+    )
+    for warn in out["warnings"]:
+        print(f"[bridge-config]   AVISO: {warn}", flush=True)
+
+    return out
+# ============================================================================
+
+
 def _mc_parse_ch_map() -> dict[int, dict]:
     """
     Mapa Meshtastic CH -> destino MeshCore.
@@ -9287,6 +9420,11 @@ def main():
                     default=7,
                     help="Días a conservar al compactar/rotar el log de posiciones (0 = sin compactar)")
 
+    # === [NUEVO v7.0.14A] configuración externa del Bridge por JSON =========
+    ap.add_argument("--bridge-config",
+                    default=None,
+                    help="Ruta opcional de bridge_config.json. Si no existe, se usa .env sin romper el arranque.")
+
     # BooleanOptionalAction para banderas on/off (si lo soporta la versión de Python)
     try:
         bool_action = argparse.BooleanOptionalAction
@@ -9307,6 +9445,16 @@ def main():
         ap.add_argument("--reconnect", dest="reconnect", action="store_true", default=True)
 
     args = ap.parse_args()
+
+    # === [NUEVO v7.0.14A] aplicar bridge_config.json como overlay seguro =====
+    # Debe ejecutarse muy pronto para que BRIDGE_ENABLED, MESHCORE_ENABLE, mapas,
+    # límites, tags y bloqueos BBS queden resueltos antes de arrancar bridge,
+    # MeshCore, backlog, tareas o hooks de conexión. Si no hay JSON válido, no
+    # modifica nada y se conserva el comportamiento histórico basado en .env.
+    globals()["BRIDGE_CONFIG_RUNTIME"] = _apply_bridge_config_runtime_once(
+        getattr(args, "bridge_config", None),
+        verbose=bool(getattr(args, "verbose", False)),
+    )
 
     # === [NUEVO] Modo sin heartbeat si el usuario lo pide
     if args.no_heartbeat:
