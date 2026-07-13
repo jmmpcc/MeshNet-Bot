@@ -27,7 +27,6 @@ services:
     # Datos persistentes de bot/broker (backlogs, mapas, auditorías, etc.)
     volumes:
       - ./bot_data:/app/bot_data:rw
-      - ./bridge_config.json:/app/bot_data/bridge_config.json:ro
      
     stop_grace_period: 15s
 
@@ -90,4 +89,30 @@ services:
     environment:
       BROKER_CTRL_HOST: "meshnet-broker"
       BROKER_CTRL_PORT: "8766"
+
+  email-to-mesh:
+    image: ghcr.io/jmmpcc/meshnet-bot-broker:latest
+    container_name: meshnet-email-to-mesh
+
+    depends_on:
+      - broker
+
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    entrypoint:
+      - python
+      - -u
+      - /app/source/email_to_mesh.py
+
+    # Comparte la red del broker. Así BROKER_CTRL_HOST=127.0.0.1
+    # y BROKER_CTRL_PORT=8766 siguen siendo válidos sin exponer otro puerto.
+    network_mode: "service:broker"
+
+    volumes:
+      - ./bot_data:/app/bot_data:rw
+
+    stop_grace_period: 10s
 
