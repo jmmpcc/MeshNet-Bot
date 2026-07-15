@@ -8739,6 +8739,25 @@ async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"Resultado: <b>KO</b>: {escape(type(e).__name__)}: {escape(str(e))}"
         )
 
+def _format_meshcore_last_seen(value: object) -> str:
+    """
+    Convierte last_seen de MeshCore (epoch en segundos o milisegundos) a texto legible.
+    """
+    try:
+        ts = int(value)
+    except Exception:
+        return ""
+    if ts <= 0:
+        return ""
+    # Algunas APIs serializan epoch en milisegundos; normalízalo a segundos.
+    if ts > 10_000_000_000:
+        ts = ts // 1000
+    try:
+        return datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        return ""
+
+
 async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /mc_contactos [max]
@@ -8777,8 +8796,9 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         mc_map[str(idx)] = pfx
 
         meta = []
-        if isinstance(ls, int) and ls > 0:
-            meta.append(f"visto: {ls}")
+        last_seen_txt = _format_meshcore_last_seen(ls)
+        if last_seen_txt:
+            meta.append(f"visto: {last_seen_txt}")
         meta_txt = f" · {' · '.join(meta)}" if meta else ""
         lines.append(
             f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>\n"
