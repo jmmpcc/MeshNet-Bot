@@ -35,6 +35,10 @@ Encaminamiento por asunto
 [ch3] Texto   -> canal 3 del nodo Meshtastic embebido/principal
 [ch2]M Texto  -> canal 2 del motor MeshCore embebido
 
+La marca ``M`` debe ir pegada al corchete de cierre. Así, ``[ch6] Muy...``
+se interpreta correctamente como Meshtastic y no confunde la inicial de ``Muy``
+con el selector de MeshCore.
+
 Sin prefijo se utiliza EMAIL_MESH_CHANNEL y la red Meshtastic.
 
 Primera ejecución
@@ -80,7 +84,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
 APP_NAME = "email-to-mesh"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.2"
 
 _LOG = logging.getLogger(APP_NAME)
 _STOP_EVENT = threading.Event()
@@ -91,7 +95,7 @@ _UIDNEXT_RE = re.compile(rb"UIDNEXT\s+(\d+)", re.IGNORECASE)
 # Prefijos de encaminamiento admitidos al principio del asunto:
 #   [ch3] Texto   -> canal 3 de Meshtastic
 #   [ch2]M Texto  -> canal 2 de MeshCore
-_SUBJECT_ROUTE_RE = re.compile(r"^\s*\[\s*ch\s*(\d+)\s*\]\s*(m)?(?:\s*[:\-]?)?\s*", re.IGNORECASE)
+_SUBJECT_ROUTE_RE = re.compile(r"^\s*\[\s*ch\s*(\d+)\s*\](m)?(?:\s*[:\-]?\s*)", re.IGNORECASE)
 
 
 # =============================================================================
@@ -187,6 +191,7 @@ class Config:
     poll_interval_sec: int
     imap_idle_enabled: bool
     imap_idle_refresh_sec: int
+    imap_idle_verify_sec: int
     imap_idle_fallback_poll_sec: int
     process_existing: bool
     mark_as_read: bool
@@ -232,6 +237,7 @@ class Config:
             poll_interval_sec=_env_int("EMAIL_POLL_INTERVAL_SEC", 30, 5, 3600),
             imap_idle_enabled=_env_bool("EMAIL_IMAP_IDLE_ENABLED", True),
             imap_idle_refresh_sec=_env_int("EMAIL_IMAP_IDLE_REFRESH_SEC", 1500, 60, 1740),
+            imap_idle_verify_sec=_env_int("EMAIL_IMAP_IDLE_VERIFY_SEC", 15, 5, 300),
             imap_idle_fallback_poll_sec=_env_int("EMAIL_IMAP_IDLE_FALLBACK_POLL_SEC", 10, 5, 300),
             process_existing=_env_bool("EMAIL_PROCESS_EXISTING", False),
             mark_as_read=_env_bool("EMAIL_MARK_AS_READ", True),
@@ -925,7 +931,38 @@ def wait_for_imap_event(config: Config, state: Dict[str, Any]) -> str:
         if not _imap_has_idle(client):
             return "fallback"
 
-        return _imap_idle_wait(client, config.imap_idle_refresh_sec)
+        # Mantiene una única conexión IMAP durante toda la ventana de refresco.
+        # Gmail debería despertar IDLE inmediatamente mediante EXISTS, pero en
+        # algunas combinaciones de imaplib/OpenSSL la notificación puede quedar
+        # retenida en el buffer interno. Para no esperar hasta 25 minutos, se
+        # cierra IDLE cada pocos segundos, se consulta UIDNEXT sobre la misma
+        # conexión y se vuelve a entrar en IDLE sin repetir login.
+        refresh_deadline = time.monotonic() + config.imap_idle_refresh_sec
+        _LOG.info(
+            "IMAP IDLE activo: aviso inmediato + verificación UID cada %ss; renovación en %ss",
+            config.imap_idle_verify_sec,
+            config.imap_idle_refresh_sec,
+        )
+
+        while not _STOP_EVENT.is_set():
+            remaining = refresh_deadline - time.monotonic()
+            if remaining <= 0:
+                return "timeout"
+
+            event = _imap_idle_wait(
+                client,
+                min(config.imap_idle_verify_sec, max(1, int(remaining))),
+            )
+            if event in {"mail", "stop"}:
+                return event
+
+            # Watchdog anti-latencia: detecta cualquier UID nuevo aunque la
+            # notificación EXISTS no haya despertado correctamente el socket.
+            if _imap_status_has_new_uid(client, config, state):
+                _LOG.info("Watchdog IMAP detectó correo pendiente mediante UIDNEXT")
+                return "mail"
+
+        return "stop"
     finally:
         if client is not None:
             try:
@@ -971,7 +1008,7 @@ def run_service(config: Config) -> int:
 
     _LOG.info(
         "%s v%s iniciado: folder=%s senders=%s default_meshtastic_channel=%s "
-        "dest=%s bridge=%s imap_idle=%s refresh=%ss",
+        "dest=%s bridge=%s imap_idle=%s refresh=%ss verify=%ss",
         APP_NAME,
         APP_VERSION,
         config.imap_folder,
@@ -981,6 +1018,7 @@ def run_service(config: Config) -> int:
         config.mesh_allow_bridge,
         config.imap_idle_enabled,
         config.imap_idle_refresh_sec,
+        config.imap_idle_verify_sec,
     )
 
     while not _STOP_EVENT.is_set():
