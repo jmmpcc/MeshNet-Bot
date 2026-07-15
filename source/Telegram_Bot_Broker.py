@@ -15819,6 +15819,17 @@ async def escuchar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception:
         pass
 
+    # Lanzar la task del bucle de escucha antes de tareas auxiliares para que
+    # /escuchar all confirme inmediatamente que la escucha queda activa.
+    task = asyncio.create_task(_broker_listen_loop(update.effective_chat.id, listen_chan, context))
+    context.chat_data["listen_task"] = task
+
+    fuente_msg = "Meshtastic/MeshCore" if listen_chan is None else "del broker"
+    await update.effective_message.reply_text(
+        f"👂 Escuchando {canal_msg}. Enviaré aquí los TEXT_MESSAGE_APP {fuente_msg} que vayan llegando.\n"
+        f"Para detener: /parar_escucha"
+    )
+
     # === NUEVO: replay backlog desde la última parada (si existe marca temporal)
     chat_id = update.effective_chat.id
     last_stop_ts = context.bot_data.get(f"escucha_last_stop_{chat_id}")
@@ -15833,15 +15844,6 @@ async def escuchar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.effective_message.reply_text(
                 f"📜 Reproducidos {count} mensajes perdidos desde la última escucha."
             )
-
-    # Lanzar la task del bucle de escucha
-    task = asyncio.create_task(_broker_listen_loop(update.effective_chat.id, listen_chan, context))
-    context.chat_data["listen_task"] = task
-
-    await update.effective_message.reply_text(
-        f"👂 Escuchando {canal_msg}. Enviaré aquí los TEXT_MESSAGE_APP que vayan llegando.\n"
-        f"Para detener: /parar_escucha"
-    )
 
 # === NUEVO: /refrescar_nodos ================================================
 # === /refrescar_nodos (usando SOLO helpers existentes) =======================
