@@ -1340,7 +1340,8 @@ class MeshCoreEmbeddedBridge:
                         f"[meshcore-embedded RX] "
                         f"type={et} kind={kind} chan_idx={chan_idx} "
                         f"prefix={data.get('pubkey_prefix')} "
-                        f"text='{text_msg[:120]}'",
+                        f"text='{text_msg[:120]}' "
+                        f"path={_meshcore_format_repeater_path(data)}",
                         flush=True
                     )
                 except Exception:
@@ -1405,6 +1406,7 @@ class MeshCoreEmbeddedBridge:
                         chan_idx=chan_idx,
                         chan_tag=(mc_chan_tag or None),
                         from_alias=(alias or None),
+                        path_info=data,
                     )
                     self._last_ok = time.time()
                     return
@@ -1434,6 +1436,7 @@ class MeshCoreEmbeddedBridge:
                         chan_idx=chan_idx,
                         chan_tag=(mc_chan_tag or None),
                         from_alias=(alias or None),
+                        path_info=data,
                     )
 
 
@@ -5632,6 +5635,59 @@ def append_offline_log(rec: dict):
     except Exception as e:
         _log_ex("append_offline_log failed", e)
 
+
+def _meshcore_path_chunks_from_payload(data: dict) -> tuple[list[str], int | None, int | None]:
+    """
+    Extrae la ruta MeshCore anunciada por la librería oficial.
+
+    La API expone `path_len` como número de saltos/repetidores y, cuando el
+    log RF pudo correlacionarse, `path` contiene los hashes compactos de esos
+    repetidores. `path_hash_size` o `path_hash_mode` indican el tamaño de cada
+    hash. Si solo tenemos `path_len`, devolvemos la cuenta sin inventar nodos.
+    """
+    if not isinstance(data, dict):
+        return [], None, None
+    try:
+        plen = int(data.get("path_len")) if data.get("path_len") is not None else None
+    except Exception:
+        plen = None
+    if plen == 255:
+        plen = 0
+
+    hsize = None
+    try:
+        if data.get("path_hash_size") is not None:
+            hsize = int(data.get("path_hash_size"))
+        elif data.get("path_hash_mode") is not None:
+            mode = int(data.get("path_hash_mode"))
+            hsize = mode + 1 if mode >= 0 else None
+    except Exception:
+        hsize = None
+    if not hsize or hsize <= 0:
+        hsize = 1
+
+    raw = str(data.get("path") or "").strip().lower().replace(":", "").replace(",", "")
+    chunks: list[str] = []
+    if raw:
+        step = max(2, int(hsize) * 2)
+        chunks = [raw[i:i + step] for i in range(0, len(raw), step) if raw[i:i + step]]
+        if plen is None:
+            plen = len(chunks)
+        elif plen >= 0:
+            chunks = chunks[:plen]
+
+    return chunks, plen, hsize
+
+def _meshcore_format_repeater_path(data: dict) -> str:
+    chunks, plen, hsize = _meshcore_path_chunks_from_payload(data)
+    if chunks:
+        return " -> ".join(chunks)
+    if plen and plen > 0:
+        return f"{plen} repetidor(es), hashes no disponibles"
+    if plen == 0:
+        return "directo"
+    return "desconocida"
+
 def emit_meshcore_rx_to_hub_and_log(
     *,
     ch: int,
@@ -5641,6 +5697,7 @@ def emit_meshcore_rx_to_hub_and_log(
     chan_idx: int | None = None,
     chan_tag: str | None = None,
     from_alias: str | None = None,
+    path_info: dict | None = None,
 ) -> None:
     """
     Emite un evento al JsonLineHub (para que el BOT lo vea en vivo)
@@ -5650,6 +5707,11 @@ def emit_meshcore_rx_to_hub_and_log(
     - MeshCore->Meshtastic se inyecta por SENDQ (TX interno).
     - El BOT normalmente "ve" lo que entra por el bus JSONL (hub/backlog).
     """
+
+    # Ruta MeshCore: path_len=N repetidores; path contiene hashes si la API/log RF los aporta.
+    path_info = path_info if isinstance(path_info, dict) else {}
+    mc_path_chunks, mc_path_len, mc_path_hash_size = _meshcore_path_chunks_from_payload(path_info)
+    mc_path_text = _meshcore_format_repeater_path(path_info)
 
     # Canal / nombre de canal
     try:
@@ -5690,6 +5752,10 @@ def emit_meshcore_rx_to_hub_and_log(
                     "meshcore_chan_idx": chan_idx,
                     "meshcore_chan_tag": ((chan_tag or "").strip() or None),
                     "meshcore_pubkey_prefix": (pubkey_prefix or "").strip() or None,
+                    "meshcore_path_len": mc_path_len,
+                    "meshcore_path_hash_size": mc_path_hash_size,
+                    "meshcore_path": mc_path_chunks,
+                    "meshcore_path_text": mc_path_text,
                 },
                 "ts": _now_s(),
             }
@@ -5717,6 +5783,10 @@ def emit_meshcore_rx_to_hub_and_log(
                 "meshcore_chan_idx": chan_idx,
                 "meshcore_chan_tag": ((chan_tag or "").strip() or None),
                 "meshcore_pubkey_prefix": (pubkey_prefix or "").strip() or None,
+                "meshcore_path_len": mc_path_len,
+                "meshcore_path_hash_size": mc_path_hash_size,
+                "meshcore_path": mc_path_chunks,
+                "meshcore_path_text": mc_path_text,
             }
         )
     except Exception:

@@ -15473,6 +15473,19 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 except Exception:
                     relay = None
 
+                # Ruta MeshCore (si el broker la adjunta desde la API oficial).
+                mc_path_txt = None
+                try:
+                    mc_path_txt = (
+                        pkt.get("meshcore_path_text")
+                        or summary.get("meshcore_path_text")
+                        or obj.get("meshcore_path_text")
+                    ) if isinstance(pkt, dict) else (summary.get("meshcore_path_text") or obj.get("meshcore_path_text"))
+                except Exception:
+                    mc_path_txt = None
+                if isinstance(mc_path_txt, str):
+                    mc_path_txt = mc_path_txt.strip() or None
+
                 # Hops reales = hop_start - hop_limit (acotado a >= 0)
                 if hop_limit is not None and hop_start is not None:
                     try:
@@ -15494,6 +15507,10 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
 
                 # Envío al chat (mismo formato que escuchar_cmd + canal visible)
                 try:
+                    extra_meshcore_path = (
+                        f"   • MeshCore repetidores: {mc_path_txt}\n"
+                        if mc_path_txt else ""
+                    )
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text=(
@@ -15501,6 +15518,7 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                             f"{texto}\n"
                             f"   • RX: RSSI {rssi_txt} {(quality_RSSI)} | SNR {snr_txt} ({quality})\n"
                             f"   • Hops reales: {hops_real_txt}\n"
+                            f"{extra_meshcore_path}"
                             f"   • hop_limit: {hl_txt} | hop_start: {hs_txt} | relay_node: {rn_txt}"
                         )
                     )
