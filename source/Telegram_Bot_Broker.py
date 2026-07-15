@@ -6151,8 +6151,8 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("enviar", "Enviar a nodo/broadcast (canal, alias, forzado)"),
         BotCommand("enviar_ack", "Enviar con ACK (reintentos)"),
         BotCommand("enviar_mc", "Enviar a MeshCore (channel_idx): /enviar_mc ch2 <texto>"),
-        BotCommand("enviar_mc_dm", "Enviar DM a MeshCore: /enviar_mc_dm <contact_prefix|[MC:prefix]> <texto...>"),
-        BotCommand("mc_contactos", "Contactos de MeshCore: /mc_contactos <n contactos>"),
+        BotCommand("enviar_mc_dm", "Enviar DM MeshCore: /dm_mc <prefix|N|[MC:prefix]> <texto...>"),
+        BotCommand("mc_contactos", "Contactos MeshCore numerados con botones DM: /mc_contactos [n]"),
         BotCommand("escuchar", "Escuchar broker (canal/all)"),
         BotCommand("parar_escucha", "Detener la escucha del broker"),
         BotCommand("traceroute", "Traceroute a un nodo (!id|número|alias) [Timeout] sg. espera"),
@@ -6387,7 +6387,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <b>Destino Meshtastic</b>: número de lista, <code>!id</code>, alias, <code>broadcast</code> o <code>all</code>.\n"
         "• <b>Canal Meshtastic</b>: <code>destino:N</code> o <code>canal N</code>.\n"
         "• <b>Destino MeshCore canal</b>: <code>meshcore canal &lt;channel_idx&gt;</code>.\n"
-        "• <b>Destino MeshCore directo</b>: <code>meshcore dm &lt;contact_prefix&gt;</code>.\n"
+        "• <b>Destino MeshCore directo</b>: <code>meshcore dm &lt;contact_prefix&gt;</code>; tras <code>/mc_contactos</code> también puedes usar el número de lista en <code>/dm_mc N texto</code>.\n"
         "• <b>Estados de tarea</b>: <code>pending</code>, <code>done</code>, <code>failed</code>, <code>canceled</code>.\n"
         "• <b>Zona horaria de programación</b>: <code>Europe/Madrid</code>.\n"
         "• <b>ACK</b>: en unicast confirma recepción. En broadcast solo puede inferirse si algún nodo confirma.\n"
@@ -6420,11 +6420,13 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<b>Mensajería MeshCore</b>\n"
         "• <code>/enviar_mc &lt;canal_meshtastic&gt; &lt;texto&gt;</code> — Envía hacia MeshCore usando el mapeo Meshtastic→MeshCore configurado.\n"
         "• <code>/enviar_mc canal &lt;channel_idx&gt; &lt;texto&gt;</code> — Envía a un canal MeshCore concreto.\n"
-        "• <code>/enviar_mc_dm &lt;contact_prefix|[MC:prefix]&gt; &lt;texto&gt;</code> — Envía directo a un contacto MeshCore.\n"
-        "• <code>/dm_mc</code> — Alias de <code>/enviar_mc_dm</code>.\n"
-        "• <code>/mc_contactos</code> — Lista contactos MeshCore disponibles si el broker los expone.\n"
+        "• <code>/enviar_mc_dm &lt;contact_prefix|[MC:prefix]|N&gt; &lt;texto&gt;</code> — Envía directo a un contacto MeshCore. <code>N</code> funciona después de ejecutar <code>/mc_contactos</code>.\n"
+        "• <code>/dm_mc</code> — Alias corto de <code>/enviar_mc_dm</code>.\n"
+        "• <code>/mc_contactos [max]</code> — Lista contactos MeshCore en formato numerado, muestra botones <b>DM</b> y guarda los números para usarlos con <code>/dm_mc N texto</code>.\n"
         "Ej.: <code>/enviar_mc canal 1 Aviso por MeshCore</code>\n"
         "Ej.: <code>/enviar_mc 4 Mensaje usando mapa CH→MeshCore</code>\n"
+        "Ej.: <code>/mc_contactos 20</code>\n"
+        "Ej.: <code>/dm_mc 3 Mensaje directo al contacto 3</code>\n"
         "Ej.: <code>/enviar_mc_dm 6a18cb3d125b Mensaje directo</code>\n"
     )
 
@@ -8737,6 +8739,25 @@ async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"Resultado: <b>KO</b>: {escape(type(e).__name__)}: {escape(str(e))}"
         )
 
+def _format_meshcore_last_seen(value: object) -> str:
+    """
+    Convierte last_seen de MeshCore (epoch en segundos o milisegundos) a texto legible.
+    """
+    try:
+        ts = int(value)
+    except Exception:
+        return ""
+    if ts <= 0:
+        return ""
+    # Algunas APIs serializan epoch en milisegundos; normalízalo a segundos.
+    if ts > 10_000_000_000:
+        ts = ts // 1000
+    try:
+        return datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        return ""
+
+
 async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /mc_contactos [max]
@@ -8758,20 +8779,84 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.effective_message.reply_text("MeshCore contactos: (vacío)")
         return
 
-    lines = ["MeshCore contactos:"]
-    for c in contacts[:max_n]:
-        pfx = (c.get("prefix") or "").strip()
-        name = (c.get("name") or "").strip()
-        ls = c.get("last_seen")
-        tail = []
-        if name:
-            tail.append(name)
-        if isinstance(ls, int):
-            tail.append(f"last_seen={ls}")
-        extra = (" • " + " • ".join(tail)) if tail else ""
-        lines.append(f"- {pfx}{extra}")
+    mc_map: dict[str, str] = {}
+    lines = [
+        "📇 <b>Contactos MeshCore</b>",
+        "",
+        "Pulsa <b>DM</b> o usa <code>/dm_mc N texto</code> con el número de la lista.",
+    ]
+    keyboard = []
 
-    await update.effective_message.reply_text("\n".join(lines[:120]))
+    for idx, c in enumerate(contacts[:max_n], start=1):
+        pfx = (c.get("prefix") or "").strip()
+        if not pfx:
+            continue
+        name = (c.get("name") or "Sin nombre").strip()
+        ls = c.get("last_seen")
+        mc_map[str(idx)] = pfx
+
+        meta = []
+        last_seen_txt = _format_meshcore_last_seen(ls)
+        if last_seen_txt:
+            meta.append(f"visto: {last_seen_txt}")
+        meta_txt = f" · {' · '.join(meta)}" if meta else ""
+        lines.append(
+            f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>\n"
+            f"    <code>[MC:{escape(pfx)}]</code>{escape(meta_txt)}"
+        )
+        keyboard.append([
+            InlineKeyboardButton(
+                f"✉️ DM {idx:02d} · {name[:24] or pfx[:8]}",
+                callback_data=f"mc_dm:{idx}:{pfx[:32]}",
+            )
+        ])
+
+    if not mc_map:
+        await update.effective_message.reply_text("MeshCore contactos: (sin prefijos válidos)")
+        return
+
+    try:
+        context.user_data["mc_contacts_map"] = mc_map
+    except Exception:
+        pass
+
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard[:40]) if keyboard else None,
+        disable_web_page_preview=True,
+    )
+
+async def mc_dm_contact_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.data or not q.data.startswith("mc_dm:"):
+        return
+    try:
+        _, idx_s, pfx = q.data.split(":", 2)
+        idx_s = idx_s.strip()
+        pfx = (pfx or "").strip().lower()
+    except Exception:
+        await q.answer("Contacto no válido")
+        return
+
+    contact_prefix = None
+    try:
+        contact_prefix = (context.user_data.get("mc_contacts_map") or {}).get(idx_s)
+    except Exception:
+        contact_prefix = None
+    contact_prefix = (contact_prefix or pfx).strip().lower()
+
+    if not _extract_mc_contact_prefix_from_text(contact_prefix):
+        await q.answer("Contacto caducado. Ejecuta /mc_contactos")
+        return
+
+    context.user_data["await_mc_dm_text"] = contact_prefix
+    await q.answer(f"DM MeshCore {idx_s}")
+    await q.message.reply_text(
+        f"Escribe el texto para enviar DM MeshCore a <code>[MC:{escape(contact_prefix)}]</code>:",
+        parse_mode="HTML",
+        reply_markup=ForceReply(selective=True),
+    )
 
 async def enviar_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -8812,6 +8897,11 @@ async def enviar_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if text_tokens:
         cp = _extract_mc_contact_prefix_from_text(text_tokens[0])
+        if not cp and str(text_tokens[0]).isdigit():
+            try:
+                cp = (context.user_data.get("mc_contacts_map") or {}).get(str(text_tokens[0]))
+            except Exception:
+                cp = None
         if cp:
             contact_prefix = cp
             text_tokens = text_tokens[1:]
@@ -16056,6 +16146,28 @@ async def _broker_listen_loop_jsonl(chat_id: int, listen_chan: Optional[int], co
 async def on_forcereply_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.effective_message.text or "").strip()
 
+    # --- MeshCore DM (Forcereply desde /mc_contactos) ---
+    contact_prefix = context.user_data.pop("await_mc_dm_text", None)
+    if contact_prefix:
+        contact_prefix = str(contact_prefix).strip().lower()
+        if not text:
+            await update.effective_message.reply_text("Texto vacío; DM MeshCore cancelado.")
+            return
+        try:
+            resp = await asyncio.to_thread(_send_via_broker_meshcore_contact, contact_prefix, text, 3.0)
+        except Exception as e:
+            await update.effective_message.reply_text(f"DM MeshCore: error enviando al broker: {type(e).__name__}: {e}")
+            return
+
+        if resp and resp.get("ok"):
+            l = resp.get("len")
+            extra = f"\nLen: {l}" if isinstance(l, int) else ""
+            await update.effective_message.reply_text(f"DM MeshCore encolado\nDestino: {contact_prefix}{extra}")
+        else:
+            err = (resp or {}).get("error") or "sin_detalle"
+            await update.effective_message.reply_text(f"No se pudo encolar DM MeshCore: {err}")
+        return
+
     # --- Traceroute (Forcereply) ---
     if context.user_data.pop("await_traceroute", False):
         node_id = _resolve_node_id(text, context)
@@ -16867,6 +16979,7 @@ def build_application() -> Application:
     app.add_handler(conv)
 
     # Menú (callback) y ForceReply del menú
+    app.add_handler(CallbackQueryHandler(mc_dm_contact_cb, pattern=r"^mc_dm:"))
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(filters.REPLY & ~filters.COMMAND, on_forcereply_text))
     app.add_handler(MessageHandler(filters.Regex(r"^/vecinos\d+$"), vecinosX_cmd))
