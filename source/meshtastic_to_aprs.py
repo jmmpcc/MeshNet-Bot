@@ -1369,6 +1369,129 @@ def _broker_send_text(ch: int, text: str, dest: str | None = None, ack: bool = F
     except Exception as e:
         return {"ok": False, "error": f"bad json: {e}"}
 
+
+
+def _radio_profile() -> str:
+    return (os.getenv("RADIO_PROFILE") or "").strip().lower().replace("-", "_")
+
+
+def _aprs_meshcore_mode() -> bool:
+    """
+    True cuando APRS→malla debe salir por MeshCore en vez de SEND_TEXT/Meshtastic.
+
+    Por defecto se activa automáticamente con RADIO_PROFILE=meshcore_only. También
+    puede forzarse con APRS_TO_MESHCORE=1 para despliegues mixtos/controlados.
+    """
+    raw = (os.getenv("APRS_TO_MESHCORE") or "").strip().lower()
+    if raw in {"1", "true", "on", "yes", "si", "sí"}:
+        return True
+    if raw in {"0", "false", "off", "no"}:
+        return False
+    return _radio_profile() == "meshcore_only"
+
+
+def _parse_meshcore_channel_map_for_aprs() -> dict[int, dict]:
+    """
+    Lee MESHCORE_CHANNEL_MAP para resolver [CHx] APRS hacia destino MeshCore.
+
+    Formatos compatibles con el broker:
+      - "0:chan:0:PUBLIC,2:chan:1:ZGZ"
+      - "0:AB12CD34:PUBLIC,2:EE99AA00:ZGZ"  (contacto/DM)
+    Si no hay mapa para un canal, APRS→MeshCore usará channel_idx == CHx.
+    """
+    out: dict[int, dict] = {}
+    raw = (os.getenv("MESHCORE_CHANNEL_MAP") or "").strip()
+    if raw:
+        for part in raw.split(","):
+            item = part.strip()
+            if not item or ":" not in item:
+                continue
+            toks = [t.strip() for t in item.split(":")]
+            try:
+                ch = int(toks[0])
+            except Exception:
+                continue
+            if len(toks) >= 3 and toks[1].lower() in {"chan", "channel", "canal"}:
+                try:
+                    out[ch] = {"kind": "chan", "channel_idx": int(toks[2])}
+                except Exception:
+                    continue
+            elif len(toks) >= 2 and toks[1]:
+                out[ch] = {"kind": "contact", "contact_prefix": toks[1]}
+
+    # Compat simple: MESHCORE_CH2CONTACT="0:AB12CD34,2:EE99AA00"
+    raw2 = (os.getenv("MESHCORE_CH2CONTACT") or "").strip()
+    if raw2:
+        for part in raw2.split(","):
+            item = part.strip()
+            if not item or ":" not in item:
+                continue
+            k, v = item.split(":", 1)
+            try:
+                ch = int(k.strip())
+            except Exception:
+                continue
+            pref = v.strip()
+            if pref and ch not in out:
+                out[ch] = {"kind": "contact", "contact_prefix": pref}
+
+    return out
+
+
+def _broker_send_meshcore_text(ch: int, text: str, timeout: float = 6.0) -> dict:
+    """
+    Envía APRS→MeshCore usando el endpoint MESHCORE_SEND del broker.
+
+    El canal APRS [CHx] se resuelve con MESHCORE_CHANNEL_MAP; si no hay entrada,
+    se trata CHx como channel_idx MeshCore para que /escuchar all y APRS funcionen
+    en instalaciones meshcore_only simples sin mapa adicional.
+    """
+    route = _parse_meshcore_channel_map_for_aprs().get(int(ch), {"kind": "chan", "channel_idx": int(ch)})
+    params = {"kind": route.get("kind") or "chan", "text": text}
+    if params["kind"] in {"contact", "dm"}:
+        cp = (route.get("contact_prefix") or "").strip()
+        if not cp:
+            return {"ok": False, "error": "missing meshcore contact_prefix"}
+        params["kind"] = "contact"
+        params["contact_prefix"] = cp
+    else:
+        try:
+            params["kind"] = "chan"
+            params["channel_idx"] = int(route.get("channel_idx", ch))
+        except Exception:
+            return {"ok": False, "error": "missing meshcore channel_idx"}
+
+    req = {"cmd": "MESHCORE_SEND", "params": params}
+    data = (json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8")
+    with socket.create_connection((BROKER_CTRL_HOST, BROKER_CTRL_PORT), timeout=timeout) as s:
+        s.sendall(data)
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    line = (buf.decode("utf-8", "ignore") or "").strip()
+    try:
+        resp = json.loads(line) if line else {"ok": False, "error": "empty broker reply"}
+    except Exception as e:
+        resp = {"ok": False, "error": f"bad json: {e}"}
+    if isinstance(resp, dict):
+        resp.setdefault("transport", "meshcore")
+        resp.setdefault("aprs_channel", int(ch))
+    return resp
+
+
+def _broker_send_mesh_text(ch: int, text: str, dest: str | None = None, ack: bool = False, timeout: float = 6.0) -> dict:
+    """Ruta común APRS→malla: MeshCore en meshcore_only, Meshtastic en modo normal."""
+    if _aprs_meshcore_mode():
+        if dest and str(dest).strip().lower() != "broadcast":
+            # En meshcore_only no existe DM Meshtastic/HOME. Para APRS sólo usamos
+            # canal/contacto MeshCore resuelto por MESHCORE_CHANNEL_MAP.
+            return {"ok": False, "error": "direct Meshtastic destination disabled in meshcore_only", "transport": "meshcore"}
+        return _broker_send_meshcore_text(ch, text, timeout=timeout)
+    return _broker_send_text(ch, text, dest=dest, ack=ack, timeout=timeout)
+
 # =========================
 # === Helpers APRS→Mesh ===
 # =========================
@@ -1411,15 +1534,15 @@ def _schedule_aprs_to_mesh(ch: int, msg: str, delay_min: int, src: str) -> None:
                 print(f"[aprs→mesh sched] GATE OFF al ejecutar CH{ch} (+{delay_min}m) ← {src}: {msg_mesh[:120]}")
                 return
 
-            res = _broker_send_text(ch, msg_mesh, dest=None, ack=False)
+            res = _broker_send_mesh_text(ch, msg_mesh, dest=None, ack=False)
             ok = bool(res.get("ok"))
             print(f"[aprs→mesh sched] CH{ch} (+{delay_min}m) ← {src}: {msg_mesh[:120]} -> {'OK' if ok else 'KO'}")
 
             # === ECO OPCIONAL AL NODO HOME ===
-            if HOME_NODE_ID:
+            if HOME_NODE_ID and not _aprs_meshcore_mode():
                 try:
                     eco_txt = f"[APRS eco de {src}] {msg_mesh}"
-                    res_eco = _broker_send_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
+                    res_eco = _broker_send_mesh_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
                     ok_eco = bool(res_eco.get("ok"))
                     print(f"[aprs→mesh ECO] CH{ch} → {HOME_NODE_ID}: {eco_txt[:120]} -> {'OK' if ok_eco else 'KO'}")
                 except Exception as _e:
@@ -1441,15 +1564,15 @@ def _schedule_aprs_to_mesh(ch: int, msg: str, delay_min: int, src: str) -> None:
                 print(f"[aprs→mesh sched/now] GATE OFF CH{ch} (+{delay_min}m≡0) ← {src}: {msg_mesh[:120]}")
                 return
 
-            res = _broker_send_text(ch, msg_mesh, dest=None, ack=False)
+            res = _broker_send_mesh_text(ch, msg_mesh, dest=None, ack=False)
             ok = bool(res.get("ok"))
             print(f"[aprs→mesh sched/now] CH{ch} (+{delay_min}m≡0) ← {src}: {msg_mesh[:120]} -> {'OK' if ok else 'KO'}")
 
             # === ECO OPCIONAL AL NODO HOME ===
-            if HOME_NODE_ID:
+            if HOME_NODE_ID and not _aprs_meshcore_mode():
                 try:
                     eco_txt = f"[APRS eco de {src}] {msg_mesh}"
-                    res_eco = _broker_send_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
+                    res_eco = _broker_send_mesh_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
                     ok_eco = bool(res_eco.get("ok"))
                     print(f"[aprs→mesh ECO] CH{ch} → {HOME_NODE_ID}: {eco_txt[:120]} -> {'OK' if ok_eco else 'KO'}")
                 except Exception as _e:
@@ -1731,17 +1854,17 @@ async def task_aprs_to_meshtastic():
                         for ch_target in channels:
                             try:
                                 # Envío normal de la emergencia a la malla
-                                res = _broker_send_text(ch_target, mesh_text, dest=None, ack=False)
+                                res = _broker_send_mesh_text(ch_target, mesh_text, dest=None, ack=False)
                                 ok = bool(res.get("ok"))
                                 print(
                                     f"[aprs→mesh EMERG] CH{ch_target} ← {src}: {mesh_text[:120]} -> {'OK' if ok else 'KO'}"
                                 )
 
                                 # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE ---
-                                if HOME_NODE_ID:
+                                if HOME_NODE_ID and not _aprs_meshcore_mode():
                                     try:
                                         eco_txt = f"[APRS eco de {src}] {msg_mesh}"
-                                        res_eco = _broker_send_text(
+                                        res_eco = _broker_send_mesh_text(
                                             ch_target, eco_txt, dest=HOME_NODE_ID, ack=False
                                         )
                                         ok_eco = bool(res_eco.get("ok"))
@@ -1773,15 +1896,15 @@ async def task_aprs_to_meshtastic():
                         # Envío inmediato al broker (como antes)
                         #res = _broker_send_text(ch, msg, dest=None, ack=False)
                         msg_mesh = _mesh_add_src_prefix(src, msg)
-                        res = _broker_send_text(ch, msg_mesh, dest=None, ack=False)
+                        res = _broker_send_mesh_text(ch, msg_mesh, dest=None, ack=False)
                         
                         ok = bool(res.get("ok"))
                         print(f"[aprs→mesh] CH{ch} ← {src}: {msg_mesh[:120]}  -> {'OK' if ok else 'KO'}")
                         # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE ---
-                        if HOME_NODE_ID:
+                        if HOME_NODE_ID and not _aprs_meshcore_mode():
                             try:
                                 eco_txt = f"[APRS eco de {src}] {msg_mesh}"
-                                res_eco = _broker_send_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
+                                res_eco = _broker_send_mesh_text(ch, eco_txt, dest=HOME_NODE_ID, ack=False)
                                 ok_eco = bool(res_eco.get("ok"))
                                 print(f"[aprs→mesh ECO] CH{ch} → {HOME_NODE_ID}: {eco_txt[:120]} -> {'OK' if ok_eco else 'KO'}")
                                     # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE (APRS-IS) ---
@@ -2000,7 +2123,7 @@ async def task_aprsis_to_meshtastic():
                 else:
                     #res = _broker_send_text(ch, msg, dest=None, ack=False)
                     msg_mesh = _mesh_add_src_prefix(src, msg)
-                    res = _broker_send_text(ch, msg_mesh, dest=None, ack=False)
+                    res = _broker_send_mesh_text(ch, msg_mesh, dest=None, ack=False)
 
                     
                     ok = bool(res.get("ok"))
@@ -2008,12 +2131,12 @@ async def task_aprsis_to_meshtastic():
                         f"[aprs←IS→mesh] CH{ch} ← {src}: {msg[:120]}  -> {'OK' if ok else 'KO'}"
                     )
                     # --- ECO OPCIONAL AL NODO HOME COMO COMPROBANTE (APRS-IS) ---
-                    if HOME_NODE_ID:
+                    if HOME_NODE_ID and not _aprs_meshcore_mode():
                         try:
                             #eco_txt = f"[APRS-IS eco de {src}] {msg}"
                             eco_txt = f"[APRS-IS eco de {src}] {msg_mesh}"
 
-                            res_eco = _broker_send_text(
+                            res_eco = _broker_send_mesh_text(
                                 ch, eco_txt, dest=HOME_NODE_ID, ack=False
                             )
                             ok_eco = bool(res_eco.get("ok"))
