@@ -3299,7 +3299,17 @@ def _send_aprs_immediate(dest: str, text: str, timeout: float | None = None) -> 
         timeout_s = 8.0
     timeout_s = max(1.0, min(timeout_s, 30.0))
 
-    ctrl = {"mode": "aprs", "dest": aprs_dest, "text": text_clean, "ack": True, "force_tx": True, "origin": "bot_send"}
+    ctrl = {
+        "mode": "aprs",
+        "dest": aprs_dest,
+        "text": text_clean,
+        "ack": True,
+        "force_tx": True,
+        "origin": "bot_send",
+        # Lista vacía explícita = sin digipeaters. Evita que una orden del bot
+        # aparezca varias veces en APRS al propagarse por WIDE1-1,WIDE2-1.
+        "path": [p.strip() for p in APRS_BOT_PATH.split(",") if p.strip()],
+    }
     data = json.dumps(ctrl, ensure_ascii=False).encode("utf-8")
 
     try:
@@ -7951,6 +7961,11 @@ try:
     APRS_CTRL_PORT
 except NameError:
     APRS_CTRL_PORT = 9464
+
+# Ruta AX.25 usada por los envíos APRS inmediatos del bot (/aprs, /enviar aprs,
+# /enviar_mc aprs). Por defecto queda vacía para que el gateway emita una sola
+# trama local; si se quieren repetidores, definir APRS_BOT_PATH=WIDE1-1,WIDE2-1.
+APRS_BOT_PATH = os.getenv("APRS_BOT_PATH", "").strip()
 
 
 # ===================== EMERG desde /enviar → APRS (opcional) =====================
