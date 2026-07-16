@@ -3278,30 +3278,72 @@ def _pop_aprs_modifier_after_mesh_dest(tokens: list[str]) -> tuple[list[str], st
     del t[aprs_idx:aprs_idx + 2]
     return t, aprs_dest
 
-def _send_aprs_immediate(dest: str, text: str) -> dict:
+def _send_aprs_immediate(dest: str, text: str, timeout: float | None = None) -> dict:
+    """
+    Envía una orden APRS al gateway por UDP y espera confirmación real del gateway.
+
+    Importante: el gateway (`meshtastic_to_aprs.py`) es quien debe trocear y
+    transmitir por KISS/RF. Aquí NO pre-troceamos, porque enviar partes ya
+    troceadas al gateway puede hacer que éste vuelva a trocear y además nos
+    impedía saber si KISS había transmitido realmente.
+    """
     dest_norm = (dest or "broadcast").strip() or "broadcast"
+    aprs_dest = "broadcast" if dest_norm.lower() in ("broadcast", "all") else dest_norm.upper()
     text_clean = (text or "").strip()
     if not text_clean:
-        return {"ok": False, "error": "missing text", "dest": dest_norm, "chunks": 0}
-    aprs_len = _aprs_max_len()
-    if dest_norm.lower() in ("broadcast", "all"):
-        chunks = _aprs_split_broadcast(text_clean, aprs_len) or [text_clean[:aprs_len]]
-        aprs_dest = "broadcast"
-    else:
-        chunks = _aprs_split_directed(text_clean, aprs_len) or [text_clean[:aprs_len]]
-        aprs_dest = dest_norm
-    sent = 0
-    last_error = None
-    for part in chunks:
-        ctrl = {"mode": "aprs", "dest": aprs_dest, "text": part}
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.sendto(json.dumps(ctrl, ensure_ascii=False).encode("utf-8"), (APRS_CTRL_HOST, APRS_CTRL_PORT))
-            sent += 1
-            time.sleep(0.15)
-        except Exception as e:
-            last_error = f"{type(e).__name__}: {e}"
-    return {"ok": sent == len(chunks), "dest": aprs_dest, "chunks": len(chunks), "sent": sent, "error": last_error}
+        return {"ok": False, "error": "missing text", "dest": aprs_dest, "chunks": 0, "sent": 0}
+
+    try:
+        timeout_s = float(timeout if timeout is not None else os.getenv("APRS_CTRL_ACK_TIMEOUT", "8.0"))
+    except Exception:
+        timeout_s = 8.0
+    timeout_s = max(1.0, min(timeout_s, 30.0))
+
+    ctrl = {"mode": "aprs", "dest": aprs_dest, "text": text_clean, "ack": True, "force_tx": True, "origin": "bot_send"}
+    data = json.dumps(ctrl, ensure_ascii=False).encode("utf-8")
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout_s)
+            s.sendto(data, (APRS_CTRL_HOST, APRS_CTRL_PORT))
+            try:
+                raw, _addr = s.recvfrom(4096)
+            except socket.timeout:
+                return {
+                    "ok": False,
+                    "error": f"sin confirmación del gateway APRS en {timeout_s:.1f}s",
+                    "dest": aprs_dest,
+                    "chunks": 0,
+                    "sent": 0,
+                    "udp_sent": True,
+                }
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "dest": aprs_dest, "chunks": 0, "sent": 0}
+
+    try:
+        resp = json.loads(raw.decode("utf-8", "ignore"))
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"respuesta APRS inválida: {type(e).__name__}: {raw[:120]!r}",
+            "dest": aprs_dest,
+            "chunks": 0,
+            "sent": 0,
+            "udp_sent": True,
+        }
+
+    if not isinstance(resp, dict):
+        return {"ok": False, "error": "respuesta APRS no es JSON object", "dest": aprs_dest, "chunks": 0, "sent": 0, "udp_sent": True}
+
+    resp.setdefault("dest", aprs_dest)
+    parts = resp.get("parts", resp.get("chunks", 0))
+    try:
+        parts_i = int(parts or 0)
+    except Exception:
+        parts_i = 0
+    resp["chunks"] = parts_i
+    resp["sent"] = parts_i if resp.get("ok") else int(resp.get("sent", 0) or 0)
+    return resp
 
 # --- [FIN] Helpers APRS
 
