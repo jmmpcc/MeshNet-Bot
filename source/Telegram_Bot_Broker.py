@@ -8917,31 +8917,26 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     keyboard = []
 
     for idx, c in enumerate(contacts[:max_n], start=1):
-        display_id = (c.get("prefix") or c.get("id") or "").strip()
-        dm_key = (c.get("dm_key") or c.get("public_key") or c.get("pubkey") or display_id).strip()
-        if not dm_key:
+        pfx = (c.get("prefix") or "").strip()
+        if not pfx:
             continue
-        if not display_id:
-            display_id = dm_key[:12]
         name = (c.get("name") or "Sin nombre").strip()
         ls = c.get("last_seen")
-        mc_map[str(idx)] = dm_key
+        mc_map[str(idx)] = pfx
 
         meta = []
-        if display_id and display_id != dm_key:
-            meta.append(f"id: {display_id}")
         last_seen_txt = _format_meshcore_last_seen(ls)
         if last_seen_txt:
             meta.append(f"visto: {last_seen_txt}")
         meta_txt = f" · {' · '.join(meta)}" if meta else ""
         lines.append(
             f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>\n"
-            f"    DM: <code>[MC:{escape(dm_key)}]</code>{escape(meta_txt)}"
+            f"    <code>[MC:{escape(pfx)}]</code>{escape(meta_txt)}"
         )
         keyboard.append([
             InlineKeyboardButton(
-                f"✉️ DM {idx:02d} · {name[:24] or dm_key[:8]}",
-                callback_data=f"mc_dm:{idx}:{dm_key[:32]}",
+                f"✉️ DM {idx:02d} · {name[:24] or pfx[:8]}",
+                callback_data=f"mc_dm:{idx}:{pfx[:32]}",
             )
         ])
 
