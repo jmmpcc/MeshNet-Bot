@@ -2282,12 +2282,21 @@ async def task_control_udp():
         path_override = [p for p in path_str.split(",") if p] if path_str else None
         if not dest or not text:
             print("[ctrl] ❌ falta dest o text")
+            try:
+                sock.sendto(json.dumps({"ok": False, "error": "missing dest or text"}).encode("utf-8"), addr)
+            except Exception:
+                pass
             continue
 
         # DEDUP
         dest_norm = "broadcast" if dest.lower() in ("broadcast", "all") else dest.upper()
-        if _dedup_seen(dest_norm, text):
+        force_tx = str(obj.get("force_tx") or obj.get("force") or "").strip().lower() in ("1", "true", "yes", "on")
+        if (not force_tx) and _dedup_seen(dest_norm, text):
             print(f"[ctrl] duplicado ignorado para dest={dest_norm}")
+            try:
+                sock.sendto(json.dumps({"ok": False, "duplicate": True, "dest": dest_norm, "parts": 0, "sent": 0, "error": "duplicate_suppressed"}).encode("utf-8"), addr)
+            except Exception:
+                pass
             continue
         # Marcar ANTES de transmitir para cerrar ventana de carrera:
         # si entra el mismo payload por otra ruta (p.ej. eco broker) mientras
@@ -2302,13 +2311,29 @@ async def task_control_udp():
             dest_hdr = dest_norm
 
         ok_all = True
+        sent_count = 0
         for pld in payloads:
             ok = _tx_aprs_payload(pld, dest_hdr, path_override=path_override)
             ok_all = ok_all and ok
+            if ok:
+                sent_count += 1
             await asyncio.sleep(0.12)
 
         _dedup_mark(dest_norm, text)
-        print(f"[ctrl] Resultado: {'OK' if ok_all else 'KO'} para dest={dest_norm}")
+        resp = {
+            "ok": bool(ok_all),
+            "dest": dest_norm,
+            "parts": len(payloads),
+            "sent": sent_count,
+            "rf": bool(ok_all),
+        }
+        if not ok_all:
+            resp["error"] = "kiss_tx_failed"
+        try:
+            sock.sendto(json.dumps(resp).encode("utf-8"), addr)
+        except Exception:
+            pass
+        print(f"[ctrl] Resultado: {'OK' if ok_all else 'KO'} para dest={dest_norm} parts={len(payloads)} sent={sent_count}")
 
 
 # =========================

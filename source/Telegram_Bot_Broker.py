@@ -3230,6 +3230,121 @@ def _aprs_split_directed(text: str, max_len: int | None = None) -> list[str]:
         final.append(s + suffix)
     return final
 
+
+
+def _normalize_transport_token(token: str | None) -> str | None:
+    t = (token or "").strip().lower()
+    if t in ("mesh", "malla", "meshtastic", "meshcore", "mc"):
+        return "mesh"
+    if t in ("aprs", "aprs-only", "solo-aprs"):
+        return "aprs"
+    if t in ("ambos", "both", "mesh+aprs", "aprs+mesh"):
+        return "both"
+    return None
+
+def _parse_aprs_dest_text(tokens: list[str], default_dest: str = "broadcast") -> tuple[str, str]:
+    tail = [str(t).strip() for t in (tokens or []) if str(t).strip()]
+    if not tail:
+        return (default_dest or "broadcast"), ""
+    joined = " ".join(tail).strip()
+    if ":" in joined:
+        head, txt = joined.split(":", 1)
+        return ((head or default_dest or "broadcast").strip().upper() or "BROADCAST"), (txt or "").strip()
+    if len(tail) == 1:
+        return (default_dest or "broadcast"), tail[0].strip()
+    return (tail[0].strip().upper() or (default_dest or "broadcast")), " ".join(tail[1:]).strip()
+
+def _pop_aprs_modifier_after_mesh_dest(tokens: list[str]) -> tuple[list[str], str | None]:
+    t = list(tokens or [])
+
+    def _looks_like_aprs_dest(tok: str) -> bool:
+        s = (tok or "").strip().rstrip(":")
+        if not s:
+            return False
+        if s.lower() == "broadcast":
+            return True
+        return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9\-\/]*", s) is not None
+
+    aprs_idx = None
+    if len(t) >= 4 and t[0].lower() == "canal" and str(t[1]).lstrip("-").isdigit():
+        if t[2].lower() == "aprs" and _looks_like_aprs_dest(t[3]):
+            aprs_idx = 2
+    elif len(t) >= 3 and t[1].lower() == "aprs" and _looks_like_aprs_dest(t[2]):
+        aprs_idx = 1
+
+    if aprs_idx is None:
+        return t, None
+    aprs_dest = (t[aprs_idx + 1] if (aprs_idx + 1) < len(t) else "broadcast").rstrip(":").upper() or "BROADCAST"
+    del t[aprs_idx:aprs_idx + 2]
+    return t, aprs_dest
+
+def _send_aprs_immediate(dest: str, text: str, timeout: float | None = None) -> dict:
+    """
+    Envía una orden APRS al gateway por UDP y espera confirmación real del gateway.
+
+    Importante: el gateway (`meshtastic_to_aprs.py`) es quien debe trocear y
+    transmitir por KISS/RF. Aquí NO pre-troceamos, porque enviar partes ya
+    troceadas al gateway puede hacer que éste vuelva a trocear y además nos
+    impedía saber si KISS había transmitido realmente.
+    """
+    dest_norm = (dest or "broadcast").strip() or "broadcast"
+    aprs_dest = "broadcast" if dest_norm.lower() in ("broadcast", "all") else dest_norm.upper()
+    text_clean = (text or "").strip()
+    if not text_clean:
+        return {"ok": False, "error": "missing text", "dest": aprs_dest, "chunks": 0, "sent": 0}
+
+    try:
+        timeout_s = float(timeout if timeout is not None else os.getenv("APRS_CTRL_ACK_TIMEOUT", "8.0"))
+    except Exception:
+        timeout_s = 8.0
+    timeout_s = max(1.0, min(timeout_s, 30.0))
+
+    ctrl = {"mode": "aprs", "dest": aprs_dest, "text": text_clean, "ack": True, "force_tx": True, "origin": "bot_send"}
+    data = json.dumps(ctrl, ensure_ascii=False).encode("utf-8")
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout_s)
+            s.sendto(data, (APRS_CTRL_HOST, APRS_CTRL_PORT))
+            try:
+                raw, _addr = s.recvfrom(4096)
+            except socket.timeout:
+                return {
+                    "ok": False,
+                    "error": f"sin confirmación del gateway APRS en {timeout_s:.1f}s",
+                    "dest": aprs_dest,
+                    "chunks": 0,
+                    "sent": 0,
+                    "udp_sent": True,
+                }
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "dest": aprs_dest, "chunks": 0, "sent": 0}
+
+    try:
+        resp = json.loads(raw.decode("utf-8", "ignore"))
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"respuesta APRS inválida: {type(e).__name__}: {raw[:120]!r}",
+            "dest": aprs_dest,
+            "chunks": 0,
+            "sent": 0,
+            "udp_sent": True,
+        }
+
+    if not isinstance(resp, dict):
+        return {"ok": False, "error": "respuesta APRS no es JSON object", "dest": aprs_dest, "chunks": 0, "sent": 0, "udp_sent": True}
+
+    resp.setdefault("dest", aprs_dest)
+    parts = resp.get("parts", resp.get("chunks", 0))
+    try:
+        parts_i = int(parts or 0)
+    except Exception:
+        parts_i = 0
+    resp["chunks"] = parts_i
+    resp["sent"] = parts_i if resp.get("ok") else int(resp.get("sent", 0) or 0)
+    return resp
+
 # --- [FIN] Helpers APRS
 
 import threading, time
@@ -6148,9 +6263,9 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("ayuda", "Ayuda completa (comandos y parámetros)"),
         BotCommand("start", "Mostrar menú principal"),
         BotCommand("menu", "Abrir menú principal"),
-        BotCommand("enviar", "Enviar a nodo/broadcast (canal, alias, forzado)"),
+        BotCommand("enviar", "Enviar Meshtastic/APRS: [mesh|aprs|ambos] destino texto"),
         BotCommand("enviar_ack", "Enviar con ACK (reintentos)"),
-        BotCommand("enviar_mc", "Enviar a MeshCore (channel_idx): /enviar_mc ch2 <texto>"),
+        BotCommand("enviar_mc", "Enviar MeshCore/APRS: [mesh|aprs|ambos] chX texto"),
         BotCommand("enviar_mc_dm", "Enviar DM MeshCore: /dm_mc <prefix|N|[MC:prefix]> <texto...>"),
         BotCommand("mc_contactos", "Contactos MeshCore numerados con botones DM: /mc_contactos [n]"),
         BotCommand("escuchar", "Escuchar broker (canal/all)"),
@@ -6406,25 +6521,36 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     s_mensajeria_mesh = (
         "────────────────────────────────────────────────\n"
-        "<b>Mensajería Meshtastic</b>\n"
-        "• <code>/enviar &lt;destino[:canal]&gt; &lt;texto&gt;</code> — Envía texto normal.\n"
-        "• <code>/enviar canal &lt;N&gt; &lt;texto&gt;</code> — Broadcast implícito por el canal indicado.\n"
+        "<b>Mensajería Meshtastic / APRS inmediata</b>\n"
+        "• <code>/enviar [mesh|aprs|ambos] &lt;destino[:canal] | canal N&gt; [aprs &lt;CALL|broadcast&gt;] &lt;texto&gt;</code> — Envía por malla, solo APRS o ambos.\n"
+        "• <code>mesh</code>/<code>malla</code>/<code>meshtastic</code> — Solo Meshtastic; es el modo por defecto si no indicas transporte.\n"
+        "• <code>aprs</code> — Solo APRS por la pasarela; no envía a la malla.\n"
+        "• <code>ambos</code>/<code>both</code> — Meshtastic + APRS. Si no añades destino APRS usa <code>broadcast</code>.\n"
+        "• <code>/enviar canal &lt;N&gt; &lt;texto&gt;</code> — Sintaxis clásica: broadcast Meshtastic por canal.\n"
         "• <code>/enviar_ack &lt;destino[:canal]&gt; &lt;texto&gt; [reintentos=N espera=S backoff=X]</code> — Envía solicitando ACK.\n"
         "Ej.: <code>/enviar canal 0 Buenos dias</code>\n"
-        "Ej.: <code>/enviar !b03df4cc:2 Mensaje directo</code>\n"
+        "Ej.: <code>/enviar mesh !b03df4cc:2 Mensaje directo</code>\n"
+        "Ej.: <code>/enviar aprs EB2ABC-7: Aviso solo APRS</code>\n"
+        "Ej.: <code>/enviar ambos canal 0 aprs EB2ABC-7 Aviso doble</code>\n"
+        "Resultado: muestra <code>Transporte: MESH|APRS|BOTH</code>, destino de malla y/o destino APRS, y partes APRS enviadas.\n"
         "Ej.: <code>/enviar_ack !b03df4cc:1 Confirmar enlace reintentos=4 espera=10 backoff=1.5</code>\n"
     )
 
     s_mensajeria_mc = (
         "────────────────────────────────────────────────\n"
-        "<b>Mensajería MeshCore</b>\n"
-        "• <code>/enviar_mc &lt;canal_meshtastic&gt; &lt;texto&gt;</code> — Envía hacia MeshCore usando el mapeo Meshtastic→MeshCore configurado.\n"
-        "• <code>/enviar_mc canal &lt;channel_idx&gt; &lt;texto&gt;</code> — Envía a un canal MeshCore concreto.\n"
+        "<b>Mensajería MeshCore / APRS inmediata</b>\n"
+        "• <code>/enviar_mc [mesh|aprs|ambos] &lt;chX|X|canal X&gt; [aprs &lt;CALL|broadcast&gt;] &lt;texto&gt;</code> — Envía por MeshCore, solo APRS o ambos.\n"
+        "• <code>mesh</code>/<code>malla</code>/<code>meshcore</code>/<code>mc</code> — Solo MeshCore; es el modo por defecto si no indicas transporte.\n"
+        "• <code>aprs</code> — Solo APRS y no necesita canal MeshCore: <code>/enviar_mc aprs CALL: texto</code>.\n"
+        "• <code>ambos</code>/<code>both</code> — MeshCore + APRS. Si no añades destino APRS usa <code>broadcast</code>.\n"
+        "• <code>/enviar_mc ch2 texto</code>, <code>/enviar_mc 2 texto</code> y <code>/enviar_mc canal 2 texto</code> — Sintaxis clásica hacia <code>channel_idx=2</code>.\n"
         "• <code>/enviar_mc_dm &lt;contact_prefix|[MC:prefix]|N&gt; &lt;texto&gt;</code> — Envía directo a un contacto MeshCore. <code>N</code> funciona después de ejecutar <code>/mc_contactos</code>.\n"
         "• <code>/dm_mc</code> — Alias corto de <code>/enviar_mc_dm</code>.\n"
         "• <code>/mc_contactos [max]</code> — Lista contactos MeshCore en formato numerado, muestra botones <b>DM</b> y guarda los números para usarlos con <code>/dm_mc N texto</code>.\n"
         "Ej.: <code>/enviar_mc canal 1 Aviso por MeshCore</code>\n"
-        "Ej.: <code>/enviar_mc 4 Mensaje usando mapa CH→MeshCore</code>\n"
+        "Ej.: <code>/enviar_mc aprs EB2ABC-7: Aviso solo APRS</code>\n"
+        "Ej.: <code>/enviar_mc ambos ch2 aprs broadcast Aviso doble</code>\n"
+        "Resultado: muestra <code>Transporte: MESH|APRS|BOTH</code>, canal MeshCore y/o destino APRS, y partes APRS enviadas.\n"
         "Ej.: <code>/mc_contactos 20</code>\n"
         "Ej.: <code>/dm_mc 3 Mensaje directo al contacto 3</code>\n"
         "Ej.: <code>/enviar_mc_dm 6a18cb3d125b Mensaje directo</code>\n"
@@ -8665,13 +8791,14 @@ def _meshcore_delay_should_apply(used_path: str | None = None) -> bool:
 
 async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /enviar_mc [chX] <texto...>
-    /enviar_mc chX <texto...>
-    /enviar_mc X <texto...>
-    /enviar_mc canal X <texto...>
+    /enviar_mc [mesh|aprs|ambos] [chX] <texto...>
+    /enviar_mc [mesh|aprs|ambos] chX <texto...>
+    /enviar_mc [mesh|aprs|ambos] X <texto...>
+    /enviar_mc [mesh|aprs|ambos] canal X <texto...>
+    /enviar_mc aprs <CALL|broadcast>: <texto...>
 
-    Envia hacia MeshCore (channel_idx) usando el broker como ejecutor (24/7).
-    No toca nada del envío Meshtastic (/enviar).
+    Envía hacia MeshCore (channel_idx), APRS o ambos.
+    MeshCore usa el broker como ejecutor (24/7).
     """
     # Respeta el mismo “cooldown guard” que /enviar (si lo tienes activo)
     if await _abort_if_cooldown(update, context):
@@ -8679,17 +8806,46 @@ async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     bump_stat(update.effective_user.id, update.effective_user.username or "", "enviar_mc")
     msg = update.effective_message
-    args = context.args or []
+    args = list(context.args or [])
+    transport = _normalize_transport_token(args[0]) if args else None
+    if transport:
+        args = args[1:]
+    else:
+        transport = "mesh"
 
-    if not args or len(args) < 2:
+    if not args or (transport in ("mesh", "both") and len(args) < 2):
         await msg.reply_text(
             "Uso:\n"
-            "• /enviar_mc ch2 texto\n"
-            "• /enviar_mc [ch2] texto\n"
-            "• /enviar_mc 2 texto\n"
-            "• /enviar_mc canal 2 texto"
+            "• /enviar_mc [mesh|aprs|ambos] ch2 texto\n"
+            "• /enviar_mc [mesh|aprs|ambos] [ch2] texto\n"
+            "• /enviar_mc [mesh|aprs|ambos] 2 texto\n"
+            "• /enviar_mc [mesh|aprs|ambos] canal 2 texto\n"
+            "• /enviar_mc aprs CALL: texto"
         )
         return
+
+    aprs_dest = "broadcast"
+    if transport == "aprs":
+        aprs_dest, text = _parse_aprs_dest_text(args)
+        if not text:
+            await msg.reply_text("Parámetros no válidos. Ejemplo: /enviar_mc aprs EB2ABC-7: hola")
+            return
+        r_aprs = await asyncio.to_thread(_send_aprs_immediate, aprs_dest, text)
+        await _safe_reply_html(
+            msg,
+            "Envío MeshCore/APRS\n"
+            "Transporte: <b>APRS</b>\n"
+            f"APRS → Destino: <code>{escape(str(aprs_dest))}</code>\n"
+            f"Resultado APRS: <b>{'OK' if r_aprs.get('ok') else 'KO'}</b> "
+            f"({escape(str(r_aprs.get('sent', 0)))}/{escape(str(r_aprs.get('chunks', 0)))} partes)"
+            f"{(' • ' + escape(str(r_aprs.get('error')))) if r_aprs.get('error') else ''}"
+        )
+        return
+
+    if transport == "both":
+        args, aprs_mod = _pop_aprs_modifier_after_mesh_dest(args)
+        if aprs_mod:
+            aprs_dest = aprs_mod
 
     channel_idx = None
     text = ""
@@ -8708,7 +8864,9 @@ async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Parámetros no válidos.\n"
             "Ejemplos:\n"
             "• /enviar_mc ch2 hola\n"
-            "• /enviar_mc canal 2 hola"
+            "• /enviar_mc canal 2 hola\n"
+            "• /enviar_mc aprs EB2ABC-7: hola\n"
+            "• /enviar_mc ambos ch2 aprs broadcast hola"
         )
         return
 
@@ -8716,20 +8874,33 @@ async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         res = await asyncio.to_thread(_send_via_broker_meshcore, int(channel_idx), text, 3.0)
         ok = bool(res.get("ok"))
+        r_aprs = None
+        if transport == "both":
+            r_aprs = await asyncio.to_thread(_send_aprs_immediate, aprs_dest, text)
         if ok:
+            extra_aprs = ""
+            if r_aprs is not None:
+                extra_aprs = (
+                    f"\nAPRS → Destino: <code>{escape(str(aprs_dest))}</code>"
+                    f"\nResultado APRS: <b>{'OK' if r_aprs.get('ok') else 'KO'}</b> "
+                    f"({escape(str(r_aprs.get('sent', 0)))}/{escape(str(r_aprs.get('chunks', 0)))} partes)"
+                )
             await _safe_reply_html(
                 msg,
                 f"Envío MeshCore\n"
-                f"Canal (channel_idx): <b>{escape(str(int(channel_idx)))}</b>\n"
-                f"Resultado: <b>OK</b>"
+                f"Transporte: <b>{escape(transport.upper())}</b>\n"
+                f"Malla MeshCore → Canal (channel_idx): <b>{escape(str(int(channel_idx)))}</b>\n"
+                f"Resultado MeshCore: <b>OK</b>"
+                f"{extra_aprs}"
             )
         else:
             err = res.get("error") or "desconocido"
             await _safe_reply_html(
                 msg,
                 f"Envío MeshCore\n"
-                f"Canal (channel_idx): <b>{escape(str(int(channel_idx)))}</b>\n"
-                f"Resultado: <b>KO</b>: {escape(str(err))}"
+                f"Transporte: <b>{escape(transport.upper())}</b>\n"
+                f"Malla MeshCore → Canal (channel_idx): <b>{escape(str(int(channel_idx)))}</b>\n"
+                f"Resultado MeshCore: <b>KO</b>: {escape(str(err))}"
             )
     except Exception as e:
         await _safe_reply_html(
@@ -8943,8 +9114,9 @@ async def enviar_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    /enviar canal <n> <texto>
-    /enviar <número|!id|alias> <texto>
+    /enviar [mesh|aprs|ambos] canal <n> [aprs <CALL|broadcast>] <texto>
+    /enviar [mesh|aprs|ambos] <número|!id|alias> [aprs <CALL|broadcast>] <texto>
+    /enviar aprs <CALL|broadcast>: <texto>
     - NO refresca nodos ni llama a API; usa sólo nodos.txt (cargar_aliases_desde_nodes).
     - Envío priorizando la cola del BROKER (dispara bridge A→B) con fallback al pool y adapter resiliente.
     - Broadcast (node_id=None) sin ACK; unicast sin ACK aquí (para evitar duplicados).
@@ -8957,7 +9129,12 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     bump_stat(update.effective_user.id, update.effective_user.username or "", "enviar")
     msg = update.effective_message
-    args = context.args or []
+    args = list(context.args or [])
+    transport = _normalize_transport_token(args[0]) if args else None
+    if transport:
+        args = args[1:]
+    else:
+        transport = "mesh"
 
     # --- Construir mapping SIN llamar a API ---
     nodes_map: Dict[str, str] = context.user_data.get("nodes_map") or {}
@@ -8978,6 +9155,34 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         except Exception:
             nodes_map = {}
         context.user_data["nodes_map"] = nodes_map
+
+    aprs_dest = "broadcast"
+    if transport == "aprs":
+        aprs_dest, texto = _parse_aprs_dest_text(args)
+        if not texto:
+            await msg.reply_text(
+                "Uso:\n"
+                "• <b>/enviar aprs</b> <i>CALL|broadcast:</i> <i>texto</i>\n"
+                "• <b>/enviar ambos canal 0 aprs CALL</b> <i>texto</i>",
+                parse_mode="HTML"
+            )
+            return ConversationHandler.END
+        r_aprs = await asyncio.to_thread(_send_aprs_immediate, aprs_dest, texto)
+        await _safe_reply_html(
+            msg,
+            "✉️ Envío Meshtastic/APRS\n"
+            "Transporte: <b>APRS</b>\n"
+            f"APRS → Destino: <code>{escape(str(aprs_dest))}</code>\n"
+            f"Resultado APRS: <b>{'OK' if r_aprs.get('ok') else 'KO'}</b> "
+            f"({escape(str(r_aprs.get('sent', 0)))}/{escape(str(r_aprs.get('chunks', 0)))} partes)"
+            f"{(' • ' + escape(str(r_aprs.get('error')))) if r_aprs.get('error') else ''}"
+        )
+        return ConversationHandler.END
+
+    if transport == "both":
+        args, aprs_mod = _pop_aprs_modifier_after_mesh_dest(args)
+        if aprs_mod:
+            aprs_dest = aprs_mod
 
     # --- Parsear destino/canal/texto + flag 'forzado' ---
     node_id, canal, texto, forced_flag = parse_dest_channel_and_text(args, nodes_map)
@@ -9000,9 +9205,11 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not texto:
         await msg.reply_text(
             "Uso:\n"
+            "• <b>/enviar [mesh|aprs|ambos]</b> <i>destino[:canal] | canal N</i> [<b>aprs</b> <i>CALL|broadcast</i>] <i>texto</i>\n"
             "• <b>/enviar canal 0</b> <i>texto</i>\n"
-            "• <b>/enviar</b> <i>número|!id|alias</i> <i>texto</i>\n"
-            "Añade <b>forzado</b> al inicio para omitir traceroute previo.",
+            "• <b>/enviar aprs EB2ABC-7:</b> <i>texto</i>\n"
+            "• <b>/enviar ambos canal 0 aprs broadcast</b> <i>texto</i>\n"
+            "Añade <b>forzado</b> al inicio para omitir traceroute previo en envíos de malla.",
             parse_mode="HTML"
         )
         return ConversationHandler.END
@@ -9188,6 +9395,13 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     except Exception:
         pass
 
+    aprs_result = None
+    if transport == "both" and send_ok:
+        try:
+            aprs_result = await asyncio.to_thread(_send_aprs_immediate, aprs_dest, texto)
+        except Exception as e:
+            aprs_result = {"ok": False, "error": f"{type(e).__name__}: {e}", "dest": aprs_dest, "chunks": 0, "sent": 0}
+
     # --- Respuesta al usuario ---
     dst_txt = "broadcast" if is_broadcast else _friendly_node(node_id, nodes_map)
     tag_tr_ok = ("✔️" if traceroute_ok else ("❌" if traceroute_ok is False else "—"))
@@ -9209,7 +9423,8 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if send_ok:
         txt = (
             f"✉️ Envío a {('broadcast' if is_broadcast else 'nodo')} (canal {canal})\n"
-            f"Destino: <b>{escape(dst_txt)}</b>\n"
+            f"Transporte: <b>{escape(transport.upper())}</b>\n"
+            f"Malla Meshtastic → Destino: <b>{escape(dst_txt)}</b>\n"
             f"Traceroute: {tag_tr_ok}  Hops: {hops}\n"
             f"Forzado: {tag_forzado}\n"
             f"Resultado: <b>OK</b> ({used_path})"
@@ -9218,6 +9433,15 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         if is_broadcast:
             txt += f"Respuestas en {SEND_LISTEN_SEC}s: <b>{replies}</b>"
+
+        if aprs_result is not None:
+            txt += (
+                f"\nAPRS → Destino: <code>{escape(str(aprs_dest))}</code>"
+                f"\nResultado APRS: <b>{'OK' if aprs_result.get('ok') else 'KO'}</b> "
+                f"({escape(str(aprs_result.get('sent', 0)))}/{escape(str(aprs_result.get('chunks', 0)))} partes)"
+            )
+            if aprs_result.get('error'):
+                txt += f" • {escape(str(aprs_result.get('error')))}"
 
         if mc_mirrored:
             if mc_ok:
@@ -9232,7 +9456,8 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     else:
         txt = (
             f"✉️ Envío a {('broadcast' if is_broadcast else 'nodo')} (canal {canal})\n"
-            f"Destino: <b>{escape(dst_txt)}</b>\n"
+            f"Transporte: <b>{escape(transport.upper())}</b>\n"
+            f"Malla Meshtastic → Destino: <b>{escape(dst_txt)}</b>\n"
             f"Traceroute: {tag_tr_ok}  Hops: {hops}\n"
             f"Forzado: {tag_forzado}\n"
             f"Resultado: <b>KO</b> ({used_path}): {escape(send_error or 'desconocido')}\n"
