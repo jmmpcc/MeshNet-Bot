@@ -215,6 +215,67 @@ def _apply_bridge_config_runtime_once(cli_path: Optional[str] = None, verbose: b
 # ============================================================================
 
 
+
+def _load_dotenv_runtime() -> None:
+    """Carga variables de .env antes de resolver perfiles radio/runtime."""
+    try:
+        from dotenv import load_dotenv  # type: ignore
+    except Exception:
+        return
+
+    candidates = []
+    explicit = (os.getenv("ENV_FILE") or os.getenv("DOTENV_PATH") or "").strip()
+    if explicit:
+        candidates.append(explicit)
+    candidates.extend(["/app/.env", str(Path.cwd() / ".env")])
+
+    seen = set()
+    for item in candidates:
+        try:
+            path = Path(item).expanduser()
+            key = str(path)
+            if key in seen or not path.exists():
+                continue
+            seen.add(key)
+            load_dotenv(dotenv_path=str(path), override=False)
+            print(f"[env] .env cargado: {path}", flush=True)
+        except Exception as e:
+            print(f"[env] ⚠️ no se pudo cargar {item}: {type(e).__name__}: {e}", flush=True)
+
+
+def _radio_profile() -> str:
+    return (os.getenv("RADIO_PROFILE") or "").strip().lower().replace("-", "_")
+
+
+def _is_meshcore_only_profile() -> bool:
+    return _radio_profile() == "meshcore_only"
+
+
+def _apply_radio_profile_runtime(verbose: bool = False) -> dict:
+    """Aplica perfiles seleccionados con RADIO_PROFILE sin tocar otros modos."""
+    profile = _radio_profile()
+    out = {"profile": profile or None, "applied": False}
+    if profile != "meshcore_only":
+        return out
+
+    overrides = {
+        "MESHCORE_ENABLE": "1",
+        "BRIDGE_ENABLED": "0",
+        "BBS_ENABLED": "0",
+        "BBS_ENABLE": "0",
+        "MESHCORE_ONLY": "1",
+    }
+    for key, value in overrides.items():
+        os.environ[key] = value
+
+    out["applied"] = True
+    out["overrides"] = overrides
+    print("[radio-profile] ✅ RADIO_PROFILE=meshcore_only: Meshtastic/BBS OFF, MeshCore ON", flush=True)
+    if verbose:
+        print(f"[radio-profile] overrides={overrides}", flush=True)
+    return out
+
+
 def _mc_parse_ch_map() -> dict[int, dict]:
     """
     Mapa Meshtastic CH -> destino MeshCore.
@@ -1080,21 +1141,27 @@ class MeshCoreEmbeddedBridge:
         for c in (items or []):
             try:
                 if isinstance(c, dict):
-                    prefix = c.get("prefix") or c.get("key_prefix") or c.get("pubkey_prefix") or c.get("public_key") or c.get("id") or c.get("key")
+                    public_key = c.get("public_key") or c.get("pubkey") or c.get("key") or c.get("key_prefix") or c.get("pubkey_prefix")
+                    # id/prefix pueden ser IDs cortos de anuncio/ruta. Para DM se debe usar public_key o un prefijo de public_key.
+                    display_id = c.get("id") or c.get("prefix")
                     name = c.get("name") or c.get("adv_name") or c.get("alias") or c.get("label")
                     last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("last_advert") or c.get("seen") or c.get("ts")
                 else:
-                    prefix = getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None) or getattr(c, "public_key", None) or getattr(c, "prefix", None) or getattr(c, "id", None)
+                    public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None) or getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None)
+                    display_id = getattr(c, "id", None) or getattr(c, "prefix", None)
                     name = getattr(c, "name", None) or getattr(c, "adv_name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
                     last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "last_advert", None) or getattr(c, "seen", None)
 
-                prefix = (str(prefix).strip() if prefix is not None else "")
-                if not prefix or prefix in seen:
+                dm_key = (str(public_key).strip() if public_key is not None else "")
+                display_id = (str(display_id).strip() if display_id is not None else "") or dm_key[:12]
+                if not dm_key or dm_key in seen:
                     continue
-                seen.add(prefix)
+                seen.add(dm_key)
 
                 out.append({
-                    "prefix": prefix,
+                    "prefix": display_id,
+                    "dm_key": dm_key,
+                    "public_key": dm_key,
                     "name": (str(name).strip() if name is not None else "") or None,
                     "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
                 })
@@ -1279,7 +1346,8 @@ class MeshCoreEmbeddedBridge:
                         f"[meshcore-embedded RX] "
                         f"type={et} kind={kind} chan_idx={chan_idx} "
                         f"prefix={data.get('pubkey_prefix')} "
-                        f"text='{text_msg[:120]}'",
+                        f"text='{text_msg[:120]}' "
+                        f"path={_meshcore_format_repeater_path(data)}",
                         flush=True
                     )
                 except Exception:
@@ -1332,8 +1400,23 @@ class MeshCoreEmbeddedBridge:
                         mc_chan_tag = None
 
 
-                # Inyectar a Meshtastic vía cola del broker (SENDQ)
+                # Inyectar a Meshtastic vía cola del broker (SENDQ), salvo en
+                # RADIO_PROFILE=meshcore_only, donde Meshtastic está completamente OFF.
                 q = globals().get("SENDQ")
+                if _is_meshcore_only_profile():
+                    emit_meshcore_rx_to_hub_and_log(
+                        ch=int(ch_out),
+                        text=out_txt,
+                        pubkey_prefix=pref,
+                        kind=kind,
+                        chan_idx=chan_idx,
+                        chan_tag=(mc_chan_tag or None),
+                        from_alias=(alias or None),
+                        path_info=data,
+                    )
+                    self._last_ok = time.time()
+                    return
+
                 if q is not None and hasattr(q, "offer"):
                     self._remember_injected(int(ch_out), out_txt)
                     q.offer(
@@ -1359,6 +1442,7 @@ class MeshCoreEmbeddedBridge:
                         chan_idx=chan_idx,
                         chan_tag=(mc_chan_tag or None),
                         from_alias=(alias or None),
+                        path_info=data,
                     )
 
 
@@ -5557,6 +5641,59 @@ def append_offline_log(rec: dict):
     except Exception as e:
         _log_ex("append_offline_log failed", e)
 
+
+def _meshcore_path_chunks_from_payload(data: dict) -> tuple[list[str], int | None, int | None]:
+    """
+    Extrae la ruta MeshCore anunciada por la librería oficial.
+
+    La API expone `path_len` como número de saltos/repetidores y, cuando el
+    log RF pudo correlacionarse, `path` contiene los hashes compactos de esos
+    repetidores. `path_hash_size` o `path_hash_mode` indican el tamaño de cada
+    hash. Si solo tenemos `path_len`, devolvemos la cuenta sin inventar nodos.
+    """
+    if not isinstance(data, dict):
+        return [], None, None
+    try:
+        plen = int(data.get("path_len")) if data.get("path_len") is not None else None
+    except Exception:
+        plen = None
+    if plen == 255:
+        plen = 0
+
+    hsize = None
+    try:
+        if data.get("path_hash_size") is not None:
+            hsize = int(data.get("path_hash_size"))
+        elif data.get("path_hash_mode") is not None:
+            mode = int(data.get("path_hash_mode"))
+            hsize = mode + 1 if mode >= 0 else None
+    except Exception:
+        hsize = None
+    if not hsize or hsize <= 0:
+        hsize = 1
+
+    raw = str(data.get("path") or "").strip().lower().replace(":", "").replace(",", "")
+    chunks: list[str] = []
+    if raw:
+        step = max(2, int(hsize) * 2)
+        chunks = [raw[i:i + step] for i in range(0, len(raw), step) if raw[i:i + step]]
+        if plen is None:
+            plen = len(chunks)
+        elif plen >= 0:
+            chunks = chunks[:plen]
+
+    return chunks, plen, hsize
+
+def _meshcore_format_repeater_path(data: dict) -> str:
+    chunks, plen, hsize = _meshcore_path_chunks_from_payload(data)
+    if chunks:
+        return " -> ".join(chunks)
+    if plen and plen > 0:
+        return f"{plen} repetidor(es), hashes no disponibles"
+    if plen == 0:
+        return "directo"
+    return "desconocida"
+
 def emit_meshcore_rx_to_hub_and_log(
     *,
     ch: int,
@@ -5566,6 +5703,7 @@ def emit_meshcore_rx_to_hub_and_log(
     chan_idx: int | None = None,
     chan_tag: str | None = None,
     from_alias: str | None = None,
+    path_info: dict | None = None,
 ) -> None:
     """
     Emite un evento al JsonLineHub (para que el BOT lo vea en vivo)
@@ -5575,6 +5713,11 @@ def emit_meshcore_rx_to_hub_and_log(
     - MeshCore->Meshtastic se inyecta por SENDQ (TX interno).
     - El BOT normalmente "ve" lo que entra por el bus JSONL (hub/backlog).
     """
+
+    # Ruta MeshCore: path_len=N repetidores; path contiene hashes si la API/log RF los aporta.
+    path_info = path_info if isinstance(path_info, dict) else {}
+    mc_path_chunks, mc_path_len, mc_path_hash_size = _meshcore_path_chunks_from_payload(path_info)
+    mc_path_text = _meshcore_format_repeater_path(path_info)
 
     # Canal / nombre de canal
     try:
@@ -5615,6 +5758,10 @@ def emit_meshcore_rx_to_hub_and_log(
                     "meshcore_chan_idx": chan_idx,
                     "meshcore_chan_tag": ((chan_tag or "").strip() or None),
                     "meshcore_pubkey_prefix": (pubkey_prefix or "").strip() or None,
+                    "meshcore_path_len": mc_path_len,
+                    "meshcore_path_hash_size": mc_path_hash_size,
+                    "meshcore_path": mc_path_chunks,
+                    "meshcore_path_text": mc_path_text,
                 },
                 "ts": _now_s(),
             }
@@ -5642,6 +5789,10 @@ def emit_meshcore_rx_to_hub_and_log(
                 "meshcore_chan_idx": chan_idx,
                 "meshcore_chan_tag": ((chan_tag or "").strip() or None),
                 "meshcore_pubkey_prefix": (pubkey_prefix or "").strip() or None,
+                "meshcore_path_len": mc_path_len,
+                "meshcore_path_hash_size": mc_path_hash_size,
+                "meshcore_path": mc_path_chunks,
+                "meshcore_path_text": mc_path_text,
             }
         )
     except Exception:
@@ -6300,24 +6451,37 @@ class _BacklogServer(threading.Thread):
                                 except Exception:
                                     items = []
                                 if isinstance(items, dict):
-                                    items = list(items.values())
+                                    normalized_items = []
+                                    for item_key, item_value in items.items():
+                                        if isinstance(item_value, dict):
+                                            item = dict(item_value)
+                                            item.setdefault("public_key", item_key)
+                                        else:
+                                            item = item_value
+                                        normalized_items.append(item)
+                                    items = normalized_items
                                 for c in (items or []):
                                     try:
                                         if isinstance(c, dict):
-                                            prefix = c.get("prefix") or c.get("key_prefix") or c.get("pubkey_prefix") or c.get("id") or c.get("key")
+                                            public_key = c.get("public_key") or c.get("pubkey") or c.get("key") or c.get("key_prefix") or c.get("pubkey_prefix")
+                                            display_id = c.get("id") or c.get("prefix")
                                             name = c.get("name") or c.get("alias") or c.get("label")
                                             last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("seen") or c.get("ts")
                                         else:
-                                            prefix = getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None) or getattr(c, "prefix", None) or getattr(c, "id", None)
+                                            public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None) or getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None)
+                                            display_id = getattr(c, "id", None) or getattr(c, "prefix", None)
                                             name = getattr(c, "name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
                                             last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "seen", None)
 
-                                        prefix = (str(prefix).strip() if prefix is not None else "")
-                                        if not prefix:
+                                        dm_key = (str(public_key).strip() if public_key is not None else "")
+                                        display_id = (str(display_id).strip() if display_id is not None else "") or dm_key[:12]
+                                        if not dm_key:
                                             continue
 
                                         contacts.append({
-                                            "prefix": prefix,
+                                            "prefix": display_id,
+                                            "dm_key": dm_key,
+                                            "public_key": dm_key,
                                             "name": (str(name).strip() if name is not None else "") or None,
                                             "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
                                         })
@@ -6330,10 +6494,10 @@ class _BacklogServer(threading.Thread):
                         seen = set()
                         uniq = []
                         for d in contacts:
-                            pfx = d.get("prefix")
-                            if not pfx or pfx in seen:
+                            key = d.get("dm_key") or d.get("public_key") or d.get("prefix")
+                            if not key or key in seen:
                                 continue
-                            seen.add(pfx)
+                            seen.add(key)
                             uniq.append(d)
 
                         resp = {"ok": True, "count": len(uniq), "contacts": uniq}
@@ -9408,8 +9572,10 @@ def is_broker_paused() -> bool:
 # ===================== main() =====================
 
 def main():
+    _load_dotenv_runtime()
+    _apply_radio_profile_runtime(verbose=_env_truthy("RADIO_PROFILE_VERBOSE", "0"))
     ap = argparse.ArgumentParser(description="Broker JSONL para Meshtastic (v3.3, salida limpia + inferencias)")
-    ap.add_argument("--host", required=True, help="IP o hostname del nodo Meshtastic (TCPInterface)")
+    ap.add_argument("--host", default=(os.getenv("MESHTASTIC_HOST") or os.getenv("MESH_NODE_HOST") or ""), help="IP o hostname del nodo Meshtastic (TCPInterface)")
     ap.add_argument("--bind", default="127.0.0.1", help="IP local para escuchar clientes JSONL")
     ap.add_argument("--port", type=int, default=8765, help="Puerto local para escuchar clientes JSONL")
     ap.add_argument("--heartbeat", type=int, default=15, help="Segundos entre heartbeats JSONL")
@@ -9461,6 +9627,13 @@ def main():
         ap.add_argument("--reconnect", dest="reconnect", action="store_true", default=True)
 
     args = ap.parse_args()
+    meshcore_only = _is_meshcore_only_profile()
+    if not args.host and not meshcore_only:
+        ap.error("--host es obligatorio salvo con RADIO_PROFILE=meshcore_only")
+
+    # Reaplica tras parsear por si el proceso recibió variables desde .env o CLI indirecta.
+    globals()["RADIO_PROFILE_RUNTIME"] = _apply_radio_profile_runtime(verbose=bool(getattr(args, "verbose", False)))
+    meshcore_only = _is_meshcore_only_profile()
 
     # === [NUEVO v7.0.14A] aplicar bridge_config.json como overlay seguro =====
     # Debe ejecutarse muy pronto para que BRIDGE_ENABLED, MESHCORE_ENABLE, mapas,
@@ -9471,6 +9644,9 @@ def main():
         getattr(args, "bridge_config", None),
         verbose=bool(getattr(args, "verbose", False)),
     )
+    if meshcore_only:
+        # RADIO_PROFILE debe tener prioridad sobre cualquier overlay JSON heredado.
+        globals()["RADIO_PROFILE_RUNTIME"] = _apply_radio_profile_runtime(verbose=bool(getattr(args, "verbose", False)))
 
     # En el perfil invertido, nodes.B es el Meshtastic embebido que controla el
     # broker. Aplicamos su host resuelto al argumento runtime para que el JSON
@@ -9500,25 +9676,28 @@ def main():
     SHOW_HEARTBEATS = bool(getattr(args, "show_heartbeats", False))
     install_heartbeat_log_filter()
 
-    # === [NUEVO] blindaje contra 10053/10054 en hilos internos del SDK
-    install_meshtastic_send_guards(verbose=args.verbose)
+    if meshcore_only:
+        print("[radio-profile] meshcore_only: no se inicializan guards ni pool TCP Meshtastic", flush=True)
+    else:
+        # === [NUEVO] blindaje contra 10053/10054 en hilos internos del SDK
+        install_meshtastic_send_guards(verbose=args.verbose)
 
-  # === [NUEVO] Aviso de guards activos (y asegurar parche del pool persistente)
-    try:
-        import tcpinterface_persistent  # asegura guards del pool/reconexión
-        print("🛡️ Guards anti-heartbeat activos (sendHeartbeat protegido).", flush=True)
-    except Exception as e:
-        print(f"⚠️ No se pudo activar guards anti-heartbeat: {e}", flush=True)
+      # === [NUEVO] Aviso de guards activos (y asegurar parche del pool persistente)
+        try:
+            import tcpinterface_persistent  # asegura guards del pool/reconexión
+            print("🛡️ Guards anti-heartbeat activos (sendHeartbeat protegido).", flush=True)
+        except Exception as e:
+            print(f"⚠️ No se pudo activar guards anti-heartbeat: {e}", flush=True)
 
-    # === [NUEVO] Reenlazar el alias local TCPInterface al wrapper del pool ===
-    try:
-        import meshtastic.tcp_interface as _tcp_mod
-        TCPInterface = getattr(_tcp_mod, "TCPInterface")
-        if args.verbose:
-            print("ℹ️ Broker: TCPInterface enlazado al pool persistente.", flush=True)
-    except Exception as e:
-        if args.verbose:
-            print(f"⚠️ No se pudo enlazar TCPInterface del broker al pool: {e}", flush=True)
+        # === [NUEVO] Reenlazar el alias local TCPInterface al wrapper del pool ===
+        try:
+            import meshtastic.tcp_interface as _tcp_mod
+            TCPInterface = getattr(_tcp_mod, "TCPInterface")
+            if args.verbose:
+                print("ℹ️ Broker: TCPInterface enlazado al pool persistente.", flush=True)
+        except Exception as e:
+            if args.verbose:
+                print(f"⚠️ No se pudo enlazar TCPInterface del broker al pool: {e}", flush=True)
 
 
     # === MODIFICADO: fijar host/port runtime para las tareas
@@ -9550,7 +9729,10 @@ def main():
     # === NUEVO: iniciar scheduler de tareas ===
     init_broker_tasks()
 
-    print(f"🟢 Broker v7.0.0 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
+    if meshcore_only:
+        print(f"🟢 Broker v7.0.0 listo en RADIO_PROFILE=meshcore_only; sirviendo en {args.bind}:{args.port}", flush=True)
+    else:
+        print(f"🟢 Broker v7.0.0 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
     print("   Clientes pueden conectarse por TCP y leer líneas JSONL (una por evento).", flush=True)
 
     # === [NUEVO] Inicializar motor BBS (broker-side) ======================================
@@ -9626,30 +9808,37 @@ def main():
     # ======================================================================================
 
 
-    # Gestor de conexión (autoreconexión)
-    iface_mgr = InterfaceManager(host=args.host, verbose=args.verbose, enable_reconnect=bool(getattr(args, "reconnect", True)))
-    iface_mgr.start()
+    # Gestor de conexión Meshtastic (autoreconexión). En meshcore_only no se
+    # crea TCPInterface, no hay receptor Meshtastic y no se suscriben hooks del SDK.
+    iface_mgr = None
+    receiver = None
+    if meshcore_only:
+        globals()["BROKER_IFACE_MGR"] = None
+        print("[radio-profile] meshcore_only: interfaz Meshtastic completamente desactivada", flush=True)
+    else:
+        iface_mgr = InterfaceManager(host=args.host, verbose=args.verbose, enable_reconnect=bool(getattr(args, "reconnect", True)))
+        iface_mgr.start()
 
-    # === NUEVO: exponer el gestor al resto del módulo (tareas, etc.)
-    globals()["BROKER_IFACE_MGR"] = iface_mgr
-    
-    # Receptor y suscripciones pubsub
-    receiver = MeshReceiver(
-        hub, stats, verbose=args.verbose,
-        assume_primary=bool(getattr(args, "assume_primary", True)),
-        assume_rfslot=bool(getattr(args, "assume_rfslot", True)),
-        iface_mgr=iface_mgr,
-        debug_packets=bool(getattr(args, "debug_packets", False)),
-        text_only=bool(getattr(args, "text_only", False)),
-    )
-    receiver.assume_user_primary = True
+        # === NUEVO: exponer el gestor al resto del módulo (tareas, etc.)
+        globals()["BROKER_IFACE_MGR"] = iface_mgr
 
-    pub.subscribe(receiver._on_rx, "meshtastic.receive")
-    pub.subscribe(receiver._on_connection, "meshtastic.connection.established")
-    pub.subscribe(receiver._on_disconnect, "meshtastic.connection.lost")
-    
+        # Receptor y suscripciones pubsub
+        receiver = MeshReceiver(
+            hub, stats, verbose=args.verbose,
+            assume_primary=bool(getattr(args, "assume_primary", True)),
+            assume_rfslot=bool(getattr(args, "assume_rfslot", True)),
+            iface_mgr=iface_mgr,
+            debug_packets=bool(getattr(args, "debug_packets", False)),
+            text_only=bool(getattr(args, "text_only", False)),
+        )
+        receiver.assume_user_primary = True
+
+        pub.subscribe(receiver._on_rx, "meshtastic.receive")
+        pub.subscribe(receiver._on_connection, "meshtastic.connection.established")
+        pub.subscribe(receiver._on_disconnect, "meshtastic.connection.lost")
+
     # === [NUEVO] Arranque condicional de la pasarela embebida al establecer conexión ===
-    
+
     def _start_or_verify_embedded_on_connection(interface=None, **kwargs):
         """
         Arranca los servicios embebidos cuando aún no existen y, en reconexiones
@@ -9707,8 +9896,9 @@ def main():
         except Exception as e:
             print(f"[bridge] hook embedded ERROR: {type(e).__name__}: {e}", flush=True)
 
-    # Suscribir el hook al evento de conexión establecida
-    pub.subscribe(_start_or_verify_embedded_on_connection, "meshtastic.connection.established")
+    # Suscribir el hook al evento de conexión establecida solo si existe interfaz Meshtastic.
+    if not meshcore_only:
+        pub.subscribe(_start_or_verify_embedded_on_connection, "meshtastic.connection.established")
 
     # === [NUEVO v7.0.14] Arranque autónomo de B MeshCore =====================
     # Punto crítico: si A Meshtastic no establece TCP, el evento
@@ -9716,11 +9906,14 @@ def main():
     # debe arrancar aquí, de forma independiente, antes de lanzar/reintentar A.
     _start_meshcore_embedded_autonomous("broker.startup.autonomous")
 
-    # Lanzar primera conexión
-    iface_mgr.signal_disconnect()
+    # Lanzar primera conexión Meshtastic si procede.
+    if iface_mgr is not None:
+        iface_mgr.signal_disconnect()
 
-    # Heartbeat (estadísticas internas del broker)
-    hb = HeartbeatThread(hub, stats, every_s=args.heartbeat, target_host=args.host, verbose=args.verbose)
+    # Heartbeat (estadísticas internas del broker). En meshcore_only se etiqueta
+    # como MeshCore para no sugerir conexión a un nodo Meshtastic inexistente.
+    hb_target = "meshcore_only" if meshcore_only else args.host
+    hb = HeartbeatThread(hub, stats, every_s=args.heartbeat, target_host=hb_target, verbose=args.verbose)
     hb.start()
 
     try:
@@ -9731,7 +9924,8 @@ def main():
     finally:
         hb.stop()
         srv.stop()
-        iface_mgr.stop()
+        if iface_mgr is not None:
+            iface_mgr.stop()
         try:
             bridge_stop_in_broker()
         except Exception:
