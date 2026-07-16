@@ -30,6 +30,63 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 # MeshNet — Changelog Consolidado
 
+# CHANGELOG — /enviar y /enviar_mc con selección de transporte Mesh/APRS
+
+## v7.0.12-enviar-aprs-transporte
+
+### Añadido
+
+- `/enviar` permite elegir explícitamente el transporte igual que `/diario`:
+  - `mesh` / `malla` / `meshtastic`: solo malla Meshtastic.
+  - `aprs`: solo APRS.
+  - `ambos` / `both`: Meshtastic + APRS.
+- `/enviar_mc` permite la misma selección de transporte aplicada a MeshCore:
+  - `mesh` / `malla` / `meshcore` / `mc`: solo malla MeshCore.
+  - `aprs`: solo APRS.
+  - `ambos` / `both`: MeshCore + APRS.
+- En modo `ambos`, se puede indicar el destino APRS justo después del destino de malla con `aprs <CALL|broadcast>`:
+
+```text
+/enviar ambos canal 0 aprs EB2ABC-7 Aviso enviado a Meshtastic y APRS
+/enviar_mc ambos ch2 aprs broadcast Aviso enviado a MeshCore y APRS
+```
+
+- Si no se especifica destino APRS en modo `ambos`, el destino APRS por defecto es `broadcast`.
+- En modo `aprs`, el comando no envía a la malla; solo manda a la pasarela APRS por UDP usando el mismo troceo que `/aprs`.
+- Las respuestas del bot ahora muestran claramente:
+  - `Transporte: MESH`, `Transporte: APRS` o `Transporte: BOTH`.
+  - Resultado de la malla Meshtastic o MeshCore.
+  - Resultado APRS, destino APRS y número de partes APRS enviadas.
+
+### Sintaxis rápida
+
+```text
+/enviar [mesh|aprs|ambos] <destino[:canal] | canal N> [aprs <CALL|broadcast>] <texto>
+/enviar_mc [mesh|aprs|ambos] <chX|X|canal X> [aprs <CALL|broadcast>] <texto>
+```
+
+### Ejemplos y resultado esperado
+
+| Comando | Sale por | Resultado mostrado |
+|---|---|---|
+| `/enviar canal 0 Hola malla` | Meshtastic | `Transporte: MESH`, destino de malla, resultado Meshtastic |
+| `/enviar mesh canal 0 Hola malla` | Meshtastic | Igual que el modo clásico, pero indicando transporte |
+| `/enviar aprs EB2ABC-7: Hola APRS` | APRS | `Transporte: APRS`, destino APRS y partes enviadas |
+| `/enviar ambos canal 0 aprs EB2ABC-7 Hola doble` | Meshtastic + APRS | Resultado Meshtastic y resultado APRS separados |
+| `/enviar_mc ch2 Hola MeshCore` | MeshCore | `Transporte: MESH`, canal MeshCore y resultado MeshCore |
+| `/enviar_mc aprs broadcast: Hola APRS` | APRS | Solo APRS, sin enviar a MeshCore |
+| `/enviar_mc ambos ch2 aprs EB2ABC-7 Hola doble` | MeshCore + APRS | Resultado MeshCore y resultado APRS separados |
+
+### Conservado
+
+- La sintaxis clásica de `/enviar canal N texto` y `/enviar <nodo|alias> texto` sigue funcionando.
+- La sintaxis clásica de `/enviar_mc chX texto`, `/enviar_mc X texto` y `/enviar_mc canal X texto` sigue funcionando.
+- `/diario` conserva su comportamiento y sirve como referencia para los modos `mesh`, `aprs` y `ambos`.
+- `/aprs` sigue disponible como comando especializado de APRS.
+- El envío APRS se trocea con `APRS_MAX_LEN` para respetar el límite de trama configurado.
+
+---
+
 # CHANGELOG — Programación diaria MeshCore
 
 ## v7.0.11-diario-meshcore
@@ -984,15 +1041,220 @@ Crea un archivo `.env` en la raíz (puedes partir de `.env-example.txt`). Mínim
       /en 5,10,25 canal 0 Mensaje      ← múltiples envíos programados
 ```
 
-### Envío directo 
+### Envío directo con `/enviar`: Meshtastic, APRS o ambos
+
+`/enviar` es el comando de envío inmediato para Meshtastic y, desde esta versión, también puede seleccionar APRS o doble salida igual que `/diario`.
+
+#### Sintaxis
+
 ```text
-  /enviar canal <n> <texto>
-    /enviar <número|!id|alias> <texto>
-    - NO refresca nodos ni llama a API; usa sólo nodos.txt (cargar_aliases_desde_nodes).
-    - Envío priorizando la cola del BROKER (dispara bridge A→B) con fallback al pool y adapter resiliente.
-    - Broadcast (node_id=None) sin ACK; unicast sin ACK aquí (para evitar duplicados).
-    - Añade feedback local: '✅ Nodo local confirmó transmisión' si ok y hay packet_id.
+/enviar [mesh|aprs|ambos] <destino[:canal] | canal N> [aprs <CALL|broadcast>] <texto…>
 ```
+
+#### Transportes aceptados
+
+| Transporte | Alias aceptados | Qué hace |
+|---|---|---|
+| `mesh` | `malla`, `meshtastic` | Envía solo a la malla Meshtastic. Es el modo por defecto si no pones transporte. |
+| `aprs` | `aprs-only`, `solo-aprs` | Envía solo a APRS mediante la pasarela APRS por UDP. No envía a Meshtastic. |
+| `ambos` | `both`, `mesh+aprs`, `aprs+mesh` | Envía a la malla Meshtastic y también a APRS. |
+
+#### Destino Meshtastic
+
+Se mantiene la sintaxis clásica:
+
+```text
+/enviar canal 0 Texto al canal 0
+/enviar mesh canal 2 Texto al canal 2
+/enviar !b03df4cc Texto directo al nodo
+/enviar alias_del_nodo Texto directo al alias
+/enviar broadcast:1 Texto broadcast en canal 1
+```
+
+- `canal N` envía en broadcast por el canal lógico Meshtastic `N`.
+- `<destino>:<canal>` permite forzar canal junto al destino.
+- `<número|!id|alias>` envía al nodo indicado.
+- `forzado` al inicio mantiene el comportamiento anterior para omitir comprobaciones previas cuando corresponda.
+
+#### Destino APRS
+
+En modo `aprs`, el destino se interpreta como APRS:
+
+```text
+/enviar aprs EB2ABC-7: Mensaje APRS directo
+/enviar aprs broadcast: Mensaje APRS broadcast/status
+/enviar aprs EB2ABC-7 Mensaje APRS directo
+```
+
+En modo `ambos`, el destino APRS se puede añadir tras el destino Meshtastic con el modificador `aprs <CALL|broadcast>`:
+
+```text
+/enviar ambos canal 0 aprs EB2ABC-7 Aviso para malla y APRS
+/enviar ambos !b03df4cc aprs broadcast Aviso a nodo Meshtastic y APRS broadcast
+/enviar both canal 2 aprs broadcast Mensaje doble
+```
+
+Si en modo `ambos` no se indica `aprs <CALL|broadcast>`, APRS usa `broadcast` por defecto.
+
+#### Ejemplos completos y resultado esperado
+
+| Ejemplo | Salida real | Respuesta esperada del bot |
+|---|---|---|
+| `/enviar canal 0 Hola malla` | Solo Meshtastic canal 0 | `Transporte: MESH`, destino malla `broadcast`, resultado Meshtastic. |
+| `/enviar mesh canal 1 Reunión a las 18:00` | Solo Meshtastic canal 1 | `Transporte: MESH`, canal 1, resultado `OK` o `KO`. |
+| `/enviar aprs EB2ABC-7: Prueba APRS` | Solo APRS a `EB2ABC-7` | `Transporte: APRS`, destino APRS, partes enviadas. |
+| `/enviar aprs broadcast: Estado desde bot` | Solo APRS broadcast/status | `Transporte: APRS`, destino `broadcast`, partes enviadas. |
+| `/enviar ambos canal 0 aprs EB2ABC-7 Aviso doble` | Meshtastic canal 0 + APRS a `EB2ABC-7` | Resultado Meshtastic y resultado APRS separados. |
+| `/enviar ambos canal 0 Aviso doble sin destino APRS` | Meshtastic canal 0 + APRS broadcast | Resultado Meshtastic y APRS con destino `broadcast`. |
+
+#### Resultado mostrado
+
+Cuando el envío es por malla, el bot muestra una respuesta similar a:
+
+```text
+✉️ Envío a broadcast (canal 0)
+Transporte: MESH
+Malla Meshtastic → Destino: broadcast
+Traceroute: —  Hops: 0
+Forzado: No
+Resultado: OK (broker-queue)
+Respuestas en 5s: 0
+```
+
+Cuando el envío es solo APRS:
+
+```text
+✉️ Envío Meshtastic/APRS
+Transporte: APRS
+APRS → Destino: EB2ABC-7
+Resultado APRS: OK (1/1 partes)
+```
+
+Cuando el envío es a ambos:
+
+```text
+✉️ Envío a broadcast (canal 0)
+Transporte: BOTH
+Malla Meshtastic → Destino: broadcast
+Resultado: OK (broker-queue)
+Respuestas en 5s: 0
+APRS → Destino: EB2ABC-7
+Resultado APRS: OK (1/1 partes)
+```
+
+#### Notas operativas
+
+- El modo clásico sin prefijo sigue funcionando y equivale a `mesh`.
+- El envío Meshtastic prioriza la cola del broker, mantiene fallback al pool persistente y al adapter resiliente.
+- Broadcast Meshtastic no solicita ACK de aplicación para evitar duplicados.
+- APRS se envía por la pasarela configurada en `APRS_CTRL_HOST` / `APRS_CTRL_PORT`.
+- APRS divide mensajes largos según `APRS_MAX_LEN`.
+- En modo `ambos`, el texto enviado a APRS es el texto limpio del mensaje, no el comando de Telegram.
+
+### Envío directo con `/enviar_mc`: MeshCore, APRS o ambos
+
+`/enviar_mc` es el envío inmediato por canal MeshCore. También puede seleccionar si el mensaje sale solo por MeshCore, solo por APRS o por ambos transportes.
+
+#### Sintaxis
+
+```text
+/enviar_mc [mesh|aprs|ambos] <chX|X|canal X> [aprs <CALL|broadcast>] <texto…>
+/enviar_mc aprs <CALL|broadcast>: <texto…>
+```
+
+#### Transportes aceptados
+
+| Transporte | Alias aceptados | Qué hace |
+|---|---|---|
+| `mesh` | `malla`, `meshcore`, `mc` | Envía solo a MeshCore. Es el modo por defecto si no pones transporte. |
+| `aprs` | `aprs-only`, `solo-aprs` | Envía solo a APRS. No envía a MeshCore ni necesita canal MeshCore. |
+| `ambos` | `both`, `mesh+aprs`, `aprs+mesh` | Envía a MeshCore y también a APRS. |
+
+#### Destino MeshCore
+
+Se mantiene la sintaxis clásica:
+
+```text
+/enviar_mc ch2 Texto por MeshCore
+/enviar_mc [ch2] Texto por MeshCore
+/enviar_mc 2 Texto por MeshCore
+/enviar_mc canal 2 Texto por MeshCore
+/enviar_mc mesh ch2 Texto por MeshCore
+```
+
+- `ch2`, `[ch2]`, `2` y `canal 2` son formas equivalentes para `channel_idx=2`.
+- El envío se ejecuta mediante el broker con `MESHCORE_SEND`.
+- Este comando es para canales MeshCore; para mensajes directos a contacto se mantiene `/enviar_mc_dm` / `/dm_mc`.
+
+#### Destino APRS
+
+En modo solo APRS:
+
+```text
+/enviar_mc aprs EB2ABC-7: Mensaje APRS desde comando MeshCore
+/enviar_mc aprs broadcast: Mensaje APRS broadcast/status
+/enviar_mc aprs EB2ABC-7 Mensaje APRS sin dos puntos
+```
+
+En modo `ambos`, el destino APRS se puede indicar tras el canal MeshCore con `aprs <CALL|broadcast>`:
+
+```text
+/enviar_mc ambos ch2 aprs EB2ABC-7 Mensaje MeshCore y APRS
+/enviar_mc ambos canal 2 aprs broadcast Mensaje MeshCore y APRS broadcast
+/enviar_mc both 2 aprs EB2ABC-7 Mensaje doble
+```
+
+Si en modo `ambos` no se indica destino APRS, APRS usa `broadcast` por defecto.
+
+#### Ejemplos completos y resultado esperado
+
+| Ejemplo | Salida real | Respuesta esperada del bot |
+|---|---|---|
+| `/enviar_mc ch2 Hola MeshCore` | Solo MeshCore canal 2 | `Transporte: MESH`, canal MeshCore y resultado MeshCore. |
+| `/enviar_mc mesh canal 2 Hola MeshCore` | Solo MeshCore canal 2 | Igual que el modo clásico, indicando transporte. |
+| `/enviar_mc aprs EB2ABC-7: Hola APRS` | Solo APRS | `Transporte: APRS`, destino APRS y partes enviadas. |
+| `/enviar_mc aprs broadcast: Estado APRS` | Solo APRS broadcast/status | Resultado APRS con destino `broadcast`. |
+| `/enviar_mc ambos ch2 aprs EB2ABC-7 Hola doble` | MeshCore canal 2 + APRS a `EB2ABC-7` | Resultado MeshCore y APRS separados. |
+| `/enviar_mc ambos ch2 Hola doble sin destino APRS` | MeshCore canal 2 + APRS broadcast | Resultado MeshCore y APRS con destino `broadcast`. |
+
+#### Resultado mostrado
+
+Solo MeshCore:
+
+```text
+Envío MeshCore
+Transporte: MESH
+Malla MeshCore → Canal (channel_idx): 2
+Resultado MeshCore: OK
+```
+
+Solo APRS:
+
+```text
+Envío MeshCore/APRS
+Transporte: APRS
+APRS → Destino: EB2ABC-7
+Resultado APRS: OK (1/1 partes)
+```
+
+MeshCore + APRS:
+
+```text
+Envío MeshCore
+Transporte: BOTH
+Malla MeshCore → Canal (channel_idx): 2
+Resultado MeshCore: OK
+APRS → Destino: EB2ABC-7
+Resultado APRS: OK (1/1 partes)
+```
+
+#### Notas operativas
+
+- El modo clásico sin prefijo sigue funcionando y equivale a `mesh`.
+- En modo `aprs`, no se exige canal MeshCore porque no hay envío MeshCore.
+- En modo `ambos`, el texto enviado a APRS es el texto limpio del mensaje, no el comando de Telegram.
+- APRS se envía por la pasarela configurada en `APRS_CTRL_HOST` / `APRS_CTRL_PORT`.
+- APRS divide mensajes largos según `APRS_MAX_LEN`.
 
 ### Envío directo con ACK
 ```text
@@ -1380,6 +1642,12 @@ Los servicios están definidos para que:
 2) **APRS**
 
 - Con TNC activo, desde el bot: `/aprs 0 Hola APRS` ⇒ deberías ver la trama en el TNC.
+- También puedes probar APRS desde los comandos de envío:
+  - `/enviar aprs broadcast: Prueba APRS desde enviar` ⇒ solo APRS.
+  - `/enviar ambos canal 0 aprs broadcast Prueba doble` ⇒ Meshtastic + APRS.
+  - `/enviar_mc aprs broadcast: Prueba APRS desde MeshCore` ⇒ solo APRS.
+  - `/enviar_mc ambos ch2 aprs broadcast Prueba doble MeshCore` ⇒ MeshCore + APRS.
+- En respuestas correctas verás `Transporte: APRS` o `Transporte: BOTH`, destino APRS y contador de partes.
 - Para uplink APRS‑IS: define `APRSIS_USER` y `APRSIS_PASSCODE`; solo suben **posiciones** con `[CHx]`.
 
 3) **Programación**
