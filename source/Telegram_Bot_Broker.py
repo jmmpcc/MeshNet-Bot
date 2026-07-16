@@ -6221,9 +6221,9 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("ayuda", "Ayuda completa (comandos y parámetros)"),
         BotCommand("start", "Mostrar menú principal"),
         BotCommand("menu", "Abrir menú principal"),
-        BotCommand("enviar", "Enviar a nodo/broadcast (canal, alias, forzado)"),
+        BotCommand("enviar", "Enviar Meshtastic/APRS: [mesh|aprs|ambos] destino texto"),
         BotCommand("enviar_ack", "Enviar con ACK (reintentos)"),
-        BotCommand("enviar_mc", "Enviar a MeshCore (channel_idx): /enviar_mc ch2 <texto>"),
+        BotCommand("enviar_mc", "Enviar MeshCore/APRS: [mesh|aprs|ambos] chX texto"),
         BotCommand("enviar_mc_dm", "Enviar DM MeshCore: /dm_mc <prefix|N|[MC:prefix]> <texto...>"),
         BotCommand("mc_contactos", "Contactos MeshCore numerados con botones DM: /mc_contactos [n]"),
         BotCommand("escuchar", "Escuchar broker (canal/all)"),
@@ -6479,25 +6479,36 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     s_mensajeria_mesh = (
         "────────────────────────────────────────────────\n"
-        "<b>Mensajería Meshtastic</b>\n"
-        "• <code>/enviar &lt;destino[:canal]&gt; &lt;texto&gt;</code> — Envía texto normal.\n"
-        "• <code>/enviar canal &lt;N&gt; &lt;texto&gt;</code> — Broadcast implícito por el canal indicado.\n"
+        "<b>Mensajería Meshtastic / APRS inmediata</b>\n"
+        "• <code>/enviar [mesh|aprs|ambos] &lt;destino[:canal] | canal N&gt; [aprs &lt;CALL|broadcast&gt;] &lt;texto&gt;</code> — Envía por malla, solo APRS o ambos.\n"
+        "• <code>mesh</code>/<code>malla</code>/<code>meshtastic</code> — Solo Meshtastic; es el modo por defecto si no indicas transporte.\n"
+        "• <code>aprs</code> — Solo APRS por la pasarela; no envía a la malla.\n"
+        "• <code>ambos</code>/<code>both</code> — Meshtastic + APRS. Si no añades destino APRS usa <code>broadcast</code>.\n"
+        "• <code>/enviar canal &lt;N&gt; &lt;texto&gt;</code> — Sintaxis clásica: broadcast Meshtastic por canal.\n"
         "• <code>/enviar_ack &lt;destino[:canal]&gt; &lt;texto&gt; [reintentos=N espera=S backoff=X]</code> — Envía solicitando ACK.\n"
         "Ej.: <code>/enviar canal 0 Buenos dias</code>\n"
-        "Ej.: <code>/enviar !b03df4cc:2 Mensaje directo</code>\n"
+        "Ej.: <code>/enviar mesh !b03df4cc:2 Mensaje directo</code>\n"
+        "Ej.: <code>/enviar aprs EB2ABC-7: Aviso solo APRS</code>\n"
+        "Ej.: <code>/enviar ambos canal 0 aprs EB2ABC-7 Aviso doble</code>\n"
+        "Resultado: muestra <code>Transporte: MESH|APRS|BOTH</code>, destino de malla y/o destino APRS, y partes APRS enviadas.\n"
         "Ej.: <code>/enviar_ack !b03df4cc:1 Confirmar enlace reintentos=4 espera=10 backoff=1.5</code>\n"
     )
 
     s_mensajeria_mc = (
         "────────────────────────────────────────────────\n"
-        "<b>Mensajería MeshCore</b>\n"
-        "• <code>/enviar_mc &lt;canal_meshtastic&gt; &lt;texto&gt;</code> — Envía hacia MeshCore usando el mapeo Meshtastic→MeshCore configurado.\n"
-        "• <code>/enviar_mc canal &lt;channel_idx&gt; &lt;texto&gt;</code> — Envía a un canal MeshCore concreto.\n"
+        "<b>Mensajería MeshCore / APRS inmediata</b>\n"
+        "• <code>/enviar_mc [mesh|aprs|ambos] &lt;chX|X|canal X&gt; [aprs &lt;CALL|broadcast&gt;] &lt;texto&gt;</code> — Envía por MeshCore, solo APRS o ambos.\n"
+        "• <code>mesh</code>/<code>malla</code>/<code>meshcore</code>/<code>mc</code> — Solo MeshCore; es el modo por defecto si no indicas transporte.\n"
+        "• <code>aprs</code> — Solo APRS y no necesita canal MeshCore: <code>/enviar_mc aprs CALL: texto</code>.\n"
+        "• <code>ambos</code>/<code>both</code> — MeshCore + APRS. Si no añades destino APRS usa <code>broadcast</code>.\n"
+        "• <code>/enviar_mc ch2 texto</code>, <code>/enviar_mc 2 texto</code> y <code>/enviar_mc canal 2 texto</code> — Sintaxis clásica hacia <code>channel_idx=2</code>.\n"
         "• <code>/enviar_mc_dm &lt;contact_prefix|[MC:prefix]|N&gt; &lt;texto&gt;</code> — Envía directo a un contacto MeshCore. <code>N</code> funciona después de ejecutar <code>/mc_contactos</code>.\n"
         "• <code>/dm_mc</code> — Alias corto de <code>/enviar_mc_dm</code>.\n"
         "• <code>/mc_contactos [max]</code> — Lista contactos MeshCore en formato numerado, muestra botones <b>DM</b> y guarda los números para usarlos con <code>/dm_mc N texto</code>.\n"
         "Ej.: <code>/enviar_mc canal 1 Aviso por MeshCore</code>\n"
-        "Ej.: <code>/enviar_mc 4 Mensaje usando mapa CH→MeshCore</code>\n"
+        "Ej.: <code>/enviar_mc aprs EB2ABC-7: Aviso solo APRS</code>\n"
+        "Ej.: <code>/enviar_mc ambos ch2 aprs broadcast Aviso doble</code>\n"
+        "Resultado: muestra <code>Transporte: MESH|APRS|BOTH</code>, canal MeshCore y/o destino APRS, y partes APRS enviadas.\n"
         "Ej.: <code>/mc_contactos 20</code>\n"
         "Ej.: <code>/dm_mc 3 Mensaje directo al contacto 3</code>\n"
         "Ej.: <code>/enviar_mc_dm 6a18cb3d125b Mensaje directo</code>\n"
@@ -8738,13 +8749,14 @@ def _meshcore_delay_should_apply(used_path: str | None = None) -> bool:
 
 async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /enviar_mc [chX] <texto...>
-    /enviar_mc chX <texto...>
-    /enviar_mc X <texto...>
-    /enviar_mc canal X <texto...>
+    /enviar_mc [mesh|aprs|ambos] [chX] <texto...>
+    /enviar_mc [mesh|aprs|ambos] chX <texto...>
+    /enviar_mc [mesh|aprs|ambos] X <texto...>
+    /enviar_mc [mesh|aprs|ambos] canal X <texto...>
+    /enviar_mc aprs <CALL|broadcast>: <texto...>
 
-    Envia hacia MeshCore (channel_idx) usando el broker como ejecutor (24/7).
-    No toca nada del envío Meshtastic (/enviar).
+    Envía hacia MeshCore (channel_idx), APRS o ambos.
+    MeshCore usa el broker como ejecutor (24/7).
     """
     # Respeta el mismo “cooldown guard” que /enviar (si lo tienes activo)
     if await _abort_if_cooldown(update, context):
@@ -8810,7 +8822,9 @@ async def enviar_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Parámetros no válidos.\n"
             "Ejemplos:\n"
             "• /enviar_mc ch2 hola\n"
-            "• /enviar_mc canal 2 hola"
+            "• /enviar_mc canal 2 hola\n"
+            "• /enviar_mc aprs EB2ABC-7: hola\n"
+            "• /enviar_mc ambos ch2 aprs broadcast hola"
         )
         return
 
@@ -9058,8 +9072,9 @@ async def enviar_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    /enviar canal <n> <texto>
-    /enviar <número|!id|alias> <texto>
+    /enviar [mesh|aprs|ambos] canal <n> [aprs <CALL|broadcast>] <texto>
+    /enviar [mesh|aprs|ambos] <número|!id|alias> [aprs <CALL|broadcast>] <texto>
+    /enviar aprs <CALL|broadcast>: <texto>
     - NO refresca nodos ni llama a API; usa sólo nodos.txt (cargar_aliases_desde_nodes).
     - Envío priorizando la cola del BROKER (dispara bridge A→B) con fallback al pool y adapter resiliente.
     - Broadcast (node_id=None) sin ACK; unicast sin ACK aquí (para evitar duplicados).
@@ -9148,9 +9163,11 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not texto:
         await msg.reply_text(
             "Uso:\n"
+            "• <b>/enviar [mesh|aprs|ambos]</b> <i>destino[:canal] | canal N</i> [<b>aprs</b> <i>CALL|broadcast</i>] <i>texto</i>\n"
             "• <b>/enviar canal 0</b> <i>texto</i>\n"
-            "• <b>/enviar</b> <i>número|!id|alias</i> <i>texto</i>\n"
-            "Añade <b>forzado</b> al inicio para omitir traceroute previo.",
+            "• <b>/enviar aprs EB2ABC-7:</b> <i>texto</i>\n"
+            "• <b>/enviar ambos canal 0 aprs broadcast</b> <i>texto</i>\n"
+            "Añade <b>forzado</b> al inicio para omitir traceroute previo en envíos de malla.",
             parse_mode="HTML"
         )
         return ConversationHandler.END
