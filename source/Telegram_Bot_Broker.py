@@ -42,6 +42,15 @@ import broker_task as broker_tasks
 import html
 
 
+def _radio_profile() -> str:
+    """Devuelve el perfil de radio activo normalizado."""
+    return (os.getenv("RADIO_PROFILE") or os.getenv("MESHNET_PROFILE") or "meshtastic").strip().lower()
+
+
+def _is_meshcore_only_profile() -> bool:
+    """True cuando el bot se ejecuta contra un broker sólo MeshCore."""
+    return _radio_profile() == "meshcore_only"
+
 from meshtastic import tcp_interface
 from positions_store import read_positions_recent, build_kml, build_gpx
 
@@ -3606,6 +3615,42 @@ def _write_atomic(path: str, data: str, encoding: str = "utf-8") -> None:
         f.write(data)
     os.replace(tmp, path)
 
+
+def _meshcore_channels_via_ctrl(limit: int = 80, timeout: float = 3.0) -> dict:
+    """Consulta canales/grupos MeshCore al broker ctrl o al triple-bridge ctrl."""
+    try:
+        r = _broker_rpc("MESHCORE_CHANNELS", {"limit": int(limit)})
+        if isinstance(r, dict) and r.get("ok"):
+            return r
+    except Exception:
+        r = None
+
+    t_host = (os.getenv("TRIPLE_CTRL_HOST", "") or "").strip()
+    t_port = (os.getenv("TRIPLE_CTRL_PORT", "") or "").strip()
+    if not t_host or not t_port:
+        return r or {"ok": False, "error": "meshcore_channels_failed"}
+
+    payload = {"cmd": "MESHCORE_CHANNELS", "params": {"limit": int(limit)}}
+    try:
+        data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        with socket.create_connection((t_host, int(t_port)), timeout=float(timeout)) as s:
+            s.sendall(data)
+            s.settimeout(float(timeout))
+            buf = b""
+            while True:
+                b = s.recv(65536)
+                if not b:
+                    break
+                buf += b
+                if b"\n" in b:
+                    break
+        raw = buf.decode("utf-8", "ignore").strip()
+        if not raw:
+            return {"ok": False, "error": "empty response"}
+        return json.loads(raw)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
 def _meshcore_contacts_via_ctrl(limit: int = 80, timeout: float = 3.0) -> dict:
     """
     Consulta al componente remoto (broker ctrl o triple-bridge ctrl) los contactos MeshCore.
@@ -6278,6 +6323,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("enviar_mc", "Enviar MeshCore/APRS: [mesh|aprs|ambos] chX texto"),
         BotCommand("enviar_mc_dm", "Enviar DM MeshCore: /dm_mc <prefix|N|[MC:prefix]> <texto...>"),
         BotCommand("mc_contactos", "Contactos MeshCore numerados con botones DM: /mc_contactos [n]"),
+        BotCommand("canales_mc", "Ver canales MeshCore: /canales_mc [max]"),
         BotCommand("escuchar", "Escuchar broker (canal/all)"),
         BotCommand("parar_escucha", "Detener la escucha del broker"),
         BotCommand("traceroute", "Traceroute a un nodo (!id|número|alias) [Timeout] sg. espera"),
@@ -6328,9 +6374,27 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("desbloquear", "Desbloquea IDs /desbloquear <id1,id2,...>"),
         BotCommand("bridge_status", "Comprueba como está el brige operativo")
     ]
-    await app.bot.set_my_commands(default_cmds, scope=BotCommandScopeDefault())
+    meshcore_only_cmd_names = {
+        "ayuda", "start", "menu",
+        "enviar_mc", "enviar_mc_dm", "mc_contactos", "canales_mc",
+        "escuchar", "parar_escucha", "estado", "canales",
+        "diario_mc", "diario_mc_dm", "mis_diarios", "parar_diario_grupo", "parar_diario",
+        "baliza_clima", "mis_balizas", "parar_baliza",
+        "alerta_aemet", "mis_alertas_aemet", "parar_alerta_aemet",
+        "tareas", "cancelar_tarea",
+        "aprs", "aprs_on", "aprsis_push", "aprs_off",
+        "notificaciones", "broker_status", "bridge_status",
+    }
 
-    admin_cmds = default_cmds + [BotCommand("estadistica", "Uso del bot (solo admin)")]
+    if _is_meshcore_only_profile():
+        visible_cmds = [cmd for cmd in default_cmds if cmd.command in meshcore_only_cmd_names]
+        log("[radio-profile] RADIO_PROFILE=meshcore_only: menú Telegram filtrado a comandos compatibles con MeshCore")
+    else:
+        visible_cmds = default_cmds
+
+    await app.bot.set_my_commands(visible_cmds, scope=BotCommandScopeDefault())
+
+    admin_cmds = visible_cmds + [BotCommand("estadistica", "Uso del bot (solo admin)")]
     for admin_id in ADMIN_IDS:
         try:
             await app.bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=admin_id))
@@ -6557,6 +6621,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <code>/enviar_mc_dm &lt;contact_prefix|[MC:prefix]|N&gt; &lt;texto&gt;</code> — Envía directo a un contacto MeshCore. <code>N</code> funciona después de ejecutar <code>/mc_contactos</code>.\n"
         "• <code>/dm_mc</code> — Alias corto de <code>/enviar_mc_dm</code>.\n"
         "• <code>/mc_contactos [max]</code> — Lista contactos MeshCore en formato numerado, muestra botones <b>DM</b> y guarda los números para usarlos con <code>/dm_mc N texto</code>.\n"
+        "• <code>/canales_mc [max]</code> — Lista canales/grupos MeshCore disponibles para <code>/enviar_mc</code>.\n"
         "Ej.: <code>/enviar_mc canal 1 Aviso por MeshCore</code>\n"
         "Ej.: <code>/enviar_mc aprs EB2ABC-7: Aviso solo APRS</code>\n"
         "Ej.: <code>/enviar_mc ambos ch2 aprs broadcast Aviso doble</code>\n"
@@ -8943,6 +9008,55 @@ def _format_meshcore_last_seen(value: object) -> str:
     except Exception:
         return ""
 
+
+
+async def canales_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /canales_mc [max]
+    Lista canales/grupos MeshCore conocidos por el broker embebido o triple-bridge.
+    """
+    try:
+        bump_stat(update.effective_user.id, update.effective_user.username or "", "canales_mc")
+    except Exception:
+        pass
+
+    try:
+        max_n = int((context.args or [])[0]) if (context.args or []) else 80
+    except Exception:
+        max_n = 80
+    max_n = max(1, min(200, int(max_n)))
+
+    r = _meshcore_channels_via_ctrl(limit=max_n, timeout=3.5)
+    if not r.get("ok"):
+        await update.effective_message.reply_text(f"MeshCore canales: KO • {r.get('error')}")
+        return
+
+    channels = r.get("channels") or []
+    if not channels:
+        await update.effective_message.reply_text("MeshCore canales: (vacío o no expuesto por la librería)")
+        return
+
+    lines = ["📡 <b>Canales MeshCore</b>", "", "Usa <code>/enviar_mc canal &lt;channel_idx&gt; texto</code> para transmitir."]
+    for ch in channels[:max_n]:
+        try:
+            channel_idx = ch.get("channel_idx", ch.get("idx", ch.get("index", "?"))) if isinstance(ch, dict) else "?"
+            name = ch.get("name") if isinstance(ch, dict) else None
+            role = ch.get("role") if isinstance(ch, dict) else None
+            mapped = ch.get("mapped_meshtastic_ch") if isinstance(ch, dict) else None
+            enabled = ch.get("enabled") if isinstance(ch, dict) else None
+            meta = []
+            if role:
+                meta.append(str(role))
+            if mapped is not None:
+                meta.append(f"map ch {mapped}")
+            if isinstance(enabled, bool):
+                meta.append("ON" if enabled else "OFF")
+            meta_txt = f" · {' · '.join(meta)}" if meta else ""
+            lines.append(f"• <code>{escape(str(channel_idx))}</code> — <b>{escape(str(name or f'Canal {channel_idx}'))}</b>{escape(meta_txt)}")
+        except Exception:
+            continue
+
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -12538,6 +12652,10 @@ async def canales_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """
         
     bump_stat(update.effective_user.id, update.effective_user.username or "", "canales")
+    if _is_meshcore_only_profile():
+        await canales_mc_cmd(update, context)
+        return
+
     if not _mesh_is_tcp():
         await update.effective_message.reply_text(
             "⚠️ /canales solo está disponible en modo TCP/API persistente. "
@@ -17146,6 +17264,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("enviar_mc", enviar_mc_cmd))
     app.add_handler(CommandHandler(["enviar_mc_dm", "dm_mc"], enviar_mc_dm_cmd))
     app.add_handler(CommandHandler("mc_contactos", mc_contactos_cmd))
+    app.add_handler(CommandHandler(["canales_mc", "mc_canales"], canales_mc_cmd))
     
     app.add_handler(CommandHandler("enviar_ack", enviar_ack_cmd))
     app.add_handler(CommandHandler("escuchar", escuchar_cmd))

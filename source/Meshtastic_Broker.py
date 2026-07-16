@@ -1079,6 +1079,84 @@ class MeshCoreEmbeddedBridge:
             "default_contact_ch": self.default_contact_ch,
         }
 
+
+    def list_channels(self, limit: int = 80) -> list[dict]:
+        """Devuelve canales/grupos MeshCore conocidos por la sesión embebida."""
+        try:
+            max_n = max(1, min(500, int(limit)))
+        except Exception:
+            max_n = 80
+
+        mc = self._mc
+        loop = self._loop
+        if mc is None or loop is None or not loop.is_running() or not self._connected:
+            raise RuntimeError("meshcore_not_connected")
+
+        async def _fetch_channels():
+            commands = getattr(mc, "commands", None)
+            for name in ("get_channels", "list_channels", "get_channel_list", "get_groups", "list_groups"):
+                fn = getattr(commands, name, None) if commands is not None else None
+                if not callable(fn):
+                    fn = getattr(mc, name, None)
+                if callable(fn):
+                    result = fn()
+                    result = await result if asyncio.iscoroutine(result) else result
+                    if getattr(result, "type", None) == _MCEventType.ERROR:
+                        raise RuntimeError(f"meshcore_channels_error: {getattr(result, 'payload', None)}")
+                    return getattr(result, "payload", result)
+            return getattr(mc, "channels", getattr(mc, "groups", []))
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_fetch_channels(), loop)
+            items = future.result(timeout=7.0)
+        except Exception as e:
+            raise RuntimeError(f"meshcore_channels_query_failed: {type(e).__name__}: {e}") from e
+
+        if isinstance(items, dict):
+            normalized_items = []
+            for item_key, item_value in items.items():
+                if isinstance(item_value, dict):
+                    item = dict(item_value)
+                    item.setdefault("channel_idx", item_key)
+                else:
+                    item = {"channel_idx": item_key, "value": item_value}
+                normalized_items.append(item)
+            items = normalized_items
+
+        out = []
+        seen = set()
+        for idx, ch in enumerate(items or []):
+            try:
+                if isinstance(ch, dict):
+                    raw_idx = ch.get("channel_idx", ch.get("idx", ch.get("index", ch.get("id", idx))))
+                    name = ch.get("name") or ch.get("label") or ch.get("tag") or ch.get("title")
+                    role = ch.get("role") or ch.get("type") or ch.get("kind")
+                    enabled = ch.get("enabled", ch.get("active", None))
+                else:
+                    raw_idx = getattr(ch, "channel_idx", getattr(ch, "idx", getattr(ch, "index", getattr(ch, "id", idx))))
+                    name = getattr(ch, "name", None) or getattr(ch, "label", None) or getattr(ch, "tag", None) or getattr(ch, "title", None)
+                    role = getattr(ch, "role", None) or getattr(ch, "type", None) or getattr(ch, "kind", None)
+                    enabled = getattr(ch, "enabled", getattr(ch, "active", None))
+
+                try:
+                    channel_idx = int(raw_idx)
+                except Exception:
+                    channel_idx = int(idx)
+                if channel_idx in seen:
+                    continue
+                seen.add(channel_idx)
+                out.append({
+                    "channel_idx": channel_idx,
+                    "name": (str(name).strip() if name is not None else "") or f"Canal {channel_idx}",
+                    "role": (str(role).strip() if role is not None else "") or None,
+                    "enabled": enabled if isinstance(enabled, bool) else None,
+                })
+                if len(out) >= max_n:
+                    break
+            except Exception:
+                continue
+        return out
+
     def list_contacts(self, limit: int = 80) -> list[dict]:
         """
         Devuelve contactos conocidos por la sesión MeshCore embebida.
@@ -6421,6 +6499,54 @@ class _BacklogServer(threading.Thread):
 
                 except Exception as e:
                     resp = {"ok": False, "error": f"meshcore_send_failed: {type(e).__name__}: {e}"}
+
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                return
+
+
+            elif cmd == "MESHCORE_CHANNELS":
+                # params: { "limit": 80 }
+                try:
+                    params = params or {}
+                    limit = int(params.get("limit") or 80)
+                except Exception:
+                    limit = 80
+
+                eng = globals().get("MESHCORE_ENGINE")
+                if not eng:
+                    resp = {"ok": False, "error": "meshcore_disabled"}
+                else:
+                    try:
+                        if hasattr(eng, "list_channels") and callable(getattr(eng, "list_channels")):
+                            channels = eng.list_channels(limit=limit)
+                        else:
+                            channels = []
+
+                        # Fallback: exponer los canales configurados en el mapa
+                        # MeshCore aunque la librería no permita consultar la lista remota.
+                        if not channels:
+                            seen = set()
+                            channels = []
+                            for _mesh_ch, _mapping in sorted((getattr(eng, "ch_map", {}) or {}).items()):
+                                try:
+                                    if (_mapping or {}).get("kind") != "chan":
+                                        continue
+                                    channel_idx = int((_mapping or {}).get("channel_idx"))
+                                    if channel_idx in seen:
+                                        continue
+                                    seen.add(channel_idx)
+                                    tag = (_mapping or {}).get("tag") or f"Canal {channel_idx}"
+                                    channels.append({
+                                        "channel_idx": channel_idx,
+                                        "name": str(tag),
+                                        "mapped_meshtastic_ch": int(_mesh_ch),
+                                    })
+                                except Exception:
+                                    continue
+
+                        resp = {"ok": True, "count": len(channels), "channels": channels[:limit]}
+                    except Exception as e:
+                        resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                 return
