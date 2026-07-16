@@ -1298,8 +1298,9 @@ def _has_ch_tag_in_info(pkt: dict) -> bool:
 # === TX APRS util ========
 # =========================
 def _tx_aprs_payload(payload: bytes, dest_hdr: str, path_override: Optional[List[str]] = None) -> bool:
+    tx_path = APRS_PATH if path_override is None else path_override
     ax25 = build_ax25_ui(dest=dest_hdr, src=MY_CALL,
-                         path=[p for p in (path_override or APRS_PATH) if p],
+                         path=[p for p in tx_path if p],
                          payload=payload)
     kiss = kiss_wrap(ax25, port=KISS_CHANNEL)  # [MOD] usa el canal elegido
     try:
@@ -2278,8 +2279,13 @@ async def task_control_udp():
         text = _aprs_ascii(text)
         dest = _aprs_ascii(dest)
 
-        path_str = (obj.get("path") or "").strip()
-        path_override = [p for p in path_str.split(",") if p] if path_str else None
+        path_obj = obj.get("path", None)
+        if isinstance(path_obj, list):
+            # Lista explícita desde el bot. [] significa sin digipeaters.
+            path_override = [str(p).strip() for p in path_obj if str(p).strip()]
+        else:
+            path_str = (path_obj or "").strip()
+            path_override = [p for p in path_str.split(",") if p] if path_str else None
         if not dest or not text:
             print("[ctrl] ❌ falta dest o text")
             try:
