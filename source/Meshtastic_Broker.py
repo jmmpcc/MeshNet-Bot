@@ -1141,21 +1141,27 @@ class MeshCoreEmbeddedBridge:
         for c in (items or []):
             try:
                 if isinstance(c, dict):
-                    prefix = c.get("prefix") or c.get("key_prefix") or c.get("pubkey_prefix") or c.get("public_key") or c.get("id") or c.get("key")
+                    public_key = c.get("public_key") or c.get("pubkey") or c.get("key") or c.get("key_prefix") or c.get("pubkey_prefix")
+                    # id/prefix pueden ser IDs cortos de anuncio/ruta. Para DM se debe usar public_key o un prefijo de public_key.
+                    display_id = c.get("id") or c.get("prefix")
                     name = c.get("name") or c.get("adv_name") or c.get("alias") or c.get("label")
                     last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("last_advert") or c.get("seen") or c.get("ts")
                 else:
-                    prefix = getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None) or getattr(c, "public_key", None) or getattr(c, "prefix", None) or getattr(c, "id", None)
+                    public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None) or getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None)
+                    display_id = getattr(c, "id", None) or getattr(c, "prefix", None)
                     name = getattr(c, "name", None) or getattr(c, "adv_name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
                     last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "last_advert", None) or getattr(c, "seen", None)
 
-                prefix = (str(prefix).strip() if prefix is not None else "")
-                if not prefix or prefix in seen:
+                dm_key = (str(public_key).strip() if public_key is not None else "")
+                display_id = (str(display_id).strip() if display_id is not None else "") or dm_key[:12]
+                if not dm_key or dm_key in seen:
                     continue
-                seen.add(prefix)
+                seen.add(dm_key)
 
                 out.append({
-                    "prefix": prefix,
+                    "prefix": display_id,
+                    "dm_key": dm_key,
+                    "public_key": dm_key,
                     "name": (str(name).strip() if name is not None else "") or None,
                     "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
                 })
@@ -6445,24 +6451,37 @@ class _BacklogServer(threading.Thread):
                                 except Exception:
                                     items = []
                                 if isinstance(items, dict):
-                                    items = list(items.values())
+                                    normalized_items = []
+                                    for item_key, item_value in items.items():
+                                        if isinstance(item_value, dict):
+                                            item = dict(item_value)
+                                            item.setdefault("public_key", item_key)
+                                        else:
+                                            item = item_value
+                                        normalized_items.append(item)
+                                    items = normalized_items
                                 for c in (items or []):
                                     try:
                                         if isinstance(c, dict):
-                                            prefix = c.get("prefix") or c.get("key_prefix") or c.get("pubkey_prefix") or c.get("id") or c.get("key")
+                                            public_key = c.get("public_key") or c.get("pubkey") or c.get("key") or c.get("key_prefix") or c.get("pubkey_prefix")
+                                            display_id = c.get("id") or c.get("prefix")
                                             name = c.get("name") or c.get("alias") or c.get("label")
                                             last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("seen") or c.get("ts")
                                         else:
-                                            prefix = getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None) or getattr(c, "prefix", None) or getattr(c, "id", None)
+                                            public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None) or getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None)
+                                            display_id = getattr(c, "id", None) or getattr(c, "prefix", None)
                                             name = getattr(c, "name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
                                             last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "seen", None)
 
-                                        prefix = (str(prefix).strip() if prefix is not None else "")
-                                        if not prefix:
+                                        dm_key = (str(public_key).strip() if public_key is not None else "")
+                                        display_id = (str(display_id).strip() if display_id is not None else "") or dm_key[:12]
+                                        if not dm_key:
                                             continue
 
                                         contacts.append({
-                                            "prefix": prefix,
+                                            "prefix": display_id,
+                                            "dm_key": dm_key,
+                                            "public_key": dm_key,
                                             "name": (str(name).strip() if name is not None else "") or None,
                                             "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
                                         })
@@ -6475,10 +6494,10 @@ class _BacklogServer(threading.Thread):
                         seen = set()
                         uniq = []
                         for d in contacts:
-                            pfx = d.get("prefix")
-                            if not pfx or pfx in seen:
+                            key = d.get("dm_key") or d.get("public_key") or d.get("prefix")
+                            if not key or key in seen:
                                 continue
-                            seen.add(pfx)
+                            seen.add(key)
                             uniq.append(d)
 
                         resp = {"ok": True, "count": len(uniq), "contacts": uniq}
