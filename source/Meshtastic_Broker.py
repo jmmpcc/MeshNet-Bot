@@ -1142,8 +1142,9 @@ class MeshCoreEmbeddedBridge:
             try:
                 if isinstance(c, dict):
                     public_key = c.get("public_key") or c.get("pubkey") or c.get("key")
-                    # pubkey_prefix/key_prefix es el mismo prefijo que aparece en los logs RX
-                    # (prefix=<...>) y es el identificador correcto para mostrar al usuario.
+                    # La API oficial de contactos devuelve public_key completa.
+                    # Si alguna versión aporta un prefijo explícito, lo respetamos;
+                    # si no, se calcula más abajo con public_key[:12].
                     display_prefix = c.get("pubkey_prefix") or c.get("key_prefix")
                     contact_id = c.get("id") or c.get("prefix")
                     name = c.get("name") or c.get("adv_name") or c.get("alias") or c.get("label")
@@ -1157,8 +1158,11 @@ class MeshCoreEmbeddedBridge:
 
                 display_id = (str(display_prefix).strip() if display_prefix is not None else "")
                 contact_id = (str(contact_id).strip() if contact_id is not None else "")
-                dm_key = (str(public_key).strip() if public_key is not None else "") or display_id or contact_id
-                display_id = display_id or dm_key[:12] or contact_id
+                public_key = (str(public_key).strip() if public_key is not None else "")
+                # send_msg resuelve contactos por prefijo de public_key mediante
+                # get_contact_by_key_prefix(); no mostramos la clave completa como DM.
+                dm_key = display_id or (public_key[:12] if public_key else "") or contact_id
+                display_id = display_id or dm_key or contact_id
                 if not dm_key or dm_key in seen:
                     continue
                 seen.add(dm_key)
@@ -1167,7 +1171,7 @@ class MeshCoreEmbeddedBridge:
                     "prefix": display_id,
                     "contact_id": contact_id or None,
                     "dm_key": dm_key,
-                    "public_key": dm_key,
+                    "public_key": public_key or dm_key,
                     "name": (str(name).strip() if name is not None else "") or None,
                     "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
                 })
@@ -1177,6 +1181,95 @@ class MeshCoreEmbeddedBridge:
                 continue
 
         return out
+
+    def list_channels(self, limit: int = 80) -> list[dict]:
+        """
+        Devuelve canales MeshCore conocidos por la sesión embebida.
+
+        API real de meshcore>=2.2.28: CommandHandler.get_channel(channel_idx)
+        devuelve EventType.CHANNEL_INFO con payload {channel_idx, channel_name,
+        channel_secret, channel_hash}. No existe un get_channels() agregado, así
+        que se consulta un rango acotado de índices y después se completa con
+        MESHCORE_CHANNEL_MAP.
+        """
+        try:
+            max_n = max(1, min(500, int(limit)))
+        except Exception:
+            max_n = 80
+        try:
+            scan_max = max(1, min(256, int(os.getenv("MESHCORE_CHANNEL_SCAN_MAX", "40") or "40")))
+        except Exception:
+            scan_max = 40
+
+        channels_by_idx: dict[int, dict] = {}
+
+        def _add_channel(channel_idx, name=None, role=None, source="api", channel_hash=None):
+            try:
+                idx = int(channel_idx)
+            except Exception:
+                return
+            if idx < 0 or idx in channels_by_idx:
+                return
+            channels_by_idx[idx] = {
+                "channel_idx": idx,
+                "name": (str(name).strip() if name is not None else "") or None,
+                "role": (str(role).strip() if role is not None else "") or None,
+                "source": source,
+                "channel_hash": (str(channel_hash).strip() if channel_hash is not None else "") or None,
+            }
+
+        mc = self._mc
+        loop = self._loop
+        if mc is not None and loop is not None and loop.is_running() and self._connected:
+            async def _fetch_channels_by_index():
+                commands = getattr(mc, "commands", None)
+                get_channel = getattr(commands, "get_channel", None) if commands is not None else None
+                if not callable(get_channel):
+                    return []
+
+                found = []
+                for channel_idx in range(scan_max):
+                    result = await get_channel(int(channel_idx))
+                    if result is None or getattr(result, "type", None) == _MCEventType.ERROR:
+                        continue
+                    payload = getattr(result, "payload", None) or {}
+                    if isinstance(payload, dict):
+                        found.append(payload)
+                return found
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(_fetch_channels_by_index(), loop)
+                items = future.result(timeout=7.0)
+            except Exception:
+                items = []
+
+            for item in (items or []):
+                try:
+                    if not isinstance(item, dict):
+                        continue
+                    _add_channel(
+                        item.get("channel_idx"),
+                        name=item.get("channel_name"),
+                        source="api:get_channel",
+                        channel_hash=item.get("channel_hash"),
+                    )
+                except Exception:
+                    continue
+
+        for _ch, mapping in (self.ch_map or {}).items():
+            try:
+                if (mapping or {}).get("kind") != "chan":
+                    continue
+                _add_channel(
+                    int((mapping or {}).get("channel_idx")),
+                    name=(mapping or {}).get("tag"),
+                    role=f"Meshtastic CH{int(_ch)}",
+                    source="MESHCORE_CHANNEL_MAP",
+                )
+            except Exception:
+                continue
+
+        return list(channels_by_idx.values())[:max_n]
 
     def start(self) -> None:
         if not self.enable:
@@ -6515,8 +6608,11 @@ class _BacklogServer(threading.Thread):
 
                                         display_id = (str(display_prefix).strip() if display_prefix is not None else "")
                                         contact_id = (str(contact_id).strip() if contact_id is not None else "")
-                                        dm_key = (str(public_key).strip() if public_key is not None else "") or display_id or contact_id
-                                        display_id = display_id or dm_key[:12] or contact_id
+                                        public_key = (str(public_key).strip() if public_key is not None else "")
+                                        # send_msg resuelve contactos por prefijo de public_key mediante
+                                        # get_contact_by_key_prefix(); no mostramos la clave completa como DM.
+                                        dm_key = display_id or (public_key[:12] if public_key else "") or contact_id
+                                        display_id = display_id or dm_key or contact_id
                                         if not dm_key:
                                             continue
 
@@ -6524,7 +6620,7 @@ class _BacklogServer(threading.Thread):
                                             "prefix": display_id,
                                             "contact_id": contact_id or None,
                                             "dm_key": dm_key,
-                                            "public_key": dm_key,
+                                            "public_key": public_key or dm_key,
                                             "name": (str(name).strip() if name is not None else "") or None,
                                             "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
                                         })
@@ -6544,6 +6640,30 @@ class _BacklogServer(threading.Thread):
                             uniq.append(d)
 
                         resp = {"ok": True, "count": len(uniq), "contacts": uniq}
+                    except Exception as e:
+                        resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                return
+
+            elif cmd == "MESHCORE_CHANNELS":
+                # params: { "limit": 80 }
+                try:
+                    params = params or {}
+                    limit = int(params.get("limit") or 80)
+                except Exception:
+                    limit = 80
+
+                eng = globals().get("MESHCORE_ENGINE")
+                if not eng:
+                    resp = {"ok": False, "error": "meshcore_disabled"}
+                else:
+                    try:
+                        if hasattr(eng, "list_channels") and callable(getattr(eng, "list_channels")):
+                            channels = eng.list_channels(limit=limit)
+                        else:
+                            channels = []
+                        resp = {"ok": True, "count": len(channels), "channels": channels}
                     except Exception as e:
                         resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 

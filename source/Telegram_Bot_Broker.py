@@ -3599,6 +3599,47 @@ def _meshcore_contacts_via_ctrl(limit: int = 80, timeout: float = 3.0) -> dict:
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+def _meshcore_channels_from_env(limit: int = 80) -> dict:
+    """Lista canales MeshCore configurados en MESHCORE_CHANNEL_MAP."""
+    channels = []
+    seen = set()
+    for ch, mapping in sorted((_MESHCORE_CHANNEL_MAP or {}).items()):
+        try:
+            if (mapping or {}).get("kind") != "chan":
+                continue
+            channel_idx = int((mapping or {}).get("target"))
+            if channel_idx in seen:
+                continue
+            seen.add(channel_idx)
+            channels.append({
+                "channel_idx": channel_idx,
+                "name": (mapping or {}).get("tag"),
+                "role": f"Meshtastic CH{int(ch)}",
+                "source": "MESHCORE_CHANNEL_MAP",
+            })
+            if len(channels) >= int(limit):
+                break
+        except Exception:
+            continue
+    return {"ok": True, "count": len(channels), "channels": channels, "source": "env"}
+
+def _meshcore_channels_via_ctrl(limit: int = 80, timeout: float = 3.0) -> dict:
+    """
+    Consulta canales MeshCore al broker embebido y cae a MESHCORE_CHANNEL_MAP.
+    Esto permite /mc_canales tanto en perfil embebido como en meshcore_only.
+    """
+    try:
+        r = _broker_rpc("MESHCORE_CHANNELS", {"limit": int(limit)})
+        if isinstance(r, dict) and r.get("ok"):
+            return r
+    except Exception:
+        r = None
+
+    env_r = _meshcore_channels_from_env(limit=limit)
+    if env_r.get("channels"):
+        return env_r
+    return r or {"ok": False, "error": "meshcore_channels_failed"}
+
 def _wait_broker_resumed(max_wait_s: float = 8.0) -> tuple[bool, str]:
     """
     Espera a que el broker confirme que ya no está en 'paused'.
@@ -6227,6 +6268,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("enviar_mc", "Enviar MeshCore/APRS: [mesh|aprs|ambos] chX texto"),
         BotCommand("enviar_mc_dm", "Enviar DM MeshCore: /dm_mc <prefix|N|[MC:prefix]> <texto...>"),
         BotCommand("mc_contactos", "Contactos MeshCore numerados con botones DM: /mc_contactos [n]"),
+        BotCommand("mc_canales", "Canales MeshCore disponibles: /mc_canales [n]"),
         BotCommand("escuchar", "Escuchar broker (canal/all)"),
         BotCommand("parar_escucha", "Detener la escucha del broker"),
         BotCommand("traceroute", "Traceroute a un nodo (!id|número|alias) [Timeout] sg. espera"),
@@ -6506,10 +6548,12 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <code>/enviar_mc_dm &lt;contact_prefix|[MC:prefix]|N&gt; &lt;texto&gt;</code> — Envía directo a un contacto MeshCore. <code>N</code> funciona después de ejecutar <code>/mc_contactos</code>.\n"
         "• <code>/dm_mc</code> — Alias corto de <code>/enviar_mc_dm</code>.\n"
         "• <code>/mc_contactos [max]</code> — Lista contactos MeshCore en formato numerado, muestra botones <b>DM</b> y guarda los números para usarlos con <code>/dm_mc N texto</code>.\n"
+        "• <code>/mc_canales [max]</code> — Lista canales MeshCore disponibles desde el perfil embebido o <code>MESHCORE_CHANNEL_MAP</code>.\n"
         "Ej.: <code>/enviar_mc canal 1 Aviso por MeshCore</code>\n"
         "Ej.: <code>/enviar_mc aprs EB2ABC-7: Aviso solo APRS</code>\n"
         "Ej.: <code>/enviar_mc ambos ch2 aprs broadcast Aviso doble</code>\n"
         "Resultado: muestra <code>Transporte: MESH|APRS|BOTH</code>, canal MeshCore y/o destino APRS, y partes APRS enviadas.\n"
+        "Ej.: <code>/mc_canales 20</code>\n"
         "Ej.: <code>/mc_contactos 20</code>\n"
         "Ej.: <code>/dm_mc 3 Mensaje directo al contacto 3</code>\n"
         "Ej.: <code>/enviar_mc_dm 6a18cb3d125b Mensaje directo</code>\n"
@@ -8938,11 +8982,12 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     for idx, c in enumerate(contacts[:max_n], start=1):
         display_prefix = (c.get("prefix") or c.get("pubkey_prefix") or c.get("key_prefix") or "").strip()
         contact_id = (c.get("contact_id") or c.get("id") or "").strip()
-        dm_key = (c.get("dm_key") or c.get("public_key") or c.get("pubkey") or display_prefix or contact_id).strip()
+        public_key = (c.get("public_key") or c.get("pubkey") or "").strip()
+        dm_key = (c.get("dm_key") or display_prefix or contact_id or (public_key[:12] if public_key else "")).strip()
         if not dm_key:
             continue
         if not display_prefix:
-            display_prefix = dm_key[:12]
+            display_prefix = dm_key
         name = (c.get("name") or "Sin nombre").strip()
         ls = c.get("last_seen")
         mc_map[str(idx)] = dm_key
@@ -8950,8 +8995,8 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         meta = []
         if contact_id and contact_id != display_prefix and contact_id != dm_key:
             meta.append(f"id: {contact_id}")
-        if dm_key and dm_key != display_prefix:
-            meta.append(f"DM: [MC:{dm_key}]")
+        # No mostramos un segundo [MC:...] para DM: el identificador correcto
+        # para enviar es el prefijo corto mostrado en la primera línea.
         last_seen_txt = _format_meshcore_last_seen(ls)
         if last_seen_txt:
             meta.append(f"visto: {last_seen_txt}")
@@ -8980,6 +9025,60 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard[:40]) if keyboard else None,
+        disable_web_page_preview=True,
+    )
+
+async def mc_canales_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /mc_canales [max]
+    Lista canales MeshCore disponibles desde la API embebida o desde MESHCORE_CHANNEL_MAP.
+    """
+    try:
+        max_n = int((context.args or [])[0]) if (context.args or []) else 80
+    except Exception:
+        max_n = 80
+    max_n = max(1, min(200, int(max_n)))
+
+    r = _meshcore_channels_via_ctrl(limit=max_n, timeout=3.5)
+    if not r.get("ok"):
+        await update.effective_message.reply_text(f"MeshCore canales: KO • {r.get('error')}")
+        return
+
+    channels = r.get("channels") or []
+    if not channels:
+        await update.effective_message.reply_text("MeshCore canales: (vacío)")
+        return
+
+    lines = [
+        "📡 <b>Canales MeshCore</b>",
+        "",
+        "Usa <code>/enviar_mc canal &lt;channel_idx&gt; texto</code> para enviar.",
+    ]
+    for idx, ch in enumerate(channels[:max_n], start=1):
+        try:
+            channel_idx = int(ch.get("channel_idx", ch.get("idx", ch.get("index"))))
+        except Exception:
+            continue
+        name = ch.get("name") or ch.get("tag") or f"Canal {channel_idx}"
+        role = str(ch.get("role") or "").strip()
+        source = str(ch.get("source") or "").strip()
+        channel_hash = str(ch.get("channel_hash") or "").strip()
+        meta = []
+        if role:
+            meta.append(role)
+        if channel_hash:
+            meta.append(f"hash {channel_hash}")
+        if source:
+            meta.append(source)
+        meta_txt = f" · {' · '.join(meta)}" if meta else ""
+        lines.append(
+            f"<b>{idx:02d}.</b> <b>{escape(str(name))}</b>\n"
+            f"    channel_idx: <code>{escape(str(channel_idx))}</code>{escape(meta_txt)}"
+        )
+
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
         disable_web_page_preview=True,
     )
 
@@ -17193,6 +17292,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("enviar_mc", enviar_mc_cmd))
     app.add_handler(CommandHandler(["enviar_mc_dm", "dm_mc"], enviar_mc_dm_cmd))
     app.add_handler(CommandHandler("mc_contactos", mc_contactos_cmd))
+    app.add_handler(CommandHandler("mc_canales", mc_canales_cmd))
     
     app.add_handler(CommandHandler("enviar_ack", enviar_ack_cmd))
     app.add_handler(CommandHandler("escuchar", escuchar_cmd))
