@@ -284,22 +284,73 @@ def _aprsis_next_msgid(dst_call: str) -> str:
 
 
 def _parse_push_channels(raw: str) -> Optional[set[int]]:
+    """Compatibilidad histórica: canales Meshtastic sin prefijo."""
+    cfg = _parse_push_channel_config(raw)
+    return cfg.get("meshtastic")
+
+
+def _parse_push_channel_config(raw: str) -> dict[str, Optional[set[int]]]:
     """
-    raw:
-      - "all" => None (significa todos)
-      - "0,1,2" => {0,1,2}
+    Parsea la configuración de canales del push APRS-IS por transporte.
+
+    Sintaxis admitida:
+      - "all" / "0,1,2"                         -> Meshtastic (legacy)
+      - "meshtastic all" / "meshtastic 0,1"     -> Meshtastic
+      - "meshcore all" / "meshcore 0,1"         -> MeshCore
+      - "meshtastic 0,1 meshcore 2,3"           -> ambos
+
+    Devuelve {transport: canales}; canales None significa ALL. La ausencia de
+    clave significa transporte no habilitado. En RADIO_PROFILE=meshcore_only se
+    ignora cualquier configuración que no use explícitamente el prefijo meshcore.
     """
+    r = (raw or "").strip().lower()
+    if not r:
+        r = "all"
+
+    aliases = {"meshtastic": "meshtastic", "mesh": "meshtastic", "malla": "meshtastic", "meshcore": "meshcore", "mc": "meshcore"}
+    meshcore_only = _radio_profile() == "meshcore_only"
+    has_prefix = any(tok in aliases for tok in re.split(r"[\s,;]+", r) if tok)
+
+    if not has_prefix:
+        if meshcore_only:
+            return {}
+        parsed = _parse_push_channel_list(r)
+        return {"meshtastic": parsed}
+
+    cfg: dict[str, Optional[set[int]]] = {}
+    current: str | None = None
+    buckets: dict[str, list[str]] = {"meshtastic": [], "meshcore": []}
+    for tok in re.split(r"[\s,;]+", r):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if tok in aliases:
+            current = aliases[tok]
+            continue
+        if current is not None:
+            buckets[current].append(tok)
+
+    for transport, parts in buckets.items():
+        if meshcore_only and transport != "meshcore":
+            continue
+        if parts:
+            cfg[transport] = _parse_push_channel_list(",".join(parts))
+    return cfg
+
+
+def _parse_push_channel_list(raw: str) -> Optional[set[int]]:
     r = (raw or "").strip().lower()
     if not r or r == "all":
         return None
     out = set()
-    for part in r.split(","):
+    for part in re.split(r"[,;\s]+", r):
         part = part.strip()
         if not part:
             continue
+        if part == "all":
+            return None
         if part.isdigit():
-            ch = max(0, min(15, int(part)))
-            out.add(ch)
+            out.add(max(0, min(15, int(part))))
     return out if out else None
 
 def _aprsis_push_is_enabled() -> bool:
@@ -2264,7 +2315,20 @@ async def task_control_udp():
                 try: APRSIS_PUSH_MIN_GAP_S = max(0.0, float(gap))
                 except Exception: pass
 
-            print(f"[ctrl] aprsis_push -> enabled={APRSIS_PUSH_ENABLED} to={APRSIS_PUSH_TO} channels={APRSIS_PUSH_CHANNELS_RAW} prefix={APRSIS_PUSH_PREFIX} gap={APRSIS_PUSH_MIN_GAP_S}")
+            _cfg = _parse_push_channel_config(APRSIS_PUSH_CHANNELS_RAW)
+            _cfg_json = {k: ("all" if v is None else sorted(v)) for k, v in _cfg.items()}
+            resp = {
+                "ok": True,
+                "enabled": bool(APRSIS_PUSH_ENABLED),
+                "to": APRSIS_PUSH_TO,
+                "channels": APRSIS_PUSH_CHANNELS_RAW,
+                "channel_config": _cfg_json,
+                "prefix": bool(APRSIS_PUSH_PREFIX),
+                "min_gap_s": APRSIS_PUSH_MIN_GAP_S,
+            }
+            try: sock.sendto(json.dumps(resp).encode("utf-8"), addr)
+            except Exception: pass
+            print(f"[ctrl] aprsis_push -> enabled={APRSIS_PUSH_ENABLED} to={APRSIS_PUSH_TO} channels={APRSIS_PUSH_CHANNELS_RAW} cfg={resp['channel_config']} prefix={APRSIS_PUSH_PREFIX} gap={APRSIS_PUSH_MIN_GAP_S}")
             continue
 
 
@@ -2767,6 +2831,27 @@ def _short(s: str, n: int) -> str:
     return s[:n].rstrip()
 
 
+def _aprsis_push_event_transport(evt: dict) -> str:
+    """Detecta si el evento JSONL procede de MeshCore o de Meshtastic."""
+    if not isinstance(evt, dict):
+        return "meshtastic"
+    pkt = evt.get("packet") if isinstance(evt.get("packet"), dict) else {}
+    meta = evt.get("meta") if isinstance(evt.get("meta"), dict) else {}
+    pkt_meta = pkt.get("meta") if isinstance(pkt.get("meta"), dict) else {}
+    for d in (evt, pkt, meta, pkt_meta):
+        if not isinstance(d, dict):
+            continue
+        if d.get("meshcore") or d.get("meshcore_kind") or d.get("meshcore_chan_idx") is not None:
+            return "meshcore"
+        origin = str(d.get("origin") or "").strip().lower()
+        if origin == "meshcore" or origin.startswith("meshcore"):
+            return "meshcore"
+    from_id = str(pkt.get("fromId") or evt.get("from") or "").strip().lower()
+    if from_id.startswith("meshcore"):
+        return "meshcore"
+    return "meshtastic"
+
+
 def _build_aprsis_push_prefix(evt: dict, ch: int) -> str:
     """
     Prefijo compacto para APRS-IS push (si APRSIS_PUSH_PREFIX=1).
@@ -2820,7 +2905,7 @@ async def task_mesh_channels_to_aprsis():
 
     # Cache para recalcular canales al vuelo cuando cambie APRSIS_PUSH_CHANNELS_RAW
     last_channels_raw = None
-    push_ch_set = None
+    push_channel_cfg: dict[str, Optional[set[int]]] = {}
 
     def _as_dict(x):
         return x if isinstance(x, dict) else {}
@@ -2908,8 +2993,8 @@ async def task_mesh_channels_to_aprsis():
             # Log de configuración al conectar (aunque todavía no lleguen líneas del broker)
             cur_raw = (APRSIS_PUSH_CHANNELS_RAW or "all").strip().lower()
             last_channels_raw = cur_raw
-            push_ch_set = _parse_push_channels(cur_raw)
-            print(f"[mesh→IS push] cfg channels={cur_raw} -> {push_ch_set if push_ch_set is not None else 'ALL'}", flush=True)
+            push_channel_cfg = _parse_push_channel_config(cur_raw)
+            print(f"[mesh→IS push] cfg channels={cur_raw} -> {push_channel_cfg or 'NONE'}", flush=True)
                 
 
             while True:
@@ -2924,11 +3009,11 @@ async def task_mesh_channels_to_aprsis():
                 cur_raw = (APRSIS_PUSH_CHANNELS_RAW or "all").strip().lower()
                 if cur_raw != last_channels_raw:
                     last_channels_raw = cur_raw
-                    push_ch_set = _parse_push_channels(cur_raw)
+                    push_channel_cfg = _parse_push_channel_config(cur_raw)
                     try:
                         print(
                             f"[mesh→IS push] cfg channels={cur_raw} -> "
-                            f"{push_ch_set if push_ch_set is not None else 'ALL'}",
+                            f"{push_channel_cfg or 'NONE'}",
                             flush=True
                         )
                     except Exception:
@@ -2940,6 +3025,7 @@ async def task_mesh_channels_to_aprsis():
                     continue
 
                 port, txt, ch = _norm_event(obj)
+                transport = _aprsis_push_event_transport(obj)
 
                 if port != "TEXT_MESSAGE_APP":
                     continue
@@ -2959,10 +3045,13 @@ async def task_mesh_channels_to_aprsis():
                 if ch is None:
                     continue
 
-                # Filtro de canal
-                if push_ch_set is not None and ch not in push_ch_set:
-                    # Debug de descartes por canal (opcional, útil mientras validas)
-                    print(f"[mesh→IS push] skip ch={ch} (allowed={push_ch_set})", flush=True)
+                # Filtro de transporte/canal
+                allowed_channels = push_channel_cfg.get(transport)
+                if transport not in push_channel_cfg:
+                    print(f"[mesh→IS push] skip transport={transport} ch={ch} (cfg={push_channel_cfg or 'NONE'})", flush=True)
+                    continue
+                if allowed_channels is not None and ch not in allowed_channels:
+                    print(f"[mesh→IS push] skip transport={transport} ch={ch} (allowed={allowed_channels})", flush=True)
                     continue
 
                 # Rate limit
@@ -2980,9 +3069,9 @@ async def task_mesh_channels_to_aprsis():
                 ok = await _aprsis_send_line_safe(line2)
                 if ok:
                     _APRSIS_PUSH_LAST_TS = now
-                    print(f"[mesh→IS push] → {APRSIS_PUSH_TO} {prefix}{tnorm[:80]}")
+                    print(f"[mesh→IS push] → {APRSIS_PUSH_TO} {transport} {prefix}{tnorm[:80]}")
                 else:
-                    print(f"[mesh→IS push] ❌ TX FAIL -> {APRSIS_PUSH_TO} ch={ch}")
+                    print(f"[mesh→IS push] ❌ TX FAIL -> {APRSIS_PUSH_TO} transport={transport} ch={ch}")
 
         except Exception as e:
             print(f"[mesh→IS push] ❌ {type(e).__name__}: {e}")
