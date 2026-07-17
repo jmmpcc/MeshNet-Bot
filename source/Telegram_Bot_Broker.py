@@ -1705,6 +1705,7 @@ def _send_via_broker_meshcore(channel_idx: int, text: str, timeout: float = 3.0)
         "params": {
             "channel_idx": int(channel_idx),
             "text": str(text),
+            "max_retries": 0,
         }
     }
     data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
@@ -8232,8 +8233,17 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # ------------------------------------------------------------
         # 3) Envío Mesh SOLO con texto limpio
         # ------------------------------------------------------------
+        # /aprs inmediato no debe usar el adapter API-pool+retry directo: si el
+        # nodo confirma tarde o la conexión queda zombie, el retry puede emitir
+        # el mismo texto varias veces. Encolamos una sola orden en el broker,
+        # con origin=bot, igual que las rutas inmediatas anti-duplicado.
         node_id = None  # broadcast al canal Mesh indicado
-        mesh_result, packet_id = send_text_message(node_id, text_clean, canal=canal_int)
+        mesh_queue = _send_via_broker_queue(text_clean, int(canal_int), dest=node_id, ack=False, timeout=3.0)
+        packet_id = None
+        if bool((mesh_queue or {}).get("ok")):
+            mesh_result = "OK (broker-queue)"
+        else:
+            mesh_result = f"KO: {(mesh_queue or {}).get('error') or 'broker_queue_not_ok'}"
 
         aprs_status = f"OK ({aprs_sent} parte{'s' if aprs_sent != 1 else ''})" if aprs_ok else \
                     f"KO parcial ({aprs_sent}/{len(chunks)} parte{'s' if len(chunks) != 1 else ''})"
