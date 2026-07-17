@@ -39,7 +39,7 @@ La marca ``M`` debe ir pegada al corchete de cierre. Así, ``[ch6] Muy...``
 se interpreta correctamente como Meshtastic y no confunde la inicial de ``Muy``
 con el selector de MeshCore.
 
-Sin prefijo se utiliza EMAIL_MESH_CHANNEL y la red Meshtastic.
+Sin prefijo se utiliza EMAIL_MESH_CHANNEL y, si RADIO_PROFILE=meshcore_only, la red MeshCore; en los demás perfiles se conserva Meshtastic.
 
 Primera ejecución
 -----------------
@@ -84,7 +84,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
 APP_NAME = "email-to-mesh"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 
 _LOG = logging.getLogger(APP_NAME)
 _STOP_EVENT = threading.Event()
@@ -208,6 +208,7 @@ class Config:
     broker_host: str
     broker_port: int
     broker_timeout_sec: int
+    default_network: str
     log_level: str
 
     @classmethod
@@ -257,6 +258,7 @@ class Config:
             broker_host=os.getenv("BROKER_CTRL_HOST", "127.0.0.1").strip() or "127.0.0.1",
             broker_port=_env_int("BROKER_CTRL_PORT", 8766, 1, 65535),
             broker_timeout_sec=_env_int("EMAIL_BROKER_TIMEOUT_SEC", 8, 1, 120),
+            default_network=_default_email_network(),
             log_level=os.getenv("EMAIL_LOG_LEVEL", "INFO").strip().upper() or "INFO",
         )
 
@@ -385,7 +387,17 @@ def normalize_subject(value: str, max_chars: int) -> str:
     return text
 
 
-def parse_subject_route(subject: str, default_meshtastic_channel: int) -> SubjectRoute:
+def _default_email_network() -> str:
+    """Devuelve la red por defecto para asuntos sin prefijo explícito."""
+    raw = (os.getenv("EMAIL_MESH_NETWORK") or os.getenv("EMAIL_DEFAULT_NETWORK") or "").strip().lower()
+    if raw in {"meshcore", "mc", "mesh", "malla"}:
+        return "meshcore"
+    if raw in {"meshtastic", "mt", "radio"}:
+        return "meshtastic"
+    return "meshcore" if (os.getenv("RADIO_PROFILE") or "").strip().lower() == "meshcore_only" else "meshtastic"
+
+
+def parse_subject_route(subject: str, default_meshtastic_channel: int, default_network: str = "meshtastic") -> SubjectRoute:
     """
     Interpreta el prefijo opcional de red y canal situado al inicio del asunto.
 
@@ -402,7 +414,9 @@ def parse_subject_route(subject: str, default_meshtastic_channel: int) -> Subjec
         [ch2]M - Texto
 
     Cuando no existe un prefijo válido se conserva todo el asunto y se utiliza
-    el canal Meshtastic definido por EMAIL_MESH_CHANNEL.
+    EMAIL_MESH_CHANNEL sobre la red por defecto resuelta por configuración. En
+    RADIO_PROFILE=meshcore_only esa red por defecto es MeshCore, salvo que se
+    fuerce EMAIL_MESH_NETWORK=meshtastic.
 
     El canal Meshtastic se limita a 0..15 porque es el rango utilizado por el
     broker. Para MeshCore se admite 0..255; la disponibilidad real del índice
@@ -411,8 +425,9 @@ def parse_subject_route(subject: str, default_meshtastic_channel: int) -> Subjec
     raw = (subject or "").strip()
     match = _SUBJECT_ROUTE_RE.match(raw)
     if not match:
+        network = "meshcore" if str(default_network).strip().lower() == "meshcore" else "meshtastic"
         return SubjectRoute(
-            network="meshtastic",
+            network=network,
             channel=int(default_meshtastic_channel),
             text=raw,
             explicit=False,
@@ -758,7 +773,7 @@ def process_mailbox_once(config: Config, state: Dict[str, Any]) -> int:
                 continue
 
             try:
-                route = parse_subject_route(subject, config.mesh_channel)
+                route = parse_subject_route(subject, config.mesh_channel, config.default_network)
             except ValueError as exc:
                 _LOG.warning("Correo UID %s descartado: %s", uid, exc)
                 state["last_uid"] = uid
