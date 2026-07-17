@@ -3278,82 +3278,30 @@ def _pop_aprs_modifier_after_mesh_dest(tokens: list[str]) -> tuple[list[str], st
     del t[aprs_idx:aprs_idx + 2]
     return t, aprs_dest
 
-def _send_aprs_immediate(dest: str, text: str, timeout: float | None = None) -> dict:
-    """
-    Envía una orden APRS al gateway por UDP y espera confirmación real del gateway.
-
-    Importante: el gateway (`meshtastic_to_aprs.py`) es quien debe trocear y
-    transmitir por KISS/RF. Aquí NO pre-troceamos, porque enviar partes ya
-    troceadas al gateway puede hacer que éste vuelva a trocear y además nos
-    impedía saber si KISS había transmitido realmente.
-    """
+def _send_aprs_immediate(dest: str, text: str) -> dict:
     dest_norm = (dest or "broadcast").strip() or "broadcast"
-    aprs_dest = "broadcast" if dest_norm.lower() in ("broadcast", "all") else dest_norm.upper()
     text_clean = (text or "").strip()
     if not text_clean:
-        return {"ok": False, "error": "missing text", "dest": aprs_dest, "chunks": 0, "sent": 0}
-
-    try:
-        timeout_s = float(timeout if timeout is not None else os.getenv("APRS_CTRL_ACK_TIMEOUT", "8.0"))
-    except Exception:
-        timeout_s = 8.0
-    timeout_s = max(1.0, min(timeout_s, 30.0))
-
-    ctrl = {
-        "mode": "aprs",
-        "dest": aprs_dest,
-        "text": text_clean,
-        "ack": True,
-        "force_tx": True,
-        "origin": "bot_send",
-        # Lista vacía explícita = sin digipeaters. Evita que una orden del bot
-        # aparezca varias veces en APRS al propagarse por WIDE1-1,WIDE2-1.
-        "path": [p.strip() for p in APRS_BOT_PATH.split(",") if p.strip()],
-    }
-    data = json.dumps(ctrl, ensure_ascii=False).encode("utf-8")
-
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.settimeout(timeout_s)
-            s.sendto(data, (APRS_CTRL_HOST, APRS_CTRL_PORT))
-            try:
-                raw, _addr = s.recvfrom(4096)
-            except socket.timeout:
-                return {
-                    "ok": False,
-                    "error": f"sin confirmación del gateway APRS en {timeout_s:.1f}s",
-                    "dest": aprs_dest,
-                    "chunks": 0,
-                    "sent": 0,
-                    "udp_sent": True,
-                }
-    except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}", "dest": aprs_dest, "chunks": 0, "sent": 0}
-
-    try:
-        resp = json.loads(raw.decode("utf-8", "ignore"))
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": f"respuesta APRS inválida: {type(e).__name__}: {raw[:120]!r}",
-            "dest": aprs_dest,
-            "chunks": 0,
-            "sent": 0,
-            "udp_sent": True,
-        }
-
-    if not isinstance(resp, dict):
-        return {"ok": False, "error": "respuesta APRS no es JSON object", "dest": aprs_dest, "chunks": 0, "sent": 0, "udp_sent": True}
-
-    resp.setdefault("dest", aprs_dest)
-    parts = resp.get("parts", resp.get("chunks", 0))
-    try:
-        parts_i = int(parts or 0)
-    except Exception:
-        parts_i = 0
-    resp["chunks"] = parts_i
-    resp["sent"] = parts_i if resp.get("ok") else int(resp.get("sent", 0) or 0)
-    return resp
+        return {"ok": False, "error": "missing text", "dest": dest_norm, "chunks": 0}
+    aprs_len = _aprs_max_len()
+    if dest_norm.lower() in ("broadcast", "all"):
+        chunks = _aprs_split_broadcast(text_clean, aprs_len) or [text_clean[:aprs_len]]
+        aprs_dest = "broadcast"
+    else:
+        chunks = _aprs_split_directed(text_clean, aprs_len) or [text_clean[:aprs_len]]
+        aprs_dest = dest_norm
+    sent = 0
+    last_error = None
+    for part in chunks:
+        ctrl = {"mode": "aprs", "dest": aprs_dest, "text": part}
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.sendto(json.dumps(ctrl, ensure_ascii=False).encode("utf-8"), (APRS_CTRL_HOST, APRS_CTRL_PORT))
+            sent += 1
+            time.sleep(0.15)
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
+    return {"ok": sent == len(chunks), "dest": aprs_dest, "chunks": len(chunks), "sent": sent, "error": last_error}
 
 # --- [FIN] Helpers APRS
 
@@ -8978,26 +8926,34 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     keyboard = []
 
     for idx, c in enumerate(contacts[:max_n], start=1):
-        pfx = (c.get("prefix") or "").strip()
-        if not pfx:
+        display_prefix = (c.get("prefix") or c.get("pubkey_prefix") or c.get("key_prefix") or "").strip()
+        contact_id = (c.get("contact_id") or c.get("id") or "").strip()
+        dm_key = (c.get("dm_key") or c.get("public_key") or c.get("pubkey") or display_prefix or contact_id).strip()
+        if not dm_key:
             continue
+        if not display_prefix:
+            display_prefix = dm_key[:12]
         name = (c.get("name") or "Sin nombre").strip()
         ls = c.get("last_seen")
-        mc_map[str(idx)] = pfx
+        mc_map[str(idx)] = dm_key
 
         meta = []
+        if contact_id and contact_id != display_prefix and contact_id != dm_key:
+            meta.append(f"id: {contact_id}")
+        if dm_key and dm_key != display_prefix:
+            meta.append(f"DM: [MC:{dm_key}]")
         last_seen_txt = _format_meshcore_last_seen(ls)
         if last_seen_txt:
             meta.append(f"visto: {last_seen_txt}")
         meta_txt = f" · {' · '.join(meta)}" if meta else ""
         lines.append(
             f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>\n"
-            f"    <code>[MC:{escape(pfx)}]</code>{escape(meta_txt)}"
+            f"    <code>[MC:{escape(display_prefix)}]</code>{escape(meta_txt)}"
         )
         keyboard.append([
             InlineKeyboardButton(
-                f"✉️ DM {idx:02d} · {name[:24] or pfx[:8]}",
-                callback_data=f"mc_dm:{idx}:{pfx[:32]}",
+                f"✉️ DM {idx:02d} · {name[:24] or display_prefix[:8] or dm_key[:8]}",
+                callback_data=f"mc_dm:{idx}:{dm_key[:32]}",
             )
         ])
 
@@ -15616,7 +15572,36 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 except Exception:
                     origen = ""
 
-                # Fallback para MeshCore (eventos sintéticos): obj["from"] = "meshcore" o "meshcore:<prefix>"
+                is_meshcore = bool(
+                    (isinstance(pkt, dict) and pkt.get("meshcore"))
+                    or summary.get("meshcore")
+                    or obj.get("meshcore")
+                )
+                try:
+                    mc_kind = (
+                        pkt.get("meshcore_kind")
+                        or summary.get("meshcore_kind")
+                        or obj.get("meshcore_kind")
+                        or ""
+                    ) if isinstance(pkt, dict) else (summary.get("meshcore_kind") or obj.get("meshcore_kind") or "")
+                    mc_kind = str(mc_kind).strip().lower()
+                except Exception:
+                    mc_kind = ""
+                try:
+                    mc_prefix = (
+                        pkt.get("meshcore_pubkey_prefix")
+                        or summary.get("meshcore_pubkey_prefix")
+                        or obj.get("meshcore_pubkey_prefix")
+                        or ""
+                    ) if isinstance(pkt, dict) else (summary.get("meshcore_pubkey_prefix") or obj.get("meshcore_pubkey_prefix") or "")
+                    mc_prefix = str(mc_prefix).strip()
+                except Exception:
+                    mc_prefix = ""
+
+                # Fallback para MeshCore (eventos sintéticos): usar el prefijo real de pubkey
+                # que el broker adjunta y que coincide con el `prefix=` de los logs RX.
+                if is_meshcore and mc_prefix:
+                    origen = f"meshcore:{mc_prefix}"
                 if not origen:
                     try:
                         origen = str(obj.get("from") or "").strip()
@@ -15642,7 +15627,32 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                     except Exception:
                         alias = ""
 
-                origen_txt = f"{alias} ({origen})" if alias else origen
+                if is_meshcore and mc_prefix:
+                    origen_txt = f"{alias} ({mc_prefix})" if alias else mc_prefix
+                else:
+                    origen_txt = f"{alias} ({origen})" if alias else origen
+
+                texto_display = texto
+                if is_meshcore:
+                    # El broker antepone cabeceras tipo "[MC] ⚡️ALIAS:" para reinyectar
+                    # hacia Meshtastic. En Telegram ya mostramos alias/prefijo en el
+                    # encabezado, así que retiramos esa cabecera para evitar duplicados.
+                    try:
+                        if alias:
+                            texto_display = re.sub(
+                                rf"^\[MC[^\]]*\]\s*(?:⚡️\s*)?{re.escape(alias)}\s*:\s*",
+                                "",
+                                str(texto_display),
+                                count=1,
+                            ).strip() or texto_display
+                        texto_display = re.sub(
+                            r"^\[MC[^\]]*\]\s*",
+                            "",
+                            str(texto_display),
+                            count=1,
+                        ).strip() or texto_display
+                    except Exception:
+                        texto_display = texto
 
                 # Canal visible en el encabezado (con nombre local por .env)
                 ch_num_txt = (str(ch) if ch is not None else "??")
@@ -15749,23 +15759,46 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 quality = _snr_quality_label(snr)
                 quality_RSSI=_rssi_quality_label(rssi)
 
-                # Envío al chat (mismo formato que escuchar_cmd + canal visible)
+                # Envío al chat (mismo formato que escuchar_cmd + canal visible).
+                # En MeshCore directo/DM no mostramos el canal Meshtastic local como si fuera
+                # el origen del mensaje, ni métricas Meshtastic desconocidas.
                 try:
                     extra_meshcore_path = (
                         f"   • MeshCore repetidores: {mc_path_txt}\n"
                         if mc_path_txt else ""
                     )
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=(
+                    if is_meshcore:
+                        if mc_kind == "contact":
+                            header_dst = "MeshCore DM directo"
+                        elif mc_chan_idx is not None:
+                            header_dst = f"MeshCore canal mc:{mc_chan_idx}"
+                            if isinstance(mc_chan_tag, str) and mc_chan_tag.strip():
+                                header_dst = f"{header_dst} ({mc_chan_tag.strip()})"
+                            header_dst = f"{header_dst} · canal local {canal_str}"
+                        else:
+                            header_dst = f"MeshCore · canal local {canal_str}"
+
+                        detail_lines = []
+                        if rssi is not None or snr is not None:
+                            detail_lines.append(f"   • RX: RSSI {rssi_txt} {(quality_RSSI)} | SNR {snr_txt} ({quality})")
+                        if hops_real is not None:
+                            detail_lines.append(f"   • Hops reales: {hops_real_txt}")
+                        if extra_meshcore_path:
+                            detail_lines.append(extra_meshcore_path.rstrip("\n"))
+                        if hop_limit is not None or hop_start is not None or relay is not None:
+                            detail_lines.append(f"   • hop_limit: {hl_txt} | hop_start: {hs_txt} | relay_node: {rn_txt}")
+                        details = ("\n" + "\n".join(detail_lines)) if detail_lines else ""
+                        text_out = f"📩 {origen_txt} ({header_dst}):\n{texto_display}{details}"
+                    else:
+                        text_out = (
                             f"📩 {origen_txt} (canal {canal_str}):\n"
-                            f"{texto}\n"
+                            f"{texto_display}\n"
                             f"   • RX: RSSI {rssi_txt} {(quality_RSSI)} | SNR {snr_txt} ({quality})\n"
                             f"   • Hops reales: {hops_real_txt}\n"
                             f"{extra_meshcore_path}"
                             f"   • hop_limit: {hl_txt} | hop_start: {hs_txt} | relay_node: {rn_txt}"
                         )
-                    )
+                    await context.bot.send_message(chat_id=chat_id, text=text_out)
                 except Exception as e:
                     log(f"❗ Error enviando mensaje del broker a chat {chat_id}: {e}")
 

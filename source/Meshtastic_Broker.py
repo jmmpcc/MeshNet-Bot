@@ -1141,25 +1141,31 @@ class MeshCoreEmbeddedBridge:
         for c in (items or []):
             try:
                 if isinstance(c, dict):
-                    public_key = c.get("public_key") or c.get("pubkey") or c.get("key") or c.get("key_prefix") or c.get("pubkey_prefix")
-                    # id/prefix pueden ser IDs cortos de anuncio/ruta. Para DM se debe usar public_key o un prefijo de public_key.
-                    display_id = c.get("id") or c.get("prefix")
+                    public_key = c.get("public_key") or c.get("pubkey") or c.get("key")
+                    # pubkey_prefix/key_prefix es el mismo prefijo que aparece en los logs RX
+                    # (prefix=<...>) y es el identificador correcto para mostrar al usuario.
+                    display_prefix = c.get("pubkey_prefix") or c.get("key_prefix")
+                    contact_id = c.get("id") or c.get("prefix")
                     name = c.get("name") or c.get("adv_name") or c.get("alias") or c.get("label")
                     last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("last_advert") or c.get("seen") or c.get("ts")
                 else:
-                    public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None) or getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None)
-                    display_id = getattr(c, "id", None) or getattr(c, "prefix", None)
+                    public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None)
+                    display_prefix = getattr(c, "pubkey_prefix", None) or getattr(c, "key_prefix", None)
+                    contact_id = getattr(c, "id", None) or getattr(c, "prefix", None)
                     name = getattr(c, "name", None) or getattr(c, "adv_name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
                     last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "last_advert", None) or getattr(c, "seen", None)
 
-                dm_key = (str(public_key).strip() if public_key is not None else "")
-                display_id = (str(display_id).strip() if display_id is not None else "") or dm_key[:12]
+                display_id = (str(display_prefix).strip() if display_prefix is not None else "")
+                contact_id = (str(contact_id).strip() if contact_id is not None else "")
+                dm_key = (str(public_key).strip() if public_key is not None else "") or display_id or contact_id
+                display_id = display_id or dm_key[:12] or contact_id
                 if not dm_key or dm_key in seen:
                     continue
                 seen.add(dm_key)
 
                 out.append({
                     "prefix": display_id,
+                    "contact_id": contact_id or None,
                     "dm_key": dm_key,
                     "public_key": dm_key,
                     "name": (str(name).strip() if name is not None else "") or None,
@@ -6463,23 +6469,28 @@ class _BacklogServer(threading.Thread):
                                 for c in (items or []):
                                     try:
                                         if isinstance(c, dict):
-                                            public_key = c.get("public_key") or c.get("pubkey") or c.get("key") or c.get("key_prefix") or c.get("pubkey_prefix")
-                                            display_id = c.get("id") or c.get("prefix")
+                                            public_key = c.get("public_key") or c.get("pubkey") or c.get("key")
+                                            display_prefix = c.get("pubkey_prefix") or c.get("key_prefix")
+                                            contact_id = c.get("id") or c.get("prefix")
                                             name = c.get("name") or c.get("alias") or c.get("label")
                                             last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("seen") or c.get("ts")
                                         else:
-                                            public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None) or getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None)
-                                            display_id = getattr(c, "id", None) or getattr(c, "prefix", None)
+                                            public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None)
+                                            display_prefix = getattr(c, "pubkey_prefix", None) or getattr(c, "key_prefix", None)
+                                            contact_id = getattr(c, "id", None) or getattr(c, "prefix", None)
                                             name = getattr(c, "name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
                                             last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "seen", None)
 
-                                        dm_key = (str(public_key).strip() if public_key is not None else "")
-                                        display_id = (str(display_id).strip() if display_id is not None else "") or dm_key[:12]
+                                        display_id = (str(display_prefix).strip() if display_prefix is not None else "")
+                                        contact_id = (str(contact_id).strip() if contact_id is not None else "")
+                                        dm_key = (str(public_key).strip() if public_key is not None else "") or display_id or contact_id
+                                        display_id = display_id or dm_key[:12] or contact_id
                                         if not dm_key:
                                             continue
 
                                         contacts.append({
                                             "prefix": display_id,
+                                            "contact_id": contact_id or None,
                                             "dm_key": dm_key,
                                             "public_key": dm_key,
                                             "name": (str(name).strip() if name is not None else "") or None,
