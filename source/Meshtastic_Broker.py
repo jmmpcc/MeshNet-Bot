@@ -1315,8 +1315,10 @@ class MeshCoreEmbeddedBridge:
             with self._retry_spool_lock:
                 pending_retry = list(self._retry_spool)
                 self._retry_spool.clear()
-            for _dst, _msg, _retry in pending_retry:
-                self._tx_q.put_nowait((_dst, _msg, _retry))
+            for _item in pending_retry:
+                _norm_item = self._normalize_tx_spool_item(_item)
+                if _norm_item is not None:
+                    self._tx_q.put_nowait(_norm_item)
             if pending_retry:
                 print(f"[meshcore-embedded] retries restaurados tras reconexión: {len(pending_retry)}", flush=True)
         except Exception:
@@ -1495,11 +1497,14 @@ class MeshCoreEmbeddedBridge:
                 continue
 
             retry_count = 0
+            item_max_retries = self._tx_max_retries
             try:
                 if isinstance(item, (tuple, list)) and len(item) >= 2:
                     dst, msg = item[0], item[1]
                     if len(item) >= 3:
                         retry_count = int(item[2] or 0)
+                    if len(item) >= 4 and item[3] is not None:
+                        item_max_retries = max(0, int(item[3]))
                 else:
                     # Compat defensiva ante payload inesperado en cola.
                     continue
@@ -1577,13 +1582,13 @@ class MeshCoreEmbeddedBridge:
                 # Despublicar la cola de sesión para que nuevos enqueues no apunten aquí.
                 _old_q = self._tx_q
                 self._tx_q = None
-                if retry_count < self._tx_max_retries:
+                if retry_count < item_max_retries:
                     next_retry = retry_count + 1
                     try:
-                        self._spool_append((dst, msg, next_retry), why="tx_retry")
+                        self._spool_append((dst, msg, next_retry, item_max_retries), why="tx_retry")
                         print(
                             f"[meshcore-embedded] TX persistido para retry={next_retry} "
-                            f"tras reconexión max={self._tx_max_retries}",
+                            f"tras reconexión max={item_max_retries}",
                             flush=True,
                         )
                     except Exception:
@@ -1599,7 +1604,7 @@ class MeshCoreEmbeddedBridge:
                     try:
                         print(
                             f"[meshcore-embedded] TX descartado tras agotar retries "
-                            f"retry={retry_count} max={self._tx_max_retries} "
+                            f"retry={retry_count} max={item_max_retries} "
                             f"error={self._last_err}",
                             flush=True,
                         )
@@ -1622,11 +1627,9 @@ class MeshCoreEmbeddedBridge:
                                     _pending = _old_q.get_nowait()
                                 except _aio.QueueEmpty:
                                     break
-                                if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
-                                    _dst = _pending[0]
-                                    _msg = str(_pending[1] or "")
-                                    _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
-                                    self._spool_append((_dst, _msg, _r), why="drain_old_q")
+                                _norm_pending = self._normalize_tx_spool_item(_pending)
+                                if _norm_pending is not None:
+                                    self._spool_append(_norm_pending, why="drain_old_q")
                                     _moved += 1
                             if _moved == 0:
                                 _idle_rounds += 1
@@ -1657,11 +1660,9 @@ class MeshCoreEmbeddedBridge:
                             _pending = _orphan_q_after_break.get_nowait()
                         except _aio.QueueEmpty:
                             break
-                        if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
-                            _dst = _pending[0]
-                            _msg = str(_pending[1] or "")
-                            _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
-                            self._spool_append((_dst, _msg, _r), why="drain_orphan_q")
+                        _norm_pending = self._normalize_tx_spool_item(_pending)
+                        if _norm_pending is not None:
+                            self._spool_append(_norm_pending, why="drain_orphan_q")
                             moved += 1
                     if moved == 0:
                         await _aio.sleep(0)
@@ -1747,8 +1748,26 @@ class MeshCoreEmbeddedBridge:
                         flush=True,
                     )
 
+    def _normalize_tx_spool_item(self, item: object, default_max_retries: int | None = None) -> tuple[object, str, int, int] | None:
+        """Normaliza entradas legacy (3-tupla) y nuevas (4-tupla) del spool TX."""
+        if not isinstance(item, (tuple, list)) or len(item) < 2:
+            return None
+        try:
+            dst = item[0]
+            msg = str(item[1] or "")
+            retry_count = int(item[2] or 0) if len(item) >= 3 else 0
+            if len(item) >= 4 and item[3] is not None:
+                max_retries = max(0, int(item[3]))
+            elif default_max_retries is not None:
+                max_retries = max(0, int(default_max_retries))
+            else:
+                max_retries = max(0, int(self._tx_max_retries))
+            return (dst, msg, retry_count, max_retries)
+        except Exception:
+            return None
 
-    def enqueue_send_contact(self, contact_prefix: str, text: str, tx_id: str | None = None) -> str | None:
+
+    def enqueue_send_contact(self, contact_prefix: str, text: str, tx_id: str | None = None, max_retries: int | None = None) -> str | None:
         """
         Encola un TX MeshCore hacia contacto/DM.
 
@@ -1762,6 +1781,8 @@ class MeshCoreEmbeddedBridge:
                 Texto a transmitir.
             tx_id:
                 Identificador opcional de trazabilidad. Si no se indica, se genera uno.
+            max_retries:
+                Reintentos máximos para este TX. Si es None, usa MESHCORE_TX_MAX_RETRIES.
 
         Funcionalidad:
             - Si MeshCore está conectado, encola en la cola activa.
@@ -1791,7 +1812,8 @@ class MeshCoreEmbeddedBridge:
                 loop = self._loop
                 tx_q = self._tx_q
 
-            item = (str(contact_prefix), msg, 0)
+            item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
+            item = (str(contact_prefix), msg, 0, item_max_retries)
 
             if (not healthy) or (not loop) or (not tx_q):
                 self._spool_append(item, why="enqueue_contact_deferred")
@@ -1818,13 +1840,14 @@ class MeshCoreEmbeddedBridge:
 
         except Exception:
             try:
-                self._spool_append((str(contact_prefix), msg, 0), why="enqueue_contact_fallback")
+                item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
+                self._spool_append((str(contact_prefix), msg, 0, item_max_retries), why="enqueue_contact_fallback")
                 return tx_id
             except Exception:
                 return None
 
    
-    def enqueue_send_channel(self, channel_idx: int, text: str, tx_id: str | None = None) -> str | None:
+    def enqueue_send_channel(self, channel_idx: int, text: str, tx_id: str | None = None, max_retries: int | None = None) -> str | None:
         """
         Encola un TX MeshCore hacia un canal MeshCore.
 
@@ -1838,6 +1861,8 @@ class MeshCoreEmbeddedBridge:
                 Texto a transmitir.
             tx_id:
                 Identificador opcional de trazabilidad. Si no se indica, se genera uno.
+            max_retries:
+                Reintentos máximos para este TX. Si es None, usa MESHCORE_TX_MAX_RETRIES.
 
         Funcionalidad:
             - Si MeshCore está conectado, encola en la cola activa.
@@ -1868,7 +1893,8 @@ class MeshCoreEmbeddedBridge:
                 tx_q = self._tx_q
 
             dst = {"kind": "chan", "channel_idx": int(channel_idx)}
-            item = (dst, msg, 0)
+            item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
+            item = (dst, msg, 0, item_max_retries)
 
             if (not healthy) or (not loop) or (not tx_q):
                 self._spool_append(item, why="enqueue_chan_deferred")
@@ -1895,8 +1921,9 @@ class MeshCoreEmbeddedBridge:
 
         except Exception:
             try:
+                item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
                 self._spool_append(
-                    ({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0),
+                    ({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0, item_max_retries),
                     why="enqueue_chan_fallback",
                 )
                 return tx_id
@@ -6366,6 +6393,11 @@ class _BacklogServer(threading.Thread):
                 # Aceptamos channel_idx (preferido) y también "ch" por compat/atajo.
                 ch_raw = params.get("channel_idx", params.get("ch", None))
                 contact_prefix = (params.get("contact_prefix") or params.get("prefix") or "").strip()
+                max_retries = params.get("max_retries", None)
+                try:
+                    max_retries = None if max_retries is None else max(0, int(max_retries))
+                except Exception:
+                    max_retries = None
 
                 # Inferencia si no viene kind
                 if not kind:
@@ -6398,7 +6430,7 @@ class _BacklogServer(threading.Thread):
                             conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                             return
 
-                        tx_id = mc.enqueue_send_channel(int(channel_idx), text)
+                        tx_id = mc.enqueue_send_channel(int(channel_idx), text, max_retries=max_retries)
                         resp = {
                             "ok": True,
                             "queued": True,
@@ -6415,7 +6447,7 @@ class _BacklogServer(threading.Thread):
                             conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                             return
 
-                        tx_id = mc.enqueue_send_contact(contact_prefix, text)
+                        tx_id = mc.enqueue_send_contact(contact_prefix, text, max_retries=max_retries)
                         resp = {
                             "ok": True,
                             "queued": True,

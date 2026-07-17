@@ -1499,7 +1499,7 @@ def _broker_send_meshcore_text(ch: int, text: str, timeout: float = 6.0) -> dict
     en instalaciones meshcore_only simples sin mapa adicional.
     """
     route = _parse_meshcore_channel_map_for_aprs().get(int(ch), {"kind": "chan", "channel_idx": int(ch)})
-    params = {"kind": route.get("kind") or "chan", "text": text}
+    params = {"kind": route.get("kind") or "chan", "text": text, "max_retries": 0}
     if params["kind"] in {"contact", "dm"}:
         cp = (route.get("contact_prefix") or "").strip()
         if not cp:
