@@ -6590,7 +6590,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <code>/aprs en &lt;min|m1,m2,...&gt; canal N &lt;texto&gt;</code> — Programa salida APRS diferida.\n"
         "• <code>/aprs_on</code> — Activa gateway APRS→Mesh.\n"
         "• <code>/aprs_off</code> — Desactiva gateway APRS→Mesh.\n"
-        "• <code>/aprsis_push on|off|status</code> — Controla mirror/push APRS-IS si está configurado.\n"
+        "• <code>/aprsis_push on|off|status</code> — Controla mirror/push APRS-IS si está configurado. Admite prefijos <code>meshtastic</code>/<code>meshcore</code> para separar canales.\n"
         "• <code>/aprs_status</code> — Estado de APRS/gateway.\n"
         "Ej.: <code>/aprs broadcast: Saludos desde MeshNet</code>\n"
         "Ej.: <code>/aprs EB2ABC-10: Hola desde la malla</code>\n"
@@ -7910,6 +7910,11 @@ try:
 except NameError:
     APRS_CTRL_PORT = 9464
 
+# Ruta AX.25 usada por los envíos APRS inmediatos del bot (/aprs, /enviar aprs,
+# /enviar_mc aprs). Por defecto queda vacía para que el gateway emita una sola
+# trama local; si se quieren repetidores, definir APRS_BOT_PATH=WIDE1-1,WIDE2-1.
+APRS_BOT_PATH = os.getenv("APRS_BOT_PATH", "").strip()
+
 
 # ===================== EMERG desde /enviar → APRS (opcional) =====================
 import os as _os
@@ -8425,6 +8430,8 @@ async def aprsis_push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     Uso:
       /aprsis_push on <canal|all>
+      /aprsis_push on meshtastic <canal|all> [meshcore <canal|all>]
+      /aprsis_push on meshcore <canal|all>
       /aprsis_push off
     """
     bump_stat(update.effective_user.id, update.effective_user.username or "", "aprsis_push")
@@ -8435,6 +8442,8 @@ async def aprsis_push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.effective_message.reply_text(
             "Uso:\n"
             "/aprsis_push on <canal|all>\n"
+            "/aprsis_push on meshtastic <canal|all> [meshcore <canal|all>]\n"
+            "/aprsis_push on meshcore <canal|all>\n"
             "/aprsis_push off"
         )
         return
@@ -8458,7 +8467,7 @@ async def aprsis_push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         if sub == "on":
-            channels = args[1] if len(args) > 1 else "all"
+            channels = " ".join(args[1:]).strip() if len(args) > 1 else "all"
             msg = {
                 "mode": "aprsis_push",
                 "enabled": 1,
