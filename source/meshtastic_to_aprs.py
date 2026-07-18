@@ -1218,12 +1218,23 @@ def parse_ax25_ui(frame: bytes) -> dict | None:
 #   [CH 1] Texto
 #   [CH1] Texto
 #   [CANAL 3] Texto
+#   [MC1] Texto / [MESHCORE 1] Texto
 #   [CH 1+10] Texto  (delay 10 min)
 #   [CANAL3+5] Texto (delay 5 min)
+#   [MC1/ZARAGOZA] Texto (se acepta el sufijo de nombre generado por aprsis_push)
 _CH_REGEX = re.compile(
-    r"\[(?:CH|CANAL)\s*([0-9]{1,2})(?:\s*([+])\s*([0-9]{1,4}))?\]",
+    r"\[(CH|CANAL|MC|MESHCORE)\s*([0-9]{1,2})(?:\s*([+])\s*([0-9]{1,4}))?(?:/[^\]]*)?\]",
     re.IGNORECASE,
 )
+
+def _channel_tag_is_meshcore(comment: str) -> bool:
+    """True si la primera etiqueta de canal usa prefijo MeshCore explícito ([MCx]/[MESHCORE x])."""
+    if not comment:
+        return False
+    m = _CH_REGEX.search(comment)
+    if not m:
+        return False
+    return (m.group(1) or "").strip().upper() in {"MC", "MESHCORE"}
 
 def extract_channel_if_tagged(comment: str) -> tuple[Optional[int], str]:
     """
@@ -1237,7 +1248,7 @@ def extract_channel_if_tagged(comment: str) -> tuple[Optional[int], str]:
     if not m:
         return (None, comment.strip())
     try:
-        ch = int(m.group(1))
+        ch = int(m.group(2))
     except Exception:
         return (None, comment.strip())
     ch = max(0, min(15, ch))
@@ -1259,7 +1270,7 @@ def extract_channel_from_comment(comment: str, default_ch: int = MESHTASTIC_CHAN
     if not m:
         return (int(default_ch), comment.strip())
     try:
-        ch = int(m.group(1))
+        ch = int(m.group(2))
     except Exception:
         ch = int(default_ch)
 
@@ -1287,9 +1298,9 @@ def extract_channel_and_delay(comment: str) -> tuple[Optional[int], Optional[int
     if not m:
         return (None, None, comment.strip())
 
-    raw = (m.group(1) or "").strip()
-    sign = m.group(2)
-    val  = m.group(3)
+    raw = (m.group(2) or "").strip()
+    sign = m.group(3)
+    val  = m.group(4)
 
     ch: Optional[int] = None
     delay_min: Optional[int] = None
@@ -1490,7 +1501,7 @@ def _parse_meshcore_channel_map_for_aprs() -> dict[int, dict]:
     return out
 
 
-def _broker_send_meshcore_text(ch: int, text: str, timeout: float = 6.0) -> dict:
+def _broker_send_meshcore_text(ch: int, text: str, timeout: float = 6.0, direct_channel_idx: bool = False) -> dict:
     """
     Envía APRS→MeshCore usando el endpoint MESHCORE_SEND del broker.
 
@@ -1498,8 +1509,11 @@ def _broker_send_meshcore_text(ch: int, text: str, timeout: float = 6.0) -> dict
     se trata CHx como channel_idx MeshCore para que /escuchar all y APRS funcionen
     en instalaciones meshcore_only simples sin mapa adicional.
     """
-    route = _parse_meshcore_channel_map_for_aprs().get(int(ch), {"kind": "chan", "channel_idx": int(ch)})
-    params = {"kind": route.get("kind") or "chan", "text": text, "max_retries": 0}
+    if direct_channel_idx:
+        route = {"kind": "chan", "channel_idx": int(ch)}
+    else:
+        route = _parse_meshcore_channel_map_for_aprs().get(int(ch), {"kind": "chan", "channel_idx": int(ch)})
+    params = {"kind": route.get("kind") or "chan", "text": text}
     if params["kind"] in {"contact", "dm"}:
         cp = (route.get("contact_prefix") or "").strip()
         if not cp:
@@ -1534,14 +1548,14 @@ def _broker_send_meshcore_text(ch: int, text: str, timeout: float = 6.0) -> dict
     return resp
 
 
-def _broker_send_mesh_text(ch: int, text: str, dest: str | None = None, ack: bool = False, timeout: float = 6.0) -> dict:
+def _broker_send_mesh_text(ch: int, text: str, dest: str | None = None, ack: bool = False, timeout: float = 6.0, direct_meshcore_channel: bool = False) -> dict:
     """Ruta común APRS→malla: MeshCore en meshcore_only, Meshtastic en modo normal."""
     if _aprs_meshcore_mode():
         if dest and str(dest).strip().lower() != "broadcast":
             # En meshcore_only no existe DM Meshtastic/HOME. Para APRS sólo usamos
             # canal/contacto MeshCore resuelto por MESHCORE_CHANNEL_MAP.
             return {"ok": False, "error": "direct Meshtastic destination disabled in meshcore_only", "transport": "meshcore"}
-        return _broker_send_meshcore_text(ch, text, timeout=timeout)
+        return _broker_send_meshcore_text(ch, text, timeout=timeout, direct_channel_idx=direct_meshcore_channel)
     return _broker_send_text(ch, text, dest=dest, ack=ack, timeout=timeout)
 
 # =========================
@@ -1815,7 +1829,8 @@ async def task_aprs_to_meshtastic():
                                 flush=True,
                             )
                                        
-                    # --- Extraer canal + posible delay (+N minutos) desde [CH x] / [CANAL x+N] ---
+                    # --- Extraer canal + posible delay (+N minutos) desde [CH x] / [CANAL x+N] / [MCx] ---
+                    direct_meshcore_channel = _channel_tag_is_meshcore((pkt.get("text") or pkt.get("info") or ""))
                     ch, delay_min, msg = _parse_ch_and_delay_from_pkt(pkt, default_ch=MESHTASTIC_CHANNEL)
                     if ch is None or not msg:
                         _aprs_dbg(f"[aprs] drop(no CH) {pkt.get('type','ui')} src={pkt.get('src','?')}")
@@ -1948,7 +1963,7 @@ async def task_aprs_to_meshtastic():
                         # Envío inmediato al broker (como antes)
                         #res = _broker_send_text(ch, msg, dest=None, ack=False)
                         msg_mesh = _mesh_add_src_prefix(src, msg)
-                        res = _broker_send_mesh_text(ch, msg_mesh, dest=None, ack=False)
+                        res = _broker_send_mesh_text(ch, msg_mesh, dest=None, ack=False, direct_meshcore_channel=direct_meshcore_channel)
                         
                         ok = bool(res.get("ok"))
                         print(f"[aprs→mesh] CH{ch} ← {src}: {msg_mesh[:120]}  -> {'OK' if ok else 'KO'}")
@@ -2113,17 +2128,35 @@ async def task_aprsis_to_meshtastic():
                     "src": src,
                     "dest": None,
                     "info": inner_info,   # mantenemos original para debug/trazas
-                    "text": body_text,    # aquí debe estar el texto “real” donde vive [CHx]
+                    "text": body_text,    # aquí debe estar el texto “real” donde vive [CHx]/[MCx]
                 }
 
+                # Observabilidad para bot/web: registrar también las tramas que llegan
+                # por APRS-IS (APRSdroid), no solo las recibidas por KISS/RF.
+                try:
+                    rec = {
+                        "ts": int(time.time()),
+                        "callsign": src,
+                        "type": "message",
+                        "dest": None,
+                        "path": None,
+                        "info": body_text or inner_info,
+                        "raw": inner_tnc2,
+                        "source": "aprs-is",
+                    }
+                    _aprs_web_append(rec)
+                    _aprs_broker_backlog_append(rec)
+                except Exception as _e:
+                    _aprs_dbg(f"[aprs←IS→broker-backlog] APRS_RX append ERR src={src}: {type(_e).__name__}: {_e}")
 
+                direct_meshcore_channel = _channel_tag_is_meshcore(body_text)
                 ch, delay_min, msg = _parse_ch_and_delay_from_pkt(
                     pkt, default_ch=MESHTASTIC_CHANNEL
                 )
                 if ch is None or not msg:
-                    # No había [CHx]/[CANAL x]
+                    # No había [CHx]/[CANAL x]/[MCx]
                     _aprs_dbg(
-                        f"[aprs←IS] sin [CHx]/[CANAL x] usable desde {src}: {inner_info[:80]}"
+                        f"[aprs←IS] sin [CHx]/[CANAL x]/[MCx] usable desde {src}: {inner_info[:80]}"
                     )
                     continue
 
@@ -2175,7 +2208,7 @@ async def task_aprsis_to_meshtastic():
                 else:
                     #res = _broker_send_text(ch, msg, dest=None, ack=False)
                     msg_mesh = _mesh_add_src_prefix(src, msg)
-                    res = _broker_send_mesh_text(ch, msg_mesh, dest=None, ack=False)
+                    res = _broker_send_mesh_text(ch, msg_mesh, dest=None, ack=False, direct_meshcore_channel=direct_meshcore_channel)
 
                     
                     ok = bool(res.get("ok"))
@@ -2852,6 +2885,22 @@ def _aprsis_push_event_transport(evt: dict) -> str:
     return "meshtastic"
 
 
+def _aprsis_push_event_channel(evt: dict, fallback_ch: int | None, transport: str | None = None) -> int | None:
+    """
+    Devuelve el canal que debe usar aprsis_push para filtrar/prefijar.
+
+    En eventos MeshCore, el campo `channel` del JSONL puede ser el canal lógico
+    Meshtastic al que se ha ruteado/injectado el mensaje. Para el push APRS-IS
+    interesa el canal MeshCore real (`meshcore_chan_idx`/`channel_idx`).
+    """
+    t = (transport or _aprsis_push_event_transport(evt)).strip().lower()
+    if t == "meshcore":
+        mc_ch = _evt_first_int(evt, ["meshcore_chan_idx", "channel_idx", "chan_idx"])
+        if mc_ch is not None:
+            return mc_ch
+    return fallback_ch
+
+
 def _build_aprsis_push_prefix(evt: dict, ch: int) -> str:
     """
     Prefijo compacto para APRS-IS push (si APRSIS_PUSH_PREFIX=1).
@@ -2862,9 +2911,15 @@ def _build_aprsis_push_prefix(evt: dict, ch: int) -> str:
     alias = _evt_first(evt, ["from_alias", "sender", "fromAlias"])
     alias = _short(alias, 10)
 
-    # nombre de canal: primero en evento, luego por .env
-    ch_name_evt = _evt_first(evt, ["channel_name", "channelName"])
-    ch_name = ch_name_evt or _CHANNEL_NAME_BY_INDEX.get(int(ch), "")
+    transport = _aprsis_push_event_transport(evt)
+
+    # nombre de canal: en MeshCore priorizamos la etiqueta real del canal
+    # MeshCore; `channel_name` puede ser el canal lógico Meshtastic mapeado.
+    if transport == "meshcore":
+        ch_name_evt = _evt_first(evt, ["meshcore_chan_tag", "meshcore_channel_tag", "meshcore_channel_name"])
+    else:
+        ch_name_evt = _evt_first(evt, ["channel_name", "channelName"])
+    ch_name = ch_name_evt or ("" if transport == "meshcore" else _CHANNEL_NAME_BY_INDEX.get(int(ch), ""))
     ch_name = _short(ch_name, 8)
 
     # hops reales
@@ -2872,7 +2927,7 @@ def _build_aprsis_push_prefix(evt: dict, ch: int) -> str:
     hops_txt = f"h{hops_real}" if isinstance(hops_real, int) else ""
 
     # etiqueta canal
-    ch_label = f"ch{ch}"
+    ch_label = f"mc{ch}" if transport == "meshcore" else f"ch{ch}"
     if ch_name:
         ch_label = f"{ch_label}/{ch_name}"
 
@@ -3024,8 +3079,9 @@ async def task_mesh_channels_to_aprsis():
                 except Exception:
                     continue
 
-                port, txt, ch = _norm_event(obj)
+                port, txt, ch_raw = _norm_event(obj)
                 transport = _aprsis_push_event_transport(obj)
+                ch = _aprsis_push_event_channel(obj, ch_raw, transport)
 
                 if port != "TEXT_MESSAGE_APP":
                     continue
