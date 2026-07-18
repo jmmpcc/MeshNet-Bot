@@ -41,6 +41,81 @@ class TaskNoTransmissionNeeded(Exception):
     """
     pass
 
+
+def _radio_profile() -> str:
+    """Devuelve RADIO_PROFILE normalizado para decisiones de transporte del scheduler."""
+    return (os.getenv("RADIO_PROFILE") or "").strip().lower().replace("-", "_")
+
+
+def _is_meshcore_only_profile() -> bool:
+    return _radio_profile() == "meshcore_only"
+
+
+def _parse_meshcore_channel_map(raw: str | None) -> dict[int, dict]:
+    """
+    Parsea MESHCORE_CHANNEL_MAP para enrutar canales lógicos Meshtastic a MeshCore.
+
+    Formatos soportados:
+      - ch:contact[:tag]                  (compatibilidad: DM/contacto)
+      - ch:chan|channel|ch:idx[:tag]      (canal MeshCore)
+      - ch:contact|dm:prefix[:tag]        (DM/contacto explícito)
+    """
+    out: dict[int, dict] = {}
+    text = str(raw or "").strip().strip('\"').strip("'")
+    if not text:
+        return out
+
+    for item in text.split(","):
+        item = (item or "").strip()
+        if not item:
+            continue
+        parts = [p.strip() for p in item.split(":")]
+        if len(parts) < 2:
+            continue
+        try:
+            ch = int(parts[0])
+        except Exception:
+            continue
+
+        if len(parts) >= 3 and parts[1].lower() in ("chan", "channel", "ch"):
+            try:
+                out[ch] = {"kind": "chan", "channel_idx": int(parts[2]), "tag": (parts[3].strip() if len(parts) >= 4 else None) or None}
+            except Exception:
+                continue
+        elif len(parts) >= 3 and parts[1].lower() in ("contact", "dm"):
+            contact = parts[2].strip()
+            if contact:
+                out[ch] = {"kind": "contact", "contact": contact, "tag": (parts[3].strip() if len(parts) >= 4 else None) or None}
+        else:
+            contact = parts[1].strip()
+            if contact:
+                out[ch] = {"kind": "contact", "contact": contact, "tag": (parts[2].strip() if len(parts) >= 3 else None) or None}
+    return out
+
+
+def _meshcore_meta_for_meshtastic_channel(channel: int, base_meta: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
+    """Construye meta MeshCore desde MESHCORE_CHANNEL_MAP para un canal lógico."""
+    try:
+        ch = int(channel)
+    except Exception:
+        return None
+
+    mapping = _parse_meshcore_channel_map(os.getenv("MESHCORE_CHANNEL_MAP")).get(ch)
+    if not mapping:
+        return None
+
+    meta = dict(base_meta or {})
+    kind = str(mapping.get("kind") or "").lower()
+    if kind in ("chan", "channel", "ch"):
+        meta.update({"transport": "meshcore", "meshcore_mode": "channel", "meshcore_channel_idx": int(mapping["channel_idx"])})
+    else:
+        contact = str(mapping.get("contact") or mapping.get("target") or "").strip()
+        if not contact:
+            return None
+        meta.update({"transport": "meshcore", "meshcore_mode": "dm", "meshcore_contact": contact})
+    return meta
+
+
 def _meshcore_send_via_broker_ctrl(*, kind: str, channel_idx: int | None = None, contact_prefix: str | None = None, text: str, timeout: float = 5.0) -> Dict[str, Any]:
     """
     Envía una orden MESHCORE_SEND al BacklogServer/Control del broker.
@@ -506,7 +581,32 @@ class _TaskManager:
             self._fail_or_retry(t, error)
             return
 
-        # 2) Transporte APRS-only ya existente. Se mantiene, pero usando el texto resuelto.
+        # 2) En RADIO_PROFILE=meshcore_only no debe salir ninguna tarea por Meshtastic.
+        #    Las tareas antiguas/legacy suelen guardar transport=mesh y channel=<canal lógico>;
+        #    si ese canal está definido como pasarela en MESHCORE_CHANNEL_MAP, lo convertimos
+        #    aquí en envío MeshCore real antes de llegar al sender Meshtastic.
+        if _is_meshcore_only_profile() and transport in ("", "mesh", "meshtastic", "both"):
+            meshcore_meta = _meshcore_meta_for_meshtastic_channel(t.channel, meta)
+            if meshcore_meta is not None:
+                if transport == "both":
+                    meshcore_meta["transport"] = "meshcore_aprs"
+                else:
+                    meshcore_meta["transport"] = "meshcore"
+                meta = meshcore_meta
+                transport = str(meta.get("transport") or "meshcore").strip().lower()
+                self._logger.info(
+                    f"[Tasks] RADIO_PROFILE=meshcore_only: redirigiendo {t.id} "
+                    f"ch={t.channel} desde Meshtastic a MeshCore"
+                )
+            else:
+                error = (
+                    f"RADIO_PROFILE=meshcore_only blocks Meshtastic scheduled task on ch={t.channel}; "
+                    "define MESHCORE_CHANNEL_MAP for this channel or schedule it as MeshCore"
+                )
+                self._fail_or_retry(t, error)
+                return
+
+        # 3) Transporte APRS-only ya existente. Se mantiene, pero usando el texto resuelto.
         if transport == "aprs":
             try:
                 self._aprs_forward_via_udp(dest=aprs_dest, text=message_to_send)
@@ -520,7 +620,7 @@ class _TaskManager:
                 return
 
                 # 3) Transporte MeshCore-only. No exige sender Meshtastic y no usa canal puente.
-        if transport == "meshcore":
+        if transport in ("meshcore", "meshcore_aprs"):
             try:
                 # Protección 24/7:
                 # Si la tarea MeshCore-only llega sin texto real, no es un fallo recuperable.
@@ -554,6 +654,11 @@ class _TaskManager:
                 self._logger.info(
                     f"[Tasks] QUEUED (MeshCore-only) {t.id} • queued={queued} • path={path}{suffix}"
                 )
+                if transport == "meshcore_aprs":
+                    try:
+                        self._aprs_forward_via_udp(dest=aprs_dest, text=message_to_send)
+                    except Exception as _e_aprs:
+                        self._logger.warning(f"[Tasks→APRS] Error post-send APRS tras MeshCore: {type(_e_aprs).__name__}: {_e_aprs}")
                 return
 
             except Exception as e:
