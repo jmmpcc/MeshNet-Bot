@@ -39,6 +39,8 @@ Se añade un nuevo comando al bot de Telegram para controlar dinámicamente el m
 ### Comandos disponibles:
 ```
 /aprsis_push on <canal|all>
+/aprsis_push on meshtastic <canal|all> [meshcore <canal|all>]
+/aprsis_push on meshcore <canal|all>
 /aprsis_push off
 ```
 
@@ -50,6 +52,10 @@ Se añaden variables para control estático (arranque) del mirror Mesh → APRS-
   APRSIS_PUSH_ENABLED=0
   APRSIS_PUSH_TO=EB2EAS-7
   APRSIS_PUSH_CHANNELS=all
+  # También admite prefijos: "meshtastic 0,1 meshcore 2" o "meshcore all".
+  # Los números tras "meshcore" son channel_idx reales de MeshCore, no canales lógicos Meshtastic.
+  # En mensajes desde APRSdroid/APRS-IS también se aceptan etiquetas [MC1] o [MC1/ZARAGOZA]
+  # para enviar directamente al channel_idx MeshCore 1 en RADIO_PROFILE=meshcore_only.
   APRSIS_PUSH_PREFIX=1
   APRSIS_PUSH_MIN_GAP_S=1.0
 
