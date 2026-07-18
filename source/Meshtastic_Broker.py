@@ -1141,27 +1141,37 @@ class MeshCoreEmbeddedBridge:
         for c in (items or []):
             try:
                 if isinstance(c, dict):
-                    public_key = c.get("public_key") or c.get("pubkey") or c.get("key") or c.get("key_prefix") or c.get("pubkey_prefix")
-                    # id/prefix pueden ser IDs cortos de anuncio/ruta. Para DM se debe usar public_key o un prefijo de public_key.
-                    display_id = c.get("id") or c.get("prefix")
+                    public_key = c.get("public_key") or c.get("pubkey") or c.get("key")
+                    # La API oficial de contactos devuelve public_key completa.
+                    # Si alguna versión aporta un prefijo explícito, lo respetamos;
+                    # si no, se calcula más abajo con public_key[:12].
+                    display_prefix = c.get("pubkey_prefix") or c.get("key_prefix")
+                    contact_id = c.get("id") or c.get("prefix")
                     name = c.get("name") or c.get("adv_name") or c.get("alias") or c.get("label")
                     last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("last_advert") or c.get("seen") or c.get("ts")
                 else:
-                    public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None) or getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None)
-                    display_id = getattr(c, "id", None) or getattr(c, "prefix", None)
+                    public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None)
+                    display_prefix = getattr(c, "pubkey_prefix", None) or getattr(c, "key_prefix", None)
+                    contact_id = getattr(c, "id", None) or getattr(c, "prefix", None)
                     name = getattr(c, "name", None) or getattr(c, "adv_name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
                     last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "last_advert", None) or getattr(c, "seen", None)
 
-                dm_key = (str(public_key).strip() if public_key is not None else "")
-                display_id = (str(display_id).strip() if display_id is not None else "") or dm_key[:12]
+                display_id = (str(display_prefix).strip() if display_prefix is not None else "")
+                contact_id = (str(contact_id).strip() if contact_id is not None else "")
+                public_key = (str(public_key).strip() if public_key is not None else "")
+                # send_msg resuelve contactos por prefijo de public_key mediante
+                # get_contact_by_key_prefix(); no mostramos la clave completa como DM.
+                dm_key = display_id or (public_key[:12] if public_key else "") or contact_id
+                display_id = display_id or dm_key or contact_id
                 if not dm_key or dm_key in seen:
                     continue
                 seen.add(dm_key)
 
                 out.append({
                     "prefix": display_id,
+                    "contact_id": contact_id or None,
                     "dm_key": dm_key,
-                    "public_key": dm_key,
+                    "public_key": public_key or dm_key,
                     "name": (str(name).strip() if name is not None else "") or None,
                     "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
                 })
@@ -1171,6 +1181,95 @@ class MeshCoreEmbeddedBridge:
                 continue
 
         return out
+
+    def list_channels(self, limit: int = 80) -> list[dict]:
+        """
+        Devuelve canales MeshCore conocidos por la sesión embebida.
+
+        API real de meshcore>=2.2.28: CommandHandler.get_channel(channel_idx)
+        devuelve EventType.CHANNEL_INFO con payload {channel_idx, channel_name,
+        channel_secret, channel_hash}. No existe un get_channels() agregado, así
+        que se consulta un rango acotado de índices y después se completa con
+        MESHCORE_CHANNEL_MAP.
+        """
+        try:
+            max_n = max(1, min(500, int(limit)))
+        except Exception:
+            max_n = 80
+        try:
+            scan_max = max(1, min(256, int(os.getenv("MESHCORE_CHANNEL_SCAN_MAX", "40") or "40")))
+        except Exception:
+            scan_max = 40
+
+        channels_by_idx: dict[int, dict] = {}
+
+        def _add_channel(channel_idx, name=None, role=None, source="api", channel_hash=None):
+            try:
+                idx = int(channel_idx)
+            except Exception:
+                return
+            if idx < 0 or idx in channels_by_idx:
+                return
+            channels_by_idx[idx] = {
+                "channel_idx": idx,
+                "name": (str(name).strip() if name is not None else "") or None,
+                "role": (str(role).strip() if role is not None else "") or None,
+                "source": source,
+                "channel_hash": (str(channel_hash).strip() if channel_hash is not None else "") or None,
+            }
+
+        mc = self._mc
+        loop = self._loop
+        if mc is not None and loop is not None and loop.is_running() and self._connected:
+            async def _fetch_channels_by_index():
+                commands = getattr(mc, "commands", None)
+                get_channel = getattr(commands, "get_channel", None) if commands is not None else None
+                if not callable(get_channel):
+                    return []
+
+                found = []
+                for channel_idx in range(scan_max):
+                    result = await get_channel(int(channel_idx))
+                    if result is None or getattr(result, "type", None) == _MCEventType.ERROR:
+                        continue
+                    payload = getattr(result, "payload", None) or {}
+                    if isinstance(payload, dict):
+                        found.append(payload)
+                return found
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(_fetch_channels_by_index(), loop)
+                items = future.result(timeout=7.0)
+            except Exception:
+                items = []
+
+            for item in (items or []):
+                try:
+                    if not isinstance(item, dict):
+                        continue
+                    _add_channel(
+                        item.get("channel_idx"),
+                        name=item.get("channel_name"),
+                        source="api:get_channel",
+                        channel_hash=item.get("channel_hash"),
+                    )
+                except Exception:
+                    continue
+
+        for _ch, mapping in (self.ch_map or {}).items():
+            try:
+                if (mapping or {}).get("kind") != "chan":
+                    continue
+                _add_channel(
+                    int((mapping or {}).get("channel_idx")),
+                    name=(mapping or {}).get("tag"),
+                    role=f"Meshtastic CH{int(_ch)}",
+                    source="MESHCORE_CHANNEL_MAP",
+                )
+            except Exception:
+                continue
+
+        return list(channels_by_idx.values())[:max_n]
 
     def start(self) -> None:
         if not self.enable:
@@ -1309,8 +1408,10 @@ class MeshCoreEmbeddedBridge:
             with self._retry_spool_lock:
                 pending_retry = list(self._retry_spool)
                 self._retry_spool.clear()
-            for _dst, _msg, _retry in pending_retry:
-                self._tx_q.put_nowait((_dst, _msg, _retry))
+            for _item in pending_retry:
+                _norm_item = self._normalize_tx_spool_item(_item)
+                if _norm_item is not None:
+                    self._tx_q.put_nowait(_norm_item)
             if pending_retry:
                 print(f"[meshcore-embedded] retries restaurados tras reconexión: {len(pending_retry)}", flush=True)
         except Exception:
@@ -1489,11 +1590,14 @@ class MeshCoreEmbeddedBridge:
                 continue
 
             retry_count = 0
+            item_max_retries = self._tx_max_retries
             try:
                 if isinstance(item, (tuple, list)) and len(item) >= 2:
                     dst, msg = item[0], item[1]
                     if len(item) >= 3:
                         retry_count = int(item[2] or 0)
+                    if len(item) >= 4 and item[3] is not None:
+                        item_max_retries = max(0, int(item[3]))
                 else:
                     # Compat defensiva ante payload inesperado en cola.
                     continue
@@ -1571,13 +1675,13 @@ class MeshCoreEmbeddedBridge:
                 # Despublicar la cola de sesión para que nuevos enqueues no apunten aquí.
                 _old_q = self._tx_q
                 self._tx_q = None
-                if retry_count < self._tx_max_retries:
+                if retry_count < item_max_retries:
                     next_retry = retry_count + 1
                     try:
-                        self._spool_append((dst, msg, next_retry), why="tx_retry")
+                        self._spool_append((dst, msg, next_retry, item_max_retries), why="tx_retry")
                         print(
                             f"[meshcore-embedded] TX persistido para retry={next_retry} "
-                            f"tras reconexión max={self._tx_max_retries}",
+                            f"tras reconexión max={item_max_retries}",
                             flush=True,
                         )
                     except Exception:
@@ -1593,7 +1697,7 @@ class MeshCoreEmbeddedBridge:
                     try:
                         print(
                             f"[meshcore-embedded] TX descartado tras agotar retries "
-                            f"retry={retry_count} max={self._tx_max_retries} "
+                            f"retry={retry_count} max={item_max_retries} "
                             f"error={self._last_err}",
                             flush=True,
                         )
@@ -1616,11 +1720,9 @@ class MeshCoreEmbeddedBridge:
                                     _pending = _old_q.get_nowait()
                                 except _aio.QueueEmpty:
                                     break
-                                if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
-                                    _dst = _pending[0]
-                                    _msg = str(_pending[1] or "")
-                                    _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
-                                    self._spool_append((_dst, _msg, _r), why="drain_old_q")
+                                _norm_pending = self._normalize_tx_spool_item(_pending)
+                                if _norm_pending is not None:
+                                    self._spool_append(_norm_pending, why="drain_old_q")
                                     _moved += 1
                             if _moved == 0:
                                 _idle_rounds += 1
@@ -1651,11 +1753,9 @@ class MeshCoreEmbeddedBridge:
                             _pending = _orphan_q_after_break.get_nowait()
                         except _aio.QueueEmpty:
                             break
-                        if isinstance(_pending, (tuple, list)) and len(_pending) >= 2:
-                            _dst = _pending[0]
-                            _msg = str(_pending[1] or "")
-                            _r = int(_pending[2] or 0) if len(_pending) >= 3 else 0
-                            self._spool_append((_dst, _msg, _r), why="drain_orphan_q")
+                        _norm_pending = self._normalize_tx_spool_item(_pending)
+                        if _norm_pending is not None:
+                            self._spool_append(_norm_pending, why="drain_orphan_q")
                             moved += 1
                     if moved == 0:
                         await _aio.sleep(0)
@@ -1741,8 +1841,26 @@ class MeshCoreEmbeddedBridge:
                         flush=True,
                     )
 
+    def _normalize_tx_spool_item(self, item: object, default_max_retries: int | None = None) -> tuple[object, str, int, int] | None:
+        """Normaliza entradas legacy (3-tupla) y nuevas (4-tupla) del spool TX."""
+        if not isinstance(item, (tuple, list)) or len(item) < 2:
+            return None
+        try:
+            dst = item[0]
+            msg = str(item[1] or "")
+            retry_count = int(item[2] or 0) if len(item) >= 3 else 0
+            if len(item) >= 4 and item[3] is not None:
+                max_retries = max(0, int(item[3]))
+            elif default_max_retries is not None:
+                max_retries = max(0, int(default_max_retries))
+            else:
+                max_retries = max(0, int(self._tx_max_retries))
+            return (dst, msg, retry_count, max_retries)
+        except Exception:
+            return None
 
-    def enqueue_send_contact(self, contact_prefix: str, text: str, tx_id: str | None = None) -> str | None:
+
+    def enqueue_send_contact(self, contact_prefix: str, text: str, tx_id: str | None = None, max_retries: int | None = None) -> str | None:
         """
         Encola un TX MeshCore hacia contacto/DM.
 
@@ -1756,6 +1874,8 @@ class MeshCoreEmbeddedBridge:
                 Texto a transmitir.
             tx_id:
                 Identificador opcional de trazabilidad. Si no se indica, se genera uno.
+            max_retries:
+                Reintentos máximos para este TX. Si es None, usa MESHCORE_TX_MAX_RETRIES.
 
         Funcionalidad:
             - Si MeshCore está conectado, encola en la cola activa.
@@ -1785,7 +1905,8 @@ class MeshCoreEmbeddedBridge:
                 loop = self._loop
                 tx_q = self._tx_q
 
-            item = (str(contact_prefix), msg, 0)
+            item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
+            item = (str(contact_prefix), msg, 0, item_max_retries)
 
             if (not healthy) or (not loop) or (not tx_q):
                 self._spool_append(item, why="enqueue_contact_deferred")
@@ -1812,13 +1933,14 @@ class MeshCoreEmbeddedBridge:
 
         except Exception:
             try:
-                self._spool_append((str(contact_prefix), msg, 0), why="enqueue_contact_fallback")
+                item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
+                self._spool_append((str(contact_prefix), msg, 0, item_max_retries), why="enqueue_contact_fallback")
                 return tx_id
             except Exception:
                 return None
 
    
-    def enqueue_send_channel(self, channel_idx: int, text: str, tx_id: str | None = None) -> str | None:
+    def enqueue_send_channel(self, channel_idx: int, text: str, tx_id: str | None = None, max_retries: int | None = None) -> str | None:
         """
         Encola un TX MeshCore hacia un canal MeshCore.
 
@@ -1832,6 +1954,8 @@ class MeshCoreEmbeddedBridge:
                 Texto a transmitir.
             tx_id:
                 Identificador opcional de trazabilidad. Si no se indica, se genera uno.
+            max_retries:
+                Reintentos máximos para este TX. Si es None, usa MESHCORE_TX_MAX_RETRIES.
 
         Funcionalidad:
             - Si MeshCore está conectado, encola en la cola activa.
@@ -1862,7 +1986,8 @@ class MeshCoreEmbeddedBridge:
                 tx_q = self._tx_q
 
             dst = {"kind": "chan", "channel_idx": int(channel_idx)}
-            item = (dst, msg, 0)
+            item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
+            item = (dst, msg, 0, item_max_retries)
 
             if (not healthy) or (not loop) or (not tx_q):
                 self._spool_append(item, why="enqueue_chan_deferred")
@@ -1889,8 +2014,9 @@ class MeshCoreEmbeddedBridge:
 
         except Exception:
             try:
+                item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
                 self._spool_append(
-                    ({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0),
+                    ({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0, item_max_retries),
                     why="enqueue_chan_fallback",
                 )
                 return tx_id
@@ -6360,6 +6486,11 @@ class _BacklogServer(threading.Thread):
                 # Aceptamos channel_idx (preferido) y también "ch" por compat/atajo.
                 ch_raw = params.get("channel_idx", params.get("ch", None))
                 contact_prefix = (params.get("contact_prefix") or params.get("prefix") or "").strip()
+                max_retries = params.get("max_retries", None)
+                try:
+                    max_retries = None if max_retries is None else max(0, int(max_retries))
+                except Exception:
+                    max_retries = None
 
                 # Inferencia si no viene kind
                 if not kind:
@@ -6392,7 +6523,7 @@ class _BacklogServer(threading.Thread):
                             conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                             return
 
-                        tx_id = mc.enqueue_send_channel(int(channel_idx), text)
+                        tx_id = mc.enqueue_send_channel(int(channel_idx), text, max_retries=max_retries)
                         resp = {
                             "ok": True,
                             "queued": True,
@@ -6409,7 +6540,7 @@ class _BacklogServer(threading.Thread):
                             conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
                             return
 
-                        tx_id = mc.enqueue_send_contact(contact_prefix, text)
+                        tx_id = mc.enqueue_send_contact(contact_prefix, text, max_retries=max_retries)
                         resp = {
                             "ok": True,
                             "queued": True,
@@ -6463,25 +6594,33 @@ class _BacklogServer(threading.Thread):
                                 for c in (items or []):
                                     try:
                                         if isinstance(c, dict):
-                                            public_key = c.get("public_key") or c.get("pubkey") or c.get("key") or c.get("key_prefix") or c.get("pubkey_prefix")
-                                            display_id = c.get("id") or c.get("prefix")
+                                            public_key = c.get("public_key") or c.get("pubkey") or c.get("key")
+                                            display_prefix = c.get("pubkey_prefix") or c.get("key_prefix")
+                                            contact_id = c.get("id") or c.get("prefix")
                                             name = c.get("name") or c.get("alias") or c.get("label")
                                             last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("seen") or c.get("ts")
                                         else:
-                                            public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None) or getattr(c, "key_prefix", None) or getattr(c, "pubkey_prefix", None)
-                                            display_id = getattr(c, "id", None) or getattr(c, "prefix", None)
+                                            public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None)
+                                            display_prefix = getattr(c, "pubkey_prefix", None) or getattr(c, "key_prefix", None)
+                                            contact_id = getattr(c, "id", None) or getattr(c, "prefix", None)
                                             name = getattr(c, "name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
                                             last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "seen", None)
 
-                                        dm_key = (str(public_key).strip() if public_key is not None else "")
-                                        display_id = (str(display_id).strip() if display_id is not None else "") or dm_key[:12]
+                                        display_id = (str(display_prefix).strip() if display_prefix is not None else "")
+                                        contact_id = (str(contact_id).strip() if contact_id is not None else "")
+                                        public_key = (str(public_key).strip() if public_key is not None else "")
+                                        # send_msg resuelve contactos por prefijo de public_key mediante
+                                        # get_contact_by_key_prefix(); no mostramos la clave completa como DM.
+                                        dm_key = display_id or (public_key[:12] if public_key else "") or contact_id
+                                        display_id = display_id or dm_key or contact_id
                                         if not dm_key:
                                             continue
 
                                         contacts.append({
                                             "prefix": display_id,
+                                            "contact_id": contact_id or None,
                                             "dm_key": dm_key,
-                                            "public_key": dm_key,
+                                            "public_key": public_key or dm_key,
                                             "name": (str(name).strip() if name is not None else "") or None,
                                             "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
                                         })
@@ -6501,6 +6640,30 @@ class _BacklogServer(threading.Thread):
                             uniq.append(d)
 
                         resp = {"ok": True, "count": len(uniq), "contacts": uniq}
+                    except Exception as e:
+                        resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                return
+
+            elif cmd == "MESHCORE_CHANNELS":
+                # params: { "limit": 80 }
+                try:
+                    params = params or {}
+                    limit = int(params.get("limit") or 80)
+                except Exception:
+                    limit = 80
+
+                eng = globals().get("MESHCORE_ENGINE")
+                if not eng:
+                    resp = {"ok": False, "error": "meshcore_disabled"}
+                else:
+                    try:
+                        if hasattr(eng, "list_channels") and callable(getattr(eng, "list_channels")):
+                            channels = eng.list_channels(limit=limit)
+                        else:
+                            channels = []
+                        resp = {"ok": True, "count": len(channels), "channels": channels}
                     except Exception as e:
                         resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
