@@ -158,19 +158,21 @@ Este proyecto proporciona un **stack completo** basado en Docker con tres servic
 
 #### `/diario_mc`
 
-Programa un mensaje diario hacia un canal MeshCore.
+Programa un mensaje diario hacia un canal MeshCore, hacia APRS o hacia ambos transportes, con la misma selección `mesh|aprs|ambos` de `/diario` y `/enviar_mc`.
 
 Sintaxis principal:
 
 ```text
-/diario_mc <HH:MM[,HH:MM,...]> <chX|canal X> <texto>
+/diario_mc <HH:MM[,HH:MM,...]> [mesh|aprs|ambos] [grupo <id>] <chX|canal X> [aprs <CALL|broadcast>] <texto>
+/diario_mc <HH:MM[,HH:MM,...]> aprs <CALL|broadcast>: <texto>
 ```
 
 Ejemplos:
 
 ```text
-/diario_mc 09:00 ch2 Parte diario MeshCore
-/diario_mc 09:00 canal 2 Parte diario MeshCore
+/diario_mc 09:00 mesh ch2 Parte diario MeshCore
+/diario_mc 09:00 ambos canal 2 aprs broadcast Parte diario doble
+/diario_mc 09:00 aprs EB2ABC-7: Parte diario APRS
 /diario_mc 09:00,21:00 grupo avisos_mc canal 2 Parte diario MeshCore
 ```
 
@@ -181,7 +183,7 @@ meta = {
     "via": "/diario_mc",
     "repeat": "daily",
     "daily_time": "09:00",
-    "transport": "meshcore",
+    "transport": "meshcore",  # o "aprs" / "meshcore_aprs"
     "meshcore_mode": "channel",
     "meshcore_channel_idx": 2,
 }

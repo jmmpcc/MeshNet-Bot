@@ -6284,7 +6284,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("estado", "Comprobar estado host/broker"),
         BotCommand("programar", "<YYYY-MM-DD HH:MM> <destino[:canal] | canal N> <texto...> Programar envío en fecha/hora"),
         BotCommand("diario", "<HH:MM[,HH:MM,...]> [mesh|aprs|ambos] [grupo <id>] <destino[:canal] | canal N | CALL|broadcast> [aprs <CALL|broadcast>:] <texto>  — Envío(s) diario(s)"),
-        BotCommand("diario_mc", "<HH:MM[,HH:MM,...]> [grupo <id>] <destino[:canal] | canal N | CALL|broadcast> <texto> — Envío(s) diario(s)"),
+        BotCommand("diario_mc", "<HH:MM[,HH:MM,...]> [mesh|aprs|ambos] [grupo <id>] <chX|canal X|CALL> [aprs <CALL|broadcast>] <texto> — Diario MeshCore/APRS"),
         BotCommand("diario_mc_dm", "<HH:MM[,HH:MM,...]> [grupo <id>] [MC:xxxxxxxxxxxxxx] <texto>  — Envío(s) diario(s)"),
         BotCommand("mis_diarios", "Listar tareas diarias (/mis_diarios [pending|done|failed|canceled] [grupo <id>])"),
         BotCommand("parar_diario_grupo", "Detener todas las diarias de un grupo"),
@@ -6590,10 +6590,11 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     s_diario_mc = (
         "────────────────────────────────────────────────\n"
         "<b>Programación diaria MeshCore</b>\n"
-        "• <code>/diario_mc &lt;HH:MM[,HH:MM...]&gt; [grupo &lt;id&gt;] canal &lt;channel_idx&gt; &lt;texto&gt;</code> — Diario a canal MeshCore.\n"
+        "• <code>/diario_mc &lt;HH:MM[,HH:MM...]&gt; [mesh|aprs|ambos] [grupo &lt;id&gt;] canal &lt;channel_idx&gt; [aprs &lt;CALL|broadcast&gt;] &lt;texto&gt;</code> — Diario a MeshCore, APRS o ambos.\n"
         "• <code>/diario_mc_dm &lt;HH:MM[,HH:MM...]&gt; [grupo &lt;id&gt;] &lt;contact_prefix|[MC:prefix]&gt; &lt;texto&gt;</code> — Diario directo MeshCore.\n"
-        "Ej.: <code>/diario_mc 09:00 grupo avisos_mc canal 2 Parte diario MeshCore</code>\n"
-        "Ej.: <code>/diario_mc 08:00,14:00 canal 1 Parte en dos horarios</code>\n"
+        "Ej.: <code>/diario_mc 09:00 mesh grupo avisos_mc canal 2 Parte diario MeshCore</code>\n"
+        "Ej.: <code>/diario_mc 08:00,14:00 ambos canal 1 aprs broadcast Parte en dos salidas</code>\n"
+        "Ej.: <code>/diario_mc 07:30 aprs EB2ABC-7: Parte solo APRS</code>\n"
         "Ej.: <code>/diario_mc_dm 09:00 grupo avisos_dm 6a18cb3d125b Parte directo</code>\n"
         "Ej.: <code>/diario_mc_dm 09:00 [MC:6a18cb3d125b] Mensaje directo</code>\n"
     )
@@ -14576,16 +14577,16 @@ def _strip_daily_group_tokens(tokens: list[str]) -> tuple[list[str], Optional[st
 
 async def diario_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /diario_mc <HH:MM[,HH:MM,...]> [grupo <id>] <chX|X|canal X> <texto...>
+    /diario_mc <HH:MM[,HH:MM,...]> [mesh|aprs|ambos] [grupo <id>] <chX|X|canal X> [aprs <CALL|broadcast>] <texto...>
+    /diario_mc <HH:MM[,HH:MM,...]> aprs <CALL|broadcast>: <texto...>
 
-    Programa uno o varios envíos diarios hacia MeshCore por channel_idx, reutilizando
-    el mismo backend que /enviar_mc: el broker recibe MESHCORE_SEND y encola en
-    MESHCORE_ENGINE.
+    Programa uno o varios envíos diarios hacia MeshCore por channel_idx, hacia
+    APRS, o hacia ambos transportes, reutilizando la semántica de /enviar_mc.
 
     Ejemplos:
-      /diario_mc 09:00 ch2 Parte diario MeshCore
-      /diario_mc 09:00,21:00 grupo avisos_mc canal 2 Parte diario MeshCore
-      /diario_mc 08:30 2 Buenos días por MeshCore
+      /diario_mc 09:00 mesh ch2 Parte diario MeshCore
+      /diario_mc 09:00,21:00 ambos grupo avisos_mc canal 2 aprs broadcast Parte diario doble
+      /diario_mc 08:30 aprs EB2ABC-7: Buenos días por APRS
     """
     if await _abort_if_cooldown(update, context):
         return ConversationHandler.END
@@ -14596,8 +14597,10 @@ async def diario_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if len(args) < 3:
         await update.effective_message.reply_text(
             "Uso:\n"
-            "/diario_mc <HH:MM[,HH:MM,...]> [grupo <id>] <chX|X|canal X> <texto...>\n"
-            "Ejemplo: /diario_mc 09:00 grupo avisos_mc canal 2 Parte diario MeshCore"
+            "/diario_mc <HH:MM[,HH:MM,...]> [mesh|aprs|ambos] [grupo <id>] "
+            "<chX|X|canal X> [aprs <CALL|broadcast>] <texto...>\n"
+            "/diario_mc <HH:MM[,HH:MM,...]> aprs <CALL|broadcast>: <texto...>\n"
+            "Ejemplo: /diario_mc 09:00 ambos grupo avisos_mc canal 2 aprs broadcast Parte diario"
         )
         return
 
@@ -14606,28 +14609,47 @@ async def diario_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text("Hora inválida. Usa HH:MM[,HH:MM,...] (00–23:59).")
         return
 
-    tail, group_id = _strip_daily_group_tokens(args[1:])
-    if len(tail) < 2:
-        await update.effective_message.reply_text("Falta canal MeshCore y texto.")
-        return
+    transport = _normalize_transport_token(args[1]) if len(args) > 1 else None
+    idx = 2 if transport else 1
+    transport = transport or "mesh"
 
-    if len(tail) >= 3 and tail[0].lower() == "canal":
-        channel_idx = _parse_mc_channel_token(str(tail[1]))
-        text = " ".join(tail[2:]).strip()
+    tail, group_id = _strip_daily_group_tokens(args[idx:])
+    aprs_dest = "broadcast"
+    channel_idx = None
+    text = ""
+
+    if transport == "aprs":
+        aprs_dest, text = _parse_aprs_dest_text(tail)
+        if not text:
+            await update.effective_message.reply_text("Parámetros no válidos. Ejemplo: /diario_mc 09:00 aprs EB2ABC-7: hola")
+            return
     else:
-        channel_idx = _parse_mc_channel_token(str(tail[0]))
-        text = " ".join(tail[1:]).strip()
+        if len(tail) < 2:
+            await update.effective_message.reply_text("Falta canal MeshCore y texto.")
+            return
 
-    if channel_idx is None or not text:
-        await update.effective_message.reply_text(
-            "Parámetros no válidos.\n"
-            "Ejemplos:\n"
-            "  /diario_mc 09:00 ch2 Texto\n"
-            "  /diario_mc 09:00,10:00 grupo xxxxx canal x Texto\n"
-            "  /diario_mc 09:00,10:00 grupo xxxxx chx Texto\n"
-            "  /diario_mc 09:00 canal 2 Texto"
-        )
-        return
+        if transport == "both":
+            tail, aprs_mod = _pop_aprs_modifier_after_mesh_dest(tail)
+            if aprs_mod:
+                aprs_dest = aprs_mod
+
+        if len(tail) >= 3 and tail[0].lower() == "canal":
+            channel_idx = _parse_mc_channel_token(str(tail[1]))
+            text = " ".join(tail[2:]).strip()
+        else:
+            channel_idx = _parse_mc_channel_token(str(tail[0]))
+            text = " ".join(tail[1:]).strip()
+
+        if channel_idx is None or not text:
+            await update.effective_message.reply_text(
+                "Parámetros no válidos.\n"
+                "Ejemplos:\n"
+                "  /diario_mc 09:00 mesh ch2 Texto\n"
+                "  /diario_mc 09:00,10:00 ambos grupo xxxxx canal 2 aprs broadcast Texto\n"
+                "  /diario_mc 09:00 aprs EB2ABC-7: Texto\n"
+                "  /diario_mc 09:00 canal 2 Texto"
+            )
+            return
 
     texto_norm = _norm_mesh(text)
     ok_len, err = _validate_len_or_block(texto_norm)
@@ -14646,26 +14668,30 @@ async def diario_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 first_dt = first_dt + timedelta(days=1)
             when_local_str = first_dt.strftime("%Y-%m-%d %H:%M")
 
+            task_transport = "aprs" if transport == "aprs" else ("meshcore_aprs" if transport == "both" else "meshcore")
             meta = {
                 "scheduled_by": update.effective_user.username or str(update.effective_user.id),
                 "bot_est_parts": est_parts,
                 "via": "/diario_mc",
                 "repeat": "daily",
                 "daily_time": hhmm_txt,
-                "transport": "meshcore",
-                "meshcore_mode": "channel",
-                "meshcore_channel_idx": int(channel_idx),
+                "transport": task_transport,
                 "chat_id": update.effective_chat.id,
                 "reply_to": update.effective_message.message_id,
             }
+            if transport in ("mesh", "both"):
+                meta["meshcore_mode"] = "channel"
+                meta["meshcore_channel_idx"] = int(channel_idx)
             if group_id:
                 meta["daily_group_id"] = group_id
+            if transport in ("aprs", "both"):
+                meta["aprs_dest"] = aprs_dest
 
             res = broker_tasks.schedule_message(
                 when_local=when_local_str,
-                channel=int(channel_idx),
+                channel=int(channel_idx) if channel_idx is not None else int(globals().get("BROKER_CHANNEL", 0)),
                 message=texto_norm,
-                destination="meshcore:channel",
+                destination="meshcore:channel" if transport != "aprs" else "broadcast",
                 require_ack=False,
                 meta=meta,
             )
@@ -14674,10 +14700,14 @@ async def diario_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             created.append(res["task"])
 
         lines = [
-            "Tareas diarias MeshCore creadas:",
+            "Tareas diarias MeshCore/APRS creadas:",
             f"• Grupo: <code>{group_id or '-'}</code>",
-            f"• MeshCore channel_idx: <b>{escape(str(int(channel_idx)))}</b>",
+            f"• Transporte: <b>{escape(transport.upper())}</b>",
         ]
+        if transport in ("mesh", "both"):
+            lines.append(f"• MeshCore channel_idx: <b>{escape(str(int(channel_idx)))}</b>")
+        if transport in ("aprs", "both"):
+            lines.append(f"• APRS → Destino: <code>{escape(str(aprs_dest))}</code>")
         if est_parts > 1:
             lines.append(f"• Partes estimadas: {est_parts}")
 
