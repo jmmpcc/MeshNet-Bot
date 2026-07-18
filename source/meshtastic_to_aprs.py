@@ -388,6 +388,59 @@ def _aprsis_tnc2_message_line(dst_call: str, text: str, *, with_msgid: bool = Tr
     # CRÍTICO: "::DEST9:mensaje" (sin espacios)
     return f"{src}>APRS,TCPIP*::{dst9}:{msg}{msgid}"
 
+
+def _aprsis_tnc2_message_lines(dst_call: str, text: str, *, with_msgid: bool = True) -> List[str]:
+    """Construye una o varias líneas APRS-IS sin recortar el texto completo."""
+    dst = (dst_call or "").strip().upper()
+    msg = _aprs_ascii(text)
+    if not dst or not msg:
+        return []
+
+    msgid_reserve = 4 if with_msgid else 0  # formato {nn}
+    suffix_reserve = len(" (99/99)")
+    part_limit = max(1, int(MAX_MSG_LEN) - msgid_reserve - suffix_reserve)
+    parts = _split_by_words(msg, part_limit)
+    if len(parts) <= 1:
+        line = _aprsis_tnc2_message_line(dst, msg, with_msgid=with_msgid)
+        return [line] if line else []
+
+    total = len(parts)
+    return [
+        line
+        for i, part in enumerate(parts, 1)
+        if (line := _aprsis_tnc2_message_line(dst, f"{part} ({i}/{total})", with_msgid=with_msgid))
+    ]
+
+
+def _aprsis_status_lines(text: str) -> List[str]:
+    """Construye una o varias líneas de estado APRS-IS sin truncar mensajes largos."""
+    src = (APRSIS_USER or MY_CALL or "").strip().upper()
+    msg = _aprs_ascii(text)
+    if not src or not msg:
+        return []
+
+    if len(msg) <= int(MAX_STATUS_LEN):
+        return [f"{src}>APRS,TCPIP*:>{msg}"]
+
+    suffix_reserve = len(" (99/99)")
+    parts = _split_by_words(msg, max(1, int(MAX_STATUS_LEN) - suffix_reserve))
+    total = len(parts)
+    return [f"{src}>APRS,TCPIP*:>{part} ({i}/{total})" for i, part in enumerate(parts, 1)]
+
+async def _aprsis_send_lines_safe(lines: List[str], *, inter_part_delay: float = 0.12) -> bool:
+    """Envía una secuencia de líneas APRS-IS y agrega el resultado de todas las partes."""
+    if not lines:
+        return False
+
+    ok_all = True
+    for idx, line in enumerate(lines, 1):
+        sent = await _aprsis_send_line_safe(line)
+        ok_all = ok_all and sent
+        if idx < len(lines):
+            await asyncio.sleep(inter_part_delay)
+    return ok_all
+
+
 async def _aprsis_send_line_safe(line: str) -> bool:
     """
     Envía una línea a APRS-IS si hay cliente conectado.
@@ -2639,16 +2692,16 @@ async def task_broker_to_aprs():
                 if _aprsis_ready():
                     try:
                         prefix = f"[CH{ch}] " if (ch is not None) else ""
+                        full_text = f"{prefix}{payload_text}"
                         if dest_norm == "broadcast":
-                            src = (APRSIS_USER or MY_CALL or "").strip().upper()
-                            if src:
-                                is_line = f"{src}>APRS,TCPIP*:>{prefix}{payload_text}"
-                                ok_is = await _aprsis_send_line_safe(is_line)
-                            else:
-                                ok_is = False
+                            is_lines = _aprsis_status_lines(full_text)
                         else:
-                            is_line = _aprsis_tnc2_message_line(dest_norm, f"{prefix}{payload_text}", with_msgid=True)
-                            ok_is = await _aprsis_send_line_safe(is_line) if is_line else False
+                            is_lines = _aprsis_tnc2_message_lines(dest_norm, full_text, with_msgid=True)
+
+                        if not is_lines:
+                            ok_is = False
+                        else:
+                            ok_is = await _aprsis_send_lines_safe(is_lines)
                     except Exception as e:
                         ok_is = False
                         print(f"[broker→IS] ❌ {type(e).__name__}: {e}")
@@ -3117,17 +3170,19 @@ async def task_mesh_channels_to_aprsis():
 
                 # Prefijo enriquecido (ch + nombre canal + hops reales + alias) si APRSIS_PUSH_PREFIX=1
                 prefix = _build_aprsis_push_prefix(obj, ch) if APRSIS_PUSH_PREFIX else ""
-                line2 = _aprsis_tnc2_message_line(APRSIS_PUSH_TO, prefix + tnorm)
+                push_text = prefix + tnorm
+                lines = _aprsis_tnc2_message_lines(APRSIS_PUSH_TO, push_text, with_msgid=True)
 
-                if not line2:
+                if not lines:
                     continue
 
-                ok = await _aprsis_send_line_safe(line2)
+                ok = await _aprsis_send_lines_safe(lines)
+
                 if ok:
                     _APRSIS_PUSH_LAST_TS = now
-                    print(f"[mesh→IS push] → {APRSIS_PUSH_TO} {transport} {prefix}{tnorm[:80]}")
+                    print(f"[mesh→IS push] → {APRSIS_PUSH_TO} {transport} parts={len(lines)} {push_text[:80]}")
                 else:
-                    print(f"[mesh→IS push] ❌ TX FAIL -> {APRSIS_PUSH_TO} transport={transport} ch={ch}")
+                    print(f"[mesh→IS push] ❌ TX FAIL -> {APRSIS_PUSH_TO} transport={transport} ch={ch} parts={len(lines)}")
 
         except Exception as e:
             print(f"[mesh→IS push] ❌ {type(e).__name__}: {e}")
