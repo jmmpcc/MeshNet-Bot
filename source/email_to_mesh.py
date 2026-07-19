@@ -400,10 +400,26 @@ def _smtp_config() -> Dict[str, Any]:
         "ssl": _env_bool("EMAIL_SMTP_SSL", False),
         "starttls": _env_bool("EMAIL_SMTP_STARTTLS", True),
         "user": os.getenv("EMAIL_SMTP_USER", os.getenv("EMAIL_IMAP_USER", "")).strip(),
-        "password": os.getenv("EMAIL_SMTP_PASSWORD", os.getenv("EMAIL_IMAP_PASSWORD", "")),
+        "password": os.getenv("EMAIL_SMTP_PASSWORD", os.getenv("EMAIL_IMAP_PASSWORD", "")).strip(),
         "from": os.getenv("EMAIL_FROM", os.getenv("EMAIL_SMTP_USER", os.getenv("EMAIL_IMAP_USER", ""))).strip(),
         "subject_prefix": os.getenv("EMAIL_OUT_SUBJECT_PREFIX", "[Mesh]").strip(),
     }
+
+
+def _format_smtp_auth_error(exc: smtplib.SMTPAuthenticationError, cfg: Dict[str, Any]) -> str:
+    server_msg = exc.smtp_error.decode("utf-8", "replace") if isinstance(exc.smtp_error, bytes) else str(exc.smtp_error)
+    host = str(cfg.get("host") or "").lower()
+    user = str(cfg.get("user") or "")
+    hint = ""
+    if "gmail" in host or "google" in server_msg.lower() or "badcredentials" in server_msg.lower():
+        hint = (
+            " Gmail rechaza la autenticación SMTP: verifica que el contenedor "
+            "que ejecuta el comando tiene cargados EMAIL_SMTP_USER y "
+            "EMAIL_SMTP_PASSWORD correctos, que la contraseña de aplicación "
+            "pertenece a ese usuario, y que no hay espacios ni saltos de línea "
+            "al copiarla."
+        )
+    return f"autenticación SMTP fallida para {user or 'usuario no configurado'} ({exc.smtp_code}): {server_msg.strip()}.{hint}"
 
 
 def send_email_to_contact(contact: Dict[str, Any], body: str, source: str = "mesh") -> None:
@@ -421,7 +437,10 @@ def send_email_to_contact(contact: Dict[str, Any], body: str, source: str = "mes
     with klass(cfg["host"], int(cfg["port"]), timeout=30) as smtp:
         if cfg["starttls"] and not cfg["ssl"]:
             smtp.starttls(context=ssl.create_default_context())
-        smtp.login(cfg["user"], cfg["password"])
+        try:
+            smtp.login(cfg["user"], cfg["password"])
+        except smtplib.SMTPAuthenticationError as exc:
+            raise RuntimeError(_format_smtp_auth_error(exc, cfg)) from exc
         smtp.send_message(msg)
 
 
