@@ -108,6 +108,12 @@ Notas:
 - `EMAIL_SMTP_USER`, `EMAIL_SMTP_PASSWORD` y `EMAIL_FROM` pueden coincidir con
   la cuenta IMAP, pero no es obligatorio.
 
+- Gmail devuelve `535 5.7.8 Username and Password not accepted` cuando rechaza
+  las credenciales SMTP. Si ya se usa una **contraseña de aplicación**, comprobar
+  que `EMAIL_SMTP_USER` es la misma cuenta que generó esa contraseña, que el
+  contenedor del bot/broker ha cargado la `.env` actualizada y que
+  `EMAIL_SMTP_PASSWORD` no incluye espacios ni saltos de línea al copiarla.
+
 ## 3. Correo → malla: funcionamiento existente
 
 El servicio `email-to-mesh` abre la cuenta IMAP, consulta los correos nuevos y
