@@ -54,6 +54,13 @@ except Exception as e:
 BBS = None  # instancia global
 # ============================================================================
 
+# === [NUEVO] Malla -> correo electrónico ===================================
+from email_to_mesh import handle_mesh_mail_command
+
+def _handle_mesh_mail_command_if_needed(text: str, source: str) -> str | None:
+    return handle_mesh_mail_command(str(text or ""), source=source)
+# ============================================================================
+
 
 # --- Pasarela embebida (NUEVO) ---
 from bridge_in_broker import (
@@ -1484,6 +1491,20 @@ class MeshCoreEmbeddedBridge:
                             text_msg = rest
                 except Exception:
                     pass
+
+                try:
+                    mail_reply = _handle_mesh_mail_command_if_needed(text_msg, source=(alias or pref or "meshcore"))
+                    if mail_reply is not None:
+                        self.enqueue_send_channel(chan_idx if chan_idx is not None else 0, mail_reply)
+                        self._last_ok = time.time()
+                        return
+                except Exception as _e_mail:
+                    try:
+                        self.enqueue_send_channel(chan_idx if chan_idx is not None else 0, f"Error correo: {_e_mail}")
+                    except Exception:
+                        pass
+                    self._last_err = f"mail: {type(_e_mail).__name__}: {_e_mail}"
+                    return
 
                 head = self._meshcore_rx_head(
                     kind=kind,
@@ -8616,6 +8637,44 @@ class MeshReceiver:
                     except Exception as _e_bbs:
                         if self.verbose:
                             print(f"⚠️ bbs: {_e_bbs}", flush=True)
+                    # === [NUEVO] Malla -> correo electrónico desde Meshtastic ===
+                    try:
+                        if str(portnum) == "TEXT_MESSAGE_APP" and isinstance(text, str):
+                            mail_reply = _handle_mesh_mail_command_if_needed(text, source=(from_alias or str(who_from)))
+                            if mail_reply is not None:
+                                q = globals().get("SENDQ")
+                                if q is not None and hasattr(q, "offer"):
+                                    q.offer({
+                                        "channel": int(canal),
+                                        "text": str(mail_reply),
+                                        "destination": None,
+                                        "require_ack": False,
+                                        "type": "text",
+                                        "no_bridge": True,
+                                        "origin": "email",
+                                        "meta": {"mail_command": 1},
+                                    }, coalesce=False)
+                                raise StopIteration
+                    except StopIteration:
+                        return
+                    except Exception as _e_mail:
+                        try:
+                            q = globals().get("SENDQ")
+                            if q is not None and hasattr(q, "offer"):
+                                q.offer({
+                                    "channel": int(canal),
+                                    "text": f"Error correo: {_e_mail}",
+                                    "destination": None,
+                                    "require_ack": False,
+                                    "type": "text",
+                                    "no_bridge": True,
+                                    "origin": "email",
+                                    "meta": {"mail_command": 1, "error": 1},
+                                }, coalesce=False)
+                        except Exception:
+                            pass
+                        return
+
                     # === [NUEVO] MeshCore embebido: reenviar TEXT_MESSAGE_APP Meshtastic -> MeshCore ===
                     try:
                         mc = globals().get("MESHCORE_ENGINE")

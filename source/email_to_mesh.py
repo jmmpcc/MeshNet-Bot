@@ -61,8 +61,10 @@ Message-ID recientes. Esto evita reenvíos tras reinicios normales.
 
 from __future__ import annotations
 
+import argparse
 import email
 import imaplib
+import smtplib
 import json
 import logging
 import os
@@ -78,13 +80,13 @@ from dataclasses import dataclass
 from email.header import decode_header, make_header
 from email.message import Message
 from email.policy import default as default_email_policy
-from email.utils import parseaddr
+from email.utils import formatdate, make_msgid, parseaddr
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
 APP_NAME = "email-to-mesh"
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.3.0"
 
 _LOG = logging.getLogger(APP_NAME)
 _STOP_EVENT = threading.Event()
@@ -284,6 +286,160 @@ class Config:
             errors.append("EMAIL_MESH_REQUIRE_ACK=1 requiere EMAIL_MESH_DEST unicast")
         return errors
 
+
+# =============================================================================
+# Contactos y envío malla -> correo
+# =============================================================================
+
+_MAIL_CMD_RE = re.compile(r"^\s*(?:\[\s*mail\s*\]|/mail\b|mail\b)\s*(.*)$", re.IGNORECASE | re.DOTALL)
+_CONTACT_KEY_RE = re.compile(r"[^a-z0-9_.-]+")
+
+
+def default_contacts_path() -> Path:
+    return Path(os.getenv("EMAIL_CONTACTS_PATH", "/app/bot_data/email_contacts.json").strip() or "/app/bot_data/email_contacts.json")
+
+
+def _contact_key(name: str) -> str:
+    key = _CONTACT_KEY_RE.sub("-", (name or "").strip().lower()).strip("-._")
+    if not key:
+        raise ValueError("nombre de contacto vacío")
+    return key
+
+
+def _valid_email_address(address: str) -> str:
+    parsed = parseaddr(address or "")[1].strip().lower()
+    if not parsed or "@" not in parsed or parsed.startswith("@") or parsed.endswith("@"):
+        raise ValueError(f"correo inválido: {address!r}")
+    return parsed
+
+
+def load_contacts(path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
+    path = path or default_contacts_path()
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text(encoding="utf-8") or "{}")
+    contacts = raw.get("contacts", raw) if isinstance(raw, dict) else {}
+    if not isinstance(contacts, dict):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, value in contacts.items():
+        if not isinstance(value, dict):
+            continue
+        try:
+            ckey = _contact_key(str(value.get("name") or key))
+            out[ckey] = {"name": str(value.get("name") or ckey), "email": _valid_email_address(str(value.get("email") or ""))}
+        except Exception:
+            continue
+    return out
+
+
+def save_contacts(contacts: Dict[str, Dict[str, Any]], path: Optional[Path] = None) -> None:
+    path = path or default_contacts_path()
+    payload = {"version": 1, "contacts": contacts, "updated_at": int(time.time())}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+            handle.flush(); os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def upsert_contact(name: str, address: str, path: Optional[Path] = None) -> Dict[str, Any]:
+    contacts = load_contacts(path)
+    key = _contact_key(name)
+    contacts[key] = {"name": name.strip(), "email": _valid_email_address(address)}
+    save_contacts(contacts, path)
+    return {"key": key, **contacts[key]}
+
+
+def delete_contact(name_or_number: str, path: Optional[Path] = None) -> Dict[str, Any]:
+    contacts = load_contacts(path)
+    key = resolve_contact_key(name_or_number, contacts)
+    removed = contacts.pop(key)
+    save_contacts(contacts, path)
+    return {"key": key, **removed}
+
+
+def resolve_contact_key(name_or_number: str, contacts: Dict[str, Dict[str, Any]]) -> str:
+    token = (name_or_number or "").strip()
+    if token.isdigit():
+        idx = int(token)
+        keys = sorted(contacts)
+        if 1 <= idx <= len(keys):
+            return keys[idx - 1]
+        raise KeyError(f"número de contacto fuera de rango: {idx}")
+    key = _contact_key(token)
+    if key in contacts:
+        return key
+    matches = [k for k, v in contacts.items() if k.startswith(key) or str(v.get("name", "")).lower().startswith(token.lower())]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise KeyError("contacto ambiguo: " + ", ".join(sorted(matches)))
+    raise KeyError(f"contacto no encontrado: {token}")
+
+
+def format_contacts(contacts: Dict[str, Dict[str, Any]]) -> str:
+    if not contacts:
+        return "No hay contactos de correo guardados."
+    lines = ["Contactos de correo:"]
+    for idx, key in enumerate(sorted(contacts), start=1):
+        c = contacts[key]
+        lines.append(f"{idx}. {c.get('name') or key} <{c.get('email')}> [{key}]")
+    return "\n".join(lines)
+
+
+def _smtp_config() -> Dict[str, Any]:
+    return {
+        "host": os.getenv("EMAIL_SMTP_HOST", "").strip(),
+        "port": _env_int("EMAIL_SMTP_PORT", 587, 1, 65535),
+        "ssl": _env_bool("EMAIL_SMTP_SSL", False),
+        "starttls": _env_bool("EMAIL_SMTP_STARTTLS", True),
+        "user": os.getenv("EMAIL_SMTP_USER", os.getenv("EMAIL_IMAP_USER", "")).strip(),
+        "password": os.getenv("EMAIL_SMTP_PASSWORD", os.getenv("EMAIL_IMAP_PASSWORD", "")),
+        "from": os.getenv("EMAIL_FROM", os.getenv("EMAIL_SMTP_USER", os.getenv("EMAIL_IMAP_USER", ""))).strip(),
+        "subject_prefix": os.getenv("EMAIL_OUT_SUBJECT_PREFIX", "[Mesh]").strip(),
+    }
+
+
+def send_email_to_contact(contact: Dict[str, Any], body: str, source: str = "mesh") -> None:
+    cfg = _smtp_config()
+    missing = [k for k in ("host", "user", "password", "from") if not cfg.get(k)]
+    if missing:
+        raise RuntimeError("faltan variables SMTP: " + ", ".join("EMAIL_FROM" if k == "from" else "EMAIL_SMTP_" + k.upper() for k in missing))
+    to_addr = _valid_email_address(str(contact.get("email") or ""))
+    subject = f"{cfg['subject_prefix']} mensaje de {source}".strip()
+    msg = Message()
+    msg["From"] = cfg["from"]; msg["To"] = to_addr; msg["Subject"] = subject
+    msg["Date"] = formatdate(localtime=True); msg["Message-ID"] = make_msgid(domain=parseaddr(cfg["from"])[1].split("@")[-1])
+    msg.set_payload(body, charset="utf-8")
+    klass = smtplib.SMTP_SSL if cfg["ssl"] else smtplib.SMTP
+    with klass(cfg["host"], int(cfg["port"]), timeout=30) as smtp:
+        if cfg["starttls"] and not cfg["ssl"]:
+            smtp.starttls(context=ssl.create_default_context())
+        smtp.login(cfg["user"], cfg["password"])
+        smtp.send_message(msg)
+
+
+def handle_mesh_mail_command(text: str, source: str = "mesh", contacts_path: Optional[Path] = None) -> Optional[str]:
+    m = _MAIL_CMD_RE.match(text or "")
+    if not m:
+        return None
+    rest = (m.group(1) or "").strip()
+    contacts = load_contacts(contacts_path)
+    if not rest or rest.lower() in {"list", "lista", "contactos", "ls"}:
+        return format_contacts(contacts)
+    parts = rest.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        return "Uso: [mail] contacto texto mensaje | [mail] lista"
+    key = resolve_contact_key(parts[0], contacts)
+    contact = contacts[key]
+    send_email_to_contact(contact, parts[1].strip(), source=source)
+    return f"Correo enviado a {contact.get('name') or key} <{contact.get('email')}>"
 
 # =============================================================================
 # Estado persistente
@@ -1080,14 +1236,43 @@ def run_service(config: Config) -> int:
     _LOG.info("Servicio detenido")
     return 0
 
-def main() -> int:
-    """
-    Punto de entrada del programa.
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=APP_NAME, description="Pasarela correo ↔ malla y libreta de contactos")
+    sub = parser.add_subparsers(dest="cmd")
+    sub.add_parser("run", help="ejecuta el servicio IMAP→malla (comportamiento por defecto)")
+    p_add = sub.add_parser("contact-add", aliases=["add"], help="añade o actualiza un contacto")
+    p_add.add_argument("name"); p_add.add_argument("email")
+    p_edit = sub.add_parser("contact-edit", aliases=["edit"], help="edita un contacto existente")
+    p_edit.add_argument("name_or_number"); p_edit.add_argument("email")
+    p_del = sub.add_parser("contact-del", aliases=["del", "rm"], help="elimina un contacto")
+    p_del.add_argument("name_or_number")
+    sub.add_parser("contacts", aliases=["list", "ls"], help="lista contactos")
+    p_send = sub.add_parser("send", help="envía un correo a un contacto desde CLI")
+    p_send.add_argument("name_or_number"); p_send.add_argument("message")
+    return parser
 
-    Retorna:
-        0 en parada normal o cuando está desactivado.
-        2 si la configuración activa es inválida.
-    """
+
+def _run_contacts_cli(args: argparse.Namespace) -> int:
+    if args.cmd in {"contact-add", "add"}:
+        c = upsert_contact(args.name, args.email); print(f"OK añadido/actualizado: {c['name']} <{c['email']}> [{c['key']}]"); return 0
+    if args.cmd in {"contact-edit", "edit"}:
+        contacts = load_contacts(); key = resolve_contact_key(args.name_or_number, contacts)
+        c = upsert_contact(contacts[key].get("name") or key, args.email); print(f"OK editado: {c['name']} <{c['email']}> [{c['key']}]"); return 0
+    if args.cmd in {"contact-del", "del", "rm"}:
+        c = delete_contact(args.name_or_number); print(f"OK eliminado: {c['name']} <{c['email']}> [{c['key']}]"); return 0
+    if args.cmd in {"contacts", "list", "ls"}:
+        print(format_contacts(load_contacts())); return 0
+    if args.cmd == "send":
+        contacts = load_contacts(); key = resolve_contact_key(args.name_or_number, contacts)
+        send_email_to_contact(contacts[key], args.message, source="cli"); print(f"OK enviado a {contacts[key].get('name') or key}"); return 0
+    return 2
+
+
+def main() -> int:
+    args = _build_arg_parser().parse_args()
+    if args.cmd and args.cmd != "run":
+        return _run_contacts_cli(args)
+
     config = Config.from_env()
     _configure_logging(config.log_level)
 
@@ -1095,9 +1280,6 @@ def main() -> int:
     signal.signal(signal.SIGINT, _request_stop)
 
     if not config.enabled:
-        # El contenedor permanece vivo y pasivo. Así puede conservarse la política
-        # restart: unless-stopped sin generar un bucle de reinicios cuando la
-        # integración todavía no está activada en .env.
         _LOG.info("EMAIL_TO_MESH_ENABLED=0; servicio cargado pero inactivo")
         while not _STOP_EVENT.wait(3600):
             pass

@@ -652,6 +652,16 @@ Notas:
 
 ---
 
+
+### ✉️ Guía correo ↔ malla
+
+> Documentación detallada de la pasarela `email-to-mesh`: correo→malla,
+> malla→correo, libreta de contactos, CLI, bot y ejemplos de uso.
+
+📘 **[Abrir guía completa → EMAIL_TO_MESH.md](./docs/EMAIL_TO_MESH.md)**
+
+---
+
 ### 🌐 Guía APRS Gateway
 
 > 🔄 Documentación detallada del sistema de pasarela entre Meshtastic y APRS,
