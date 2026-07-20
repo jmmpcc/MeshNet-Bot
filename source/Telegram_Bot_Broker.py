@@ -47,6 +47,17 @@ from positions_store import read_positions_recent, build_kml, build_gpx
 
 from auditoria_red import auditoria_red_cmd, auditoria_integral_cmd, auditoria_impacto_cmd
 
+# === [NUEVO] Gestión correo↔malla desde el bot ==============================
+from email_to_mesh import (
+    delete_contact as email_delete_contact,
+    format_contacts as email_format_contacts,
+    load_contacts as email_load_contacts,
+    resolve_contact_key as email_resolve_contact_key,
+    send_email_to_contact as email_send_to_contact,
+    upsert_contact as email_upsert_contact,
+)
+# ============================================================================
+
 # === [NUEVO] Helper para compatibilizar funciones sync/async ===
 import inspect
 from html import escape
@@ -6317,6 +6328,11 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("notificaciones", "Activar/Desactivar avisos de tareas"),
         BotCommand("bloquear", "Bloquea ids /bloquear <id1, id2,...> Bloquea IDs indicados /bloquear lista Lista IDs actuales"),
         BotCommand("desbloquear", "Desbloquea IDs /desbloquear <id1,id2,...>"),
+        BotCommand("mail", "Enviar correo: /mail contacto texto"),
+        BotCommand("mail_contactos", "Listar contactos de correo"),
+        BotCommand("mail_add", "Añadir contacto de correo"),
+        BotCommand("mail_edit", "Editar contacto de correo"),
+        BotCommand("mail_del", "Eliminar contacto de correo"),
         BotCommand("bridge_status", "Comprueba como está el brige operativo")
     ]
     await app.bot.set_my_commands(default_cmds, scope=BotCommandScopeDefault())
@@ -6327,6 +6343,55 @@ async def set_bot_menu(app: Application) -> None:
             await app.bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=admin_id))
         except Exception as e:
             log(f"❗ set_my_commands admin {admin_id}: {e}")
+
+
+async def mail_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(email_format_contacts(email_load_contacts()))
+
+async def mail_add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args or []) < 2:
+        await update.effective_message.reply_text("Uso: /mail_add contacto correo@dominio")
+        return
+    try:
+        c = email_upsert_contact(context.args[0], context.args[1])
+        await update.effective_message.reply_text(f"OK añadido/actualizado: {c['name']} <{c['email']}> [{c['key']}]")
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Error: {exc}")
+
+async def mail_edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args or []) < 2:
+        await update.effective_message.reply_text("Uso: /mail_edit contacto_o_numero nuevo@correo")
+        return
+    try:
+        contacts = email_load_contacts()
+        key = email_resolve_contact_key(context.args[0], contacts)
+        c = email_upsert_contact(contacts[key].get("name") or key, context.args[1])
+        await update.effective_message.reply_text(f"OK editado: {c['name']} <{c['email']}> [{c['key']}]")
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Error: {exc}")
+
+async def mail_del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Uso: /mail_del contacto_o_numero")
+        return
+    try:
+        c = email_delete_contact(context.args[0])
+        await update.effective_message.reply_text(f"OK eliminado: {c['name']} <{c['email']}> [{c['key']}]")
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Error: {exc}")
+
+async def mail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args or []) < 2:
+        await update.effective_message.reply_text("Uso: /mail contacto_o_numero texto mensaje")
+        return
+    try:
+        contacts = email_load_contacts()
+        key = email_resolve_contact_key(context.args[0], contacts)
+        msg = " ".join(context.args[1:]).strip()
+        email_send_to_contact(contacts[key], msg, source=f"telegram:{update.effective_user.id if update.effective_user else 'bot'}")
+        await update.effective_message.reply_text(f"Correo enviado a {contacts[key].get('name') or key} <{contacts[key].get('email')}>.")
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Error: {exc}")
 
 # ====== MODIFICADA: callbacks del menú, añade 'lora' ======
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -17323,6 +17388,11 @@ def build_application() -> Application:
     app.add_handler(CommandHandler(["enviar_mc_dm", "dm_mc"], enviar_mc_dm_cmd))
     app.add_handler(CommandHandler("mc_contactos", mc_contactos_cmd))
     app.add_handler(CommandHandler("mc_canales", mc_canales_cmd))
+    app.add_handler(CommandHandler("mail", mail_cmd))
+    app.add_handler(CommandHandler("mail_contactos", mail_contactos_cmd))
+    app.add_handler(CommandHandler("mail_add", mail_add_cmd))
+    app.add_handler(CommandHandler("mail_edit", mail_edit_cmd))
+    app.add_handler(CommandHandler("mail_del", mail_del_cmd))
     
     app.add_handler(CommandHandler("enviar_ack", enviar_ack_cmd))
     app.add_handler(CommandHandler("escuchar", escuchar_cmd))
