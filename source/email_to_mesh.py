@@ -400,26 +400,10 @@ def _smtp_config() -> Dict[str, Any]:
         "ssl": _env_bool("EMAIL_SMTP_SSL", False),
         "starttls": _env_bool("EMAIL_SMTP_STARTTLS", True),
         "user": os.getenv("EMAIL_SMTP_USER", os.getenv("EMAIL_IMAP_USER", "")).strip(),
-        "password": os.getenv("EMAIL_SMTP_PASSWORD", os.getenv("EMAIL_IMAP_PASSWORD", "")).strip(),
+        "password": os.getenv("EMAIL_SMTP_PASSWORD", os.getenv("EMAIL_IMAP_PASSWORD", "")),
         "from": os.getenv("EMAIL_FROM", os.getenv("EMAIL_SMTP_USER", os.getenv("EMAIL_IMAP_USER", ""))).strip(),
         "subject_prefix": os.getenv("EMAIL_OUT_SUBJECT_PREFIX", "[Mesh]").strip(),
     }
-
-
-def _format_smtp_auth_error(exc: smtplib.SMTPAuthenticationError, cfg: Dict[str, Any]) -> str:
-    server_msg = exc.smtp_error.decode("utf-8", "replace") if isinstance(exc.smtp_error, bytes) else str(exc.smtp_error)
-    host = str(cfg.get("host") or "").lower()
-    user = str(cfg.get("user") or "")
-    hint = ""
-    if "gmail" in host or "google" in server_msg.lower() or "badcredentials" in server_msg.lower():
-        hint = (
-            " Gmail rechaza la autenticación SMTP: verifica que el contenedor "
-            "que ejecuta el comando tiene cargados EMAIL_SMTP_USER y "
-            "EMAIL_SMTP_PASSWORD correctos, que la contraseña de aplicación "
-            "pertenece a ese usuario, y que no hay espacios ni saltos de línea "
-            "al copiarla."
-        )
-    return f"autenticación SMTP fallida para {user or 'usuario no configurado'} ({exc.smtp_code}): {server_msg.strip()}.{hint}"
 
 
 def send_email_to_contact(contact: Dict[str, Any], body: str, source: str = "mesh") -> None:
@@ -437,10 +421,7 @@ def send_email_to_contact(contact: Dict[str, Any], body: str, source: str = "mes
     with klass(cfg["host"], int(cfg["port"]), timeout=30) as smtp:
         if cfg["starttls"] and not cfg["ssl"]:
             smtp.starttls(context=ssl.create_default_context())
-        try:
-            smtp.login(cfg["user"], cfg["password"])
-        except smtplib.SMTPAuthenticationError as exc:
-            raise RuntimeError(_format_smtp_auth_error(exc, cfg)) from exc
+        smtp.login(cfg["user"], cfg["password"])
         smtp.send_message(msg)
 
 
@@ -1259,31 +1240,34 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=APP_NAME, description="Pasarela correo ↔ malla y libreta de contactos")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("run", help="ejecuta el servicio IMAP→malla (comportamiento por defecto)")
-    p_add = sub.add_parser("contact-add", aliases=["add"], help="añade o actualiza un contacto")
+    p_add = sub.add_parser("contact-add", aliases=["add", "mail_add"], help="añade o actualiza un contacto")
     p_add.add_argument("name"); p_add.add_argument("email")
-    p_edit = sub.add_parser("contact-edit", aliases=["edit"], help="edita un contacto existente")
+    p_edit = sub.add_parser("contact-edit", aliases=["edit", "mail_edit"], help="edita un contacto existente")
     p_edit.add_argument("name_or_number"); p_edit.add_argument("email")
-    p_del = sub.add_parser("contact-del", aliases=["del", "rm"], help="elimina un contacto")
+    p_del = sub.add_parser("contact-del", aliases=["del", "rm", "mail_del"], help="elimina un contacto")
     p_del.add_argument("name_or_number")
-    sub.add_parser("contacts", aliases=["list", "ls"], help="lista contactos")
-    p_send = sub.add_parser("send", help="envía un correo a un contacto desde CLI")
-    p_send.add_argument("name_or_number"); p_send.add_argument("message")
+    sub.add_parser("contacts", aliases=["list", "ls", "mail_contactos"], help="lista contactos")
+    p_send = sub.add_parser("send", aliases=["mail"], help="envía un correo a un contacto desde CLI")
+    p_send.add_argument("name_or_number"); p_send.add_argument("message", nargs=argparse.REMAINDER)
     return parser
 
 
 def _run_contacts_cli(args: argparse.Namespace) -> int:
-    if args.cmd in {"contact-add", "add"}:
+    if args.cmd in {"contact-add", "add", "mail_add"}:
         c = upsert_contact(args.name, args.email); print(f"OK añadido/actualizado: {c['name']} <{c['email']}> [{c['key']}]"); return 0
-    if args.cmd in {"contact-edit", "edit"}:
+    if args.cmd in {"contact-edit", "edit", "mail_edit"}:
         contacts = load_contacts(); key = resolve_contact_key(args.name_or_number, contacts)
         c = upsert_contact(contacts[key].get("name") or key, args.email); print(f"OK editado: {c['name']} <{c['email']}> [{c['key']}]"); return 0
-    if args.cmd in {"contact-del", "del", "rm"}:
+    if args.cmd in {"contact-del", "del", "rm", "mail_del"}:
         c = delete_contact(args.name_or_number); print(f"OK eliminado: {c['name']} <{c['email']}> [{c['key']}]"); return 0
-    if args.cmd in {"contacts", "list", "ls"}:
+    if args.cmd in {"contacts", "list", "ls", "mail_contactos"}:
         print(format_contacts(load_contacts())); return 0
-    if args.cmd == "send":
+    if args.cmd in {"send", "mail"}:
+        message = " ".join(args.message).strip() if isinstance(args.message, list) else str(args.message or "").strip()
+        if not message:
+            raise ValueError("falta el texto del mensaje")
         contacts = load_contacts(); key = resolve_contact_key(args.name_or_number, contacts)
-        send_email_to_contact(contacts[key], args.message, source="cli"); print(f"OK enviado a {contacts[key].get('name') or key}"); return 0
+        send_email_to_contact(contacts[key], message, source="cli"); print(f"OK enviado a {contacts[key].get('name') or key}"); return 0
     return 2
 
 

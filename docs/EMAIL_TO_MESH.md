@@ -108,12 +108,6 @@ Notas:
 - `EMAIL_SMTP_USER`, `EMAIL_SMTP_PASSWORD` y `EMAIL_FROM` pueden coincidir con
   la cuenta IMAP, pero no es obligatorio.
 
-- Gmail devuelve `535 5.7.8 Username and Password not accepted` cuando rechaza
-  las credenciales SMTP. Si ya se usa una **contraseña de aplicación**, comprobar
-  que `EMAIL_SMTP_USER` es la misma cuenta que generó esa contraseña, que el
-  contenedor del bot/broker ha cargado la `.env` actualizada y que
-  `EMAIL_SMTP_PASSWORD` no incluye espacios ni saltos de línea al copiarla.
-
 ## 3. Correo → malla: funcionamiento existente
 
 El servicio `email-to-mesh` abre la cuenta IMAP, consulta los correos nuevos y
@@ -264,12 +258,51 @@ También se permite resolver por prefijo si no hay ambigüedad. Por ejemplo,
 `[mail] eb ...` puede resolver `eb2eas` si no existe otro contacto que empiece
 por `eb`.
 
-## 5. Gestión de contactos por CLI en Docker
+
+## 5. Gestión de contactos por CLI sencilla desde el host
+
+Para evitar escribir siempre el comando completo de Docker, se incluye el script:
+
+```bash
+scripts/email-to-mesh
+```
+
+El script ejecuta internamente `docker compose exec -T email-to-mesh python /app/source/email_to_mesh.py ...` y acepta comandos con nombres iguales o muy parecidos a los del bot:
+
+```bash
+scripts/email-to-mesh mail_contactos
+scripts/email-to-mesh mail_add eb2eas eb2eas@example.org
+scripts/email-to-mesh mail_edit eb2eas nuevo@example.org
+scripts/email-to-mesh mail_del eb2eas
+scripts/email-to-mesh mail eb2eas Mensaje desde CLI sin comillas
+scripts/email-to-mesh mail 1 Mensaje al primer contacto
+```
+
+También admite los comandos originales:
+
+```bash
+scripts/email-to-mesh contacts
+scripts/email-to-mesh contact-add eb2eas eb2eas@example.org
+scripts/email-to-mesh contact-edit 1 nuevo@example.org
+scripts/email-to-mesh contact-del 1
+scripts/email-to-mesh send 1 Mensaje desde CLI
+```
+
+Variables opcionales del wrapper:
+
+```env
+EMAIL_TO_MESH_SERVICE=email-to-mesh
+EMAIL_TO_MESH_SCRIPT=/app/source/email_to_mesh.py
+```
+
+Esto permite adaptar el wrapper si el servicio tiene otro nombre en un despliegue concreto.
+
+## 6. Gestión de contactos por CLI en Docker
 
 Los comandos se ejecutan contra el contenedor `email-to-mesh`. Ejemplos con
 `docker compose`:
 
-### 5.1 Añadir o actualizar contacto
+### 6.1 Añadir o actualizar contacto
 
 ```bash
 docker compose exec email-to-mesh python /app/source/email_to_mesh.py contact-add eb2eas eb2eas@example.org
@@ -281,7 +314,7 @@ Alias corto:
 docker compose exec email-to-mesh python /app/source/email_to_mesh.py add eb2eas eb2eas@example.org
 ```
 
-### 5.2 Editar correo de un contacto
+### 6.2 Editar correo de un contacto
 
 Por nombre:
 
@@ -301,7 +334,7 @@ Alias corto:
 docker compose exec email-to-mesh python /app/source/email_to_mesh.py edit 1 nuevo@example.org
 ```
 
-### 5.3 Eliminar contacto
+### 6.3 Eliminar contacto
 
 Por nombre:
 
@@ -322,7 +355,7 @@ docker compose exec email-to-mesh python /app/source/email_to_mesh.py del eb2eas
 docker compose exec email-to-mesh python /app/source/email_to_mesh.py rm eb2eas
 ```
 
-### 5.4 Listar contactos
+### 6.4 Listar contactos
 
 ```bash
 docker compose exec email-to-mesh python /app/source/email_to_mesh.py contacts
@@ -335,7 +368,7 @@ docker compose exec email-to-mesh python /app/source/email_to_mesh.py list
 docker compose exec email-to-mesh python /app/source/email_to_mesh.py ls
 ```
 
-### 5.5 Enviar correo desde CLI
+### 6.5 Enviar correo desde CLI
 
 Por nombre:
 
@@ -349,44 +382,44 @@ Por número:
 docker compose exec email-to-mesh python /app/source/email_to_mesh.py send 1 "Mensaje desde CLI por número"
 ```
 
-## 6. Gestión desde el bot de Telegram
+## 7. Gestión desde el bot de Telegram
 
 Si el bot está activo, se añaden comandos que usan la misma BDD JSON:
 
-### 6.1 Listar contactos
+### 7.1 Listar contactos
 
 ```text
 /mail_contactos
 ```
 
-### 6.2 Añadir contacto
+### 7.2 Añadir contacto
 
 ```text
 /mail_add eb2eas eb2eas@example.org
 ```
 
-### 6.3 Editar contacto
+### 7.3 Editar contacto
 
 ```text
 /mail_edit eb2eas nuevo@example.org
 /mail_edit 1 nuevo@example.org
 ```
 
-### 6.4 Eliminar contacto
+### 7.4 Eliminar contacto
 
 ```text
 /mail_del eb2eas
 /mail_del 1
 ```
 
-### 6.5 Enviar correo desde Telegram
+### 7.5 Enviar correo desde Telegram
 
 ```text
 /mail eb2eas Mensaje enviado desde Telegram
 /mail 1 Mensaje enviado al primer contacto
 ```
 
-## 7. Validación operativa recomendada
+## 8. Validación operativa recomendada
 
 Después de configurar `.env`, se recomienda validar en este orden:
 
@@ -424,9 +457,9 @@ Después de configurar `.env`, se recomienda validar en este orden:
 7. Enviar un correo entrante autorizado a la cuenta IMAP y comprobar que aparece
    en la malla con el prefijo `EMAIL_MESH_PREFIX`.
 
-## 8. Errores habituales
+## 9. Errores habituales
 
-### 8.1 `faltan variables SMTP`
+### 9.1 `faltan variables SMTP`
 
 El envío malla→correo requiere, como mínimo:
 
@@ -437,7 +470,7 @@ EMAIL_SMTP_PASSWORD=
 EMAIL_FROM=
 ```
 
-### 8.2 `contacto no encontrado`
+### 9.2 `contacto no encontrado`
 
 El nombre no existe o el número está fuera de rango. Primero consultar:
 
@@ -451,12 +484,12 @@ o por CLI:
 docker compose exec email-to-mesh python /app/source/email_to_mesh.py contacts
 ```
 
-### 8.3 `contacto ambiguo`
+### 9.3 `contacto ambiguo`
 
 El prefijo escrito coincide con varios contactos. Usar el nombre completo o el
 número de la lista.
 
-### 8.4 El correo entrante no se reenvía a la malla
+### 9.4 El correo entrante no se reenvía a la malla
 
 Comprobar:
 
@@ -465,7 +498,7 @@ Comprobar:
 - Que el remitente está incluido exactamente en `EMAIL_ALLOWED_SENDERS`.
 - Logs del contenedor `email-to-mesh`.
 
-### 8.5 El correo saliente no llega
+### 9.5 El correo saliente no llega
 
 Comprobar:
 
@@ -475,13 +508,16 @@ Comprobar:
 - Carpeta de spam del destinatario.
 - Logs del contenedor.
 
-## 9. Resumen rápido de comandos
+## 10. Resumen rápido de comandos
 
 | Origen | Comando | Acción |
 | --- | --- | --- |
 | Malla | `[mail] lista` | Lista contactos |
 | Malla | `[mail] contacto texto` | Envía correo al contacto |
 | Malla | `[mail] 1 texto` | Envía correo al contacto número 1 |
+| Script host | `scripts/email-to-mesh mail_contactos` | Lista contactos vía Docker |
+| Script host | `scripts/email-to-mesh mail_add nombre correo` | Añade/actualiza contacto vía Docker |
+| Script host | `scripts/email-to-mesh mail nombre texto` | Envía correo vía Docker sin escribir el comando largo |
 | CLI | `email_to_mesh.py contacts` | Lista contactos |
 | CLI | `email_to_mesh.py contact-add nombre correo` | Añade/actualiza contacto |
 | CLI | `email_to_mesh.py contact-edit nombre_o_num correo` | Edita contacto |
