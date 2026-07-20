@@ -6542,7 +6542,7 @@ async def _send_html_chunks(update: Update, html_text: str, block_title: str = "
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /ayuda — Ayuda completa del bot MeshNet Bot v7.0.12.
+    /ayuda — Ayuda completa del bot MeshNet Bot v7.0.15.
 
     Funcionalidad:
       - Genera una ayuda HTML-safe para Telegram.
@@ -6556,7 +6556,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
 
     s_intro = (
-        "<b>Ayuda — MeshNet Bot v7.0.12</b>\n"
+        "<b>Ayuda — MeshNet Bot v7.0.15</b>\n"
         "Bot de control para Meshtastic, MeshCore, APRS, BBS, programación de tareas, "
         "avisos AEMET, balizas meteorológicas, auditorías y administración del broker.\n"
         "Arquitectura API-first con broker persistente, control JSONL/BacklogServer y reconexión 24/7.\n"
