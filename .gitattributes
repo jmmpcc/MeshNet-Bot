@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell wrappers must keep LF line endings for /usr/bin/env shebangs.
+scripts/* text eol=lf
