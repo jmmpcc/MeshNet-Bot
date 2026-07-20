@@ -1072,6 +1072,117 @@ class MeshCoreEmbeddedBridge:
         self._last_err = ""
         self._connected = False
 
+        # Cache ligero de contactos MeshCore para resolver rutas RX:
+        # - public_key completo -> nombre/posición
+        # - prefijos cortos -> nombre/posición
+        # - hashes compactos de ruta -> nombre/posición cuando coinciden con
+        #   prefijos únicos de public_key (formato usado por MeshCore)
+        self._mc_contacts_cache: dict[str, dict] = {}
+        self._mc_path_prefix_cache: dict[str, list[dict]] = {}
+
+    def _meshcore_remember_contact(self, contact: dict | None) -> None:
+        if not isinstance(contact, dict):
+            return
+        public_key = str(contact.get("public_key") or contact.get("pubkey") or contact.get("key") or "").strip().lower()
+        name = str(contact.get("name") or contact.get("adv_name") or contact.get("alias") or contact.get("label") or "").strip()
+        if not public_key and not name:
+            return
+        item = dict(contact)
+        if public_key:
+            item["public_key"] = public_key
+        if name:
+            item["name"] = name
+        for lat_key, lon_key in (("adv_lat", "adv_lon"), ("lat", "lon"), ("latitude", "longitude")):
+            try:
+                lat = item.get(lat_key)
+                lon = item.get(lon_key)
+                if lat is not None and lon is not None and float(lat) != 0.0 and float(lon) != 0.0:
+                    item["lat"] = float(lat)
+                    item["lon"] = float(lon)
+                    break
+            except Exception:
+                pass
+        keys = set()
+        if public_key:
+            keys.add(public_key)
+            for n in (6, 8, 10, 12, 16):
+                keys.add(public_key[:n])
+        for k in (contact.get("pubkey_prefix"), contact.get("key_prefix"), contact.get("prefix"), contact.get("id")):
+            if k:
+                keys.add(str(k).strip().lower())
+        for k in keys:
+            if k:
+                self._mc_contacts_cache[k] = item
+        # MeshCore representa los repetidores de la ruta con los primeros bytes
+        # de la public_key del repetidor. Indexamos prefijos por longitud real
+        # para resolver nombres solo cuando el prefijo es inequívoco.
+        if public_key:
+            for hex_len in (2, 4, 6, 8, 16):
+                prefix = public_key[:hex_len]
+                if not prefix:
+                    continue
+                bucket = self._mc_path_prefix_cache.setdefault(prefix, [])
+                if not any(str(x.get("public_key") or "").lower() == public_key for x in bucket):
+                    bucket.append(item)
+
+    def _meshcore_contact_display(self, contact: dict | None, fallback: str = "") -> str:
+        if not isinstance(contact, dict):
+            return fallback or "desconocido"
+        name = str(contact.get("name") or contact.get("adv_name") or contact.get("alias") or contact.get("label") or "").strip()
+        pk = str(contact.get("public_key") or "").strip()
+        return name or (pk[:12] if pk else fallback) or "desconocido"
+
+    def _meshcore_enrich_path_info(self, data: dict) -> dict:
+        enriched = dict(data or {})
+        # Primero recuerda el emisor, si está en contacts/cache.
+        pref = str(enriched.get("pubkey_prefix") or "").strip().lower()
+        contact = None
+        try:
+            if self._mc is not None and pref:
+                getter = getattr(self._mc, "get_contact_by_key_prefix", None)
+                if callable(getter):
+                    contact = getter(pref)
+        except Exception:
+            contact = None
+        if isinstance(contact, dict):
+            self._meshcore_remember_contact(contact)
+        else:
+            contact = self._mc_contacts_cache.get(pref)
+        if isinstance(contact, dict):
+            enriched["from_name"] = self._meshcore_contact_display(contact, pref)
+            enriched["from_lat"] = contact.get("lat")
+            enriched["from_lon"] = contact.get("lon")
+
+        chunks, _, _ = _meshcore_path_chunks_from_payload(enriched)
+        raw_path = enriched.get("path")
+        path_items = raw_path if isinstance(raw_path, list) else []
+        repeaters = []
+        for idx, chunk in enumerate(chunks):
+            chunk_s = str(chunk).strip().lower()
+            matches = self._mc_path_prefix_cache.get(chunk_s, [])
+            c = matches[0] if len(matches) == 1 else None
+            snr = None
+            try:
+                if idx < len(path_items) and isinstance(path_items[idx], dict):
+                    snr = path_items[idx].get("snr")
+            except Exception:
+                snr = None
+            entry = {
+                "hash": chunk_s,
+                "name": self._meshcore_contact_display(c, chunk_s) if c else chunk_s,
+                "resolved": bool(c),
+                "ambiguous": len(matches) > 1,
+                "snr": snr,
+                "lat": c.get("lat") if isinstance(c, dict) else None,
+                "lon": c.get("lon") if isinstance(c, dict) else None,
+            }
+            if len(matches) > 1:
+                entry["name"] = f"{chunk_s} (prefijo ambiguo: {len(matches)} contactos)"
+            repeaters.append(entry)
+        if repeaters:
+            enriched["meshcore_repeaters"] = repeaters
+        return enriched
+
     def status(self) -> dict:
         return {
             "enabled": bool(self.enable),
@@ -1174,14 +1285,19 @@ class MeshCoreEmbeddedBridge:
                     continue
                 seen.add(dm_key)
 
-                out.append({
+                contact_out = {
                     "prefix": display_id,
                     "contact_id": contact_id or None,
                     "dm_key": dm_key,
                     "public_key": public_key or dm_key,
                     "name": (str(name).strip() if name is not None else "") or None,
                     "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
-                })
+                }
+                for key in ("adv_lat", "adv_lon", "lat", "lon", "out_path"):
+                    if isinstance(c, dict) and c.get(key) is not None:
+                        contact_out[key] = c.get(key)
+                self._meshcore_remember_contact(contact_out)
+                out.append(contact_out)
                 if len(out) >= max_n:
                     break
             except Exception:
@@ -1424,6 +1540,28 @@ class MeshCoreEmbeddedBridge:
         except Exception:
             pass
 
+        # Cargar contactos cuanto antes: la API expone nombre y posición en la
+        # libreta de contactos; se usa para resolver emisor y repetidores.
+        try:
+            ensure_contacts = getattr(mc, "ensure_contacts", None)
+            if callable(ensure_contacts):
+                await ensure_contacts(follow=True)
+                for _contact in (getattr(mc, "contacts", {}) or {}).values():
+                    self._meshcore_remember_contact(_contact)
+        except Exception as e:
+            print(f"[meshcore-embedded] contacts preload WARN: {type(e).__name__}: {e}", flush=True)
+
+        async def _on_contact_event(event):
+            try:
+                payload = getattr(event, "payload", None)
+                if isinstance(payload, dict) and all(isinstance(v, dict) for v in payload.values()):
+                    for _contact in payload.values():
+                        self._meshcore_remember_contact(_contact)
+                elif isinstance(payload, dict):
+                    self._meshcore_remember_contact(payload)
+            except Exception:
+                pass
+
         # --- activar auto-fetch (CRÍTICO para que entren eventos RX) ---
         try:
             await mc.start_auto_message_fetching()  # type: ignore[union-attr]
@@ -1448,12 +1586,19 @@ class MeshCoreEmbeddedBridge:
                 if not text_msg:
                     return
 
+                # Enriquecer con contactos/posiciones conocidos antes de formatear ruta.
+                try:
+                    data = self._meshcore_enrich_path_info(data)
+                except Exception:
+                    pass
+
                 # === [LOG RX MeshCore] ===
                 try:
                     print(
                         f"[meshcore-embedded RX] "
                         f"type={et} kind={kind} chan_idx={chan_idx} "
                         f"prefix={data.get('pubkey_prefix')} "
+                        f"from={data.get('from_name') or ''} "
                         f"text='{text_msg[:120]}' "
                         f"path={_meshcore_format_repeater_path(data)}",
                         flush=True
@@ -1596,6 +1741,11 @@ class MeshCoreEmbeddedBridge:
 
         # Suscripción RX
         try:
+            for _evt in ("CONTACTS", "NEW_CONTACT", "ADVERTISEMENT", "PATH_UPDATE"):
+                try:
+                    mc.subscribe(getattr(_MCEventType, _evt), _on_contact_event)  # type: ignore[union-attr]
+                except Exception:
+                    pass
             mc.subscribe(_MCEventType.CONTACT_MSG_RECV, _on_msg)  # type: ignore[union-attr]
             mc.subscribe(_MCEventType.CHANNEL_MSG_RECV, _on_msg)  # type: ignore[union-attr]
         except Exception as e:
@@ -5819,24 +5969,64 @@ def _meshcore_path_chunks_from_payload(data: dict) -> tuple[list[str], int | Non
     if not hsize or hsize <= 0:
         hsize = 1
 
-    raw = str(data.get("path") or "").strip().lower().replace(":", "").replace(",", "")
     chunks: list[str] = []
-    if raw:
-        step = max(2, int(hsize) * 2)
-        chunks = [raw[i:i + step] for i in range(0, len(raw), step) if raw[i:i + step]]
+    raw_path = data.get("path")
+    if isinstance(raw_path, list):
+        for item in raw_path:
+            if isinstance(item, dict):
+                h = str(item.get("hash") or "").strip().lower()
+            else:
+                h = str(item or "").strip().lower()
+            h = h.replace(":", "").replace(",", "")
+            if h:
+                chunks.append(h)
         if plen is None:
             plen = len(chunks)
         elif plen >= 0:
             chunks = chunks[:plen]
+    else:
+        raw = str(raw_path or "").strip().lower().replace(":", "").replace(",", "")
+        if raw:
+            step = max(2, int(hsize) * 2)
+            chunks = [raw[i:i + step] for i in range(0, len(raw), step) if raw[i:i + step]]
+            if plen is None:
+                plen = len(chunks)
+            elif plen >= 0:
+                chunks = chunks[:plen]
 
     return chunks, plen, hsize
 
 def _meshcore_format_repeater_path(data: dict) -> str:
     chunks, plen, hsize = _meshcore_path_chunks_from_payload(data)
+    repeaters = data.get("meshcore_repeaters") if isinstance(data, dict) else None
+    if isinstance(repeaters, list) and repeaters:
+        parts = []
+        for idx, repeater in enumerate(repeaters, 1):
+            if not isinstance(repeater, dict):
+                continue
+            name = str(repeater.get("name") or repeater.get("hash") or f"repetidor {idx}").strip()
+            snr = repeater.get("snr")
+            snr_txt = ""
+            try:
+                if snr is not None:
+                    snr_txt = f" SNR {float(snr):.1f} dB"
+            except Exception:
+                pass
+            pos_txt = ""
+            try:
+                lat = repeater.get("lat")
+                lon = repeater.get("lon")
+                if lat is not None and lon is not None and not (float(lat) == 0.0 and float(lon) == 0.0):
+                    pos_txt = f" pos {float(lat):.6f},{float(lon):.6f}"
+            except Exception:
+                pass
+            parts.append(f"{name}{snr_txt}{pos_txt}")
+        if parts:
+            return " -> ".join(parts)
     if chunks:
         return " -> ".join(chunks)
     if plen and plen > 0:
-        return f"{plen} repetidor(es), hashes no disponibles"
+        return f"{plen} repetidor(es), nombres no disponibles"
     if plen == 0:
         return "directo"
     return "desconocida"
@@ -5909,6 +6099,10 @@ def emit_meshcore_rx_to_hub_and_log(
                     "meshcore_path_hash_size": mc_path_hash_size,
                     "meshcore_path": mc_path_chunks,
                     "meshcore_path_text": mc_path_text,
+                    "meshcore_repeaters": path_info.get("meshcore_repeaters") if isinstance(path_info.get("meshcore_repeaters"), list) else None,
+                    "meshcore_from_name": path_info.get("from_name"),
+                    "meshcore_from_lat": path_info.get("from_lat"),
+                    "meshcore_from_lon": path_info.get("from_lon"),
                 },
                 "ts": _now_s(),
             }
@@ -5940,6 +6134,10 @@ def emit_meshcore_rx_to_hub_and_log(
                 "meshcore_path_hash_size": mc_path_hash_size,
                 "meshcore_path": mc_path_chunks,
                 "meshcore_path_text": mc_path_text,
+                "meshcore_repeaters": path_info.get("meshcore_repeaters") if isinstance(path_info.get("meshcore_repeaters"), list) else None,
+                "meshcore_from_name": path_info.get("from_name"),
+                "meshcore_from_lat": path_info.get("from_lat"),
+                "meshcore_from_lon": path_info.get("from_lon"),
             }
         )
     except Exception:

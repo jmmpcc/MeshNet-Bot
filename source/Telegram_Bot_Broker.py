@@ -15568,6 +15568,29 @@ async def _broker_listen_loop_OLD(chat_id: int, listen_chan: Optional[int], cont
                 except Exception:
                     relay = None
 
+                # Posición MeshCore del emisor, si el broker pudo resolverla desde contactos.
+                mc_from_pos_txt = None
+                try:
+                    mc_from_name = (
+                        pkt.get("meshcore_from_name")
+                        or summary.get("meshcore_from_name")
+                        or obj.get("meshcore_from_name")
+                    ) if isinstance(pkt, dict) else (summary.get("meshcore_from_name") or obj.get("meshcore_from_name"))
+                    mc_from_lat = (
+                        pkt.get("meshcore_from_lat")
+                        or summary.get("meshcore_from_lat")
+                        or obj.get("meshcore_from_lat")
+                    ) if isinstance(pkt, dict) else (summary.get("meshcore_from_lat") or obj.get("meshcore_from_lat"))
+                    mc_from_lon = (
+                        pkt.get("meshcore_from_lon")
+                        or summary.get("meshcore_from_lon")
+                        or obj.get("meshcore_from_lon")
+                    ) if isinstance(pkt, dict) else (summary.get("meshcore_from_lon") or obj.get("meshcore_from_lon"))
+                    if mc_from_lat is not None and mc_from_lon is not None:
+                        mc_from_pos_txt = f"{mc_from_name or 'emisor'}: {float(mc_from_lat):.6f},{float(mc_from_lon):.6f}"
+                except Exception:
+                    mc_from_pos_txt = None
+
                 # Hops reales = hop_start - hop_limit (acotado a >= 0)
                 if hop_limit is not None and hop_start is not None:
                     try:
@@ -15944,6 +15967,29 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 if isinstance(mc_path_txt, str):
                     mc_path_txt = mc_path_txt.strip() or None
 
+                # Posición MeshCore del emisor, si el broker pudo resolverla desde contactos.
+                mc_from_pos_txt = None
+                try:
+                    mc_from_name = (
+                        pkt.get("meshcore_from_name")
+                        or summary.get("meshcore_from_name")
+                        or obj.get("meshcore_from_name")
+                    ) if isinstance(pkt, dict) else (summary.get("meshcore_from_name") or obj.get("meshcore_from_name"))
+                    mc_from_lat = (
+                        pkt.get("meshcore_from_lat")
+                        or summary.get("meshcore_from_lat")
+                        or obj.get("meshcore_from_lat")
+                    ) if isinstance(pkt, dict) else (summary.get("meshcore_from_lat") or obj.get("meshcore_from_lat"))
+                    mc_from_lon = (
+                        pkt.get("meshcore_from_lon")
+                        or summary.get("meshcore_from_lon")
+                        or obj.get("meshcore_from_lon")
+                    ) if isinstance(pkt, dict) else (summary.get("meshcore_from_lon") or obj.get("meshcore_from_lon"))
+                    if mc_from_lat is not None and mc_from_lon is not None:
+                        mc_from_pos_txt = f"{mc_from_name or 'emisor'}: {float(mc_from_lat):.6f},{float(mc_from_lon):.6f}"
+                except Exception:
+                    mc_from_pos_txt = None
+
                 # Hops reales = hop_start - hop_limit (acotado a >= 0)
                 if hop_limit is not None and hop_start is not None:
                     try:
@@ -15985,6 +16031,8 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                         detail_lines = []
                         if rssi is not None or snr is not None:
                             detail_lines.append(f"   • RX: RSSI {rssi_txt} {(quality_RSSI)} | SNR {snr_txt} ({quality})")
+                        if mc_from_pos_txt:
+                            detail_lines.append(f"   • MeshCore posición emisor: {mc_from_pos_txt}")
                         if hops_real is not None:
                             detail_lines.append(f"   • Hops reales: {hops_real_txt}")
                         if extra_meshcore_path:
