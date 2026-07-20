@@ -228,6 +228,7 @@ También sirven:
 [mail] contactos
 [mail] ls
 /mail lista
+mail lista
 ```
 
 Respuesta esperada en la malla:
