@@ -278,6 +278,32 @@ scripts/email-to-mesh mail eb2eas Mensaje desde CLI sin comillas
 scripts/email-to-mesh mail 1 Mensaje al primer contacto
 ```
 
+Si aparece `Permission denied` al ejecutarlo desde Bash, restaura el permiso de
+ejecución del wrapper en tu copia local y vuelve a lanzar el comando:
+
+```bash
+chmod +x scripts/email-to-mesh
+scripts/email-to-mesh mail_contactos
+```
+
+Si aparece `env: ‘bash\r’: No such file or directory`, tu copia local del
+wrapper tiene finales de línea Windows (CRLF). Convierte el script a finales LF,
+restaura el permiso de ejecución y vuelve a probar:
+
+```bash
+sed -i 's/\r$//' scripts/email-to-mesh
+chmod +x scripts/email-to-mesh
+scripts/email-to-mesh mail_contactos
+```
+
+Como alternativa temporal, puedes invocarlo explícitamente con Bash si solo se
+perdió el bit ejecutable. Si el archivo tiene CRLF, primero conviértelo con el
+comando `sed` anterior:
+
+```bash
+bash scripts/email-to-mesh mail_contactos
+```
+
 También admite los comandos originales:
 
 ```bash
