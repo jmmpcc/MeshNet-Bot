@@ -1465,9 +1465,33 @@ KISS_SLOTTIME = int(os.getenv("KISS_SLOTTIME", "10")) # 100 ms
 KISS_TXTAIL  = int(os.getenv("KISS_TXTAIL",  "3"))
 
 try:
-    APRS_RF_PART_DELAY_S = max(0.0, float(os.getenv("APRS_RF_PART_DELAY_S", "1.5") or "1.5"))
+    APRS_RF_PART_DELAY_S = max(0.0, float(os.getenv("APRS_RF_PART_DELAY_S", "2.0") or "2.0"))
 except Exception:
-    APRS_RF_PART_DELAY_S = 1.5
+    APRS_RF_PART_DELAY_S = 2.0
+try:
+    APRS_RF_BAUD = max(300.0, float(os.getenv("APRS_RF_BAUD", "1200") or "1200"))
+except Exception:
+    APRS_RF_BAUD = 1200.0
+
+
+def _aprs_rf_part_gap_s(payload_len: int) -> float:
+    """
+    Pausa conservadora entre tramas APRS multipart entregadas al TNC.
+
+    Soundmodem puede aceptar varias tramas KISS en el mismo segundo, pero en RF
+    no conviene alimentar la siguiente hasta dejar margen para TXDELAY, cola AX.25
+    y el tiempo de aire de la parte anterior.
+    """
+    try:
+        payload_len = max(0, int(payload_len))
+    except Exception:
+        payload_len = 0
+    # Direcciones AX.25 + control/PID/FCS/flags/escape KISS aproximados.
+    estimated_ax25_bytes = payload_len + 80
+    airtime_s = (estimated_ax25_bytes * 10.0) / APRS_RF_BAUD
+    kiss_tail_s = max(0, KISS_TXTAIL) * 0.01
+    kiss_txdelay_s = max(0, KISS_TXDELAY) * 0.01
+    return max(APRS_RF_PART_DELAY_S, kiss_txdelay_s + airtime_s + kiss_tail_s)
 
 def _kiss_param_frame(cmd_id: int, value: bytes, port: int = 0) -> bytes:
     typ = ((int(port) & 0x0F) << 4) | (cmd_id & 0x0F)
@@ -2507,8 +2531,11 @@ async def task_control_udp():
             ok_all = ok_all and ok
             if ok:
                 sent_count += 1
-            if part_idx < total_parts and APRS_RF_PART_DELAY_S > 0:
-                await asyncio.sleep(APRS_RF_PART_DELAY_S)
+            if part_idx < total_parts:
+                gap_s = _aprs_rf_part_gap_s(len(pld))
+                if gap_s > 0:
+                    print(f"[ctrl→aprs] pausa multipart {gap_s:.2f}s antes de parte {part_idx + 1}/{total_parts}")
+                    await asyncio.sleep(gap_s)
 
         _dedup_mark(dest_norm, text)
         resp = {
@@ -2719,7 +2746,11 @@ async def task_broker_to_aprs():
                     except Exception as e:
                         ok_all = False
                         print(f"[broker→aprs][DBG] RF TX EXC part {i}/{len(payloads)}: {type(e).__name__}: {e}")
-                    await asyncio.sleep(0.12)
+                    if i < len(payloads):
+                        gap_s = _aprs_rf_part_gap_s(len(pld))
+                        if gap_s > 0:
+                            print(f"[broker→aprs][DBG] RF multipart pause {gap_s:.2f}s before part {i + 1}/{len(payloads)}")
+                            await asyncio.sleep(gap_s)
 
 
                 # --- 2) APRS-IS (opcional) ---
