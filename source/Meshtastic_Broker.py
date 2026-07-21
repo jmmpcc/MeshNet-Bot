@@ -738,12 +738,31 @@ def _safe_meshcore_max_text_bytes() -> int:
     Límite conservador (en BYTES UTF-8) para TX hacia MeshCore.
     Env:
       MESHCORE_MAX_TEXT_BYTES (default 180)
+
+    El log de TX muestra una vista previa recortada, pero el envío real se
+    divide con este límite antes de llamar al firmware MeshCore.
     """
     try:
         v = int((os.getenv("MESHCORE_MAX_TEXT_BYTES") or "180").strip())
     except Exception:
         v = 180
     return max(80, min(v, 260))
+
+
+def _safe_meshcore_part_delay_sec() -> float:
+    """
+    Demora entre partes de un mismo mensaje MeshCore troceado.
+    Env:
+      MESHCORE_TX_PART_DELAY_SEC (default 1.0)
+
+    La pausa solo se aplica cuando el texto se divide en varias partes. Ayuda a
+    que el firmware y la cola RF procesen cada fragmento sin ráfagas seguidas.
+    """
+    try:
+        v = float((os.getenv("MESHCORE_TX_PART_DELAY_SEC") or "1.0").strip())
+    except Exception:
+        v = 1.0
+    return max(0.0, min(v, 10.0))
 
 
 def _split_text_chunks_utf8(text: str, max_bytes: int) -> list[str]:
@@ -1785,19 +1804,26 @@ class MeshCoreEmbeddedBridge:
                     # 1º retry: -20 bytes, 2º: -40, ... con suelo conservador.
                     max_b = max(80, int(max_b) - (20 * int(retry_count)))
 
+                parts = _split_text_chunks_utf8(msg, max_b)
+
                 # === [LOG TX MeshCore] ===
+                # text_preview es solo una vista previa de log; no es el texto completo enviado.
                 try:
-                    msg_bytes = len(str(msg or "").encode("utf-8", errors="ignore"))
+                    msg_text = str(msg or "")
+                    msg_bytes = len(msg_text.encode("utf-8", errors="ignore"))
+                    preview_limit = 120
+                    preview_truncated = len(msg_text) > preview_limit
+                    preview = msg_text[:preview_limit] + ("…" if preview_truncated else "")
                     print(
                         f"[meshcore-embedded TX] dst={dst} retry={retry_count} "
-                        f"chars={len(str(msg or ''))} bytes={msg_bytes} max_part_bytes={max_b} "
-                        f"text='{str(msg or '')[:120]}'",
+                        f"chars={len(msg_text)} bytes={msg_bytes} max_part_bytes={max_b} "
+                        f"parts={len(parts)} preview_chars={preview_limit} "
+                        f"preview_truncated={preview_truncated} text_preview='{preview}'",
                         flush=True,
                     )
                 except Exception:
                     pass
 
-                parts = _split_text_chunks_utf8(msg, max_b)
 
                 # Si hay más de una parte, añadir (i/n) garantizando que sigue cabiendo en bytes
                 if len(parts) > 1:
@@ -1805,8 +1831,10 @@ class MeshCoreEmbeddedBridge:
                 else:
                     send_parts = parts
 
-                # Enviar secuencialmente (micro-espaciado para evitar ráfagas)
-                for p in (send_parts or [""]):
+                part_delay_sec = _safe_meshcore_part_delay_sec() if len(send_parts) > 1 else 0.0
+
+                # Enviar secuencialmente, pausando entre partes para evitar ráfagas.
+                for part_pos, p in enumerate(send_parts or [""]):
                     result = None
                     if isinstance(dst, dict) and str(dst.get("kind") or "").lower() in ("chan", "channel"):
                         chan_idx = int(dst.get("channel_idx"))
@@ -1831,10 +1859,16 @@ class MeshCoreEmbeddedBridge:
                     except Exception:
                         raise
 
-                    try:
-                        await _aio.sleep(0.15)
-                    except Exception:
-                        pass
+                    if part_delay_sec > 0 and part_pos < len(send_parts) - 1:
+                        try:
+                            await _aio.sleep(part_delay_sec)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            await _aio.sleep(0.15)
+                        except Exception:
+                            pass
 
                 self._last_ok = time.time()
 
