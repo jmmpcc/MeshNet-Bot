@@ -1464,6 +1464,11 @@ KISS_PERSIST = int(os.getenv("KISS_PERSIST", "200"))
 KISS_SLOTTIME = int(os.getenv("KISS_SLOTTIME", "10")) # 100 ms
 KISS_TXTAIL  = int(os.getenv("KISS_TXTAIL",  "3"))
 
+try:
+    APRS_RF_PART_DELAY_S = max(0.0, float(os.getenv("APRS_RF_PART_DELAY_S", "1.5") or "1.5"))
+except Exception:
+    APRS_RF_PART_DELAY_S = 1.5
+
 def _kiss_param_frame(cmd_id: int, value: bytes, port: int = 0) -> bytes:
     typ = ((int(port) & 0x0F) << 4) | (cmd_id & 0x0F)
     payload = bytes([typ]) + _kiss_escape(value)
@@ -2496,12 +2501,14 @@ async def task_control_udp():
 
         ok_all = True
         sent_count = 0
-        for pld in payloads:
+        total_parts = len(payloads)
+        for part_idx, pld in enumerate(payloads, 1):
             ok = _tx_aprs_payload(pld, dest_hdr, path_override=path_override)
             ok_all = ok_all and ok
             if ok:
                 sent_count += 1
-            await asyncio.sleep(0.12)
+            if part_idx < total_parts and APRS_RF_PART_DELAY_S > 0:
+                await asyncio.sleep(APRS_RF_PART_DELAY_S)
 
         _dedup_mark(dest_norm, text)
         resp = {
