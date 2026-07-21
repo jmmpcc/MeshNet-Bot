@@ -1545,7 +1545,13 @@ def _broker_send_text(ch: int, text: str, dest: str | None = None, ack: bool = F
 
 
 def _radio_profile() -> str:
-    return (os.getenv("RADIO_PROFILE") or "").strip().lower().replace("-", "_")
+    """Devuelve el perfil canónico sin alterar la lógica APRS existente."""
+    try:
+        from radio_profile import normalize_radio_profile  # type: ignore
+        profile = normalize_radio_profile(os.getenv("RADIO_PROFILE"), allow_legacy_empty=True)
+        return "" if profile == "legacy" else profile
+    except Exception:
+        return (os.getenv("RADIO_PROFILE") or "").strip().lower().replace("-", "_")
 
 
 def _aprs_meshcore_mode() -> bool:

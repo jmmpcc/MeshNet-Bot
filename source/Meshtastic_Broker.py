@@ -186,6 +186,53 @@ def _apply_bridge_config_runtime_once(cli_path: Optional[str] = None, verbose: b
     out["warnings"] = list(getattr(result, "warnings", []) or [])
     out["errors"] = list(getattr(result, "errors", []) or [])
 
+    # RADIO_PROFILE es la autoridad operativa. En meshcore_only no se aplica un
+    # JSON que active un bridge mixto, aunque el fichero sea válido. Así se evita
+    # contaminar el entorno con hosts/mapas de Meshtastic durante un despliegue
+    # exclusivamente MeshCore. El fichero se conserva para futuros cambios de
+    # perfil y el broker continúa usando el .env actual.
+    try:
+        from radio_profile import normalize_radio_profile  # type: ignore
+        active_radio_profile = normalize_radio_profile(os.getenv("RADIO_PROFILE"), allow_legacy_empty=True)
+    except Exception:
+        active_radio_profile = (os.getenv("RADIO_PROFILE") or "").strip().lower().replace("-", "_")
+
+    configured_profile_raw = str((getattr(result, "config", {}) or {}).get("profile") or "").strip()
+    try:
+        from radio_profile import bridge_profile_matches_radio_profile  # type: ignore
+        profiles_match = bridge_profile_matches_radio_profile(
+            active_radio_profile,
+            configured_profile_raw,
+        )
+    except Exception:
+        configured_normalized = configured_profile_raw.lower().replace("-", "_").replace(" ", "_")
+        profiles_match = (
+            active_radio_profile in {"", "legacy"}
+            or configured_normalized in {"", "off", active_radio_profile}
+        )
+
+    # RADIO_PROFILE es autoritativo para todos los perfiles canónicos, no solo
+    # para meshcore_only. El JSON puede complementar el perfil activo únicamente
+    # cuando ambos describen la misma arquitectura. Si son distintos, no se
+    # aplica ningún valor del JSON para evitar que hosts, mapas o flags cambien
+    # silenciosamente la topología seleccionada en .env.
+    if not profiles_match:
+        out["ok"] = True
+        out["details"] = "ignored_by_radio_profile_mismatch"
+        out["profile"] = configured_profile_raw or None
+        out["warnings"].append(
+            "bridge_config.json no aplicado porque su perfil "
+            f"{configured_profile_raw!r} no coincide con RADIO_PROFILE="
+            f"{active_radio_profile!r}."
+        )
+        print(
+            f"[bridge-config] ℹ️ {path} validado pero no aplicado: "
+            f"profile JSON={configured_profile_raw or 'off'} distinto de "
+            f"RADIO_PROFILE={active_radio_profile}",
+            flush=True,
+        )
+        return out
+
     if not getattr(result, "ok", False):
         out["details"] = "validation_failed_using_env"
         print(f"[bridge-config] ⚠️ configuración inválida en {path}; se usa .env actual", flush=True)
@@ -251,7 +298,15 @@ def _load_dotenv_runtime() -> None:
 
 
 def _radio_profile() -> str:
-    return (os.getenv("RADIO_PROFILE") or "").strip().lower().replace("-", "_")
+    """Devuelve el perfil canónico utilizando el resolvedor común v7.0.20."""
+    try:
+        from radio_profile import normalize_radio_profile  # type: ignore
+        profile = normalize_radio_profile(os.getenv("RADIO_PROFILE"), allow_legacy_empty=True)
+        return "" if profile == "legacy" else profile
+    except Exception:
+        # Fallback conservador para no romper imágenes antiguas donde todavía no
+        # estuviese incluido radio_profile.py.
+        return (os.getenv("RADIO_PROFILE") or "").strip().lower().replace("-", "_")
 
 
 def _is_meshcore_only_profile() -> bool:
@@ -259,28 +314,71 @@ def _is_meshcore_only_profile() -> bool:
 
 
 def _apply_radio_profile_runtime(verbose: bool = False) -> dict:
-    """Aplica perfiles seleccionados con RADIO_PROFILE sin tocar otros modos."""
-    profile = _radio_profile()
-    out = {"profile": profile or None, "applied": False}
-    if profile != "meshcore_only":
+    """Aplica el perfil de radio común sin reescribir la lógica ya estable.
+
+    La resolución se delega en :mod:`radio_profile`, que normaliza aliases y
+    aplica únicamente los overrides mínimos de cada arquitectura. Si el módulo
+    no puede importarse se conserva el comportamiento v7.0.19 para
+    ``meshcore_only`` y no se alteran los demás modos.
+    """
+    try:
+        from radio_profile import apply_radio_profile_to_environment  # type: ignore
+
+        caps = apply_radio_profile_to_environment(env=os.environ, strict=False)
+        out = caps.to_dict()
+        out["applied"] = bool(caps.valid and not caps.legacy_mode)
+        out["overrides"] = dict(caps.environment_overrides)
+
+        if not caps.valid:
+            for warning in caps.warnings:
+                print(f"[radio-profile] ⚠️ {warning}; se conserva el entorno sin aplicar", flush=True)
+            return out
+
+        if caps.legacy_mode:
+            if verbose:
+                print("[radio-profile] RADIO_PROFILE vacío: modo legacy sin overrides", flush=True)
+            return out
+
+        print(
+            f"[radio-profile] ✅ profile={caps.profile} "
+            f"node_a={caps.node_a_transport or '-'} "
+            f"node_b={caps.node_b_transport or '-'} "
+            f"meshcore={'ON' if caps.meshcore_enabled else 'OFF'} "
+            f"meshtastic={'ON' if caps.meshtastic_enabled else 'OFF'}",
+            flush=True,
+        )
+        if caps.alias_used:
+            print(
+                f"[radio-profile] alias {caps.requested_profile!r} normalizado a {caps.profile!r}",
+                flush=True,
+            )
+        if verbose:
+            print(f"[radio-profile] overrides={caps.environment_overrides}", flush=True)
         return out
+    except Exception as e:
+        profile = (os.getenv("RADIO_PROFILE") or "").strip().lower().replace("-", "_")
+        out = {"profile": profile or None, "applied": False, "fallback": True}
+        if profile != "meshcore_only":
+            print(
+                f"[radio-profile] ⚠️ resolvedor común no disponible: {type(e).__name__}: {e}; "
+                "se conserva configuración legacy",
+                flush=True,
+            )
+            return out
 
-    overrides = {
-        "MESHCORE_ENABLE": "1",
-        "BRIDGE_ENABLED": "0",
-        "BBS_ENABLED": "0",
-        "BBS_ENABLE": "0",
-        "MESHCORE_ONLY": "1",
-    }
-    for key, value in overrides.items():
-        os.environ[key] = value
-
-    out["applied"] = True
-    out["overrides"] = overrides
-    print("[radio-profile] ✅ RADIO_PROFILE=meshcore_only: Meshtastic/BBS OFF, MeshCore ON", flush=True)
-    if verbose:
-        print(f"[radio-profile] overrides={overrides}", flush=True)
-    return out
+        overrides = {
+            "MESHCORE_ENABLE": "1",
+            "BRIDGE_ENABLED": "0",
+            "BBS_ENABLED": "0",
+            "BBS_ENABLE": "0",
+            "MESHCORE_ONLY": "1",
+        }
+        for key, value in overrides.items():
+            os.environ[key] = value
+        out["applied"] = True
+        out["overrides"] = overrides
+        print("[radio-profile] ✅ fallback meshcore_only: Meshtastic/BBS OFF, MeshCore ON", flush=True)
+        return out
 
 
 def _mc_parse_ch_map() -> dict[int, dict]:
@@ -10082,8 +10180,10 @@ def main():
 
     args = ap.parse_args()
     meshcore_only = _is_meshcore_only_profile()
-    if not args.host and not meshcore_only:
-        ap.error("--host es obligatorio salvo con RADIO_PROFILE=meshcore_only")
+
+    # La validación final del host se realiza después de aplicar bridge_config.json.
+    # El perfil invertido puede definir el nodo Meshtastic B exclusivamente en el
+    # JSON; validar aquí impediría arrancar antes de que ese overlay fuese leído.
 
     # Reaplica tras parsear por si el proceso recibió variables desde .env o CLI indirecta.
     globals()["RADIO_PROFILE_RUNTIME"] = _apply_radio_profile_runtime(verbose=bool(getattr(args, "verbose", False)))
@@ -10098,9 +10198,13 @@ def main():
         getattr(args, "bridge_config", None),
         verbose=bool(getattr(args, "verbose", False)),
     )
-    if meshcore_only:
-        # RADIO_PROFILE debe tener prioridad sobre cualquier overlay JSON heredado.
-        globals()["RADIO_PROFILE_RUNTIME"] = _apply_radio_profile_runtime(verbose=bool(getattr(args, "verbose", False)))
+    # RADIO_PROFILE se reaplica siempre después del overlay. Así sus capacidades
+    # y flags mínimos permanecen autoritativos incluso cuando el JSON contiene
+    # variables compatibles del mismo perfil.
+    globals()["RADIO_PROFILE_RUNTIME"] = _apply_radio_profile_runtime(
+        verbose=bool(getattr(args, "verbose", False))
+    )
+    meshcore_only = _is_meshcore_only_profile()
 
     # En el perfil invertido, nodes.B es el Meshtastic embebido que controla el
     # broker. Aplicamos su host resuelto al argumento runtime para que el JSON
@@ -10115,6 +10219,14 @@ def main():
             args.host = _mesh_b_host
             if bool(getattr(args, "verbose", False)):
                 print(f"[bridge-config] nodo B Meshtastic aplicado a --host={args.host}", flush=True)
+
+    # Validación final, una vez resueltos .env, RADIO_PROFILE y bridge_config.json.
+    if not args.host and not meshcore_only:
+        ap.error(
+            "--host/MESHTASTIC_HOST es obligatorio para el perfil activo; "
+            "también puede definirse nodes.B.host en bridge_config.json para "
+            "meshcore_a_meshtastic_embedded_b"
+        )
 
     # === [NUEVO] Modo sin heartbeat si el usuario lo pide
     if args.no_heartbeat:
