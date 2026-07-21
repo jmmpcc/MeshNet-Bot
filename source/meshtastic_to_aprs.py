@@ -539,7 +539,7 @@ def _aprsis_ready() -> bool:
 # --- De-dup sencillo para evitar doble TX (bot UDP + eco broker) ---
 import time
 
-_DEDUP_TTL_S = int(os.getenv("APRS_DEDUP_TTL", "20"))  # segundos
+_DEDUP_TTL_S = int(os.getenv("APRS_DEDUP_TTL", "120"))  # segundos
 _recent_aprs_keys: dict[str, float] = {}
 
 # --- Debug opcional para APRS ---
@@ -2503,8 +2503,13 @@ async def task_control_udp():
 
         # DEDUP
         dest_norm = "broadcast" if dest.lower() in ("broadcast", "all") else dest.upper()
+        origin = str(obj.get("origin") or obj.get("src") or "").strip().lower()
         force_tx = str(obj.get("force_tx") or obj.get("force") or "").strip().lower() in ("1", "true", "yes", "on")
-        if (not force_tx) and _dedup_seen(dest_norm, text):
+        # Los envíos interactivos del bot deben poder repetirse aunque sean
+        # idénticos dentro de la ventana TTL. Aun así se marcan antes de TX para
+        # que el eco posterior del broker/malla sí quede suprimido.
+        ctrl_bypass_dedup = force_tx or origin in ("bot_send", "telegram_aprs")
+        if (not ctrl_bypass_dedup) and _dedup_seen(dest_norm, text):
             print(f"[ctrl] duplicado ignorado para dest={dest_norm}")
             try:
                 sock.sendto(json.dumps({"ok": False, "duplicate": True, "dest": dest_norm, "parts": 0, "sent": 0, "error": "duplicate_suppressed"}).encode("utf-8"), addr)

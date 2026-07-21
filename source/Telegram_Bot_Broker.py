@@ -3315,7 +3315,10 @@ def _send_aprs_immediate(dest: str, text: str, timeout: float | None = None) -> 
         "dest": aprs_dest,
         "text": text_clean,
         "ack": True,
-        "force_tx": True,
+        # No forzamos TX: el gateway APRS debe poder suprimir ecos del mismo
+        # texto que le lleguen segundos después por el stream del broker/malla.
+        # Si se fuerza siempre, /aprs canal N y /enviar_mc ambos pueden acabar
+        # generando retransmisiones idénticas en RF/APRS-IS.
         "origin": "bot_send",
     }
     # Compatibilidad con versiones anteriores: si APRS_BOT_PATH está vacío no
