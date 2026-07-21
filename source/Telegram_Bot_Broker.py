@@ -3317,10 +3317,16 @@ def _send_aprs_immediate(dest: str, text: str, timeout: float | None = None) -> 
         "ack": True,
         "force_tx": True,
         "origin": "bot_send",
-        # Lista vacía explícita = sin digipeaters. Evita duplicados por WIDE si
-        # APRS_BOT_PATH está vacío; si se configura, se respeta literalmente.
-        "path": [p.strip() for p in APRS_BOT_PATH.split(",") if p.strip()],
     }
+    # Compatibilidad con versiones anteriores: si APRS_BOT_PATH está vacío no
+    # enviamos `path`, y la pasarela usa su APRS_PATH por defecto. Para forzar
+    # salida local sin digipeaters, usar APRS_BOT_PATH=none/direct/local.
+    bot_path_raw = (APRS_BOT_PATH or "").strip()
+    if bot_path_raw.lower() in ("none", "direct", "local", "sin", "no", "0"):
+        ctrl["path"] = []
+    elif bot_path_raw:
+        ctrl["path"] = [p.strip() for p in bot_path_raw.split(",") if p.strip()]
+
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -8082,8 +8088,8 @@ except NameError:
     APRS_CTRL_PORT = 9464
 
 # Ruta AX.25 usada por los envíos APRS inmediatos del bot (/aprs, /enviar aprs,
-# /enviar_mc aprs). Por defecto queda vacía para que el gateway emita una sola
-# trama local; si se quieren repetidores, definir APRS_BOT_PATH=WIDE1-1,WIDE2-1.
+# /enviar_mc aprs). Vacío = compatibilidad con versiones anteriores: el gateway
+# usa APRS_PATH. Para forzar salida local sin digipeaters: APRS_BOT_PATH=none.
 APRS_BOT_PATH = os.getenv("APRS_BOT_PATH", "").strip()
 
 

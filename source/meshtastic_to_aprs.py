@@ -1190,15 +1190,43 @@ def _split_by_words(text: str, max_len: int) -> List[str]:
     return parts
 
 def build_aprs_status_chunks(text: str, max_len: int | None = None) -> List[bytes]:
-    limit = int(max_len if max_len is not None else MAX_STATUS_LEN)
+    """
+    Construye payloads APRS de estado respetando el límite completo del campo INFO.
+
+    El byte inicial '>' también viaja dentro del payload KISS. Antes se reservaba
+    `max_len` solo para el texto y después se anteponía '>', por lo que una
+    configuración APRS_STATUS_MAX=67 podía emitir payloads de 68 bytes.
+    """
+    limit = max(2, int(max_len if max_len is not None else MAX_STATUS_LEN))
     text = _to_ascii7(text)  # <-- Sanitizar aquí
-    base = _split_by_words(text, limit)
-    if len(base) <= 1:
-        return [b">" + base[0].encode("ascii", "ignore")] if base else []
-    suf_worst = len(f" ({len(base)}/{len(base)})")
-    parts = _split_by_words(text, limit - suf_worst)
-    n = len(parts)
-    return [b">" + f"{p} ({i}/{n})".encode("ascii", "ignore") for i, p in enumerate(parts, 1)]
+    text_limit = max(1, limit - 1)  # reservar el marcador de estado '>'
+    if not text:
+        return []
+    if len(text) <= text_limit:
+        return [b">" + text.encode("ascii", "ignore")]
+
+    # Reservar marcador '>' + sufijo multipart. Usamos el peor caso habitual
+    # (99/99) para no generar micro-partes al recalcular el total final.
+    suffix_reserve = len(" (99/99)")
+    part_limit = max(1, limit - 1 - suffix_reserve)
+    parts = _split_by_words(text, part_limit)
+
+    # Si hubiese 100+ partes, el sufijo crece; recalcular con el ancho real.
+    total = max(1, len(parts))
+    actual_suffix_reserve = len(f" ({total}/{total})")
+    if actual_suffix_reserve != suffix_reserve:
+        part_limit = max(1, limit - 1 - actual_suffix_reserve)
+        parts = _split_by_words(text, part_limit)
+        total = max(1, len(parts))
+
+    out: List[bytes] = []
+    for i, part in enumerate(parts, 1):
+        suffix = f" ({i}/{total})"
+        body_limit = max(1, limit - 1 - len(suffix))
+        body = part[:body_limit] + suffix
+        payload = b">" + body.encode("ascii", "ignore")
+        out.append(payload[:limit])
+    return out
 
 
 def build_aprs_message_chunks(dest_call: str, text: str, max_len: int | None = None) -> List[bytes]:
