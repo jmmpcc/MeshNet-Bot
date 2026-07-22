@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Validador operativo de RADIO_PROFILE para MeshNet-Bot.
+
+Uso::
+
+    scripts/radio-profile-check
+    scripts/radio-profile-check --env-file .env
+    scripts/radio-profile-check --json
+
+El script no abre radios ni modifica el fichero indicado. Carga las variables,
+resuelve el perfil común y comprueba los hosts mínimos exigidos por ese perfil.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Dict
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_DIR = PROJECT_ROOT / "source"
+if str(SOURCE_DIR) not in sys.path:
+    sys.path.insert(0, str(SOURCE_DIR))
+
+from radio_profile import validate_radio_profile_environment  # noqa: E402
+
+
+def load_env_file(path: Path) -> Dict[str, str]:
+    """Carga un .env sencillo sin ejecutar código ni expandir variables.
+
+    Se conservan los valores ya presentes en el entorno del proceso: tienen
+    prioridad sobre el fichero para reproducir el comportamiento de Docker.
+    """
+    loaded: Dict[str, str] = {}
+    if not path.exists():
+        raise FileNotFoundError(f"No existe el fichero de entorno: {path}")
+
+    for number, raw_line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            raise ValueError(f"Línea {number} no válida en {path}: falta '='")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Línea {number} no válida en {path}: clave vacía")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        loaded[key] = value
+    return loaded
+
+
+def build_effective_environment(env_file: Path | None) -> Dict[str, str]:
+    """Combina el .env con os.environ, dando prioridad al entorno actual."""
+    result: Dict[str, str] = {}
+    if env_file is not None:
+        result.update(load_env_file(env_file))
+    result.update({str(key): str(value) for key, value in os.environ.items()})
+    return result
+
+
+def main() -> int:
+    """Ejecuta la validación y devuelve 0 cuando el perfil es operativo."""
+    parser = argparse.ArgumentParser(description="Valida RADIO_PROFILE sin abrir conexiones de radio.")
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=PROJECT_ROOT / ".env",
+        help="Fichero .env a validar. Por defecto: ./.env",
+    )
+    parser.add_argument("--json", action="store_true", help="Muestra el resultado completo en JSON.")
+    parser.add_argument(
+        "--no-env-file",
+        action="store_true",
+        help="Valida exclusivamente las variables del entorno actual.",
+    )
+    args = parser.parse_args()
+
+    try:
+        env_file = None if args.no_env_file else args.env_file.resolve()
+        env = build_effective_environment(env_file)
+        result = validate_radio_profile_environment(env=env)
+    except (OSError, ValueError) as exc:
+        print(f"[radio-profile-check] ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        caps = result["capabilities"]
+        print(f"Perfil: {caps['profile']}")
+        print(f"Válido: {'sí' if caps['valid'] else 'no'}")
+        print(f"Nodo A: {caps.get('node_a_transport') or 'no definido'}")
+        print(f"Nodo B: {caps.get('node_b_transport') or 'no definido'}")
+        print(f"Transporte predeterminado: {caps.get('default_transport') or 'legacy'}")
+        print(f"MeshCore: {'activo' if caps['meshcore_enabled'] else 'inactivo'}")
+        print(f"Meshtastic: {'activo' if caps['meshtastic_enabled'] else 'inactivo'}")
+        for warning in result["warnings"]:
+            print(f"AVISO: {warning}")
+        for error in result["errors"]:
+            print(f"ERROR: {error}")
+        print("Resultado: OK" if result["ok"] else "Resultado: NO OPERATIVO")
+
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

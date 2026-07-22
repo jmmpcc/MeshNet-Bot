@@ -1,5 +1,12 @@
 ## 🧾 Historial de versiones
 
+## v7.0.21 — Validación preventiva de perfiles de radio
+
+- Añadido `scripts/radio-profile-check` para validar `.env` sin abrir conexiones de radio.
+- Añadidas pruebas unitarias de aliases, capacidades, overrides y requisitos de los tres perfiles.
+- Añadida la guía `docs/RADIO_PROFILES.md`.
+- No se altera el comportamiento operativo de broker, bot, APRS, correo ni bridges.
+
 # Changelog — MeshNet v6.2.3
 
 Fecha: 2026-01-24

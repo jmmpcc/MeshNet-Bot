@@ -80,6 +80,14 @@ scripts/email-to-mesh mail eb2eas Mensaje desde CLI sin comillas
 ---
 
 
+### 📡 Guía de perfiles de radio
+
+> Configuración canónica de `RADIO_PROFILE`, matriz Nodo A/Nodo B, validación previa y pruebas de regresión.
+
+📘 **[Abrir guía completa → RADIO_PROFILES.md](./docs/RADIO_PROFILES.md)**
+
+---
+
 ### 🌐 Guía BROKER
 
 > 🔄 Documentación detallada del sistema del BROKER  
