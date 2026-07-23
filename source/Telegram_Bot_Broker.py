@@ -3290,6 +3290,157 @@ def _pop_aprs_modifier_after_mesh_dest(tokens: list[str]) -> tuple[list[str], st
     del t[aprs_idx:aprs_idx + 2]
     return t, aprs_dest
 
+
+def _dotenv_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    for key in ("ENV_FILE", "DOTENV_PATH"):
+        raw = (os.getenv(key, "") or "").strip()
+        if raw:
+            candidates.append(Path(raw).expanduser())
+    candidates.extend((Path("/app/.env"), Path.cwd() / ".env"))
+    return candidates
+
+
+def _clean_dotenv_value(value: str) -> str:
+    """Limpia comillas y comentarios inline de un valor .env sencillo."""
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+
+    quote = ""
+    escaped = False
+    out: list[str] = []
+    for ch in raw:
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\" and quote == '"':
+            escaped = True
+            out.append(ch)
+            continue
+        if ch in {"'", '"'}:
+            if not quote:
+                quote = ch
+            elif quote == ch:
+                quote = ""
+            out.append(ch)
+            continue
+        if ch == "#" and not quote:
+            break
+        out.append(ch)
+
+    cleaned = "".join(out).strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+        cleaned = cleaned[1:-1]
+    return cleaned.strip()
+
+
+def _read_dotenv_value(*names: str) -> str:
+    """Lee claves simples de .env sin cargar secretos en os.environ ni depender de python-dotenv."""
+    wanted = {str(n or "").strip() for n in names if str(n or "").strip()}
+    if not wanted:
+        return ""
+
+    for path in _dotenv_candidates():
+        try:
+            if not path.exists() or not path.is_file():
+                continue
+            for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.lower().startswith("export "):
+                    line = line[7:].strip()
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if key not in wanted:
+                    continue
+                return _clean_dotenv_value(value)
+        except Exception:
+            continue
+    return ""
+
+
+def _env_or_dotenv(*names: str) -> str:
+    for name in names:
+        value = (os.getenv(name, "") or "").strip()
+        if value:
+            return value
+    return _read_dotenv_value(*names)
+
+
+def _load_bridge_profile_name() -> str:
+    """Devuelve el perfil activo desde env/.env o bridge_config.json, si existe."""
+    env_profile = _env_or_dotenv("RADIO_PROFILE", "BRIDGE_PROFILE", "MESHNET_BRIDGE_PROFILE")
+    if env_profile:
+        try:
+            from radio_profile import normalize_radio_profile  # type: ignore
+            normalized = normalize_radio_profile(env_profile, allow_legacy_empty=True)
+            if normalized != "legacy":
+                return str(normalized).lower()
+        except Exception:
+            normalized = env_profile.strip().lower().replace("-", "_")
+            if normalized not in ("", "legacy", "off"):
+                return normalized
+        # RADIO_PROFILE vacío/legacy/off no debe desactivar un bridge_config.json válido.
+
+    candidates = []
+    cfg_env = _env_or_dotenv("BRIDGE_CONFIG", "MESHNET_BRIDGE_CONFIG")
+    if cfg_env:
+        candidates.append(Path(cfg_env).expanduser())
+    candidates.extend((
+        Path("bot_data/bridge_config.json"),
+        Path("config/bridge_config.json"),
+    ))
+
+    for cfg in candidates:
+        try:
+            if not cfg.exists():
+                continue
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            profile = str((data or {}).get("profile") or "").strip()
+            if profile:
+                return profile.lower()
+        except Exception:
+            continue
+    return ""
+
+
+def _aprs_mesh_uses_meshcore_profile() -> bool:
+    """True si /aprs canal N debe inyectar en MeshCore en vez de Meshtastic."""
+    override = _env_or_dotenv("APRS_MESH_TRANSPORT", "APRS_TO_MESHCORE").strip().lower()
+    if override in ("meshcore", "mc", "1", "true", "yes", "on", "si", "sí"):
+        return True
+    if override in ("meshtastic", "mesh", "mt", "0", "false", "no", "off"):
+        return False
+
+    profile = _load_bridge_profile_name()
+    return profile.startswith("meshcore_a_meshtastic_embedded") or profile in {
+        "meshcore_only",
+        "meshcore",
+    }
+
+
+def _send_aprs_mesh_leg_for_profile(text: str, canal_int: int) -> tuple[str, str]:
+    """
+    Envía la pata de malla de /aprs respetando el perfil activo.
+
+    Devuelve (resultado_para_usuario, etiqueta_transporte).
+    """
+    if _aprs_mesh_uses_meshcore_profile():
+        res = _send_via_broker_meshcore(int(canal_int), text, timeout=3.0)
+        if bool((res or {}).get("ok")):
+            return "OK (meshcore-queue)", "MeshCore"
+        return f"KO: {(res or {}).get('error') or 'meshcore_queue_not_ok'}", "MeshCore"
+
+    res = _send_via_broker_queue(text, int(canal_int), dest=None, ack=False, timeout=3.0)
+    if bool((res or {}).get("ok")):
+        return "OK (broker-queue)", "Meshtastic"
+    return f"KO: {(res or {}).get('error') or 'broker_queue_not_ok'}", "Meshtastic"
+
 def _send_aprs_immediate(dest: str, text: str, timeout: float | None = None) -> dict:
     """
     Envía una orden APRS al gateway por UDP y espera confirmación real del gateway.
@@ -8407,13 +8558,8 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # nodo confirma tarde o la conexión queda zombie, el retry puede emitir
         # el mismo texto varias veces. Encolamos una sola orden en el broker,
         # con origin=bot, igual que las rutas inmediatas anti-duplicado.
-        node_id = None  # broadcast al canal Mesh indicado
-        mesh_queue = _send_via_broker_queue(text_clean, int(canal_int), dest=node_id, ack=False, timeout=3.0)
+        mesh_result, mesh_transport_label = _send_aprs_mesh_leg_for_profile(text_clean, int(canal_int))
         packet_id = None
-        if bool((mesh_queue or {}).get("ok")):
-            mesh_result = "OK (broker-queue)"
-        else:
-            mesh_result = f"KO: {(mesh_queue or {}).get('error') or 'broker_queue_not_ok'}"
 
         aprs_err = str(r_aprs.get("error") or "").strip()
         aprs_status = f"OK ({aprs_sent} parte{'s' if aprs_sent != 1 else ''})" if aprs_ok else \
@@ -8422,7 +8568,7 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         html = (
             "<b>APRS</b> → enviado a pasarela y malla.\n"
             f"Destino APRS: <code>{escape(mesh_dest_norm)}</code>\n"
-            f"Canal Mesh: <code>{canal_int}</code>\n"
+            f"Malla: <code>{escape(mesh_transport_label)}</code> canal <code>{canal_int}</code>\n"
             f"Texto Mesh: <code>{escape(text_clean)}</code>\n"
             f"Chunks APRS: <code>{chunks}</code> (gateway, máx={APRS_LEN})\n"
             f"Mesh: <code>{escape(mesh_result)}</code> {('packet_id=' + str(packet_id)) if packet_id else ''}\n"
