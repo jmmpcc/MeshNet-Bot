@@ -3290,6 +3290,68 @@ def _pop_aprs_modifier_after_mesh_dest(tokens: list[str]) -> tuple[list[str], st
     del t[aprs_idx:aprs_idx + 2]
     return t, aprs_dest
 
+
+def _load_bridge_profile_name() -> str:
+    """Devuelve el perfil bridge activo desde env o bridge_config.json, si existe."""
+    env_profile = (os.getenv("BRIDGE_PROFILE", "") or os.getenv("MESHNET_BRIDGE_PROFILE", "")).strip()
+    if env_profile:
+        return env_profile.lower()
+
+    candidates = []
+    cfg_env = (os.getenv("BRIDGE_CONFIG", "") or os.getenv("MESHNET_BRIDGE_CONFIG", "")).strip()
+    if cfg_env:
+        candidates.append(Path(cfg_env))
+    candidates.extend((
+        Path("bot_data/bridge_config.json"),
+        Path("config/bridge_config.json"),
+        Path("config/bridge_config.example.json"),
+    ))
+
+    for cfg in candidates:
+        try:
+            if not cfg.exists():
+                continue
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            profile = str((data or {}).get("profile") or "").strip()
+            if profile:
+                return profile.lower()
+        except Exception:
+            continue
+    return ""
+
+
+def _aprs_mesh_uses_meshcore_profile() -> bool:
+    """True si /aprs canal N debe inyectar en MeshCore en vez de Meshtastic."""
+    override = (os.getenv("APRS_MESH_TRANSPORT", "") or "").strip().lower()
+    if override in ("meshcore", "mc"):
+        return True
+    if override in ("meshtastic", "mesh", "mt"):
+        return False
+
+    profile = _load_bridge_profile_name()
+    return profile.startswith("meshcore_a_meshtastic_embedded") or profile in {
+        "meshcore_only",
+        "meshcore",
+    }
+
+
+def _send_aprs_mesh_leg_for_profile(text: str, canal_int: int) -> tuple[str, str]:
+    """
+    Envía la pata de malla de /aprs respetando el perfil activo.
+
+    Devuelve (resultado_para_usuario, etiqueta_transporte).
+    """
+    if _aprs_mesh_uses_meshcore_profile():
+        res = _send_via_broker_meshcore(int(canal_int), text, timeout=3.0)
+        if bool((res or {}).get("ok")):
+            return "OK (meshcore-queue)", "MeshCore"
+        return f"KO: {(res or {}).get('error') or 'meshcore_queue_not_ok'}", "MeshCore"
+
+    res = _send_via_broker_queue(text, int(canal_int), dest=None, ack=False, timeout=3.0)
+    if bool((res or {}).get("ok")):
+        return "OK (broker-queue)", "Meshtastic"
+    return f"KO: {(res or {}).get('error') or 'broker_queue_not_ok'}", "Meshtastic"
+
 def _send_aprs_immediate(dest: str, text: str, timeout: float | None = None) -> dict:
     """
     Envía una orden APRS al gateway por UDP y espera confirmación real del gateway.
@@ -8407,13 +8469,8 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # nodo confirma tarde o la conexión queda zombie, el retry puede emitir
         # el mismo texto varias veces. Encolamos una sola orden en el broker,
         # con origin=bot, igual que las rutas inmediatas anti-duplicado.
-        node_id = None  # broadcast al canal Mesh indicado
-        mesh_queue = _send_via_broker_queue(text_clean, int(canal_int), dest=node_id, ack=False, timeout=3.0)
+        mesh_result, mesh_transport_label = _send_aprs_mesh_leg_for_profile(text_clean, int(canal_int))
         packet_id = None
-        if bool((mesh_queue or {}).get("ok")):
-            mesh_result = "OK (broker-queue)"
-        else:
-            mesh_result = f"KO: {(mesh_queue or {}).get('error') or 'broker_queue_not_ok'}"
 
         aprs_err = str(r_aprs.get("error") or "").strip()
         aprs_status = f"OK ({aprs_sent} parte{'s' if aprs_sent != 1 else ''})" if aprs_ok else \
@@ -8422,7 +8479,7 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         html = (
             "<b>APRS</b> → enviado a pasarela y malla.\n"
             f"Destino APRS: <code>{escape(mesh_dest_norm)}</code>\n"
-            f"Canal Mesh: <code>{canal_int}</code>\n"
+            f"Malla: <code>{escape(mesh_transport_label)}</code> canal <code>{canal_int}</code>\n"
             f"Texto Mesh: <code>{escape(text_clean)}</code>\n"
             f"Chunks APRS: <code>{chunks}</code> (gateway, máx={APRS_LEN})\n"
             f"Mesh: <code>{escape(mesh_result)}</code> {('packet_id=' + str(packet_id)) if packet_id else ''}\n"
