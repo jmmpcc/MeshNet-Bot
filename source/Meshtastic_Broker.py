@@ -6658,6 +6658,19 @@ class _BacklogServer(threading.Thread):
             # --- NUEVO: envío de texto vía la iface persistente del broker ---
             elif cmd == "SEND_TEXT":
 
+                # Defensa de perfil: SEND_TEXT pertenece a la ruta Meshtastic.
+                # En meshcore_only debe rechazarse antes de encolar para evitar
+                # falsos OK y búsquedas posteriores de un manejador inexistente.
+                # Los perfiles combinados y el modo legacy conservan su flujo.
+                if _is_meshcore_only_profile():
+                    resp = {
+                        "ok": False,
+                        "error": "meshtastic_disabled_by_radio_profile",
+                        "profile": "meshcore_only",
+                    }
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                    return
+
                 # === Veto por pausa/cooldown/barrera TX ===
                 try:
                     mgr = globals().get("BROKER_IFACE_MGR", None)

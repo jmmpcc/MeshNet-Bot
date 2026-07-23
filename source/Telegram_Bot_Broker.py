@@ -1816,6 +1816,126 @@ def _send_via_broker_queue(text: str, ch: int, dest: str | None = None, ack: boo
 
 
 
+def _send_aprs_text_to_active_mesh(
+    text: str,
+    logical_channel: int,
+    timeout: float = 3.0,
+) -> dict:
+    """Envía la copia Mesh de ``/aprs`` por el transporte activo del perfil.
+
+    Esta función es el único selector de transporte para la ruta APRS inmediata.
+    Reutiliza los emisores ya existentes y no modifica el envío APRS por UDP.
+
+    Parámetros:
+        text:
+            Texto limpio que debe transmitirse a la malla. Nunca incluye la orden
+            ``/aprs`` ni cabeceras técnicas APRS.
+        logical_channel:
+            Canal lógico indicado por el usuario en Telegram. Para MeshCore se
+            convierte mediante ``_meshcore_chanidx_for_meshtastic_ch``.
+        timeout:
+            Tiempo máximo de espera de la llamada al puerto de control del broker.
+
+    Retorno:
+        Diccionario normalizado con ``ok``, ``transport`` y datos de diagnóstico.
+        En modo legacy se conserva exactamente la ruta histórica ``SEND_TEXT``.
+
+    Seguridad:
+        Un perfil desconocido se rechaza sin realizar fallback silencioso. Si el
+        canal lógico no está mapeado a MeshCore, APRS puede seguir funcionando,
+        pero esta copia Mesh devuelve un error explícito.
+    """
+    clean_text = str(text or "").strip()
+    if not clean_text:
+        return {
+            "ok": False,
+            "transport": None,
+            "error": "missing text",
+        }
+
+    try:
+        logical_channel = int(logical_channel)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "transport": None,
+            "error": "invalid logical channel",
+        }
+
+    try:
+        from radio_profile import resolve_radio_profile  # type: ignore
+
+        caps = resolve_radio_profile(env=os.environ, strict=False)
+    except Exception as exc:
+        # Compatibilidad conservadora con imágenes antiguas: si el resolvedor no
+        # estuviese disponible, se mantiene la ruta legacy que ya funcionaba.
+        result = _send_via_broker_queue(
+            clean_text,
+            logical_channel,
+            dest=None,
+            ack=False,
+            timeout=timeout,
+        )
+        result = dict(result or {})
+        result.setdefault("transport", "meshtastic")
+        result.setdefault("profile", "legacy")
+        result.setdefault("profile_warning", f"{type(exc).__name__}: {exc}")
+        return result
+
+    if not caps.valid:
+        warning = "; ".join(str(item) for item in caps.warnings if item) or "RADIO_PROFILE no válido"
+        return {
+            "ok": False,
+            "transport": None,
+            "profile": caps.profile,
+            "error": warning,
+        }
+
+    # Un entorno sin RADIO_PROFILE conserva el comportamiento histórico.
+    transport = "meshtastic" if caps.legacy_mode else caps.default_transport
+
+    if transport == "meshcore":
+        channel_idx = _meshcore_chanidx_for_meshtastic_ch(logical_channel)
+        if channel_idx is None:
+            return {
+                "ok": False,
+                "transport": "meshcore",
+                "profile": caps.profile,
+                "logical_channel": logical_channel,
+                "error": f"canal lógico {logical_channel} sin correspondencia MeshCore",
+            }
+
+        result = _send_via_broker_meshcore(channel_idx, clean_text, timeout=timeout)
+        result = dict(result or {})
+        result.setdefault("transport", "meshcore")
+        result.setdefault("profile", caps.profile)
+        result.setdefault("logical_channel", logical_channel)
+        result.setdefault("channel_idx", int(channel_idx))
+        return result
+
+    if transport == "meshtastic":
+        result = _send_via_broker_queue(
+            clean_text,
+            logical_channel,
+            dest=None,
+            ack=False,
+            timeout=timeout,
+        )
+        result = dict(result or {})
+        result.setdefault("transport", "meshtastic")
+        result.setdefault("profile", caps.profile)
+        result.setdefault("logical_channel", logical_channel)
+        return result
+
+    return {
+        "ok": False,
+        "transport": transport,
+        "profile": caps.profile,
+        "error": "el perfil activo no define transporte Mesh predeterminado",
+    }
+
+
+
 # --- /reconectar (admin) → fuerza reset limpio y confirma conexión ---
 #Baja 04-11-2025
 async def reconectar_cmd_old(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8407,13 +8527,25 @@ async def aprs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # nodo confirma tarde o la conexión queda zombie, el retry puede emitir
         # el mismo texto varias veces. Encolamos una sola orden en el broker,
         # con origin=bot, igual que las rutas inmediatas anti-duplicado.
-        node_id = None  # broadcast al canal Mesh indicado
-        mesh_queue = _send_via_broker_queue(text_clean, int(canal_int), dest=node_id, ack=False, timeout=3.0)
-        packet_id = None
-        if bool((mesh_queue or {}).get("ok")):
-            mesh_result = "OK (broker-queue)"
+        mesh_send = _send_aprs_text_to_active_mesh(
+            text=text_clean,
+            logical_channel=int(canal_int),
+            timeout=3.0,
+        )
+        packet_id = (mesh_send or {}).get("packet_id")
+        mesh_transport = str((mesh_send or {}).get("transport") or "").strip().lower()
+        if bool((mesh_send or {}).get("ok")):
+            if mesh_transport == "meshcore":
+                channel_idx = (mesh_send or {}).get("channel_idx")
+                mesh_result = f"OK (MeshCore, channel_idx={channel_idx})"
+            elif mesh_transport == "meshtastic":
+                mesh_result = "OK (Meshtastic, broker-queue)"
+            else:
+                mesh_result = "OK"
         else:
-            mesh_result = f"KO: {(mesh_queue or {}).get('error') or 'broker_queue_not_ok'}"
+            error = (mesh_send or {}).get("error") or "mesh_send_not_ok"
+            label = "MeshCore" if mesh_transport == "meshcore" else ("Meshtastic" if mesh_transport == "meshtastic" else "Mesh")
+            mesh_result = f"KO ({label}: {error})"
 
         aprs_err = str(r_aprs.get("error") or "").strip()
         aprs_status = f"OK ({aprs_sent} parte{'s' if aprs_sent != 1 else ''})" if aprs_ok else \
