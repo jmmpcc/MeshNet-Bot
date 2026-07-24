@@ -25,6 +25,7 @@ import os
 import re
 import socket
 import sys
+import threading
 import time
 import unicodedata
 import urllib.parse
@@ -91,11 +92,126 @@ class Pharmacy:
 
 
 def first(record: dict[str, Any], *keys: str) -> Any:
+    """Devuelve el primer campo no vacío de un diccionario, ignorando mayúsculas.
+
+    Uso:
+        value = first(record, "sector", "barrio")
+
+    Parámetros:
+        record:
+            Diccionario del registro que se está normalizando.
+        *keys:
+            Nombres alternativos admitidos, ordenados por prioridad.
+
+    La función conserva su comportamiento histórico y no recorre estructuras
+    anidadas. Para los datos específicos de guardia se utiliza
+    :func:`guardia_fields`, evitando búsquedas recursivas ambiguas.
+    """
     lowered = {str(k).casefold(): v for k, v in record.items()}
     for key in keys:
         if key.casefold() in lowered and lowered[key.casefold()] not in (None, "", [], {}):
             return lowered[key.casefold()]
     return ""
+
+
+def guardia_fields(record: dict[str, Any]) -> dict[str, Any]:
+    """Obtiene de forma segura el bloque de guardia de la fuente municipal.
+
+    Uso:
+        guardia = guardia_fields(record)
+        sector = first(guardia, "sector")
+
+    Parámetros:
+        record:
+            Registro individual devuelto por la API de farmacias.
+
+    Funcionalidad:
+        - Acepta ``guardia`` como diccionario directo.
+        - Acepta listas de guardias y selecciona el primer elemento válido.
+        - Tolera los alias ``guardias`` y ``onDuty`` por compatibilidad.
+        - Devuelve siempre un diccionario y nunca altera el registro original.
+    """
+    raw = first(record, "guardia", "guardias", "onDuty", "onduty")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                return dict(item)
+    return {}
+
+
+def normalize_area(value: Any, locality: str) -> str:
+    """Normaliza el sector oficial sin destruir nombres compuestos.
+
+    Uso:
+        area = normalize_area(guardia.get("sector"), locality)
+
+    Parámetros:
+        value:
+            Texto de sector/barrio suministrado por la fuente.
+        locality:
+            Localidad usada como fallback cuando no existe sector.
+
+    Funcionalidad:
+        - Elimina el prefijo descriptivo ``Sector``.
+        - Retira indicaciones de ubicación añadidas tras marcadores como
+          ``-Esquina``, ``-Frente`` o ``-Junto``.
+        - Conserva nombres oficiales compuestos como
+          ``Avda. Cataluña-Barrio La Jota``.
+        - Si no hay sector válido, conserva el fallback histórico de localidad.
+    """
+    area = norm(value)
+    area = re.sub(r"^sector\s*[:.-]?\s*", "", area, flags=re.I).strip()
+    area = re.split(
+        r"\s*-\s*(?=(?:esquina|frente|junto|pr[oó]ximo|al lado|entre)\b)",
+        area,
+        maxsplit=1,
+        flags=re.I,
+    )[0].strip()
+    return area or norm(locality)
+
+
+def sector_from_guardia_text(value: Any) -> str:
+    """Extrae el sector de un texto combinado de horario de guardia.
+
+    Uso:
+        sector = sector_from_guardia_text(
+            "Abiertas ... Sector Delicias. Turno: T-17"
+        )
+
+    Parámetros:
+        value:
+            Texto libre que puede contener ``Sector ...`` y ``Turno``.
+
+    Funcionalidad:
+        - Soporta respuestas donde la fuente no separa sector y horario.
+        - Captura el texto situado entre ``Sector`` y ``Turno``.
+        - Devuelve cadena vacía cuando no existe un sector reconocible.
+    """
+    text = norm(value)
+    if not text:
+        return ""
+    match = re.search(
+        r"\bSector\s+(.+?)(?=(?:\.\s*)?Turno\s*:|$)",
+        text,
+        flags=re.I,
+    )
+    return norm(match.group(1)).rstrip(".") if match else ""
+
+
+def schedule_without_sector(value: Any) -> str:
+    """Elimina del horario los metadatos ``Sector`` y ``Turno``.
+
+    Mantiene únicamente el horario legible para evitar repetir el sector en la
+    salida y en el hash persistido. Si no se detecta el marcador, conserva el
+    texto original.
+    """
+    text = norm(value)
+    if not text:
+        return ""
+    cleaned = re.split(r"\bSector\s+", text, maxsplit=1, flags=re.I)[0]
+    return norm(cleaned).rstrip(".")
 
 
 def records_from_payload(payload: Any) -> list[dict[str, Any]]:
@@ -153,12 +269,48 @@ def parse_html_fallback(text: str, valid_date: str) -> list[Pharmacy]:
 
 
 def normalize_record(record: dict[str, Any], valid_date: str) -> Pharmacy | None:
+    """Normaliza un registro de la API municipal al modelo interno Pharmacy.
+
+    Uso:
+        pharmacy = normalize_record(record, "2026-07-24")
+
+    Parámetros:
+        record:
+            Registro individual extraído de ``result``/``items`` de la fuente.
+        valid_date:
+            Fecha ISO a la que corresponde el listado descargado.
+
+    Funcionalidad:
+        - Mantiene los nombres alternativos ya soportados en campos raíz.
+        - Lee prioritariamente ``guardia.sector`` y ``guardia.horario`` cuando
+          la API municipal encapsula allí la información de guardia.
+        - Normaliza el prefijo ``Sector`` y notas descriptivas de ubicación.
+        - Conserva el fallback histórico a ``Zaragoza`` si falta localidad.
+        - Descarta únicamente registros sin dirección, como antes.
+    """
+    guardia_raw = first(record, "guardia", "guardias", "onDuty", "onduty")
+    guardia = guardia_fields(record)
+
     name = norm(first(record, "title", "nombre", "name", "farmacia", "titular"))
     address = norm(first(record, "streetAddress", "direccion", "domicilio", "address", "calle"))
     phone = norm(first(record, "telephone", "telefono", "phone"))
     locality = norm(first(record, "addressLocality", "localidad", "poblacion", "municipio", "city")) or "Zaragoza"
-    area = norm(first(record, "sector", "barrio", "distrito", "area")) or locality
-    schedule = norm(first(record, "horarioGuardia", "horario", "schedule", "descripcion")) or "Guardia"
+
+    schedule_raw = (
+        first(guardia, "horario", "horarioGuardia", "schedule", "descripcion")
+        or first(record, "horarioGuardia", "horario", "schedule", "descripcion")
+        or (guardia_raw if isinstance(guardia_raw, str) else "")
+    )
+
+    area_raw = (
+        first(guardia, "sector", "barrio", "distrito", "area")
+        or first(record, "sector", "barrio", "distrito", "area")
+        or sector_from_guardia_text(schedule_raw)
+        or sector_from_guardia_text(guardia_raw if isinstance(guardia_raw, str) else "")
+    )
+    area = normalize_area(area_raw, locality)
+    schedule = schedule_without_sector(schedule_raw) or "Guardia"
+
     source_id = norm(first(record, "id", "@id", "identifier", "codigo"))
     if not address:
         return None
@@ -233,76 +385,29 @@ def compact_address(value: str) -> str:
     return norm(out.replace(",", ""))
 
 
-def fit_utf8(text: str, max_bytes: int) -> str:
-    """Recorta texto respetando límites UTF-8 y dejando marca de truncado."""
-    if len(text.encode("utf-8")) <= max_bytes:
-        return text
-    suffix = "…"
-    suffix_bytes = len(suffix.encode("utf-8"))
-    if max_bytes <= suffix_bytes:
-        return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
-    out = []
-    used = 0
-    for char in text:
-        char_len = len(char.encode("utf-8"))
-        if used + char_len + suffix_bytes > max_bytes:
-            break
-        out.append(char)
-        used += char_len
-    return "".join(out).rstrip() + suffix
-
-
 def byte_chunks(lines: list[str], header: str, max_bytes: int) -> list[str]:
-    safe_limit = max(1, int(max_bytes))
     chunks: list[list[str]] = []
     current: list[str] = []
-
     for line in lines:
-        line = str(line)
         probe = "\n".join([header] + current + [line])
-        if current and len(probe.encode("utf-8")) > safe_limit:
+        if current and len(probe.encode("utf-8")) > max_bytes:
             chunks.append(current)
             current = [line]
         else:
             current.append(line)
     if current:
         chunks.append(current)
-    if not chunks:
-        chunks.append([])
-
-    # Reparte líneas hasta que cada fragmento multilínea quepa con la
-    # cabecera numerada definitiva. Si una sola línea no cabe, se recorta al
-    # renderizar sin partir bytes UTF-8.
-    changed = True
-    while changed:
-        changed = False
-        index = 0
-        total = len(chunks)
-        while index < len(chunks):
-            body = chunks[index]
-            final_header = f"{header} [{index + 1}/{total}]"
-            while (
-                body
-                and len(body) > 1
-                and len((final_header + "\n" + "\n".join(body)).encode("utf-8")) > safe_limit
-            ):
-                moved = body.pop()
-                chunks.insert(index + 1, [moved])
-                total = len(chunks)
-                final_header = f"{header} [{index + 1}/{total}]"
-                changed = True
-            index += 1
-
-    result: list[str] = []
     total = len(chunks)
+    result = []
     for index, body in enumerate(chunks, 1):
         final_header = f"{header} [{index}/{total}]"
-        prefix = final_header + ("\n" if body else "")
-        room = safe_limit - len(prefix.encode("utf-8"))
-        if room < 1:
-            result.append(fit_utf8(final_header, safe_limit))
-        else:
-            result.append(prefix + fit_utf8("\n".join(body), room))
+        while len((final_header + "\n" + "\n".join(body)).encode("utf-8")) > max_bytes and len(body) > 1:
+            moved = body.pop()
+            chunks.insert(index, [moved])
+            total += 1
+        result.append(final_header + "\n" + "\n".join(body))
+    if len(result) != total:
+        return byte_chunks(lines, header, max_bytes)
     return result
 
 
@@ -329,34 +434,85 @@ def grouped_lines(pharmacies: list[Pharmacy], locality_filter: str | None = None
 
 
 def format_query(text: str, network: str) -> list[str]:
+    """Responde consultas ``farma`` usando localidad y sector oficial.
+
+    Uso desde MeshCore/Meshtastic:
+        farma
+        farma zaragoza
+        farma zaragoza delicias
+
+    Funcionalidad:
+        - Sin argumentos, enumera localidades.
+        - ``farma zaragoza`` enumera sectores reales distintos de Zaragoza.
+        - ``farma zaragoza <sector>`` filtra por coincidencia exacta o única
+          parcial, tolerando tildes y mayúsculas.
+        - Para otras localidades conserva el comportamiento anterior.
+    """
     pharmacies = load_pharmacies()
     words = norm(text).split()[1:]
     max_bytes = int(os.getenv("FARMACIAS_MESHCORE_MAX_BYTES" if network == "meshcore" else "FARMACIAS_MESHTASTIC_MAX_BYTES", "170"))
     localities = sorted({p.locality for p in pharmacies}, key=key_text)
+
     if not words or key_text(" ".join(words)) in {"ayuda", "localidades", "pueblos"}:
         lines = ["Localidades: " + " · ".join(localities), "Uso: farma <localidad>"]
         return byte_chunks(lines, "FARMA", max_bytes)
+
+    # Zaragoza necesita resolución por sector antes de la coincidencia exacta
+    # de localidad; de lo contrario ``farma zaragoza`` mostraría todas las
+    # farmacias y nunca alcanzaría el listado de barrios/sectores.
+    if key_text(words[0]) in {"zaragoza", "zgz"}:
+        locality = next((x for x in localities if key_text(x) == "zaragoza"), "Zaragoza")
+        areas = sorted(
+            {p.area for p in pharmacies if key_text(p.locality) == "zaragoza" and key_text(p.area) != "zaragoza"},
+            key=key_text,
+        )
+        area_query = key_text(" ".join(words[1:]))
+
+        if not area_query:
+            if not areas:
+                return byte_chunks(
+                    ["La fuente no ha proporcionado sectores diferenciados.", "Usa: farma zaragoza"],
+                    "FARMA ZARAGOZA",
+                    max_bytes,
+                )
+            return byte_chunks(
+                ["Barrios/sectores: " + " · ".join(areas), "Uso: farma zaragoza <barrio>"],
+                "FARMA ZARAGOZA",
+                max_bytes,
+            )
+
+        area = next((x for x in areas if key_text(x) == area_query), None)
+        if area is None:
+            matches = [x for x in areas if area_query in key_text(x) or key_text(x) in area_query]
+            if len(matches) == 1:
+                area = matches[0]
+        if area is None:
+            return byte_chunks(
+                ["Barrio/sector no disponible.", "Usa: farma zaragoza"],
+                "FARMA ZARAGOZA",
+                max_bytes,
+            )
+
+        lines = grouped_lines(pharmacies, locality, area)
+        if not lines:
+            return [f"No consta guardia para {area}."]
+        date_text = datetime.now(TZ).strftime("%d/%m")
+        return byte_chunks(lines, f"GUARDIA {area.upper()} {date_text}", max_bytes)
+
     query = key_text(" ".join(words))
     locality = next((x for x in localities if key_text(x) == query), None)
-    area = None
     if not locality:
         matches = [x for x in localities if query in key_text(x) or key_text(x) in query]
         if len(matches) == 1:
             locality = matches[0]
-    if not locality and words and key_text(words[0]) in {"zaragoza", "zgz"}:
-        locality = "Zaragoza"
-        area_query = key_text(" ".join(words[1:]))
-        areas = sorted({p.area for p in pharmacies if key_text(p.locality) == "zaragoza"}, key=key_text)
-        if not area_query:
-            return byte_chunks(["Barrios: " + " · ".join(areas), "Uso: farma zaragoza <barrio>"], "FARMA ZARAGOZA", max_bytes)
-        area = next((x for x in areas if key_text(x) == area_query), None)
     if not locality:
         return byte_chunks(["Localidad no disponible.", "Usa: farma"], "FARMA", max_bytes)
-    lines = grouped_lines(pharmacies, locality, area)
+
+    lines = grouped_lines(pharmacies, locality, None)
     if not lines:
-        return [f"No consta guardia para {area or locality}."]
+        return [f"No consta guardia para {locality}."]
     date_text = datetime.now(TZ).strftime("%d/%m")
-    return byte_chunks(lines, f"GUARDIA {(area or locality).upper()} {date_text}", max_bytes)
+    return byte_chunks(lines, f"GUARDIA {locality.upper()} {date_text}", max_bytes)
 
 
 def broker_request(command: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -428,6 +584,171 @@ def send_current(force: bool = False, only_if_changed: bool = False) -> dict[str
     return {"sent": True, "network": network, "channel": channel, "messages": len(messages), "results": results}
 
 
+_MESH_EVENT_STOP = threading.Event()
+_MESH_EVENT_DEDUP_LOCK = threading.Lock()
+_MESH_EVENT_DEDUP: dict[str, float] = {}
+
+
+def _strip_meshcore_display_prefix(text: str) -> str:
+    """Elimina únicamente la cabecera visual ``[MC...]`` añadida por el broker.
+
+    El evento JSONL MeshCore puede publicar el texto como ``[MC:... ] farma`` para
+    que el bot muestre el origen. La aplicación independiente necesita evaluar el
+    comando original y, por tanto, retira solo esa cabecera inicial.
+    """
+    value = norm(text)
+    return re.sub(r"^\[MC[^\]]*\]\s*", "", value, flags=re.IGNORECASE).strip()
+
+
+def _event_seen_recently(source: str, text: str, rx_time: Any) -> bool:
+    """Deduplica eventos JSONL durante una ventana corta para evitar respuestas dobles."""
+    now = time.time()
+    ttl = max(5.0, float(os.getenv("FARMACIAS_EVENT_DEDUP_SECONDS", "30")))
+    key = hashlib.sha1(f"{source}|{text}|{rx_time}".encode("utf-8", errors="ignore")).hexdigest()
+    with _MESH_EVENT_DEDUP_LOCK:
+        for old_key, ts in list(_MESH_EVENT_DEDUP.items()):
+            if now - ts > ttl:
+                _MESH_EVENT_DEDUP.pop(old_key, None)
+        if key in _MESH_EVENT_DEDUP:
+            return True
+        _MESH_EVENT_DEDUP[key] = now
+    return False
+
+
+def _send_meshcore_dm(contact_prefix: str, messages: list[str]) -> None:
+    """Envía por el puerto de control del broker una respuesta DM MeshCore.
+
+    La aplicación no importa código del broker: utiliza exclusivamente el contrato
+    JSONL público ``MESHCORE_SEND`` sobre ``BROKER_CTRL_HOST:BROKER_CTRL_PORT``.
+    """
+    prefix = norm(contact_prefix)
+    if not prefix:
+        raise RuntimeError("evento MeshCore sin pubkey_prefix; no se puede responder por DM")
+
+    delay = max(0.0, float(os.getenv("FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS", "1.0")))
+    max_messages = max(1, int(os.getenv("FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE", "6")))
+    for index, message in enumerate(messages[:max_messages]):
+        response = broker_request(
+            "MESHCORE_SEND",
+            {"kind": "contact", "contact_prefix": prefix, "text": str(message)},
+        )
+        if not response.get("ok"):
+            raise RuntimeError(f"broker rechazó respuesta DM {index + 1}: {response}")
+        if index + 1 < min(len(messages), max_messages) and delay:
+            time.sleep(delay)
+
+
+def _handle_broker_event(event: dict[str, Any]) -> None:
+    """Procesa un evento JSONL del broker y atiende comandos ``farma`` MeshCore.
+
+    Solo acepta:
+      - mensajes directos MeshCore; o
+      - mensajes del canal indicado por ``FARMACIAS_MESHCORE_CHANNEL``.
+
+    La respuesta se devuelve siempre por DM al ``meshcore_pubkey_prefix`` emisor.
+    """
+    if not isinstance(event, dict) or event.get("type") != "packet":
+        return
+    packet = event.get("packet") or {}
+    if not isinstance(packet, dict) or not packet.get("meshcore"):
+        return
+    decoded = packet.get("decoded") or {}
+    if not isinstance(decoded, dict) or str(decoded.get("portnum") or "").upper() != "TEXT_MESSAGE_APP":
+        return
+
+    text = _strip_meshcore_display_prefix(decoded.get("text") or "")
+    if not (text.casefold() == "farma" or text.casefold().startswith("farma ")):
+        return
+
+    kind = str(packet.get("meshcore_kind") or "").strip().lower()
+    try:
+        chan_idx = int(packet.get("meshcore_chan_idx")) if packet.get("meshcore_chan_idx") is not None else None
+    except Exception:
+        chan_idx = None
+    allowed_channel = int(os.getenv("FARMACIAS_MESHCORE_CHANNEL", "-1"))
+    is_direct = kind == "contact"
+    if not is_direct and not (kind in {"chan", "channel"} and chan_idx == allowed_channel):
+        return
+
+    source = norm(packet.get("meshcore_pubkey_prefix") or "")
+    if not source:
+        from_id = norm(packet.get("fromId") or "")
+        if from_id.lower().startswith("meshcore:"):
+            source = from_id.split(":", 1)[1].strip()
+    if not source:
+        print("[farmacias-listener] comando ignorado: origen MeshCore sin pubkey_prefix", flush=True)
+        return
+
+    rx_time = packet.get("rxTime") or event.get("ts") or 0
+    if _event_seen_recently(source, text, rx_time):
+        return
+
+    try:
+        messages = format_query(text, "meshcore")
+        _send_meshcore_dm(source, messages)
+        print(
+            f"[farmacias-listener] atendido source={source} kind={kind} "
+            f"channel={chan_idx} command={text!r} parts={len(messages)}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[farmacias-listener] ERROR {type(exc).__name__}: {exc}", flush=True)
+        try:
+            _send_meshcore_dm(source, ["Servicio de farmacias no disponible temporalmente."])
+        except Exception:
+            pass
+
+
+def broker_event_listener(stop_event: threading.Event | None = None) -> None:
+    """Mantiene una conexión 24x7 al puerto JSONL del broker.
+
+    Parámetros configurables en el `.env` independiente:
+      ``BROKER_EVENT_HOST`` (127.0.0.1), ``BROKER_EVENT_PORT`` (8765),
+      ``FARMACIAS_LISTENER_RECONNECT_SECONDS`` (5).
+    """
+    stop = stop_event or _MESH_EVENT_STOP
+    host = os.getenv("BROKER_EVENT_HOST", os.getenv("BROKER_CTRL_HOST", "127.0.0.1"))
+    port = int(os.getenv("BROKER_EVENT_PORT", "8765"))
+    reconnect = max(1.0, float(os.getenv("FARMACIAS_LISTENER_RECONNECT_SECONDS", "5")))
+
+    while not stop.is_set():
+        try:
+            print(f"[farmacias-listener] conectando a {host}:{port}", flush=True)
+            with socket.create_connection((host, port), timeout=10) as sock:
+                sock.settimeout(30.0)
+                reader = sock.makefile("r", encoding="utf-8", errors="replace")
+                print(f"[farmacias-listener] conectado a {host}:{port}", flush=True)
+                while not stop.is_set():
+                    try:
+                        line = reader.readline()
+                    except socket.timeout:
+                        continue
+                    if not line:
+                        raise ConnectionError("broker cerró la conexión JSONL")
+                    try:
+                        _handle_broker_event(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as exc:
+            if not stop.is_set():
+                print(f"[farmacias-listener] reconexión: {type(exc).__name__}: {exc}", flush=True)
+                stop.wait(reconnect)
+
+
+def start_broker_event_listener() -> threading.Thread | None:
+    """Arranca el listener independiente en segundo plano si está habilitado."""
+    if not env_bool("FARMACIAS_COMMAND_LISTENER_ENABLED", "1"):
+        print("[farmacias-listener] deshabilitado por configuración", flush=True)
+        return None
+    thread = threading.Thread(
+        target=broker_event_listener,
+        name="farmacias-broker-listener",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         print("[farmacias-api] " + (fmt % args), flush=True)
@@ -478,9 +799,16 @@ def main() -> int:
     if args.command == "serve":
         host = os.getenv("FARMACIAS_API_HOST", "127.0.0.1")
         port = int(os.getenv("FARMACIAS_API_PORT", "8788"))
+        listener_thread = start_broker_event_listener()
         server = ThreadingHTTPServer((host, port), Handler)
         print(f"API farmacias escuchando en http://{host}:{port}", flush=True)
-        server.serve_forever()
+        try:
+            server.serve_forever()
+        finally:
+            _MESH_EVENT_STOP.set()
+            server.server_close()
+            if listener_thread and listener_thread.is_alive():
+                listener_thread.join(timeout=2.0)
     elif args.command == "fetch":
         payload = save_current(fetch()); print(json.dumps({"ok": True, "records": len(payload["pharmacies"]), "hash": payload["hash"]}, ensure_ascii=False))
     elif args.command == "preview":
@@ -501,9 +829,20 @@ def main() -> int:
     elif args.command == "status":
         print(json.dumps({"current": load_current() if CURRENT_FILE.exists() else None, "state": json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else None}, ensure_ascii=False, indent=2))
     elif args.command == "doctor":
-        checks = {"data_dir": str(DATA_DIR), "current_exists": CURRENT_FILE.exists(), "profile": radio_profile(), "target": broadcast_target()}
+        checks = {
+            "data_dir": str(DATA_DIR),
+            "current_exists": CURRENT_FILE.exists(),
+            "profile": radio_profile(),
+            "target": broadcast_target(),
+            "listener_enabled": env_bool("FARMACIAS_COMMAND_LISTENER_ENABLED", "1"),
+            "broker_event": [
+                os.getenv("BROKER_EVENT_HOST", os.getenv("BROKER_CTRL_HOST", "127.0.0.1")),
+                int(os.getenv("BROKER_EVENT_PORT", "8765")),
+            ],
+        }
         try:
-            checks["broker"] = broker_request("BROKER_STATUS", {})
+            status_cmd = "MESHCORE_STATUS" if radio_profile() == "meshcore_only" else "BROKER_STATUS"
+            checks["broker"] = broker_request(status_cmd, {})
         except Exception as exc:
             checks["broker_error"] = str(exc)
         try:

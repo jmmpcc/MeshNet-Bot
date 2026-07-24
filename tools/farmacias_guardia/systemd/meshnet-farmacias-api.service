@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=meshnet
-WorkingDirectory=/home/meshnet/farmacias_guardia
-ExecStart=/usr/bin/python3 /home/meshnet/farmacias_guardia/farmacias_guardia.py serve
+WorkingDirectory=/home/meshnet/MeshNet-Bot/tools/farmacias_guardia
+ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/farmacias_guardia/farmacias_guardia.py serve
 Restart=always
 RestartSec=5
 
