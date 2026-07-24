@@ -419,6 +419,7 @@ def grouped_lines(pharmacies: list[Pharmacy], locality_filter: str | None = None
         if area_filter and key_text(area_filter) != key_text(p.area):
             continue
         selected.append(p)
+    selected.sort(key=lambda p: (key_text(p.locality), key_text(p.area), key_text(p.name), key_text(p.address)))
     lines: list[str] = []
     previous = None
     for p in selected:
@@ -442,7 +443,8 @@ def format_query(text: str, network: str) -> list[str]:
         farma zaragoza delicias
 
     Funcionalidad:
-        - Sin argumentos, enumera localidades.
+        - Sin argumentos, devuelve todas las farmacias de guardia disponibles.
+        - ``farma ayuda`` enumera localidades.
         - ``farma zaragoza`` enumera sectores reales distintos de Zaragoza.
         - ``farma zaragoza <sector>`` filtra por coincidencia exacta o única
           parcial, tolerando tildes y mayúsculas.
@@ -453,7 +455,14 @@ def format_query(text: str, network: str) -> list[str]:
     max_bytes = int(os.getenv("FARMACIAS_MESHCORE_MAX_BYTES" if network == "meshcore" else "FARMACIAS_MESHTASTIC_MAX_BYTES", "170"))
     localities = sorted({p.locality for p in pharmacies}, key=key_text)
 
-    if not words or key_text(" ".join(words)) in {"ayuda", "localidades", "pueblos"}:
+    if not words:
+        lines = grouped_lines(pharmacies, None, None)
+        if not lines:
+            return ["No constan farmacias de guardia."]
+        date_text = datetime.now(TZ).strftime("%d/%m")
+        return byte_chunks(lines, f"GUARDIA {date_text}", max_bytes)
+
+    if key_text(" ".join(words)) in {"ayuda", "localidades", "pueblos"}:
         lines = ["Localidades: " + " · ".join(localities), "Uso: farma <localidad>"]
         return byte_chunks(lines, "FARMA", max_bytes)
 
@@ -600,6 +609,58 @@ def _strip_meshcore_display_prefix(text: str) -> str:
     return re.sub(r"^\[MC[^\]]*\]\s*", "", value, flags=re.IGNORECASE).strip()
 
 
+
+def _split_meshcore_display_alias(text: str) -> tuple[str, str]:
+    """Separa ``ALIAS: comando`` usado en canales MeshCore, si existe."""
+    value = _strip_meshcore_display_prefix(text)
+    match = re.match(r"^([A-Za-z0-9_./@+\-]{3,32})\s*:\s+(.+)$", value)
+    if not match:
+        return "", value
+    return norm(match.group(1)), norm(match.group(2))
+
+
+
+def _meshcore_contact_prefix_for_alias_from_env(alias: str) -> str:
+    """Resuelve alias desde ``MESHCORE_CONTACT_ALIASES`` si está configurado."""
+    wanted = key_text(alias)
+    if not wanted:
+        return ""
+    matches: list[str] = []
+    for part in (os.getenv("MESHCORE_CONTACT_ALIASES", "") or "").split(","):
+        if ":" not in part:
+            continue
+        prefix, name = part.split(":", 1)
+        if key_text(name) == wanted and norm(prefix):
+            matches.append(norm(prefix))
+    unique = list(dict.fromkeys(matches))
+    return unique[0] if len(unique) == 1 else ""
+
+def _meshcore_contact_prefix_for_alias(alias: str) -> str:
+    """Resuelve un alias/nombre MeshCore a prefijo DM usando el broker."""
+    wanted = key_text(alias)
+    if not wanted:
+        return ""
+    env_prefix = _meshcore_contact_prefix_for_alias_from_env(alias)
+    if env_prefix:
+        return env_prefix
+    try:
+        response = broker_request("MESHCORE_CONTACTS", {"limit": 500})
+    except Exception:
+        return ""
+    if not response.get("ok"):
+        return ""
+    matches: list[str] = []
+    for contact in response.get("contacts") or []:
+        if not isinstance(contact, dict):
+            continue
+        names = [contact.get("name"), contact.get("alias"), contact.get("label")]
+        if any(key_text(value) == wanted for value in names if value):
+            dm_key = norm(contact.get("dm_key") or contact.get("prefix") or contact.get("contact_id") or "")
+            if dm_key:
+                matches.append(dm_key)
+    unique = list(dict.fromkeys(matches))
+    return unique[0] if len(unique) == 1 else ""
+
 def _event_seen_recently(source: str, text: str, rx_time: Any) -> bool:
     """Deduplica eventos JSONL durante una ventana corta para evitar respuestas dobles."""
     now = time.time()
@@ -656,7 +717,8 @@ def _handle_broker_event(event: dict[str, Any]) -> None:
     if not isinstance(decoded, dict) or str(decoded.get("portnum") or "").upper() != "TEXT_MESSAGE_APP":
         return
 
-    text = _strip_meshcore_display_prefix(decoded.get("text") or "")
+    raw_text = decoded.get("text") or ""
+    display_alias, text = _split_meshcore_display_alias(raw_text)
     if not (text.casefold() == "farma" or text.casefold().startswith("farma ")):
         return
 
@@ -674,9 +736,13 @@ def _handle_broker_event(event: dict[str, Any]) -> None:
     if not source:
         from_id = norm(packet.get("fromId") or "")
         if from_id.lower().startswith("meshcore:"):
-            source = from_id.split(":", 1)[1].strip()
+            candidate = from_id.split(":", 1)[1].strip()
+            if candidate and candidate.casefold() != "meshcore":
+                source = candidate
+    if not source and kind in {"chan", "channel"}:
+        source = _meshcore_contact_prefix_for_alias(display_alias)
     if not source:
-        print("[farmacias-listener] comando ignorado: origen MeshCore sin pubkey_prefix", flush=True)
+        print("[farmacias-listener] comando ignorado: origen MeshCore sin pubkey_prefix/alias resoluble", flush=True)
         return
 
     rx_time = packet.get("rxTime") or event.get("ts") or 0
