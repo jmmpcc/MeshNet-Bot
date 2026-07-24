@@ -137,7 +137,7 @@ class FarmaciasServiceClient:
     """Cliente HTTP local, sin dependencias externas, para la app de farmacias."""
 
     def __init__(self) -> None:
-        self.url = os.getenv("FARMACIAS_SERVICE_URL", "http://127.0.0.1:8788/query").strip()
+        self.url = os.getenv("FARMACIAS_SERVICE_URL", "http://host.docker.internal:8788/query").strip()
         self.timeout = max(0.5, float(os.getenv("FARMACIAS_SERVICE_TIMEOUT_SECONDS", "3")))
 
     def query(self, ctx: FarmaciasCommandContext) -> list[str]:

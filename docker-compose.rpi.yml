@@ -9,6 +9,12 @@ services:
       net.ipv4.tcp_keepalive_probes: 3
     environment:
       - BROKER_CTRL_BIND=0.0.0.0
+
+    # Permite que el broker acceda de forma estable a servicios que se ejecutan
+    # directamente en la Raspberry, como la API independiente de farmacias.
+    # Dentro del contenedor, host.docker.internal resolverá al host Docker.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     devices:
       - "/dev/ttyACM0:/dev/ttyACM0"
     privileged: true
