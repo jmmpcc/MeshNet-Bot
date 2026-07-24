@@ -1754,6 +1754,43 @@ class MeshCoreEmbeddedBridge:
                 except Exception:
                     pass
 
+                # === [FARMACIAS] Comando interno MeshCore =======================
+                # Los mensajes de contacto y de canal se aceptan; la respuesta se
+                # encola siempre como contacto directo al pubkey_prefix de origen.
+                try:
+                    from farmacias_commands import (
+                        FarmaciasCommandContext,
+                        handle_farmacias_command,
+                        is_allowed_origin,
+                        is_farmacias_command,
+                    )
+                    if is_farmacias_command(text_msg):
+                        _ctx_farma = FarmaciasCommandContext(
+                            network="meshcore",
+                            source_id=pref,
+                            text=text_msg,
+                            channel=chan_idx,
+                            is_direct=(kind == "contact"),
+                            packet_id=data.get("id") or data.get("message_id") or data.get("timestamp"),
+                        )
+                        if is_allowed_origin(_ctx_farma):
+                            def _farma_meshcore_worker():
+                                def _enqueue_dm(_message: str) -> None:
+                                    if not pref:
+                                        raise RuntimeError("pubkey_prefix de origen vacío")
+                                    self.enqueue_send_contact(pref, str(_message))
+                                handle_farmacias_command(_ctx_farma, _enqueue_dm)
+
+                            threading.Thread(
+                                target=_farma_meshcore_worker,
+                                name="farmacias-meshcore",
+                                daemon=True,
+                            ).start()
+                            self._last_ok = time.time()
+                            return
+                except Exception as _e_farma:
+                    print(f"[farmacias] meshcore WARN: {type(_e_farma).__name__}: {_e_farma}", flush=True)
+
                 try:
                     mail_reply = _handle_mesh_mail_command_if_needed(text_msg, source=(alias or pref or "meshcore"))
                     if mail_reply is not None:
@@ -6657,7 +6694,7 @@ class _BacklogServer(threading.Thread):
         
             # --- NUEVO: envío de texto vía la iface persistente del broker ---
             elif cmd == "SEND_TEXT":
-
+                
                 # Defensa de perfil: SEND_TEXT pertenece a la ruta Meshtastic.
                 # En meshcore_only debe rechazarse antes de encolar para evitar
                 # falsos OK y búsquedas posteriores de un manejador inexistente.
@@ -8694,6 +8731,59 @@ class MeshReceiver:
                     channel_name = CHANNEL_NAME_BY_INDEX.get(int(canal))
             except Exception:
                 channel_name = None
+
+            # === [FARMACIAS] Comando interno procesado por el broker ============
+            # Se intercepta antes de emitir al hub, BBS, APRS o bridge. La consulta
+            # se ejecuta en un hilo corto para no bloquear el receptor PubSub.
+            try:
+                if str(portnum) == "TEXT_MESSAGE_APP" and isinstance(text, str):
+                    from farmacias_commands import (
+                        FarmaciasCommandContext,
+                        handle_farmacias_command,
+                        is_farmacias_command,
+                    )
+                    if is_farmacias_command(text):
+                        _to_norm_farma = _norm_node_id(who_to)
+                        _is_dm_farma = bool(_to_norm_farma) and _to_norm_farma not in {"^all", "broadcast", "?"}
+                        _ctx_farma = FarmaciasCommandContext(
+                            network="meshtastic",
+                            source_id=str(who_from),
+                            text=str(text),
+                            channel=int(canal) if canal is not None else None,
+                            is_direct=bool(_is_dm_farma),
+                            packet_id=pkt.get("id") or pkt.get("packetId") or pkt.get("packet_id"),
+                        )
+
+                        def _farma_meshtastic_worker():
+                            def _enqueue_dm(_message: str) -> None:
+                                _q = globals().get("SENDQ")
+                                if _q is None or not hasattr(_q, "offer"):
+                                    raise RuntimeError("SENDQ no disponible")
+                                _q.offer({
+                                    "channel": int(canal),
+                                    "text": str(_message),
+                                    "destination": str(who_from),
+                                    "require_ack": False,
+                                    "type": "text",
+                                    "no_bridge": True,
+                                    "origin": "farmacias",
+                                    "meta": {"farmacias": 1, "reply_dm": 1},
+                                }, coalesce=False)
+                            handle_farmacias_command(_ctx_farma, _enqueue_dm)
+
+                        # Si el comando no procede de DM ni del canal FARMACIA, el
+                        # manejador devuelve False y el paquete sigue su flujo normal.
+                        from farmacias_commands import is_allowed_origin
+                        if is_allowed_origin(_ctx_farma):
+                            threading.Thread(
+                                target=_farma_meshtastic_worker,
+                                name="farmacias-meshtastic",
+                                daemon=True,
+                            ).start()
+                            return
+            except Exception as _e_farma:
+                if self.verbose:
+                    print(f"⚠️ farmacias meshtastic: {_e_farma}", flush=True)
 
 
             # === Emitir JSONL a clientes ===

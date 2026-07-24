@@ -1,0 +1,15 @@
+[Unit]
+Description=MeshNet Farmacias API local
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=meshnet
+WorkingDirectory=/home/meshnet/farmacias_guardia
+ExecStart=/usr/bin/python3 /home/meshnet/farmacias_guardia/farmacias_guardia.py serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

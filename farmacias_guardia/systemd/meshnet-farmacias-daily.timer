@@ -1,0 +1,11 @@
+[Unit]
+Description=Temporizador diario de farmacias
+
+[Timer]
+OnCalendar=*-*-* 08:30:00
+Persistent=true
+RandomizedDelaySec=30
+Unit=meshnet-farmacias-daily.service
+
+[Install]
+WantedBy=timers.target

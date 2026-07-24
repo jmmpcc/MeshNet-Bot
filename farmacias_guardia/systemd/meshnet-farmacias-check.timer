@@ -1,0 +1,12 @@
+[Unit]
+Description=Temporizador de cambios de farmacias
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+Persistent=true
+RandomizedDelaySec=60
+Unit=meshnet-farmacias-check.service
+
+[Install]
+WantedBy=timers.target
