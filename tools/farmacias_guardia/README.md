@@ -526,7 +526,7 @@ Ejemplo de respuesta:
 {
   "recognized": true,
   "messages": [
-    "FARMA [1/1]\nLocalidades: Zaragoza\nUso: farma <localidad>"
+    "GUARDIA 24/07 [1/1]\nDELICIAS\nAv Madrid 185 · 976332929"
   ]
 }
 ```
@@ -544,6 +544,12 @@ El broker envía a `/query` los comandos recibidos por DM o en el canal `FARMACI
 
 ```text
 farma
+```
+
+Devuelve todas las farmacias de guardia disponibles.
+
+```text
+farma ayuda
 ```
 
 Devuelve las localidades disponibles.
@@ -872,6 +878,8 @@ PY
 Consultas disponibles desde la malla:
 
 ```text
+farma
+farma ayuda
 farma zaragoza
 farma zaragoza delicias
 farma zaragoza centro

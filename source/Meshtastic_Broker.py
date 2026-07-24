@@ -1242,6 +1242,29 @@ class MeshCoreEmbeddedBridge:
                 if not any(str(x.get("public_key") or "").lower() == public_key for x in bucket):
                     bucket.append(item)
 
+
+    def _meshcore_contact_prefix_by_name(self, name: str) -> str:
+        wanted = _norm_text(name or "").casefold()
+        if not wanted:
+            return ""
+        matches = []
+        for key, alias in (self.contact_aliases or {}).items():
+            if _norm_text(alias).casefold() == wanted and str(key).strip():
+                matches.append(str(key).strip())
+        for contact in (self._mc_contacts_cache or {}).values():
+            if not isinstance(contact, dict):
+                continue
+            contact_name = _norm_text(contact.get("name") or contact.get("adv_name") or contact.get("alias") or contact.get("label") or "")
+            if contact_name.casefold() != wanted:
+                continue
+            public_key = str(contact.get("public_key") or contact.get("pubkey") or contact.get("key") or "").strip()
+            prefix = str(contact.get("pubkey_prefix") or contact.get("key_prefix") or contact.get("prefix") or "").strip()
+            dm_key = prefix or (public_key[:12] if public_key else "")
+            if dm_key:
+                matches.append(dm_key)
+        unique = list(dict.fromkeys(matches))
+        return unique[0] if len(unique) == 1 else ""
+
     def _meshcore_contact_display(self, contact: dict | None, fallback: str = "") -> str:
         if not isinstance(contact, dict):
             return fallback or "desconocido"
@@ -1742,15 +1765,19 @@ class MeshCoreEmbeddedBridge:
                 if not alias and pref:
                     alias = str(self.contact_aliases.get(pref) or "").strip()
 
-                # Si el texto lleva "ALIAS: ...", extrae alias y limpia cuerpo (evita duplicar)
+                # Si el texto lleva "ALIAS: ...", extrae alias y limpia cuerpo (evita duplicar).
+                # En algunos CHANNEL_MSG_RECV MeshCore no llega pubkey_prefix; en ese caso
+                # resolvemos el alias visual contra contactos/aliases para poder responder por DM.
                 try:
-                    m = re.match(r"^([A-Za-z0-9_\-/]{3,24})\s*:\s+(.+)$", text_msg)
+                    m = re.match(r"^([A-Za-z0-9_./@+\-]{3,32})\s*:\s+(.+)$", text_msg)
                     if m:
                         extracted = (m.group(1) or "").strip()
                         rest = (m.group(2) or "").strip()
                         if extracted and not alias:
                             alias = extracted
-                            text_msg = rest
+                        if extracted and not pref:
+                            pref = self._meshcore_contact_prefix_by_name(extracted)
+                        text_msg = rest
                 except Exception:
                     pass
 
@@ -1774,20 +1801,24 @@ class MeshCoreEmbeddedBridge:
                             packet_id=data.get("id") or data.get("message_id") or data.get("timestamp"),
                         )
                         if is_allowed_origin(_ctx_farma):
-                            def _farma_meshcore_worker():
-                                def _enqueue_dm(_message: str) -> None:
-                                    if not pref:
-                                        raise RuntimeError("pubkey_prefix de origen vacío")
-                                    self.enqueue_send_contact(pref, str(_message))
-                                handle_farmacias_command(_ctx_farma, _enqueue_dm)
+                            if pref:
+                                def _farma_meshcore_worker():
+                                    def _enqueue_dm(_message: str) -> None:
+                                        self.enqueue_send_contact(pref, str(_message))
+                                    handle_farmacias_command(_ctx_farma, _enqueue_dm)
 
-                            threading.Thread(
-                                target=_farma_meshcore_worker,
-                                name="farmacias-meshcore",
-                                daemon=True,
-                            ).start()
-                            self._last_ok = time.time()
-                            return
+                                threading.Thread(
+                                    target=_farma_meshcore_worker,
+                                    name="farmacias-meshcore",
+                                    daemon=True,
+                                ).start()
+                                self._last_ok = time.time()
+                                return
+                            print(
+                                "[farmacias] meshcore WARN: comando de canal sin pubkey_prefix resoluble; "
+                                "se deja pasar al listener externo",
+                                flush=True,
+                            )
                 except Exception as _e_farma:
                     print(f"[farmacias] meshcore WARN: {type(_e_farma).__name__}: {_e_farma}", flush=True)
 
