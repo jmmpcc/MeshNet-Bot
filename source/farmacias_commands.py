@@ -212,6 +212,14 @@ def handle_farmacias_command(
         enqueue_direct(f"Límite alcanzado: 5 consultas por hora. Disponible en {minutes} min.")
         return True
 
+    normalized_command = _normalized_command(ctx.text)
+    print(
+        f"[farmacias] request network={ctx.network} source={ctx.source_id} "
+        f"direct={ctx.is_direct} channel={ctx.channel} raw={ctx.text!r} "
+        f"normalized={normalized_command!r} packet_id={ctx.packet_id}",
+        flush=True,
+    )
+
     try:
         messages = _CLIENT.query(ctx)
         if not messages:
@@ -220,9 +228,22 @@ def handle_farmacias_command(
         print(f"[farmacias] query WARN: {type(exc).__name__}: {exc}", flush=True)
         messages = ["Servicio de farmacias no disponible temporalmente."]
 
-    max_messages = max(1, int(os.getenv("FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE", "6")))
-    for message in messages[:max_messages]:
+    # La orden exacta ``farma`` significa deliberadamente "todas". Para el
+    # resto de consultas se conserva el límite operativo configurable.
+    is_all_query = normalized_command.casefold() == "farma"
+    configured_max = max(1, int(os.getenv("FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE", "6")))
+    selected_messages = messages if is_all_query else messages[:configured_max]
+    delay = max(0.0, float(os.getenv("FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS", "1.0")))
+    print(
+        f"[farmacias] response normalized={normalized_command!r} "
+        f"parts_generated={len(messages)} parts_enqueued={len(selected_messages)} "
+        f"complete={is_all_query or len(messages) <= configured_max}",
+        flush=True,
+    )
+    for index, message in enumerate(selected_messages):
         enqueue_direct(message)
-    if len(messages) > max_messages:
-        enqueue_direct(f"Respuesta truncada a {max_messages} mensajes.")
+        if delay > 0 and index + 1 < len(selected_messages):
+            time.sleep(delay)
+    if not is_all_query and len(messages) > configured_max:
+        enqueue_direct(f"Respuesta truncada a {configured_max} mensajes.")
     return True

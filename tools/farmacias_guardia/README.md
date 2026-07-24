@@ -150,9 +150,15 @@ FARMACIAS_RATE_LIMIT_WINDOW_SECONDS=3600
 FARMACIAS_RATE_LIMIT_SAVE_SECONDS=60
 FARMACIAS_DUPLICATE_WINDOW_SECONDS=20
 FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE=6
+FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS=1
 ```
 
 La IP `172.17.0.1` es un ejemplo. Debe utilizarse una dirección del host accesible desde el contenedor. Para obtener la gateway real del contenedor:
+
+`FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE` limita las consultas filtradas. El
+comando exacto `farma` es la excepción: devuelve todas las guardias presentes
+en `current.json`, espaciando sus partes con
+`FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS`.
 
 ```bash
 docker exec meshnet-broker python3 -c '

@@ -114,6 +114,30 @@ class FarmaciasAppTests(unittest.TestCase):
         finally:
             app.load_pharmacies = original_loader
 
+    def test_send_meshcore_dm_can_send_more_than_six_parts_for_bare_farma(self):
+        original_request = app.broker_request
+        original_delay = os.environ.get("FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS")
+        original_limit = os.environ.get("FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE")
+        sent = []
+        try:
+            os.environ["FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS"] = "0"
+            os.environ["FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE"] = "6"
+            app.broker_request = lambda command, params: sent.append((command, params)) or {"ok": True}
+            messages = [f"parte-{idx}" for idx in range(1, 9)]
+            count = app._send_meshcore_dm("abc123", messages, send_all=True)
+            self.assertEqual(count, 8)
+            self.assertEqual([params["text"] for _, params in sent], messages)
+        finally:
+            app.broker_request = original_request
+            if original_delay is None:
+                os.environ.pop("FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS", None)
+            else:
+                os.environ["FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS"] = original_delay
+            if original_limit is None:
+                os.environ.pop("FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE", None)
+            else:
+                os.environ["FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE"] = original_limit
+
     def test_byte_chunks_respect_utf8_limit(self):
         lines = ["DELICIAS", "Av Madrid 120 · 976123456", "C/ Ramón y Cajal 4 · 976000000"]
         chunks = app.byte_chunks(lines, "GUARDIA ZARAGOZA 24/07", 90)

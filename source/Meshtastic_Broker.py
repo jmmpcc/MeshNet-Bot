@@ -835,15 +835,15 @@ def _safe_meshcore_max_text_bytes() -> int:
     """
     Límite conservador (en BYTES UTF-8) para TX hacia MeshCore.
     Env:
-      MESHCORE_MAX_TEXT_BYTES (default 180)
+      MESHCORE_MAX_TEXT_BYTES (default 140)
 
     El log de TX muestra una vista previa recortada, pero el envío real se
     divide con este límite antes de llamar al firmware MeshCore.
     """
     try:
-        v = int((os.getenv("MESHCORE_MAX_TEXT_BYTES") or "180").strip())
+        v = int((os.getenv("MESHCORE_MAX_TEXT_BYTES") or "140").strip())
     except Exception:
-        v = 180
+        v = 140
     return max(80, min(v, 260))
 
 
@@ -863,91 +863,53 @@ def _safe_meshcore_part_delay_sec() -> float:
     return max(0.0, min(v, 10.0))
 
 
-def _split_text_chunks_utf8(text: str, max_bytes: int) -> list[str]:
-    """
-    Divide 'text' en trozos cuyo tamaño en bytes UTF-8 sea <= max_bytes.
-    Preferencia por cortar en espacios; fallback a corte duro.
-    """
-    if text is None:
+def _split_meshcore_send_parts(text: str, max_bytes: int) -> list[str]:
+    """Crea partes MeshCore estables y sin pérdida, contando el prefijo ``(i/n)``."""
+    value = str(text or "").strip()
+    if not value:
         return []
-    s = str(text).strip()
-    if not s:
-        return []
+    max_bytes = max(80, int(max_bytes or 140))
+    if len(value.encode("utf-8", errors="ignore")) <= max_bytes:
+        return [value]
 
-    max_bytes = int(max_bytes or 180)
-    if max_bytes < 80:
-        max_bytes = 80
+    def _lossless_bodies(body_limit: int) -> list[str]:
+        remaining = value
+        bodies: list[str] = []
+        while remaining:
+            if len(remaining.encode("utf-8", errors="ignore")) <= body_limit:
+                bodies.append(remaining)
+                break
+            lo, hi, best = 1, len(remaining), 1
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                if len(remaining[:mid].encode("utf-8", errors="ignore")) <= body_limit:
+                    best = mid
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            cut = best
+            # Incluye el separador en la parte anterior para que concatenar los
+            # cuerpos reproduzca exactamente el texto normalizado de entrada.
+            whitespace = max(
+                remaining.rfind(" ", 0, cut + 1),
+                remaining.rfind("\n", 0, cut + 1),
+                remaining.rfind("\t", 0, cut + 1),
+            )
+            if whitespace >= max(1, int(cut * 0.6)):
+                cut = whitespace + 1
+            bodies.append(remaining[:cut])
+            remaining = remaining[cut:]
+        return bodies
 
-    out: list[str] = []
-
-    def _take_prefix_fit_bytes(s0: str, limit_b: int) -> tuple[str, str]:
-        if not s0:
-            return "", ""
-
-        if len(s0.encode("utf-8", errors="ignore")) <= limit_b:
-            return s0, ""
-
-        # Búsqueda binaria por longitud de caracteres aproximando bytes
-        lo, hi = 1, len(s0)
-        best = 1
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            cand = s0[:mid]
-            b = len(cand.encode("utf-8", errors="ignore"))
-            if b <= limit_b:
-                best = mid
-                lo = mid + 1
-            else:
-                hi = mid - 1
-
-        cut = best
-
-        # intenta no romper palabras
-        sp = s0.rfind(" ", 0, cut + 1)
-        if sp >= max(10, int(cut * 0.6)):
-            cut = sp
-
-        head = s0[:cut].strip()
-        tail = s0[cut:].strip()
-        if not head:
-            head = s0[:1]
-            tail = s0[1:].strip()
-        return head, tail
-
-    rest = s
-    while rest:
-        head, rest = _take_prefix_fit_bytes(rest, max_bytes)
-        if head:
-            out.append(head)
-        else:
-            break
-
-    return out
-
-
-def _add_part_prefix_fit(part: str, idx: int, total: int, max_bytes: int) -> str:
-    """
-    Añade prefijo "(i/n) " y asegura que el resultado cabe en max_bytes (UTF-8).
-    Si no cabe, recorta el cuerpo para que quepa.
-    """
-    prefix = f"({idx}/{total}) "
-    max_bytes = int(max_bytes or 180)
-    p_b = len(prefix.encode("utf-8", errors="ignore"))
-    if p_b >= max_bytes:
-        return prefix[: max(1, max_bytes // 2)]
-
-    body = str(part or "").strip()
-    if not body:
-        return prefix.strip()
-
-    cand = prefix + body
-    if len(cand.encode("utf-8", errors="ignore")) <= max_bytes:
-        return cand
-
-    avail = max_bytes - p_b
-    chunk = _split_text_chunks_utf8(body, avail)
-    body_fit = chunk[0] if chunk else body[:1]
-    return prefix + body_fit
+    total_hint = 2
+    for _ in range(12):
+        prefix_bytes = len(f"({total_hint}/{total_hint}) ".encode("utf-8"))
+        bodies = _lossless_bodies(max(1, max_bytes - prefix_bytes))
+        actual_total = len(bodies)
+        if actual_total == total_hint:
+            return [f"({idx}/{actual_total}) {body}" for idx, body in enumerate(bodies, 1)]
+        total_hint = actual_total
+    raise RuntimeError("meshcore_split_no_converge")
 
 
 # === [FIX APRS -> MeshCore] Limpieza de payload APRS para MeshCore ============
@@ -1138,7 +1100,7 @@ class MeshCoreEmbeddedBridge:
             100,
             int((os.getenv("MESHCORE_RETRY_SPOOL_MAX", "2000") or "2000").strip() or 2000),
         )
-        self._retry_spool: deque[tuple[object, str, int]] = deque(maxlen=self._retry_spool_max)
+        self._retry_spool: deque[tuple] = deque(maxlen=self._retry_spool_max)
         self._retry_spool_drop_count = 0
 
         # Reintentos reales de TX MeshCore.
@@ -1945,32 +1907,18 @@ class MeshCoreEmbeddedBridge:
             except _aio.TimeoutError:
                 continue
 
-            retry_count = 0
-            item_max_retries = self._tx_max_retries
-            try:
-                if isinstance(item, (tuple, list)) and len(item) >= 2:
-                    dst, msg = item[0], item[1]
-                    if len(item) >= 3:
-                        retry_count = int(item[2] or 0)
-                    if len(item) >= 4 and item[3] is not None:
-                        item_max_retries = max(0, int(item[3]))
-                else:
-                    # Compat defensiva ante payload inesperado en cola.
-                    continue
-            except Exception:
+            normalized_item = self._normalize_tx_spool_item(item)
+            if normalized_item is None:
                 continue
+            dst, msg, retry_count, item_max_retries, tx_id, send_parts, next_part = normalized_item
+            failed_part = next_part
 
             try:
-                # --- [PATCH] Split por bytes UTF-8 para no perder / truncar mensajes largos ---
                 max_b = _safe_meshcore_max_text_bytes()
-                # En reintentos, reducir de forma adaptativa el tamaño máximo por parte.
-                # Motivo: algunos enlaces/firmwares devuelven `no_event_received` con
-                # payloads que en primer intento entran "justos".
-                if retry_count > 0:
-                    # 1º retry: -20 bytes, 2º: -40, ... con suelo conservador.
-                    max_b = max(80, int(max_b) - (20 * int(retry_count)))
-
-                parts = _split_text_chunks_utf8(msg, max_b)
+                # Las partes se calculan una sola vez al encolar y se conservan en
+                # el spool junto con el índice pendiente durante las reconexiones.
+                send_parts = list(send_parts) if send_parts else _split_meshcore_send_parts(msg, max_b)
+                next_part = max(0, min(int(next_part), len(send_parts)))
 
                 # === [LOG TX MeshCore] ===
                 # text_preview es solo una vista previa de log; no es el texto completo enviado.
@@ -1981,26 +1929,27 @@ class MeshCoreEmbeddedBridge:
                     preview_truncated = len(msg_text) > preview_limit
                     preview = msg_text[:preview_limit] + ("…" if preview_truncated else "")
                     print(
-                        f"[meshcore-embedded TX] dst={dst} retry={retry_count} "
+                        f"[meshcore-embedded TX] tx_id={tx_id} dst={dst} retry={retry_count} "
                         f"chars={len(msg_text)} bytes={msg_bytes} max_part_bytes={max_b} "
-                        f"parts={len(parts)} preview_chars={preview_limit} "
+                        f"parts={len(send_parts)} next_part={next_part + 1} preview_chars={preview_limit} "
                         f"preview_truncated={preview_truncated} text_preview='{preview}'",
                         flush=True,
                     )
                 except Exception:
                     pass
 
-
-                # Si hay más de una parte, añadir (i/n) garantizando que sigue cabiendo en bytes
-                if len(parts) > 1:
-                    send_parts = [_add_part_prefix_fit(p, i + 1, len(parts), max_b) for i, p in enumerate(parts)]
-                else:
-                    send_parts = parts
-
                 part_delay_sec = _safe_meshcore_part_delay_sec() if len(send_parts) > 1 else 0.0
 
                 # Enviar secuencialmente, pausando entre partes para evitar ráfagas.
-                for part_pos, p in enumerate(send_parts or [""]):
+                for part_pos in range(next_part, len(send_parts)):
+                    p = send_parts[part_pos]
+                    failed_part = part_pos
+                    print(
+                        f"[meshcore-embedded TX PART] tx_id={tx_id} "
+                        f"part={part_pos + 1}/{len(send_parts)} retry={retry_count} "
+                        f"bytes={len(p.encode('utf-8', errors='ignore'))}",
+                        flush=True,
+                    )
                     result = None
                     if isinstance(dst, dict) and str(dst.get("kind") or "").lower() in ("chan", "channel"):
                         chan_idx = int(dst.get("channel_idx"))
@@ -2024,6 +1973,12 @@ class MeshCoreEmbeddedBridge:
                             raise RuntimeError(f"meshcore_tx_error: {getattr(result, 'payload', None)}")
                     except Exception:
                         raise
+                    next_part = part_pos + 1
+                    print(
+                        f"[meshcore-embedded TX OK] tx_id={tx_id} "
+                        f"part={part_pos + 1}/{len(send_parts)} retry={retry_count}",
+                        flush=True,
+                    )
 
                     if part_delay_sec > 0 and part_pos < len(send_parts) - 1:
                         try:
@@ -2049,9 +2004,13 @@ class MeshCoreEmbeddedBridge:
                 if retry_count < item_max_retries:
                     next_retry = retry_count + 1
                     try:
-                        self._spool_append((dst, msg, next_retry, item_max_retries), why="tx_retry")
+                        self._spool_append(
+                            (dst, msg, next_retry, item_max_retries, tx_id, tuple(send_parts), failed_part),
+                            why="tx_retry",
+                        )
                         print(
-                            f"[meshcore-embedded] TX persistido para retry={next_retry} "
+                            f"[meshcore-embedded] TX persistido tx_id={tx_id} "
+                            f"part={failed_part + 1}/{len(send_parts)} retry={next_retry} "
                             f"tras reconexión max={item_max_retries}",
                             flush=True,
                         )
@@ -2193,7 +2152,7 @@ class MeshCoreEmbeddedBridge:
             return f"[MC:{prefix}]"
         return "[MC]"
 
-    def _spool_append(self, item: tuple[object, str, int], *, why: str = "") -> None:
+    def _spool_append(self, item: tuple, *, why: str = "") -> None:
         """
         Inserta en spool persistente con límite de tamaño para evitar OOM
         durante desconexiones prolongadas.
@@ -2212,8 +2171,12 @@ class MeshCoreEmbeddedBridge:
                         flush=True,
                     )
 
-    def _normalize_tx_spool_item(self, item: object, default_max_retries: int | None = None) -> tuple[object, str, int, int] | None:
-        """Normaliza entradas legacy (3-tupla) y nuevas (4-tupla) del spool TX."""
+    def _normalize_tx_spool_item(
+        self,
+        item: object,
+        default_max_retries: int | None = None,
+    ) -> tuple[object, str, int, int, str, tuple[str, ...], int] | None:
+        """Normaliza entradas legacy y conserva partes/posición de los retries."""
         if not isinstance(item, (tuple, list)) or len(item) < 2:
             return None
         try:
@@ -2226,7 +2189,19 @@ class MeshCoreEmbeddedBridge:
                 max_retries = max(0, int(default_max_retries))
             else:
                 max_retries = max(0, int(self._tx_max_retries))
-            return (dst, msg, retry_count, max_retries)
+            tx_id = str(item[4] or "") if len(item) >= 5 else ""
+            if not tx_id:
+                tx_id = hashlib.sha1(
+                    f"{time.time()}|legacy|{dst}|{msg}".encode("utf-8", errors="ignore")
+                ).hexdigest()[:12]
+            raw_parts = item[5] if len(item) >= 6 else None
+            if isinstance(raw_parts, (tuple, list)) and raw_parts:
+                send_parts = tuple(str(part) for part in raw_parts)
+            else:
+                send_parts = tuple(_split_meshcore_send_parts(msg, _safe_meshcore_max_text_bytes()))
+            next_part = int(item[6] or 0) if len(item) >= 7 else 0
+            next_part = max(0, min(next_part, len(send_parts)))
+            return (dst, msg, retry_count, max_retries, tx_id, send_parts, next_part)
         except Exception:
             return None
 
@@ -2277,7 +2252,8 @@ class MeshCoreEmbeddedBridge:
                 tx_q = self._tx_q
 
             item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
-            item = (str(contact_prefix), msg, 0, item_max_retries)
+            send_parts = tuple(_split_meshcore_send_parts(msg, _safe_meshcore_max_text_bytes()))
+            item = (str(contact_prefix), msg, 0, item_max_retries, tx_id, send_parts, 0)
 
             if (not healthy) or (not loop) or (not tx_q):
                 self._spool_append(item, why="enqueue_contact_deferred")
@@ -2305,7 +2281,11 @@ class MeshCoreEmbeddedBridge:
         except Exception:
             try:
                 item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
-                self._spool_append((str(contact_prefix), msg, 0, item_max_retries), why="enqueue_contact_fallback")
+                send_parts = tuple(_split_meshcore_send_parts(msg, _safe_meshcore_max_text_bytes()))
+                self._spool_append(
+                    (str(contact_prefix), msg, 0, item_max_retries, tx_id, send_parts, 0),
+                    why="enqueue_contact_fallback",
+                )
                 return tx_id
             except Exception:
                 return None
@@ -2358,7 +2338,8 @@ class MeshCoreEmbeddedBridge:
 
             dst = {"kind": "chan", "channel_idx": int(channel_idx)}
             item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
-            item = (dst, msg, 0, item_max_retries)
+            send_parts = tuple(_split_meshcore_send_parts(msg, _safe_meshcore_max_text_bytes()))
+            item = (dst, msg, 0, item_max_retries, tx_id, send_parts, 0)
 
             if (not healthy) or (not loop) or (not tx_q):
                 self._spool_append(item, why="enqueue_chan_deferred")
@@ -2386,8 +2367,17 @@ class MeshCoreEmbeddedBridge:
         except Exception:
             try:
                 item_max_retries = self._tx_max_retries if max_retries is None else max(0, int(max_retries))
+                send_parts = tuple(_split_meshcore_send_parts(msg, _safe_meshcore_max_text_bytes()))
                 self._spool_append(
-                    ({"kind": "chan", "channel_idx": int(channel_idx)}, msg, 0, item_max_retries),
+                    (
+                        {"kind": "chan", "channel_idx": int(channel_idx)},
+                        msg,
+                        0,
+                        item_max_retries,
+                        tx_id,
+                        send_parts,
+                        0,
+                    ),
                     why="enqueue_chan_fallback",
                 )
                 return tx_id

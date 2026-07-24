@@ -451,7 +451,8 @@ def format_query(text: str, network: str) -> list[str]:
         - Para otras localidades conserva el comportamiento anterior.
     """
     pharmacies = load_pharmacies()
-    words = norm(text).split()[1:]
+    normalized = norm(text)
+    words = normalized.split()[1:]
     max_bytes = int(os.getenv("FARMACIAS_MESHCORE_MAX_BYTES" if network == "meshcore" else "FARMACIAS_MESHTASTIC_MAX_BYTES", "170"))
     localities = sorted({p.locality for p in pharmacies}, key=key_text)
 
@@ -460,7 +461,13 @@ def format_query(text: str, network: str) -> list[str]:
         if not lines:
             return ["No constan farmacias de guardia."]
         date_text = datetime.now(TZ).strftime("%d/%m")
-        return byte_chunks(lines, f"GUARDIA {date_text}", max_bytes)
+        result = byte_chunks(lines, f"GUARDIA {date_text}", max_bytes)
+        print(
+            f"[farmacias-api] format command={normalized!r} network={network} "
+            f"pharmacies={len(pharmacies)} parts={len(result)} all=True",
+            flush=True,
+        )
+        return result
 
     if key_text(" ".join(words)) in {"ayuda", "localidades", "pueblos"}:
         lines = ["Localidades: " + " · ".join(localities), "Uso: farma <localidad>"]
@@ -676,7 +683,7 @@ def _event_seen_recently(source: str, text: str, rx_time: Any) -> bool:
     return False
 
 
-def _send_meshcore_dm(contact_prefix: str, messages: list[str]) -> None:
+def _send_meshcore_dm(contact_prefix: str, messages: list[str], *, send_all: bool = False) -> int:
     """Envía por el puerto de control del broker una respuesta DM MeshCore.
 
     La aplicación no importa código del broker: utiliza exclusivamente el contrato
@@ -688,15 +695,17 @@ def _send_meshcore_dm(contact_prefix: str, messages: list[str]) -> None:
 
     delay = max(0.0, float(os.getenv("FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS", "1.0")))
     max_messages = max(1, int(os.getenv("FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE", "6")))
-    for index, message in enumerate(messages[:max_messages]):
+    selected_messages = messages if send_all else messages[:max_messages]
+    for index, message in enumerate(selected_messages):
         response = broker_request(
             "MESHCORE_SEND",
             {"kind": "contact", "contact_prefix": prefix, "text": str(message)},
         )
         if not response.get("ok"):
             raise RuntimeError(f"broker rechazó respuesta DM {index + 1}: {response}")
-        if index + 1 < min(len(messages), max_messages) and delay:
+        if index + 1 < len(selected_messages) and delay:
             time.sleep(delay)
+    return len(selected_messages)
 
 
 def _handle_broker_event(event: dict[str, Any]) -> None:
@@ -750,11 +759,19 @@ def _handle_broker_event(event: dict[str, Any]) -> None:
         return
 
     try:
+        normalized_command = norm(text)
+        print(
+            f"[farmacias-listener] request source={source} kind={kind} channel={chan_idx} "
+            f"raw={raw_text!r} normalized={normalized_command!r} rx_time={rx_time}",
+            flush=True,
+        )
         messages = format_query(text, "meshcore")
-        _send_meshcore_dm(source, messages)
+        send_all = normalized_command.casefold() == "farma"
+        sent_parts = _send_meshcore_dm(source, messages, send_all=send_all)
         print(
             f"[farmacias-listener] atendido source={source} kind={kind} "
-            f"channel={chan_idx} command={text!r} parts={len(messages)}",
+            f"channel={chan_idx} command={normalized_command!r} "
+            f"parts_generated={len(messages)} parts_enqueued={sent_parts}",
             flush=True,
         )
     except Exception as exc:
