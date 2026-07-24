@@ -8760,7 +8760,7 @@ class MeshReceiver:
                                 if _q is None or not hasattr(_q, "offer"):
                                     raise RuntimeError("SENDQ no disponible")
                                 _q.offer({
-                                    "channel": int(canal),
+                                    "channel": int(canal) if canal is not None else 0,
                                     "text": str(_message),
                                     "destination": str(who_from),
                                     "require_ack": False,
