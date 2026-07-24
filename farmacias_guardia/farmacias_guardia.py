@@ -233,29 +233,76 @@ def compact_address(value: str) -> str:
     return norm(out.replace(",", ""))
 
 
+def fit_utf8(text: str, max_bytes: int) -> str:
+    """Recorta texto respetando límites UTF-8 y dejando marca de truncado."""
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    suffix = "…"
+    suffix_bytes = len(suffix.encode("utf-8"))
+    if max_bytes <= suffix_bytes:
+        return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+    out = []
+    used = 0
+    for char in text:
+        char_len = len(char.encode("utf-8"))
+        if used + char_len + suffix_bytes > max_bytes:
+            break
+        out.append(char)
+        used += char_len
+    return "".join(out).rstrip() + suffix
+
+
 def byte_chunks(lines: list[str], header: str, max_bytes: int) -> list[str]:
+    safe_limit = max(1, int(max_bytes))
     chunks: list[list[str]] = []
     current: list[str] = []
+
     for line in lines:
+        line = str(line)
         probe = "\n".join([header] + current + [line])
-        if current and len(probe.encode("utf-8")) > max_bytes:
+        if current and len(probe.encode("utf-8")) > safe_limit:
             chunks.append(current)
             current = [line]
         else:
             current.append(line)
     if current:
         chunks.append(current)
+    if not chunks:
+        chunks.append([])
+
+    # Reparte líneas hasta que cada fragmento multilínea quepa con la
+    # cabecera numerada definitiva. Si una sola línea no cabe, se recorta al
+    # renderizar sin partir bytes UTF-8.
+    changed = True
+    while changed:
+        changed = False
+        index = 0
+        total = len(chunks)
+        while index < len(chunks):
+            body = chunks[index]
+            final_header = f"{header} [{index + 1}/{total}]"
+            while (
+                body
+                and len(body) > 1
+                and len((final_header + "\n" + "\n".join(body)).encode("utf-8")) > safe_limit
+            ):
+                moved = body.pop()
+                chunks.insert(index + 1, [moved])
+                total = len(chunks)
+                final_header = f"{header} [{index + 1}/{total}]"
+                changed = True
+            index += 1
+
+    result: list[str] = []
     total = len(chunks)
-    result = []
     for index, body in enumerate(chunks, 1):
         final_header = f"{header} [{index}/{total}]"
-        while len((final_header + "\n" + "\n".join(body)).encode("utf-8")) > max_bytes and len(body) > 1:
-            moved = body.pop()
-            chunks.insert(index, [moved])
-            total += 1
-        result.append(final_header + "\n" + "\n".join(body))
-    if len(result) != total:
-        return byte_chunks(lines, header, max_bytes)
+        prefix = final_header + ("\n" if body else "")
+        room = safe_limit - len(prefix.encode("utf-8"))
+        if room < 1:
+            result.append(fit_utf8(final_header, safe_limit))
+        else:
+            result.append(prefix + fit_utf8("\n".join(body), room))
     return result
 
 

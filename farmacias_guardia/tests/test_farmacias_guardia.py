@@ -35,6 +35,26 @@ class FarmaciasAppTests(unittest.TestCase):
         self.assertGreaterEqual(len(chunks), 2)
         self.assertTrue(all(len(chunk.encode("utf-8")) <= 90 for chunk in chunks))
 
+    def test_byte_chunks_truncates_single_oversized_line(self):
+        chunks = app.byte_chunks(["C/ " + "Ramón " * 40 + "· 976000000"], "GUARDIA ZARAGOZA 24/07", 90)
+        self.assertEqual(len(chunks), 1)
+        self.assertTrue(chunks[0].endswith("…"))
+        self.assertTrue(all(len(chunk.encode("utf-8")) <= 90 for chunk in chunks))
+
+    def test_byte_chunks_honors_tiny_byte_limit(self):
+        chunks = app.byte_chunks(["C/ Ramón y Cajal 4"], "GUARDIA ZARAGOZA 24/07", 10)
+        self.assertTrue(chunks)
+        self.assertTrue(all(len(chunk.encode("utf-8")) <= 10 for chunk in chunks))
+
+    def test_byte_chunks_renumbers_after_late_split(self):
+        lines = ["A" * 28, "B" * 28, "C" * 28]
+        chunks = app.byte_chunks(lines, "HDR", 45)
+        self.assertEqual(
+            [chunk.split("\n", 1)[0] for chunk in chunks],
+            ["HDR [1/3]", "HDR [2/3]", "HDR [3/3]"],
+        )
+        self.assertTrue(all(len(chunk.encode("utf-8")) <= 45 for chunk in chunks))
+
     def test_canonical_hash_ignores_input_order(self):
         a = app.Pharmacy("A", "C/ Uno 1", "1", "Utebo", "Utebo", "G", "2026-07-24", "1")
         b = app.Pharmacy("B", "C/ Dos 2", "2", "Zaragoza", "Centro", "G", "2026-07-24", "2")
