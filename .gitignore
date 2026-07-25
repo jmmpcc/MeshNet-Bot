@@ -5,7 +5,5 @@ leer_marca_whitespace.py
 .env
 .env.*
 !.env_example
-tools/farmacias_guardia/.env
-tools/farmacias_guardia/data/
 
 __pycache__/
