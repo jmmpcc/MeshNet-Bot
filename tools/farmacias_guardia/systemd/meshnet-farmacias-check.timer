@@ -1,9 +1,9 @@
 [Unit]
-Description=Temporizador de cambios de farmacias
+Description=Comprobación de nuevas farmacias cada tres horas
 
 [Timer]
 OnBootSec=10min
-OnUnitActiveSec=30min
+OnUnitActiveSec=3h
 Persistent=true
 RandomizedDelaySec=60
 Unit=meshnet-farmacias-check.service

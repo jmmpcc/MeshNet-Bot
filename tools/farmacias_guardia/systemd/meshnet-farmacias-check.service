@@ -1,5 +1,5 @@
 [Unit]
-Description=Comprobación de cambios en farmacias de guardia
+Description=Comprobación de nuevas farmacias de guardia
 After=network-online.target docker.service meshnet-farmacias-api.service
 
 [Service]

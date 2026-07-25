@@ -22,10 +22,11 @@ Aplicación farmacias_guardia
 Broker → DM al contacto solicitante
 ```
 
-Para la difusión diaria o por cambios:
+Para las difusiones automáticas:
 
 ```text
-farmacias_guardia.py send/check --send
+farmacias_guardia.py send (listado completo a las 08:30)
+farmacias_guardia.py check --send (solo altas nuevas cada 3 horas)
         │
         │ puerto de control TCP
         ▼
@@ -336,13 +337,13 @@ python3 farmacias_guardia.py check
 Salida sin cambios:
 
 ```json
-{"changed": false}
+{"changed": false, "new_pharmacies": 0}
 ```
 
 Salida con cambios:
 
 ```json
-{"changed": true}
+{"changed": true, "new_pharmacies": 2}
 ```
 
 Qué realiza:
@@ -361,13 +362,16 @@ Qué no realiza sin opciones:
 python3 farmacias_guardia.py check --send
 ```
 
-Publica el listado solamente cuando el hash ha cambiado.
+Publica solamente las farmacias cuya identidad no existía en la copia local
+anterior. Los cambios de datos o las bajas actualizan la copia usada por las
+consultas manuales, pero no generan una difusión.
 
 Ejemplo:
 
 ```json
 {
   "changed": true,
+  "new_pharmacies": 2,
   "send": {
     "sent": true,
     "network": "meshcore",
@@ -377,12 +381,13 @@ Ejemplo:
 }
 ```
 
-Este es el comando apropiado para el temporizador de comprobación periódica.
+Los mensajes utilizan la cabecera `NUEVAS FARMACIAS DE GUARDIA` y no repiten
+las farmacias que ya se habían publicado.
 
 Si no hay cambios:
 
 ```json
-{"changed": false}
+{"changed": false, "new_pharmacies": 0}
 ```
 
 No se genera tráfico de radio.
@@ -640,8 +645,26 @@ python3 farmacias_guardia.py status
 ## Operación automática
 
 - API permanente: `serve` mediante `meshnet-farmacias-api.service`.
-- Envío diario: `send` mediante `meshnet-farmacias-daily.timer`.
-- Comprobación de cambios: `check --send` mediante `meshnet-farmacias-check.timer`.
+- Envío completo diario: `send` todos los días a las 08:30 mediante
+  `meshnet-farmacias-daily.timer`.
+- Las consultas manuales `farma` siguen atendidas permanentemente por la API y
+  no dependen del temporizador de difusión.
+- Cada tres horas, `check --send` actualiza la copia local y, si encuentra
+  incorporaciones, difunde exclusivamente las nuevas farmacias.
+
+### Por qué antes los envíos posteriores podían incluir más farmacias
+
+El envío de las 08:30 ejecuta `send`, que descarga en ese momento una
+instantánea nueva de la fuente antes de publicarla. El antiguo temporizador de
+cambios volvía a descargar la fuente cada 30 minutos; si el proveedor añadía
+registros después de las 08:30, cambiaba el hash y se difundía de nuevo el
+listado completo, ya con esas farmacias adicionales. Por tanto, no se añadían
+datos dentro de MeshNet: eran actualizaciones posteriores de la fuente.
+
+Ahora `meshnet-farmacias-check.timer` realiza la comprobación cada tres horas.
+Las actualizaciones mantienen vigente la consulta manual, pero solamente las
+altas generan el aviso `NUEVAS FARMACIAS DE GUARDIA`; nunca se repite el
+listado completo de las 08:30.
 
 # Instalación de systemd
 
@@ -653,6 +676,19 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now meshnet-farmacias-api.service
 sudo systemctl enable --now meshnet-farmacias-daily.timer
 sudo systemctl enable --now meshnet-farmacias-check.timer
+```
+
+Si se actualiza una instalación que ya utilizaba la comprobación periódica,
+hay que reemplazar sus unidades antiguas y reiniciar el temporizador. Es
+importante verificar que el temporizador indica `OnUnitActiveSec=3h`:
+
+```bash
+sudo systemctl disable --now meshnet-farmacias-check.timer
+sudo cp systemd/meshnet-farmacias-check.service \
+  systemd/meshnet-farmacias-check.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now meshnet-farmacias-check.timer
+systemctl cat meshnet-farmacias-check.service
 ```
 
 Comprobar servicios:
@@ -672,12 +708,6 @@ Logs del envío diario:
 
 ```bash
 journalctl -u meshnet-farmacias-daily.service -n 100 --no-pager
-```
-
-Logs de comprobación de cambios:
-
-```bash
-journalctl -u meshnet-farmacias-check.service -n 100 --no-pager
 ```
 
 # Comprobación de recepción desde MeshCore
@@ -793,10 +823,11 @@ La lista de localidades depende de los registros reales devueltos por la fuente.
 
 - Descarga y normaliza datos.
 - Mantiene el último listado válido.
-- Detecta cambios por hash.
+- Comprueba cada tres horas si existen nuevas incorporaciones.
 - Formatea mensajes por bytes.
 - Expone `/health` y `/query`.
-- Solicita al broker la difusión diaria o por cambios.
+- Solicita al broker el listado completo diario de las 08:30 y avisos que
+  contienen exclusivamente las nuevas incorporaciones detectadas.
 
 ## Broker
 
