@@ -1,0 +1,10 @@
+[Unit]
+Description=Actualización local de emergencias
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=meshnet
+WorkingDirectory=/home/meshnet/MeshNet-Bot/tools/emergencias_guardia
+ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/emergencias_guardia/emergencias_guardia.py fetch

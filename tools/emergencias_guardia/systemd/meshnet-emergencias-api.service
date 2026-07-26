@@ -1,0 +1,15 @@
+[Unit]
+Description=MeshNet Emergencias API local
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=meshnet
+WorkingDirectory=/home/meshnet/MeshNet-Bot/tools/emergencias_guardia
+ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/emergencias_guardia/emergencias_guardia.py serve
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

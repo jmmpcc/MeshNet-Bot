@@ -1,0 +1,12 @@
+[Unit]
+Description=Consulta fuentes de emergencias cada dos minutos
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Persistent=true
+RandomizedDelaySec=15
+Unit=meshnet-emergencias-check.service
+
+[Install]
+WantedBy=timers.target
