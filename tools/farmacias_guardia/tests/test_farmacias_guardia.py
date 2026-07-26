@@ -17,9 +17,12 @@ class FarmaciasAppTests(unittest.TestCase):
     def test_systemd_checks_for_new_pharmacies_every_three_hours(self):
         systemd_dir = MODULE_PATH.parent / "systemd"
         daily_service = (systemd_dir / "meshnet-farmacias-daily.service").read_text(encoding="utf-8")
+        daily_timer = (systemd_dir / "meshnet-farmacias-daily.timer").read_text(encoding="utf-8")
         check_service = (systemd_dir / "meshnet-farmacias-check.service").read_text(encoding="utf-8")
 
         self.assertIn("farmacias_guardia.py send", daily_service)
+        self.assertIn("OnCalendar=*-*-* 08:30:00", daily_timer)
+        self.assertNotIn("Persistent=true", daily_timer)
         self.assertIn("farmacias_guardia.py check --send", check_service)
         check_timer = (systemd_dir / "meshnet-farmacias-check.timer").read_text(encoding="utf-8")
         self.assertIn("OnUnitActiveSec=3h", check_timer)

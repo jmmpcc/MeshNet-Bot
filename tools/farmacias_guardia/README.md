@@ -674,8 +674,8 @@ sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 
 sudo systemctl enable --now meshnet-farmacias-api.service
-sudo systemctl enable --now meshnet-farmacias-daily.timer
-sudo systemctl enable --now meshnet-farmacias-check.timer
+sudo systemctl enable meshnet-farmacias-daily.timer meshnet-farmacias-check.timer
+sudo systemctl restart meshnet-farmacias-daily.timer meshnet-farmacias-check.timer
 ```
 
 Si se actualiza una instalación que ya utilizaba la comprobación periódica,
@@ -683,13 +683,33 @@ hay que reemplazar sus unidades antiguas y reiniciar el temporizador. Es
 importante verificar que el temporizador indica `OnUnitActiveSec=3h`:
 
 ```bash
-sudo systemctl disable --now meshnet-farmacias-check.timer
-sudo cp systemd/meshnet-farmacias-check.service \
-  systemd/meshnet-farmacias-check.timer /etc/systemd/system/
+sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now meshnet-farmacias-check.timer
+sudo systemctl enable meshnet-farmacias-daily.timer meshnet-farmacias-check.timer
+sudo systemctl restart meshnet-farmacias-daily.timer meshnet-farmacias-check.timer
 systemctl cat meshnet-farmacias-check.service
 ```
+
+Se usa `restart` deliberadamente: `enable --now` no reinicia una unidad que ya
+estuviera activa antes de copiar una versión nueva. Después de actualizar, ambos
+temporizadores deben mostrar una fecha en las columnas `NEXT` y `LEFT`:
+
+```bash
+systemctl is-active meshnet-farmacias-daily.timer meshnet-farmacias-check.timer
+systemctl list-timers --all meshnet-farmacias-daily.timer meshnet-farmacias-check.timer
+```
+
+Una salida con `NEXT` igual a `-`, como la de un temporizador detenido, se
+resuelve cargando y reiniciando las unidades:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart meshnet-farmacias-daily.timer meshnet-farmacias-check.timer
+```
+
+El temporizador diario no utiliza `Persistent=true`. De esta forma, si se
+arranca o actualiza el servicio después de las 08:30, no recupera el envío
+perdido a mediodía: programa directamente las 08:30 del día siguiente.
 
 Comprobar servicios:
 
