@@ -351,6 +351,12 @@ def canonical_hash(pharmacies: Iterable[Pharmacy]) -> str:
     return hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def added_pharmacies(previous: Iterable[Pharmacy], current: Iterable[Pharmacy]) -> list[Pharmacy]:
+    """Devuelve solo identidades nuevas, conservando el orden de ``current``."""
+    previous_ids = {pharmacy.identity for pharmacy in previous}
+    return [pharmacy for pharmacy in current if pharmacy.identity not in previous_ids]
+
+
 def save_current(pharmacies: list[Pharmacy]) -> dict[str, Any]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -562,11 +568,39 @@ def broadcast_target() -> tuple[str, int]:
     return configured, int(os.getenv(channel_var, "-1"))
 
 
-def broadcast_messages(network: str) -> list[str]:
-    pharmacies = load_pharmacies()
+def broadcast_messages(
+    network: str,
+    pharmacies: list[Pharmacy] | None = None,
+    header: str | None = None,
+) -> list[str]:
+    pharmacies = load_pharmacies() if pharmacies is None else pharmacies
     max_bytes = int(os.getenv("FARMACIAS_MESHCORE_MAX_BYTES" if network == "meshcore" else "FARMACIAS_MESHTASTIC_MAX_BYTES", "170"))
     lines = grouped_lines(pharmacies)
-    return byte_chunks(lines, f"FARMACIAS GUARDIA {datetime.now(TZ).strftime('%d/%m')}", max_bytes)
+    title = header or f"FARMACIAS GUARDIA {datetime.now(TZ).strftime('%d/%m')}"
+    return byte_chunks(lines, title, max_bytes)
+
+
+def send_pharmacies(pharmacies: list[Pharmacy], header: str) -> dict[str, Any]:
+    """Difunde exclusivamente las farmacias indicadas con una cabecera propia."""
+    if not pharmacies:
+        return {"sent": False, "reason": "no_new_pharmacies"}
+    network, channel = broadcast_target()
+    if channel < 0:
+        raise RuntimeError(f"canal FARMACIAS no configurado para {network}")
+    messages = broadcast_messages(network, pharmacies, header)
+    delay = max(0, int(os.getenv("FARMACIAS_INTER_MESSAGE_DELAY_SECONDS", "8")))
+    results = []
+    for index, message in enumerate(messages):
+        if network == "meshcore":
+            response = broker_request("MESHCORE_SEND", {"kind": "chan", "channel_idx": channel, "text": message})
+        else:
+            response = broker_request("SEND_TEXT", {"ch": channel, "dest": None, "ack": 0, "origin": "farmacias", "no_bridge": True, "text": message})
+        if not response.get("ok"):
+            raise RuntimeError(f"broker rechazó fragmento {index + 1}: {response}")
+        results.append(response)
+        if index + 1 < len(messages) and delay:
+            time.sleep(delay)
+    return {"sent": True, "network": network, "channel": channel, "messages": len(messages), "results": results}
 
 
 def send_current(force: bool = False, only_if_changed: bool = False) -> dict[str, Any]:
@@ -902,12 +936,18 @@ def main() -> int:
     elif args.command == "send":
         save_current(fetch()); print(json.dumps(send_current(force=args.force), ensure_ascii=False))
     elif args.command == "check":
-        before = load_current().get("hash") if CURRENT_FILE.exists() else None
-        after = save_current(fetch()).get("hash")
-        changed = before != after
-        result = {"changed": changed}
-        if args.send and changed:
-            result["send"] = send_current(only_if_changed=True)
+        previous = load_pharmacies() if CURRENT_FILE.exists() else []
+        had_previous = CURRENT_FILE.exists()
+        current = fetch()
+        before_hash = canonical_hash(previous) if had_previous else None
+        after = canonical_hash(current)
+        # Sin una instantánea previa no hay base para afirmar que un registro
+        # sea una incorporación; se inicializa la copia sin difundir todo.
+        added = added_pharmacies(previous, current) if had_previous else []
+        result = {"changed": before_hash != after, "new_pharmacies": len(added)}
+        if args.send and added:
+            result["send"] = send_pharmacies(added, "NUEVAS FARMACIAS DE GUARDIA")
+        save_current(current)
         print(json.dumps(result, ensure_ascii=False))
     elif args.command == "status":
         print(json.dumps({"current": load_current() if CURRENT_FILE.exists() else None, "state": json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else None}, ensure_ascii=False, indent=2))

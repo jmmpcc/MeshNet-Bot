@@ -14,6 +14,51 @@ spec.loader.exec_module(app)
 
 
 class FarmaciasAppTests(unittest.TestCase):
+    def test_systemd_checks_for_new_pharmacies_every_three_hours(self):
+        systemd_dir = MODULE_PATH.parent / "systemd"
+        daily_service = (systemd_dir / "meshnet-farmacias-daily.service").read_text(encoding="utf-8")
+        daily_timer = (systemd_dir / "meshnet-farmacias-daily.timer").read_text(encoding="utf-8")
+        check_service = (systemd_dir / "meshnet-farmacias-check.service").read_text(encoding="utf-8")
+
+        self.assertIn("farmacias_guardia.py send", daily_service)
+        self.assertIn("OnCalendar=*-*-* 08:30:00", daily_timer)
+        self.assertNotIn("Persistent=true", daily_timer)
+        self.assertIn("farmacias_guardia.py check --send", check_service)
+        check_timer = (systemd_dir / "meshnet-farmacias-check.timer").read_text(encoding="utf-8")
+        self.assertIn("OnUnitActiveSec=3h", check_timer)
+
+    def test_send_pharmacies_only_formats_supplied_additions(self):
+        original_request = app.broker_request
+        original_profile = os.environ.get("RADIO_PROFILE")
+        original_channel = os.environ.get("FARMACIAS_MESHCORE_CHANNEL")
+        original_transport = os.environ.get("FARMACIAS_BROADCAST_TRANSPORT")
+        sent = []
+        try:
+            os.environ["RADIO_PROFILE"] = "meshcore_only"
+            os.environ["FARMACIAS_MESHCORE_CHANNEL"] = "1"
+            os.environ["FARMACIAS_BROADCAST_TRANSPORT"] = "meshcore"
+            app.broker_request = lambda command, params: sent.append((command, params)) or {"ok": True}
+            addition = app.Pharmacy("Nueva", "C/ Nueva 1", "976", "Zaragoza", "Centro", "G", "2026-07-25", "new-1")
+            result = app.send_pharmacies([addition], "NUEVAS FARMACIAS DE GUARDIA")
+            self.assertTrue(result["sent"])
+            self.assertTrue(sent)
+            self.assertIn("NUEVAS FARMACIAS DE GUARDIA", sent[0][1]["text"])
+            self.assertIn("C/ Nueva 1", sent[0][1]["text"])
+        finally:
+            app.broker_request = original_request
+            if original_profile is None:
+                os.environ.pop("RADIO_PROFILE", None)
+            else:
+                os.environ["RADIO_PROFILE"] = original_profile
+            if original_channel is None:
+                os.environ.pop("FARMACIAS_MESHCORE_CHANNEL", None)
+            else:
+                os.environ["FARMACIAS_MESHCORE_CHANNEL"] = original_channel
+            if original_transport is None:
+                os.environ.pop("FARMACIAS_BROADCAST_TRANSPORT", None)
+            else:
+                os.environ["FARMACIAS_BROADCAST_TRANSPORT"] = original_transport
+
     def test_normalize_generic_api_record(self):
         item = app.normalize_record({
             "title": "Farmacia Ejemplo",
@@ -148,6 +193,20 @@ class FarmaciasAppTests(unittest.TestCase):
         a = app.Pharmacy("A", "C/ Uno 1", "1", "Utebo", "Utebo", "G", "2026-07-24", "1")
         b = app.Pharmacy("B", "C/ Dos 2", "2", "Zaragoza", "Centro", "G", "2026-07-24", "2")
         self.assertEqual(app.canonical_hash([a, b]), app.canonical_hash([b, a]))
+
+    def test_added_pharmacies_ignores_updates_and_removals(self):
+        existing = app.Pharmacy("A", "C/ Uno 1", "1", "Utebo", "Utebo", "G", "2026-07-24", "id-1")
+        updated = app.Pharmacy("A", "C/ Uno 1", "999", "Utebo", "Utebo", "G", "2026-07-24", "id-1")
+        removed = app.Pharmacy("B", "C/ Dos 2", "2", "Utebo", "Utebo", "G", "2026-07-24", "id-2")
+        added = app.Pharmacy("C", "C/ Tres 3", "3", "Zaragoza", "Centro", "G", "2026-07-24", "id-3")
+
+        self.assertEqual(app.added_pharmacies([existing, removed], [updated, added]), [added])
+
+    def test_added_pharmacies_preserves_source_order(self):
+        first = app.Pharmacy("A", "C/ Uno 1", "1", "Utebo", "Utebo", "G", "2026-07-24", "id-1")
+        second = app.Pharmacy("B", "C/ Dos 2", "2", "Zaragoza", "Centro", "G", "2026-07-24", "id-2")
+
+        self.assertEqual(app.added_pharmacies([], [second, first]), [second, first])
 
     def test_listener_handles_meshcore_dm_without_broker_plugin(self):
         original_loader = app.load_pharmacies
