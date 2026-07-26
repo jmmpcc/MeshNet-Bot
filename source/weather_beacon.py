@@ -24,7 +24,7 @@ Campos meta esperados:
 
 Variables .env opcionales:
     WEATHER_BEACON_TIMEOUT_SEC=8
-    WEATHER_BEACON_CACHE_SEC=600
+    WEATHER_BEACON_CACHE_SEC=7200
     WEATHER_BEACON_DEFAULT_CITY=Zaragoza
     WEATHER_BEACON_DEFAULT_LAT=41.6488
     WEATHER_BEACON_DEFAULT_LON=-0.8891
@@ -79,6 +79,11 @@ def _env_int(name: str, default: int) -> int:
         return int((os.getenv(name, str(default)) or str(default)).strip())
     except Exception:
         return int(default)
+
+
+def _weather_cache_seconds() -> int:
+    """Devuelve la duración de la caché meteorológica (2 horas por defecto)."""
+    return max(0, _env_int("WEATHER_BEACON_CACHE_SEC", 7200))
 
 
 def _safe_float(v: Any) -> Optional[float]:
@@ -236,7 +241,7 @@ def fetch_weather_now(city: str, lat: float, lon: float, tz_name: str) -> Weathe
       - relative_humidity_2m
       - weather_code
     """
-    cache_sec = max(0, _env_int("WEATHER_BEACON_CACHE_SEC", 600))
+    cache_sec = _weather_cache_seconds()
     cache_key = f"{city.lower()}|{lat:.5f}|{lon:.5f}|{tz_name}"
     now = time.time()
     cached = _CACHE.get(cache_key)
