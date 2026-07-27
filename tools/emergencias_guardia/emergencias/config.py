@@ -24,15 +24,59 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "filters": {"minimum_severity": "low", "categories": sorted(VALID_CATEGORIES)},
     "areas": [],
+    "notifications": {
+        "enabled": False,
+        "transport": "meshcore",
+        "max_bytes": 140,
+        "max_events_per_broadcast": 3,
+        "inter_message_delay_seconds": 8,
+        "allow_satellite_detection": False,
+        "incremental": {
+            "batch_window_seconds": {
+                "emergencias": 0,
+                "servicios": 300,
+                "meteo": 300,
+            },
+            "retry_base_seconds": 60,
+            "retry_max_seconds": 3600,
+            "max_pending": 200,
+        },
+        "broker": {"host": "127.0.0.1", "port": 8766, "timeout_seconds": 10},
+        "routes": {
+            "emergencias": {
+                "meshcore_channel": -1,
+                "meshtastic_channel": -1,
+            },
+            "servicios": {
+                "meshcore_channel": -1,
+                "meshtastic_channel": -1,
+            },
+            "meteo": {
+                "meshcore_channel": -1,
+                "meshtastic_channel": -1,
+            },
+        },
+    },
     "sources": {
         "dgt_datex": {
             "type": "datex2", "enabled": False, "url": "",
             "verification": "official", "default_province": "",
         },
         "municipal_json": {
-            "type": "json", "enabled": False, "url": "",
+            "type": "json", "enabled": False,
+            "url": "https://www.zaragoza.es/sede/servicio/via-publica/incidencia.json?rows=1000&srsname=wgs84",
             "verification": "official", "default_province": "Zaragoza",
-            "records_path": "", "mapping": {},
+            "default_municipality": "Zaragoza",
+            "records_path": "result",
+            "mapping": {
+                "description": "motivo",
+                "category": "tipo.title",
+                "road": "calle",
+                "started_at": "inicio",
+                "updated_at": "lastUpdated",
+                "expected_end": "fin",
+                "source_url": "uri",
+            },
         },
     },
 }

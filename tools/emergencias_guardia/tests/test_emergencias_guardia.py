@@ -1,14 +1,20 @@
 import json
+import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
+
+APP_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(APP_DIR))
 
 from emergencias import engine, storage
 from emergencias.api import query_from_text
 from emergencias.config import DEFAULT_CONFIG
-from emergencias.formatters import byte_chunks
+from emergencias.formatters import byte_chunks, compact_messages
 from emergencias.models import Event
+from emergencias import notifier
 from emergencias.sources.base import SourceError
 from emergencias.sources.datex2 import Datex2Source
 from emergencias.sources.json_source import JsonSource
@@ -34,6 +40,34 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(event.category, "road_closed")
         self.assertEqual(event.province, "Zaragoza")
         self.assertEqual((event.latitude, event.longitude), (41.65, -0.88))
+
+    def test_zaragoza_real_schema_is_classified(self):
+        source = JsonSource("municipal_json", {
+            "url": "https://www.zaragoza.es/sede/servicio/via-publica/incidencia.json",
+            "verification": "official", "default_province": "Zaragoza",
+            "default_municipality": "Zaragoza", "records_path": "result",
+            "mapping": {
+                "description": "motivo", "category": "tipo.title",
+                "road": "calle",
+                "started_at": "inicio", "updated_at": "lastUpdated",
+                "expected_end": "fin", "source_url": "uri",
+            },
+        }, config())
+        body = json.dumps({"result": [{
+            "id": 25688, "title": "AVENIDA DE PRUEBA",
+            "calle": "VALENCIA, AVENIDA DE, 10",
+            "motivo": "Obras en la calzada",
+            "tipo": {"id": 1, "title": "Cortes de Tráfico"},
+            "inicio": "2026-07-26T00:00:00", "fin": "2026-07-27T00:00:00",
+            "geometry": {"type": "Point", "coordinates": [-0.88, 41.65]},
+            "uri": "https://www.zaragoza.es/sede/servicio/via-publica/incidencia/25688",
+        }]}).encode()
+        event = source.parse(body)[0]
+        self.assertEqual(event.category, "road_closed")
+        self.assertEqual(event.municipality, "Zaragoza")
+        self.assertEqual(event.province, "Zaragoza")
+        self.assertEqual(event.description, "Obras en la calzada")
+        self.assertEqual(event.road, "VALENCIA, AVENIDA DE, 10")
 
     def test_datex_accident_is_normalized(self):
         xml = b"""<?xml version="1.0"?>
@@ -116,6 +150,13 @@ class EngineTests(unittest.TestCase):
 
 
 class ApiAndFormattingTests(unittest.TestCase):
+    def test_systemd_uses_incremental_check_without_direct_radio_process(self):
+        systemd = APP_DIR / "systemd"
+        service = (systemd / "meshnet-emergencias-check.service").read_text(encoding="utf-8")
+        timer = (systemd / "meshnet-emergencias-check.timer").read_text(encoding="utf-8")
+        self.assertIn("check --notify-changes", service)
+        self.assertIn("OnUnitActiveSec=2min", timer)
+
     def test_query_aliases(self):
         self.assertEqual(query_from_text("emergencias incendios"), {"category": "wildfire"})
         self.assertEqual(query_from_text("emergencias A-2"), {"road": "A-2"})
@@ -131,6 +172,175 @@ class ApiAndFormattingTests(unittest.TestCase):
         messages = byte_chunks([event], 140)
         self.assertTrue(messages)
         self.assertTrue(all(len(message.encode("utf-8")) <= 140 for message in messages))
+        self.assertIn("ALTA · COLISIÓN", messages[0])
+        self.assertIn("Dgt", messages[0])
+
+    def test_each_compact_message_is_a_complete_event(self):
+        events = [
+            Event(
+                f"x:{index}", "municipal_json", str(index), "road_closed",
+                title=f"Calle de prueba {index}", description="Obras programadas",
+                road=f"Z-{index}", municipality="Zaragoza",
+                expected_end="2026-08-31T00:00:00+02:00",
+            )
+            for index in range(1, 4)
+        ]
+        messages = compact_messages(events, 140, "SERV")
+        self.assertEqual(len(messages), 3)
+        self.assertTrue(all(message.startswith("SERV [") for message in messages))
+        self.assertTrue(all("Ayto. Zaragoza" in message for message in messages))
+        self.assertTrue(all(len(message.encode("utf-8")) <= 140 for message in messages))
+
+
+class NotifierTests(unittest.TestCase):
+    @staticmethod
+    def _incremental_config():
+        cfg = config()
+        cfg["notifications"]["enabled"] = True
+        cfg["notifications"]["inter_message_delay_seconds"] = 0
+        cfg["notifications"]["routes"]["servicios"]["meshcore_channel"] = 2
+        cfg["notifications"]["incremental"]["batch_window_seconds"]["servicios"] = 0
+        return cfg
+
+    def test_routes_only_serious_official_events_to_emergencias(self):
+        cfg = config()
+        routine = Event("m:1", "municipal_json", "1", "road_closed", severity="medium")
+        serious = Event(
+            "d:1", "dgt_datex", "1", "traffic_collision",
+            severity="high", verification="official",
+        )
+        unverified = Event(
+            "n:1", "news", "1", "wildfire",
+            severity="critical", verification="unverified",
+        )
+        weather = Event("a:1", "aemet", "1", "storm", severity="high")
+        future = Event(
+            "m:2", "municipal_json", "2", "road_closed",
+            started_at="2999-01-01T00:00:00+00:00",
+        )
+        self.assertEqual(notifier.route_event(routine, cfg), "servicios")
+        self.assertEqual(notifier.route_event(serious, cfg), "emergencias")
+        self.assertIsNone(notifier.route_event(unverified, cfg))
+        self.assertEqual(notifier.route_event(weather, cfg), "meteo")
+        self.assertIsNone(notifier.route_event(future, cfg))
+
+    def test_satellite_detection_is_disabled_by_default(self):
+        cfg = config()
+        event = Event(
+            "firms:1", "nasa_firms", "1", "wildfire",
+            severity="high", verification="satellite_detection",
+        )
+        self.assertIsNone(notifier.route_event(event, cfg))
+
+    def test_send_is_disabled_and_deduplicated(self):
+        cfg = config()
+        event = Event(
+            "m:1", "municipal_json", "1", "road_closed",
+            title="Corte", municipality="Zaragoza",
+        )
+        self.assertEqual(
+            notifier.send_route([event], cfg, "servicios")["reason"],
+            "notifications_disabled",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            with mock.patch.object(storage, "STATE_FILE", state_path), \
+                    mock.patch.object(notifier, "_send_message", return_value={"ok": True}):
+                cfg["notifications"]["enabled"] = True
+                cfg["notifications"]["inter_message_delay_seconds"] = 0
+                cfg["notifications"]["routes"]["servicios"]["meshcore_channel"] = 2
+                first = notifier.send_route([event], cfg, "servicios")
+                second = notifier.send_route([event], cfg, "servicios")
+        self.assertTrue(first["sent"])
+        self.assertEqual(second["reason"], "unchanged")
+
+    def test_incremental_bootstrap_is_silent_then_sends_new_event(self):
+        cfg = self._incremental_config()
+        existing = Event(
+            "m:1", "municipal_json", "1", "road_closed",
+            title="Corte existente", municipality="Zaragoza",
+        )
+        added = Event(
+            "m:2", "municipal_json", "2", "water_outage",
+            title="Nuevo corte de agua", municipality="Zaragoza",
+        )
+        now = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+        sent = []
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(storage, "STATE_FILE", Path(directory) / "state.json"), \
+                    mock.patch.object(
+                        notifier,
+                        "_send_message",
+                        side_effect=lambda _config, _target, message: sent.append(message) or {"ok": True},
+                    ):
+                baseline = notifier.process_incremental([existing], cfg, now)
+                changed = notifier.process_incremental(
+                    [existing, added], cfg, now + timedelta(minutes=1),
+                )
+        self.assertEqual(baseline["baseline"], 1)
+        self.assertEqual(sent[0].splitlines()[0], "NUEVA · SERV")
+        self.assertEqual(changed["sent"], 1)
+
+    def test_incremental_sends_update_and_resolution_only_after_delivery(self):
+        cfg = self._incremental_config()
+        original = Event(
+            "m:1", "municipal_json", "1", "road_closed",
+            title="Corte", description="Un carril afectado", municipality="Zaragoza",
+        )
+        now = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+        sent = []
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(storage, "STATE_FILE", Path(directory) / "state.json"), \
+                    mock.patch.object(
+                        notifier,
+                        "_send_message",
+                        side_effect=lambda _config, _target, message: sent.append(message) or {"ok": True},
+                    ):
+                notifier.process_incremental([], cfg, now)
+                notifier.process_incremental([original], cfg, now + timedelta(minutes=1))
+                updated = Event(
+                    "m:1", "municipal_json", "1", "road_closed",
+                    title="Corte", description="Corte total", municipality="Zaragoza",
+                )
+                notifier.process_incremental([updated], cfg, now + timedelta(minutes=2))
+                resolved = Event(
+                    "m:1", "municipal_json", "1", "road_closed",
+                    status="resolved", title="Corte", description="Circulación restablecida",
+                    municipality="Zaragoza",
+                )
+                notifier.process_incremental([resolved], cfg, now + timedelta(minutes=3))
+        self.assertEqual(
+            [message.splitlines()[0] for message in sent],
+            ["NUEVA · SERV", "ACTUALIZACIÓN · SERV", "FINALIZADA · SERV"],
+        )
+
+    def test_incremental_failure_stays_pending_and_retries_with_backoff(self):
+        cfg = self._incremental_config()
+        cfg["notifications"]["incremental"]["retry_base_seconds"] = 60
+        event = Event(
+            "m:1", "municipal_json", "1", "road_closed",
+            title="Corte", municipality="Zaragoza",
+        )
+        now = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            with mock.patch.object(storage, "STATE_FILE", state_path):
+                notifier.process_incremental([], cfg, now)
+                with mock.patch.object(notifier, "_send_message", side_effect=RuntimeError("broker caído")):
+                    failed = notifier.process_incremental(
+                        [event], cfg, now + timedelta(minutes=1),
+                    )
+                with mock.patch.object(notifier, "_send_message", return_value={"ok": True}) as sender:
+                    early = notifier.process_incremental(
+                        [event], cfg, now + timedelta(minutes=1, seconds=30),
+                    )
+                    retried = notifier.process_incremental(
+                        [event], cfg, now + timedelta(minutes=2, seconds=1),
+                    )
+        self.assertEqual(failed["failed"], 1)
+        self.assertEqual(early["pending"], 1)
+        self.assertEqual(retried["sent"], 1)
+        self.assertEqual(sender.call_count, 1)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ Esta primera fase usa únicamente la biblioteca estándar de Python y aporta:
 - CLI para fuentes, áreas, categorías, consulta, diagnóstico e histórico.
 - API local en el puerto `8789`.
 - conectores configurables para DGT DATEX II y fuentes municipales JSON/GeoJSON;
+- adaptación inicial verificada para la API de incidencias del Ayuntamiento de Zaragoza;
 - caché HTTP con `ETag` y `Last-Modified`;
 - límites de tamaño y tiempo de descarga;
 - rechazo de DTD y entidades en XML;
@@ -19,8 +20,9 @@ Esta primera fase usa únicamente la biblioteca estándar de Python y aporta:
 - conservación de incidentes si una fuente falla;
 - fragmentación UTF-8 para respuestas de radio.
 
-No se incluye `.env`, no hay claves ni endpoints inventados. Las fuentes vienen
-desactivadas hasta que un operador configure sus URL oficiales.
+No se incluye `.env` ni hay claves. Las fuentes vienen desactivadas. La URL
+pública municipal de Zaragoza se incluye como valor conocido, pero requiere
+habilitación explícita.
 
 ## Instalación
 
@@ -60,10 +62,20 @@ python3 emergencias_guardia.py source enable dgt_datex
 Configurar una fuente municipal JSON:
 
 ```bash
-python3 emergencias_guardia.py source set-url municipal_json URL_OFICIAL
+python3 emergencias_guardia.py source set-url municipal_json \
+  'https://www.zaragoza.es/sede/servicio/via-publica/incidencia.json?rows=1000&srsname=wgs84'
 python3 emergencias_guardia.py source test municipal_json
 python3 emergencias_guardia.py source enable municipal_json
 ```
+
+El valor inicial de `municipal_json` apunta al listado oficial:
+
+```text
+https://www.zaragoza.es/sede/servicio/via-publica/incidencia.json?rows=1000&srsname=wgs84
+```
+
+Al asignar esta URL mediante `source set-url`, la CLI aplica también el mapeo
+oficial conocido aunque `data/config.json` proceda de una prueba anterior.
 
 El conector JSON admite en `data/config.json`:
 
@@ -178,9 +190,161 @@ emergencias A-2
 emergencias <texto de localidad>
 ```
 
-La API genera mensajes, pero no abre conexiones de radio ni transmite. La
-integración futura con el broker debe conservar sus controles de tasa,
-duplicados, destino y DM, como hace Farmacias.
+La API genera mensajes, pero no abre conexiones de radio ni transmite.
+
+## Integración con MeshNet-Broker
+
+El broker incorpora `source/emergencias_commands.py` y consulta esta API desde
+los receptores MeshCore y Meshtastic. La respuesta se encola siempre como DM
+por la misma red de origen.
+
+Configuración recomendada en el `.env` de MeshNet-Bot:
+
+```env
+EMERGENCIAS_COMMAND_ENABLED=true
+EMERGENCIAS_SERVICE_URL=http://172.17.0.1:8789/query
+EMERGENCIAS_SERVICE_TIMEOUT_SECONDS=3
+
+EMERGENCIAS_MESHCORE_CHANNEL=-1
+EMERGENCIAS_MESHTASTIC_CHANNEL=-1
+
+EMERGENCIAS_MAX_REQUESTS_PER_HOUR=5
+EMERGENCIAS_RATE_LIMIT_WINDOW_SECONDS=3600
+EMERGENCIAS_DUPLICATE_WINDOW_SECONDS=20
+EMERGENCIAS_RATE_LIMIT_SAVE_SECONDS=60
+EMERGENCIAS_DM_MAX_MESSAGES_PER_RESPONSE=4
+EMERGENCIAS_DM_INTER_MESSAGE_DELAY_SECONDS=1
+EMERGENCIAS_MAX_EVENTS_PER_QUERY=5
+EMERGENCIAS_MAX_TEXT_BYTES=140
+```
+
+La dirección `172.17.0.1` es solo un ejemplo: debe sustituirse por la puerta de
+enlace real del host vista desde el contenedor. La integración viene desactivada
+por defecto en código y los canales `-1` impiden consultas públicas. Con esa
+configuración se puede validar primero únicamente por DM.
+
+El broker aplica:
+
+- límite independiente por red y contacto;
+- rechazo de duplicados;
+- timeout HTTP corto;
+- máximo de cuatro partes por respuesta;
+- mensajes de hasta 140 bytes UTF-8;
+- ejecución en un hilo para no bloquear el receptor;
+- `no_bridge` en respuestas Meshtastic.
+
+No se realizan avisos automáticos. Las incidencias municipales actuales solo
+se ofrecen bajo demanda.
+
+## Formato y enrutamiento por canales
+
+Cada incidencia se convierte en un mensaje autocontenido de hasta 140 bytes.
+No se divide una descripción larga en partes huérfanas: se conserva siempre
+gravedad, categoría, ubicación, vigencia y fuente.
+
+Ejemplo:
+
+```text
+SERV [1/2]
+MEDIA · CARRETERA CORTADA
+AV. VALENCIA · Zaragoza
+Hasta 31/01 · Ayto. Zaragoza
+```
+
+Las reglas iniciales son:
+
+- `SERVICIOS`: tráfico, carreteras, agua, luz, gas e incidencias municipales;
+- `METEO`: tormenta, nieve, viento y temperaturas extremas;
+- `EMERGENCIAS`: únicamente sucesos graves `high`/`critical`, oficiales y de
+  categorías de emergencia;
+- sin difusión: eventos futuros, caducados, resueltos, no verificados o
+  detecciones satelitales sin confirmación.
+
+La difusión está desactivada por defecto y todos los canales comienzan en `-1`.
+Primero debe revisarse la salida:
+
+```bash
+python3 emergencias_guardia.py notify status
+python3 emergencias_guardia.py notify preview
+python3 emergencias_guardia.py notify preview --route servicios
+python3 emergencias_guardia.py notify preview --route emergencias
+```
+
+`preview` no transmite. Muestra el destino resuelto y los mensajes exactos.
+
+Una vez confirmados los índices reales:
+
+```bash
+python3 emergencias_guardia.py notify set-transport meshcore
+python3 emergencias_guardia.py notify set-channel servicios meshcore INDICE
+python3 emergencias_guardia.py notify set-channel emergencias meshcore INDICE
+python3 emergencias_guardia.py notify set-channel meteo meshcore INDICE
+python3 emergencias_guardia.py notify enable
+```
+
+En Meshtastic se sustituye `meshcore` por `meshtastic`.
+
+Antes de automatizar, el envío se prueba manualmente:
+
+```bash
+python3 emergencias_guardia.py notify send servicios
+python3 emergencias_guardia.py notify send emergencias
+python3 emergencias_guardia.py notify send meteo
+```
+
+Cada ruta publica como máximo tres eventos. Un hash persistente impide repetir
+exactamente la misma difusión; `--force` permite repetirla deliberadamente:
+
+```bash
+python3 emergencias_guardia.py notify send emergencias --force
+```
+
+La automatización no se habilitará hasta verificar los índices y el contenido
+real en cada canal.
+
+## Avisos incrementales automáticos
+
+El flujo automático utiliza:
+
+```bash
+python3 emergencias_guardia.py check --notify-changes
+```
+
+La primera ejecución crea una línea base silenciosa. No publica todos los
+eventos ya existentes. Las siguientes ejecuciones detectan:
+
+- `NUEVA`: evento que no existía en la línea base;
+- `ACTUALIZACIÓN`: cambio significativo en gravedad, estado, ubicación o texto;
+- `FINALIZADA`: resolución de un evento previamente difundido.
+
+Los cambios de `SERVICIOS` y `METEO` se agrupan durante cinco minutos. Las
+emergencias oficiales graves no tienen esa espera adicional. Si el broker
+rechaza un mensaje o no responde, el elemento permanece en un spool persistente
+y se reintenta con backoff progresivo entre 60 y 3600 segundos.
+
+Si las notificaciones están desactivadas, `check --notify-changes` actualiza la
+línea base sin acumular mensajes pendientes. Solo se encolan rutas cuyo canal
+está configurado.
+
+Secuencia segura de activación:
+
+```bash
+# 1. Crear línea base sin transmitir
+python3 emergencias_guardia.py notify disable
+python3 emergencias_guardia.py check --notify-changes
+
+# 2. Revisar estado y salida
+python3 emergencias_guardia.py notify status
+python3 emergencias_guardia.py notify preview
+
+# 3. Configurar canales, probar manualmente y habilitar
+python3 emergencias_guardia.py notify set-channel servicios meshcore INDICE
+python3 emergencias_guardia.py notify send servicios
+python3 emergencias_guardia.py notify enable
+```
+
+`notify status` muestra si existe línea base, número de eventos observados,
+eventos ya difundidos y elementos pendientes.
 
 ## systemd
 
@@ -209,24 +373,33 @@ sudo systemctl enable --now meshnet-emergencias-api.service
 sudo systemctl enable --now meshnet-emergencias-check.timer
 ```
 
-El temporizador consulta cada dos minutos con un pequeño retardo aleatorio. No
-envía alertas: únicamente mantiene la API y el histórico actualizados.
+La unidad de API incluida escucha en `0.0.0.0:8789` para permitir el acceso
+desde Docker. El puerto no debe exponerse a Internet; restrínjalo al host y a
+la red Docker mediante el cortafuegos del sistema.
+
+El temporizador consulta cada dos minutos con un pequeño retardo aleatorio y
+ejecuta `check --notify-changes`. Con notificaciones desactivadas solo mantiene
+la API, el histórico y la línea base. Cuando se habilitan, procesa el spool
+incremental según las reglas anteriores.
 
 ## Validación
 
 ```bash
 python3 -m py_compile emergencias_guardia.py emergencias/*.py emergencias/sources/*.py
 python3 -m unittest discover -s tests -v
+
+cd /home/meshnet/MeshNet-Bot
+python3 -m py_compile source/emergencias_commands.py source/Meshtastic_Broker.py
+python3 -m unittest tests.test_emergencias_commands -v
 ```
 
 ## Alcance pendiente
 
-- verificar endpoints oficiales concretos y adaptar sus campos reales;
+- verificar y adaptar nuevas fuentes oficiales;
 - geometrías oficiales de provincias y municipios;
 - conectores AEMET, FIRMS, RAN, INFOAR y EFFIS;
 - correlación entre fuentes;
-- integración del comando con el broker;
-- cola de avisos y envío por canal `EMERGENCIAS`.
+- automatización de nuevas fuentes oficiales y correlación entre ellas.
 
 NASA FIRMS, cuando se incorpore, deberá clasificarse siempre como
 `satellite_detection` y describirse como foco térmico no confirmado, salvo

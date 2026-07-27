@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import Any
 
-from ..models import Event, clean_text
+from ..models import Event, clean_text, fold_text
 from .base import HttpSource, SourceError
 
 
@@ -61,7 +61,7 @@ class JsonSource(HttpSource):
             events.append(Event(
                 event_id=f"{self.source_id}:{source_event_id}",
                 source=self.source_id, source_event_id=source_event_id,
-                category=clean_text(nested_get(properties, mapping["category"])) or "other",
+                category=_category(nested_get(properties, mapping["category"])),
                 status=clean_text(nested_get(properties, mapping["status"])) or "active",
                 verification=self.config.get("verification", "official"),
                 severity=clean_text(nested_get(properties, mapping["severity"])) or "medium",
@@ -69,7 +69,7 @@ class JsonSource(HttpSource):
                 description=nested_get(properties, mapping["description"]),
                 road=nested_get(properties, mapping["road"]),
                 kilometre=_number(nested_get(properties, mapping["kilometre"], None)),
-                municipality=nested_get(properties, mapping["municipality"]),
+                municipality=nested_get(properties, mapping["municipality"]) or self.config.get("default_municipality", ""),
                 province=nested_get(properties, mapping["province"]) or self.config.get("default_province", ""),
                 latitude=_number(latitude), longitude=_number(longitude),
                 started_at=clean_text(nested_get(properties, mapping["started_at"])),
@@ -86,3 +86,14 @@ def _number(value: Any) -> float | None:
         return float(str(value).replace(",", "."))
     except (TypeError, ValueError):
         return None
+
+
+def _category(value: Any) -> str:
+    normalized = fold_text(value)
+    if "corte" in normalized and "trafico" in normalized:
+        return "road_closed"
+    if "agua" in normalized:
+        return "water_outage"
+    if "tranvia" in normalized or "afecciones importantes" in normalized:
+        return "traffic_obstruction"
+    return clean_text(value) or "other"

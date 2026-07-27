@@ -1784,6 +1784,51 @@ class MeshCoreEmbeddedBridge:
                 except Exception as _e_farma:
                     print(f"[farmacias] meshcore WARN: {type(_e_farma).__name__}: {_e_farma}", flush=True)
 
+                # === [EMERGENCIAS] Comando interno MeshCore ====================
+                # La API local solo consulta su caché; la respuesta vuelve siempre
+                # como DM al contacto de origen y nunca abre otra conexión de radio.
+                try:
+                    from emergencias_commands import (
+                        EmergenciasCommandContext,
+                        handle_emergencias_command,
+                        is_allowed_origin as is_emergencias_allowed_origin,
+                        is_emergencias_command,
+                    )
+                    if is_emergencias_command(text_msg):
+                        _ctx_emerg = EmergenciasCommandContext(
+                            network="meshcore",
+                            source_id=pref,
+                            text=text_msg,
+                            channel=chan_idx,
+                            is_direct=(kind == "contact"),
+                            packet_id=data.get("id") or data.get("message_id") or data.get("timestamp"),
+                        )
+                        if is_emergencias_allowed_origin(_ctx_emerg):
+                            if pref:
+                                def _emergencias_meshcore_worker():
+                                    def _enqueue_dm(_message: str) -> None:
+                                        self.enqueue_send_contact(pref, str(_message))
+                                    handle_emergencias_command(_ctx_emerg, _enqueue_dm)
+
+                                threading.Thread(
+                                    target=_emergencias_meshcore_worker,
+                                    name="emergencias-meshcore",
+                                    daemon=True,
+                                ).start()
+                                self._last_ok = time.time()
+                                return
+                            print(
+                                "[emergencias] meshcore WARN: comando de canal sin "
+                                "pubkey_prefix resoluble; se deja pasar",
+                                flush=True,
+                            )
+                except Exception as _e_emerg:
+                    print(
+                        f"[emergencias] meshcore WARN: "
+                        f"{type(_e_emerg).__name__}: {_e_emerg}",
+                        flush=True,
+                    )
+
                 try:
                     mail_reply = _handle_mesh_mail_command_if_needed(text_msg, source=(alias or pref or "meshcore"))
                     if mail_reply is not None:
@@ -8805,6 +8850,58 @@ class MeshReceiver:
             except Exception as _e_farma:
                 if self.verbose:
                     print(f"⚠️ farmacias meshtastic: {_e_farma}", flush=True)
+
+            # === [EMERGENCIAS] Comando interno procesado por el broker =========
+            try:
+                if str(portnum) == "TEXT_MESSAGE_APP" and isinstance(text, str):
+                    from emergencias_commands import (
+                        EmergenciasCommandContext,
+                        handle_emergencias_command,
+                        is_allowed_origin as is_emergencias_allowed_origin,
+                        is_emergencias_command,
+                    )
+                    if is_emergencias_command(text):
+                        _to_norm_emerg = _norm_node_id(who_to)
+                        _is_dm_emerg = (
+                            bool(_to_norm_emerg)
+                            and _to_norm_emerg not in {"^all", "broadcast", "?"}
+                        )
+                        _ctx_emerg = EmergenciasCommandContext(
+                            network="meshtastic",
+                            source_id=str(who_from),
+                            text=str(text),
+                            channel=int(canal) if canal is not None else None,
+                            is_direct=bool(_is_dm_emerg),
+                            packet_id=pkt.get("id") or pkt.get("packetId") or pkt.get("packet_id"),
+                        )
+
+                        def _emergencias_meshtastic_worker():
+                            def _enqueue_dm(_message: str) -> None:
+                                _q = globals().get("SENDQ")
+                                if _q is None or not hasattr(_q, "offer"):
+                                    raise RuntimeError("SENDQ no disponible")
+                                _q.offer({
+                                    "channel": int(canal) if canal is not None else 0,
+                                    "text": str(_message),
+                                    "destination": str(who_from),
+                                    "require_ack": False,
+                                    "type": "text",
+                                    "no_bridge": True,
+                                    "origin": "emergencias",
+                                    "meta": {"emergencias": 1, "reply_dm": 1},
+                                }, coalesce=False)
+                            handle_emergencias_command(_ctx_emerg, _enqueue_dm)
+
+                        if is_emergencias_allowed_origin(_ctx_emerg):
+                            threading.Thread(
+                                target=_emergencias_meshtastic_worker,
+                                name="emergencias-meshtastic",
+                                daemon=True,
+                            ).start()
+                            return
+            except Exception as _e_emerg:
+                if self.verbose:
+                    print(f"⚠️ emergencias meshtastic: {_e_emerg}", flush=True)
 
 
             # === Emitir JSONL a clientes ===

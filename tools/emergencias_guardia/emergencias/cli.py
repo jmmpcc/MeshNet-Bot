@@ -6,9 +6,12 @@ import sys
 from typing import Any
 
 from .api import serve
-from .config import CONFIG_FILE, DATA_DIR, load_config, save_config
+from .config import CONFIG_FILE, DATA_DIR, DEFAULT_CONFIG, load_config, save_config
 from .engine import fetch_sources, list_events
 from .models import VALID_CATEGORIES, VALID_SEVERITIES
+from .notifier import (
+    ROUTE_PREFIXES, preview_routes, process_incremental, send_route, target_for,
+)
 from .sources import SOURCE_TYPES
 from .storage import CURRENT_FILE, load_state, read_history
 
@@ -19,6 +22,12 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("init", help="crea la configuración inicial")
     fetch = commands.add_parser("fetch", help="actualiza las fuentes habilitadas")
     fetch.add_argument("--source")
+    check = commands.add_parser(
+        "check",
+        help="actualiza fuentes y procesa cambios incrementales",
+    )
+    check.add_argument("--source")
+    check.add_argument("--notify-changes", action="store_true")
     listing = commands.add_parser("list", help="muestra emergencias actuales")
     _query_arguments(listing)
     listing.add_argument("--json", action="store_true")
@@ -62,6 +71,25 @@ def parser() -> argparse.ArgumentParser:
     source_url = source.add_parser("set-url")
     source_url.add_argument("name")
     source_url.add_argument("url")
+
+    notify = commands.add_parser(
+        "notify",
+        help="previsualiza y gestiona difusión por canales",
+    ).add_subparsers(dest="notify_command", required=True)
+    notify.add_parser("status")
+    preview = notify.add_parser("preview")
+    preview.add_argument("--route", choices=sorted(ROUTE_PREFIXES))
+    set_channel = notify.add_parser("set-channel")
+    set_channel.add_argument("route", choices=sorted(ROUTE_PREFIXES))
+    set_channel.add_argument("network", choices=("meshcore", "meshtastic"))
+    set_channel.add_argument("channel", type=int)
+    set_transport = notify.add_parser("set-transport")
+    set_transport.add_argument("network", choices=("meshcore", "meshtastic"))
+    notify.add_parser("enable")
+    notify.add_parser("disable")
+    send = notify.add_parser("send")
+    send.add_argument("route", choices=sorted(ROUTE_PREFIXES))
+    send.add_argument("--force", action="store_true")
     return root
 
 
@@ -80,6 +108,16 @@ def main(argv: list[str] | None = None) -> int:
         print_json({"ok": True, "config": str(CONFIG_FILE), "data_dir": str(DATA_DIR)})
     elif args.command == "fetch":
         report = fetch_sources(config, args.source)
+        print_json(report)
+        if args.source and args.source not in config.get("sources", {}):
+            return 2
+    elif args.command == "check":
+        report = {"fetch": fetch_sources(config, args.source)}
+        if args.notify_changes:
+            report["notifications"] = process_incremental(
+                list_events(config, {"include_resolved": True}),
+                config,
+            )
         print_json(report)
         if args.source and args.source not in config.get("sources", {}):
             return 2
@@ -118,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
         _categories(config, args)
     elif args.command == "source":
         return _sources(config, args)
+    elif args.command == "notify":
+        return _notifications(config, args)
     return 0
 
 
@@ -188,6 +228,10 @@ def _sources(config: dict[str, Any], args: argparse.Namespace) -> int:
         print_json({"ok": False, "error": "fuente desconocida", "source": args.name})
         return 2
     if args.source_command == "set-url":
+        if args.name == "municipal_json" and "zaragoza.es/sede/servicio/via-publica/incidencia" in args.url:
+            enabled = bool(sources[args.name].get("enabled", False))
+            sources[args.name] = json.loads(json.dumps(DEFAULT_CONFIG["sources"]["municipal_json"]))
+            sources[args.name]["enabled"] = enabled
         sources[args.name]["url"] = args.url
         save_config(config)
         print_json({"ok": True, "source": args.name, "url": args.url})
@@ -206,6 +250,70 @@ def _sources(config: dict[str, Any], args: argparse.Namespace) -> int:
         print_json(report)
         return 0 if report["sources"].get(args.name, {}).get("ok") else 1
     return 0
+
+
+def _notifications(config: dict[str, Any], args: argparse.Namespace) -> int:
+    notifications = config["notifications"]
+    if args.notify_command == "status":
+        incremental = (
+            load_state()
+            .get("notifications", {})
+            .get("incremental", {})
+        )
+        print_json({
+            "enabled": notifications.get("enabled", False),
+            "transport": notifications.get("transport"),
+            "routes": {
+                route: target_for(config, route) for route in ROUTE_PREFIXES
+            },
+            "incremental": {
+                "initialized": incremental.get("initialized", False),
+                "baseline_at": incremental.get("baseline_at"),
+                "last_check_at": incremental.get("last_check_at"),
+                "observed": len(incremental.get("observed", {})),
+                "delivered": len(incremental.get("delivered", {})),
+                "pending": len(incremental.get("pending", [])),
+            },
+        })
+        return 0
+    if args.notify_command == "preview":
+        events = list_events(config)
+        print_json(preview_routes(events, config, args.route))
+        return 0
+    if args.notify_command == "set-channel":
+        notifications["routes"][args.route][f"{args.network}_channel"] = args.channel
+        save_config(config)
+        print_json({
+            "ok": True, "route": args.route, "network": args.network,
+            "channel": args.channel,
+        })
+        return 0
+    if args.notify_command == "set-transport":
+        notifications["transport"] = args.network
+        save_config(config)
+        print_json({"ok": True, "transport": args.network})
+        return 0
+    if args.notify_command in {"enable", "disable"}:
+        enabled = args.notify_command == "enable"
+        if enabled:
+            configured = [
+                route for route in ROUTE_PREFIXES
+                if target_for(config, route)["channel"] >= 0
+            ]
+            if not configured:
+                print_json({
+                    "ok": False,
+                    "error": "configure al menos un canal antes de habilitar",
+                })
+                return 2
+        notifications["enabled"] = enabled
+        save_config(config)
+        print_json({"ok": True, "enabled": enabled})
+        return 0
+    events = list_events(config)
+    result = send_route(events, config, args.route, force=args.force)
+    print_json(result)
+    return 0 if result.get("sent") or result.get("reason") == "unchanged" else 2
 
 
 def _slug(value: str) -> str:

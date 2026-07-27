@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=meshnet
 WorkingDirectory=/home/meshnet/MeshNet-Bot/tools/emergencias_guardia
-ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/emergencias_guardia/emergencias_guardia.py serve
+ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/emergencias_guardia/emergencias_guardia.py serve --host 0.0.0.0 --port 8789
 Restart=always
 RestartSec=10
 

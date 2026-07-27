@@ -7,4 +7,4 @@ Wants=network-online.target
 Type=oneshot
 User=meshnet
 WorkingDirectory=/home/meshnet/MeshNet-Bot/tools/emergencias_guardia
-ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/emergencias_guardia/emergencias_guardia.py fetch
+ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/emergencias_guardia/emergencias_guardia.py check --notify-changes
