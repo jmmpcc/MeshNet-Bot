@@ -87,6 +87,14 @@ def fetch_sources(config: dict[str, Any], only: str | None = None) -> dict[str, 
         if not source_config.get("enabled", False):
             report["sources"][source_id] = {"ok": False, "skipped": "disabled"}
             continue
+        if source_config.get("require_areas") and not any(
+            area.get("enabled", True) for area in config.get("areas", [])
+        ):
+            report["sources"][source_id] = {
+                "ok": False,
+                "error": "la fuente requiere al menos un área geográfica habilitada",
+            }
+            continue
         source_type = SOURCE_TYPES.get(source_config.get("type"))
         if source_type is None:
             report["sources"][source_id] = {"ok": False, "error": "tipo de fuente desconocido"}

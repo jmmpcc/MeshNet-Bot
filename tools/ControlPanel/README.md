@@ -1,63 +1,87 @@
 # MeshNet ControlPanel
 
-Aplicación web **independiente** para administrar las herramientas instaladas en
-`tools/`. No forma parte del panel web de Meshtastic, no necesita Docker y no
-modifica sus contenedores ni su configuración.
+Panel web independiente para supervisar y operar las aplicaciones instaladas en
+`tools/`. No depende de Docker ni modifica el panel web de Meshtastic.
 
-Esta primera fase permite:
+## Funciones
 
-- registrar exclusivamente aplicaciones conocidas;
-- habilitar o deshabilitar su acceso desde el panel;
-- conservar el estado local en `data/state.json`;
-- comprobar el endpoint de salud de cada aplicación habilitada.
+- descubre aplicaciones mediante `manifests/*.json`;
+- habilita cada aplicación en el panel con estado persistente;
+- consulta su endpoint `/health`;
+- inicia, detiene y reinicia sus servicios API;
+- consulta servicios y temporizadores;
+- ejecuta únicamente acciones CLI declaradas por el administrador;
+- muestra resultados JSON, texto y errores con salida y timeout limitados;
+- exige confirmación para paradas, reinicios, publicaciones y notificaciones.
 
-Incluye inicialmente `farmacias_guardia` y `emergencias_guardia`. Activar una
-tarjeta permite operarla desde el panel, pero no inicia procesos ni ejecuta
-`systemctl`, Docker o comandos arbitrarios.
+Los manifiestos incluidos cubren Farmacias y Emergencias: estado, actualización,
+listados actuales, histórico, fuentes, áreas, categorías, diagnóstico,
+publicación/avisos y control de sus API. Para añadir una aplicación futura se
+instala otro JSON en `manifests/`; no es necesario modificar `web_admin.py`.
+El navegador nunca puede enviar un comando, argumentos, ruta o unidad systemd.
 
-## Instalación independiente
-
-Requiere Python 3.10 o posterior. Desde este directorio:
+## Instalación
 
 ```bash
+cd tools/ControlPanel
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+export CONTROLPANEL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 .venv/bin/python control_panel.py
 ```
 
-El panel escucha de forma predeterminada en `http://127.0.0.1:8790`. Se puede
-cambiar la interfaz o el puerto sin crear archivos con secretos:
+Escucha por defecto en `http://127.0.0.1:8790`. Variables:
+
+- `CONTROLPANEL_HOST` y `CONTROLPANEL_PORT`: escucha;
+- `CONTROLPANEL_TOKEN`: secreto obligatorio para habilitar o ejecutar acciones;
+- `CONTROLPANEL_STATE`: archivo de estado;
+- `CONTROLPANEL_MANIFESTS`: directorio alternativo de manifiestos.
+
+Sin token, las consultas siguen disponibles localmente, pero cualquier escritura
+devuelve `503`. Para acceso en red use HTTPS mediante un proxy autenticado. El
+token se conserva solamente en `sessionStorage` del navegador.
+
+## systemd y permisos
+
+La unidad `systemd/meshnet-control-panel.service` inicia el panel. Añada
+`EnvironmentFile=/home/meshnet/.config/meshnet-control-panel.env` en un override
+y guarde allí `CONTROLPANEL_TOKEN=...` con permisos `0600`.
+
+Las acciones de lectura usan `systemctl` sin privilegios. Las mutaciones usan
+`sudo -n systemctl` y requieren la lista mínima incluida:
 
 ```bash
-CONTROLPANEL_HOST=0.0.0.0 CONTROLPANEL_PORT=8790 \
-  .venv/bin/python control_panel.py
+sudo install -o root -g root -m 0440 \
+  systemd/meshnet-control-panel.sudoers /etc/sudoers.d/meshnet-control-panel
+sudo visudo -cf /etc/sudoers.d/meshnet-control-panel
 ```
 
-## Configuración
+No se concede acceso general a `systemctl`, Python ni un shell. Al registrar una
+aplicación futura, añada al `sudoers` solo sus operaciones y unidades exactas.
 
-Las aplicaciones independientes se consultan por defecto en:
+## Formato de manifiesto
 
-```text
-Farmacias:  http://127.0.0.1:8788
-Emergencias: http://127.0.0.1:8789
+```json
+{
+  "id": "mi_aplicacion",
+  "name": "Mi aplicación",
+  "description": "Descripción",
+  "url": "http://127.0.0.1:8800",
+  "health_path": "/health",
+  "actions": [
+    {
+      "id": "status",
+      "name": "Estado",
+      "kind": "command",
+      "argv": ["${PYTHON}", "${REPO}/tools/mi_aplicacion/app.py", "status"]
+    }
+  ]
+}
 ```
 
-Se pueden cambiar con `FARMACIAS_PANEL_URL` y `EMERGENCIAS_PANEL_URL`. La ruta
-del estado se puede cambiar con `CONTROLPANEL_STATE`; no contiene credenciales.
-
-## Servicio systemd opcional
-
-Revise primero el usuario y las rutas de la unidad incluida y después instálela:
-
-```bash
-sudo cp systemd/meshnet-control-panel.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now meshnet-control-panel.service
-```
-
-La unidad incluida escucha solamente en `127.0.0.1`. Para publicar el panel en
-la red debe configurarse conscientemente otra interfaz y aplicar autenticación o
-un proxy inverso adecuado.
+Tipos permitidos: `command` con un `argv` fijo, y `systemd` con una operación
+entre `status`, `start`, `stop`, `restart`, `enable` y `disable`. Los ids,
+unidades, timeout (1–300 s) y duplicados se validan al arrancar.
 
 ## Pruebas
 

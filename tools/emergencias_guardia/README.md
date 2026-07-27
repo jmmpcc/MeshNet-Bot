@@ -54,10 +54,15 @@ python3 emergencias_guardia.py source list
 Configurar y probar DGT DATEX II:
 
 ```bash
-python3 emergencias_guardia.py source set-url dgt_datex URL_OFICIAL
+python3 emergencias_guardia.py source set-url dgt_datex \
+  'https://nap.dgt.es/datex2/v3/dgt/SituationPublication/datex2_v37.xml'
 python3 emergencias_guardia.py source test dgt_datex
 python3 emergencias_guardia.py source enable dgt_datex
 ```
+
+Por seguridad, `dgt_datex` exige al menos un área geográfica habilitada.
+Configure, por ejemplo, `area add province Zaragoza` antes de probar o activar
+esta fuente nacional.
 
 Configurar una fuente municipal JSON:
 

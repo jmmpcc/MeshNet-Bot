@@ -59,8 +59,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "sources": {
         "dgt_datex": {
-            "type": "datex2", "enabled": False, "url": "",
-            "verification": "official", "default_province": "",
+            "type": "datex2", "enabled": False,
+            "url": "https://nap.dgt.es/datex2/v3/dgt/SituationPublication/datex2_v37.xml",
+            "verification": "official", "require_areas": True,
         },
         "municipal_json": {
             "type": "json", "enabled": False,

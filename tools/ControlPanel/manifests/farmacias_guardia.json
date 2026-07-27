@@ -1,0 +1,12 @@
+{"id":"farmacias_guardia","name":"Farmacias de guardia","description":"Consultas, actualización, publicación y servicio API.","url":"http://127.0.0.1:8788","url_env":"FARMACIAS_PANEL_URL","actions":[
+{"id":"api_status","name":"Estado API","kind":"systemd","unit":"meshnet-farmacias-api.service","operation":"status"},
+{"id":"api_start","name":"Iniciar API","kind":"systemd","unit":"meshnet-farmacias-api.service","operation":"start","mutating":true},
+{"id":"api_stop","name":"Detener API","kind":"systemd","unit":"meshnet-farmacias-api.service","operation":"stop","mutating":true,"confirm":true},
+{"id":"api_restart","name":"Reiniciar API","kind":"systemd","unit":"meshnet-farmacias-api.service","operation":"restart","mutating":true,"confirm":true},
+{"id":"timers","name":"Temporizadores","kind":"command","argv":["systemctl","list-timers","--all","meshnet-farmacias-daily.timer","meshnet-farmacias-check.timer"]},
+{"id":"status","name":"Estado de datos","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia.py","status"]},
+{"id":"preview","name":"Ver farmacias","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia.py","preview"]},
+{"id":"fetch","name":"Actualizar datos","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia.py","fetch"],"timeout":90,"mutating":true},
+{"id":"check","name":"Comprobar cambios","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia.py","check"],"timeout":90,"mutating":true},
+{"id":"publish","name":"Publicar ahora","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia.py","send","--force"],"timeout":120,"mutating":true,"confirm":true},
+{"id":"doctor","name":"Diagnóstico","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia.py","doctor"],"timeout":90}]}

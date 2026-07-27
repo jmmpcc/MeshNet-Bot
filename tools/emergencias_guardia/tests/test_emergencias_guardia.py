@@ -97,6 +97,52 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(SourceError):
             source.parse(b'<!DOCTYPE x [<!ENTITY boom "bad">]><x>&boom;</x>')
 
+    def test_datex_v37_uses_explicit_province_and_xsi_type(self):
+        xml = b"""<?xml version="1.0"?>
+        <d2LogicalModel xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+          <situation>
+            <situationRecord xsi:type="sit:Accident" id="dgt-1">
+              <validityStatus>active</validityStatus>
+              <accidentType>collision</accidentType>
+              <roadName>A-2</roadName><kilometerPoint>314.5</kilometerPoint>
+              <municipality>La Muela</municipality><province>Zaragoza</province>
+              <autonomousCommunity>Aragon</autonomousCommunity>
+              <latitude>41.58</latitude><longitude>-1.11</longitude>
+            </situationRecord>
+          </situation>
+        </d2LogicalModel>"""
+        source = Datex2Source(
+            "dgt_datex",
+            {"url": "file:///fixture.xml", "default_province": "Incorrecta"},
+            config(),
+        )
+        event = source.parse(xml)[0]
+        self.assertEqual(event.category, "traffic_collision")
+        self.assertEqual(event.province, "Zaragoza")
+        self.assertEqual(event.autonomous_region, "Aragon")
+        self.assertEqual(event.metadata["datex_record_type"], "Accident")
+
+    def test_datex_does_not_invent_missing_province(self):
+        xml = b"""<root><situation><situationRecord id="dgt-2">
+          <roadName>A-2</roadName><municipality>La Muela</municipality>
+        </situationRecord></situation></root>"""
+        source = Datex2Source(
+            "dgt_datex",
+            {"url": "file:///fixture.xml", "default_province": "Zaragoza"},
+            config(),
+        )
+        self.assertEqual(source.parse(xml)[0].province, "")
+
+    def test_datex_v37_classifies_lane_closure(self):
+        xml = b"""<root xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+          <situation><situationRecord xsi:type="sit:RoadOrCarriagewayOrLaneManagement" id="dgt-3">
+            <roadOrCarriagewayOrLaneManagementType>laneClosures</roadOrCarriagewayOrLaneManagementType>
+            <roadName>A-68</roadName><province>Zaragoza</province>
+          </situationRecord></situation>
+        </root>"""
+        source = Datex2Source("dgt_datex", {"url": "file:///fixture.xml"}, config())
+        self.assertEqual(source.parse(xml)[0].category, "lane_closed")
+
 
 class EngineTests(unittest.TestCase):
     def setUp(self):
@@ -115,6 +161,14 @@ class EngineTests(unittest.TestCase):
         for patcher in reversed(self.patchers):
             patcher.stop()
         self.temp.cleanup()
+
+    def test_national_source_requires_an_enabled_area(self):
+        cfg = config()
+        cfg["sources"]["dgt_datex"]["enabled"] = True
+        cfg["sources"]["dgt_datex"]["url"] = "file:///fixture.xml"
+        report = engine.fetch_sources(cfg, "dgt_datex")
+        self.assertFalse(report["sources"]["dgt_datex"]["ok"])
+        self.assertIn("requiere", report["sources"]["dgt_datex"]["error"])
 
     def test_merge_emits_new_update_and_resolves_after_two_misses(self):
         report = {"changes": {"new": 0, "updated": 0, "resolved": 0}}
