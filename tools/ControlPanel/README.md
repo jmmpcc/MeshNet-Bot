@@ -115,6 +115,10 @@ El panel muestra también el perfil de radio y la salida efectiva. Con
 `RADIO_PROFILE=meshcore_only` no permite seleccionar Meshtastic; si una
 configuración antigua todavía lo solicita, Farmacias cambia de forma segura a
 MeshCore al publicar para evitar el error `meshtastic_disabled_by_radio_profile`.
+Si `RADIO_PROFILE` no existe en el `.env` independiente de Farmacias, el panel
+lo indica como no definido en vez de mostrar un perfil predeterminado que no
+está realmente configurado. En ese caso, la respuesta del broker decide el
+respaldo de transporte durante la publicación.
 
 ## Pruebas
 

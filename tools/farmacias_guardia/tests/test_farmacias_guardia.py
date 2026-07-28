@@ -93,6 +93,29 @@ class FarmaciasAppTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "auto, meshcore o meshtastic"):
                 app.broadcast_target()
 
+    def test_send_retries_meshcore_when_broker_reports_meshtastic_disabled(self):
+        calls = []
+
+        def request(command, params):
+            calls.append((command, params))
+            if command == "SEND_TEXT":
+                return {
+                    "ok": False,
+                    "error": "meshtastic_disabled_by_radio_profile",
+                    "profile": "meshcore_only",
+                }
+            return {"ok": True}
+
+        with (
+            mock.patch.object(app, "broker_request", side_effect=request),
+            mock.patch.dict(os.environ, {"FARMACIAS_MESHCORE_CHANNEL": "6"}, clear=False),
+        ):
+            response, network, channel = app.send_broadcast_message("meshtastic", 3, "prueba")
+
+        self.assertTrue(response["ok"])
+        self.assertEqual((network, channel), ("meshcore", 6))
+        self.assertEqual([call[0] for call in calls], ["SEND_TEXT", "MESHCORE_SEND"])
+
     def test_normalize_generic_api_record(self):
         item = app.normalize_record({
             "title": "Farmacia Ejemplo",

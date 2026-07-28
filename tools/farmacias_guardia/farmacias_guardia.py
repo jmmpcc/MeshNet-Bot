@@ -551,7 +551,10 @@ def broker_request(command: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def radio_profile() -> str:
-    return os.getenv("RADIO_PROFILE", "meshtastic_a_meshcore_embedded_b").strip().lower()
+    # La aplicación es independiente del broker: si no se declara el perfil en
+    # su propio .env no debemos inventar uno. El broker sigue siendo la fuente
+    # de verdad y puede indicar una incompatibilidad al enviar.
+    return os.getenv("RADIO_PROFILE", "auto").strip().lower()
 
 
 def broadcast_target() -> tuple[str, int]:
@@ -595,6 +598,32 @@ def broadcast_messages(
     return byte_chunks(lines, title, max_bytes)
 
 
+def send_broadcast_message(network: str, channel: int, message: str) -> tuple[dict[str, Any], str, int]:
+    """Envía un fragmento y corrige el destino usando la respuesta real del broker."""
+    if network == "meshcore":
+        response = broker_request("MESHCORE_SEND", {"kind": "chan", "channel_idx": channel, "text": message})
+    else:
+        response = broker_request("SEND_TEXT", {
+            "ch": channel, "dest": None, "ack": 0, "origin": "farmacias",
+            "no_bridge": True, "text": message,
+        })
+    if response.get("ok") or response.get("error") != "meshtastic_disabled_by_radio_profile":
+        return response, network, channel
+
+    fallback_channel = int(os.getenv("FARMACIAS_MESHCORE_CHANNEL", "-1"))
+    if fallback_channel < 0:
+        return response, network, channel
+    print(
+        "[farmacias] el broker tiene Meshtastic deshabilitado; se reintenta por MeshCore",
+        file=sys.stderr,
+        flush=True,
+    )
+    fallback = broker_request("MESHCORE_SEND", {
+        "kind": "chan", "channel_idx": fallback_channel, "text": message,
+    })
+    return fallback, "meshcore", fallback_channel
+
+
 def send_pharmacies(pharmacies: list[Pharmacy], header: str) -> dict[str, Any]:
     """Difunde exclusivamente las farmacias indicadas con una cabecera propia."""
     if not pharmacies:
@@ -606,10 +635,7 @@ def send_pharmacies(pharmacies: list[Pharmacy], header: str) -> dict[str, Any]:
     delay = max(0, int(os.getenv("FARMACIAS_INTER_MESSAGE_DELAY_SECONDS", "8")))
     results = []
     for index, message in enumerate(messages):
-        if network == "meshcore":
-            response = broker_request("MESHCORE_SEND", {"kind": "chan", "channel_idx": channel, "text": message})
-        else:
-            response = broker_request("SEND_TEXT", {"ch": channel, "dest": None, "ack": 0, "origin": "farmacias", "no_bridge": True, "text": message})
+        response, network, channel = send_broadcast_message(network, channel, message)
         if not response.get("ok"):
             raise RuntimeError(f"broker rechazó fragmento {index + 1}: {response}")
         results.append(response)
@@ -630,10 +656,7 @@ def send_current(force: bool = False, only_if_changed: bool = False) -> dict[str
     delay = max(0, int(os.getenv("FARMACIAS_INTER_MESSAGE_DELAY_SECONDS", "8")))
     results = []
     for index, message in enumerate(messages):
-        if network == "meshcore":
-            response = broker_request("MESHCORE_SEND", {"kind": "chan", "channel_idx": channel, "text": message})
-        else:
-            response = broker_request("SEND_TEXT", {"ch": channel, "dest": None, "ack": 0, "origin": "farmacias", "no_bridge": True, "text": message})
+        response, network, channel = send_broadcast_message(network, channel, message)
         if not response.get("ok"):
             raise RuntimeError(f"broker rechazó fragmento {index + 1}: {response}")
         results.append(response)
