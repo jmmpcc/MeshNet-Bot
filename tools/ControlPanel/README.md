@@ -13,6 +13,8 @@ Panel web independiente para supervisar y operar las aplicaciones instaladas en
 - ejecuta únicamente acciones CLI declaradas por el administrador;
 - convierte los resultados técnicos en tarjetas, campos y listas legibles;
 - permite elegir severidad y categorías propagables de Emergencias;
+- muestra y permite editar los canales MeshCore y Meshtastic de Farmacias y de
+  cada ruta de Emergencias (emergencias, servicios y meteorología);
 - exige confirmación para paradas, reinicios, publicaciones y notificaciones.
 
 Los manifiestos incluidos cubren Farmacias y Emergencias: estado, actualización,
@@ -96,6 +98,23 @@ La tarjeta de Emergencias permite seleccionar:
 Guardar el filtro modifica la configuración persistente de
 `emergencias_guardia`. No envía mensajes inmediatamente; se aplica a las
 próximas comprobaciones y propagaciones.
+
+## Canales de comunicación
+
+Las tarjetas de Farmacias y Emergencias muestran el transporte activo y los
+índices de canal de MeshCore y Meshtastic. El valor `-1` deja ese destino sin
+configurar. Emergencias guarda los canales por separado para las rutas de
+emergencias, servicios y meteorología; Farmacias actualiza únicamente esas tres
+claves públicas en su `.env`, conservando el resto de variables y secretos.
+
+Después de cambiar los canales de Farmacias, reinicie su API desde la propia
+tarjeta para que el proceso vuelva a cargar el `.env`. Emergencias lee su
+configuración persistente en cada ejecución programada.
+
+El panel muestra también el perfil de radio y la salida efectiva. Con
+`RADIO_PROFILE=meshcore_only` no permite seleccionar Meshtastic; si una
+configuración antigua todavía lo solicita, Farmacias cambia de forma segura a
+MeshCore al publicar para evitar el error `meshtastic_disabled_by_radio_profile`.
 
 ## Pruebas
 

@@ -305,7 +305,12 @@ def _notifications(config: dict[str, Any], args: argparse.Namespace) -> int:
             "enabled": notifications.get("enabled", False),
             "transport": notifications.get("transport"),
             "routes": {
-                route: target_for(config, route) for route in ROUTE_PREFIXES
+                route: {
+                    **target_for(config, route),
+                    "meshcore_channel": int(notifications["routes"][route]["meshcore_channel"]),
+                    "meshtastic_channel": int(notifications["routes"][route]["meshtastic_channel"]),
+                }
+                for route in ROUTE_PREFIXES
             },
             "incremental": {
                 "initialized": incremental.get("initialized", False),
