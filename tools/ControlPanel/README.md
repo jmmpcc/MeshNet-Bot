@@ -91,7 +91,8 @@ unidades, timeout (1–300 s) y duplicados se validan al arrancar.
 
 La tarjeta de Emergencias permite seleccionar:
 
-- severidad mínima: baja, media, alta o crítica;
+- severidades propagables, seleccionables individualmente: baja, media, alta y
+  crítica;
 - categorías propagables: incendios, tráfico, cortes, meteorología, servicios,
   seguridad pública y otras.
 
@@ -108,9 +109,9 @@ emergencias, servicios y meteorología, mientras que el transporte es único par
 las tres rutas. Farmacias actualiza únicamente esas tres claves públicas en su
 `.env`, conservando el resto de variables y secretos.
 
-Los controles de canales solo aparecen cuando la aplicación está habilitada.
-La API aplica la misma comprobación y rechaza cualquier lectura o escritura de
-canales mientras la tarjeta permanezca deshabilitada.
+Los controles de canales y filtros solo aparecen cuando la aplicación está
+habilitada. La API aplica la misma comprobación y rechaza cualquier lectura o
+escritura de esta configuración mientras la tarjeta permanezca deshabilitada.
 
 Después de cambiar los canales de Farmacias, reinicie su API desde la propia
 tarjeta para que el proceso vuelva a cargar el `.env`. Emergencias lee su

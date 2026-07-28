@@ -66,7 +66,9 @@ def parser() -> argparse.ArgumentParser:
     )
     filters.add_parser("show")
     filters_set = filters.add_parser("set")
-    filters_set.add_argument("--minimum-severity", required=True, choices=VALID_SEVERITIES)
+    severity_filter = filters_set.add_mutually_exclusive_group(required=True)
+    severity_filter.add_argument("--severities")
+    severity_filter.add_argument("--minimum-severity", choices=VALID_SEVERITIES)
     filters_set.add_argument("--categories", required=True)
 
     source = commands.add_parser("source", help="gestiona conectores").add_subparsers(
@@ -234,9 +236,16 @@ def _filters(config: dict[str, Any], args: argparse.Namespace) -> int:
         "minimum_severity": "low",
         "categories": sorted(VALID_CATEGORIES),
     })
+    configured_severities = current.get("severities")
+    if configured_severities is None:
+        minimum_rank = VALID_SEVERITIES.index(current.get("minimum_severity", "low"))
+        configured_severities = VALID_SEVERITIES[minimum_rank:]
     if args.filters_command == "show":
         print_json({
-            "minimum_severity": current.get("minimum_severity", "low"),
+            "severities": [
+                {"name": name, "enabled": name in set(configured_severities)}
+                for name in VALID_SEVERITIES
+            ],
             "categories": [
                 {"name": name, "enabled": name in set(current.get("categories", []))}
                 for name in sorted(VALID_CATEGORIES)
@@ -248,12 +257,23 @@ def _filters(config: dict[str, Any], args: argparse.Namespace) -> int:
     if unknown:
         print_json({"ok": False, "error": "categorías desconocidas", "categories": sorted(unknown)})
         return 2
-    current["minimum_severity"] = args.minimum_severity
+    if args.severities is not None:
+        severities = {item.strip() for item in args.severities.split(",") if item.strip()}
+        unknown_severities = severities - set(VALID_SEVERITIES)
+        if unknown_severities:
+            print_json({"ok": False, "error": "severidades desconocidas",
+                        "severities": sorted(unknown_severities)})
+            return 2
+    else:
+        minimum_rank = VALID_SEVERITIES.index(args.minimum_severity)
+        severities = set(VALID_SEVERITIES[minimum_rank:])
+    current.pop("minimum_severity", None)
+    current["severities"] = [name for name in VALID_SEVERITIES if name in severities]
     current["categories"] = sorted(requested)
     save_config(config)
     print_json({
         "ok": True,
-        "minimum_severity": args.minimum_severity,
+        "severities": current["severities"],
         "categories": sorted(requested),
         "note": "El filtro se aplicará en las próximas comprobaciones y propagaciones.",
     })
