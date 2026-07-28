@@ -1,7 +1,0 @@
-# Instalar como /etc/sudoers.d/meshnet-control-panel y validar con visudo -cf.
-meshnet ALL=(root) NOPASSWD: /usr/bin/systemctl start meshnet-farmacias-api.service
-meshnet ALL=(root) NOPASSWD: /usr/bin/systemctl stop meshnet-farmacias-api.service
-meshnet ALL=(root) NOPASSWD: /usr/bin/systemctl restart meshnet-farmacias-api.service
-meshnet ALL=(root) NOPASSWD: /usr/bin/systemctl start meshnet-emergencias-api.service
-meshnet ALL=(root) NOPASSWD: /usr/bin/systemctl stop meshnet-emergencias-api.service
-meshnet ALL=(root) NOPASSWD: /usr/bin/systemctl restart meshnet-emergencias-api.service

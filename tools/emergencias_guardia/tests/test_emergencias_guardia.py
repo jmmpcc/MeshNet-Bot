@@ -12,7 +12,7 @@ sys.path.insert(0, str(APP_DIR))
 from emergencias import engine, storage
 from emergencias.api import query_from_text
 from emergencias.config import DEFAULT_CONFIG
-from emergencias.formatters import byte_chunks, compact_messages
+from emergencias.formatters import byte_chunks, compact_messages, google_maps_url
 from emergencias.models import Event
 from emergencias import notifier
 from emergencias.sources.base import SourceError
@@ -222,12 +222,31 @@ class ApiAndFormattingTests(unittest.TestCase):
             title="Colisión con vehículo y calzada afectada",
             description="Carril derecho cerrado por intervención de emergencias.",
             road="A-2", kilometre=314.5, municipality="La Muela", province="Zaragoza",
+            latitude=41.5801, longitude=-1.1187,
         )
         messages = byte_chunks([event], 140)
         self.assertTrue(messages)
         self.assertTrue(all(len(message.encode("utf-8")) <= 140 for message in messages))
         self.assertIn("ALTA · COLISIÓN", messages[0])
         self.assertIn("Dgt", messages[0])
+        self.assertIn("https://maps.google.com/?q=41.5801,-1.1187", messages[0])
+
+    def test_google_maps_link_requires_valid_coordinates(self):
+        valid = Event(
+            "dgt:map", "dgt_datex", "map", "traffic_obstruction",
+            latitude=41.64882, longitude=-0.88909,
+        )
+        missing = Event("dgt:none", "dgt_datex", "none", "traffic_obstruction")
+        invalid = Event(
+            "dgt:bad", "dgt_datex", "bad", "traffic_obstruction",
+            latitude=95, longitude=-0.88,
+        )
+        self.assertEqual(
+            google_maps_url(valid),
+            "https://maps.google.com/?q=41.64882,-0.88909",
+        )
+        self.assertEqual(google_maps_url(missing), "")
+        self.assertEqual(google_maps_url(invalid), "")
 
     def test_each_compact_message_is_a_complete_event(self):
         events = [

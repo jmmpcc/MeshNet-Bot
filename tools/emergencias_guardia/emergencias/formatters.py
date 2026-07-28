@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 
 from .models import Event
 
@@ -48,12 +49,34 @@ def format_event(event: Event) -> list[str]:
         lines.append(event.description)
     if event.verification == "satellite_detection":
         lines.append("Detección térmica no confirmada oficialmente.")
+    map_url = google_maps_url(event)
+    if map_url:
+        lines.append(f"Mapa: {map_url}")
     lines.append(f"Fuente: {source_label(event.source)}")
     return lines
 
 
 def source_label(source: str) -> str:
     return SOURCE_LABELS.get(source, source.replace("_", " ").strip().title())
+
+
+def google_maps_url(event: Event) -> str:
+    """Devuelve un enlace compacto solo para coordenadas geográficas válidas."""
+    if event.latitude is None or event.longitude is None:
+        return ""
+    latitude = float(event.latitude)
+    longitude = float(event.longitude)
+    if (
+        not math.isfinite(latitude)
+        or not math.isfinite(longitude)
+        or not -90 <= latitude <= 90
+        or not -180 <= longitude <= 180
+    ):
+        return ""
+    return (
+        "https://maps.google.com/?q="
+        f"{_coordinate(latitude)},{_coordinate(longitude)}"
+    )
 
 
 def short_date(value: str) -> str:
@@ -96,8 +119,11 @@ def _compact_event(event: Event, header: str, max_bytes: int) -> str:
     detail = _sentence(event.description, 72)
     end = short_date(event.expected_end)
     source = source_label(event.source)
+    map_url = google_maps_url(event)
 
     required = [header, f"{severity} · {category}", _trim_text(place or event.title, 55)]
+    if map_url:
+        required.append(map_url)
     footer = " · ".join(part for part in (
         f"Hasta {end}" if end else "",
         source,
@@ -116,7 +142,8 @@ def _compact_event(event: Event, header: str, max_bytes: int) -> str:
     if len(message.encode("utf-8")) <= max_bytes:
         return message
 
-    fixed = "\n".join(required[:2] + ([footer] if footer else []))
+    fixed_lines = required[:2] + ([map_url] if map_url else []) + ([footer] if footer else [])
+    fixed = "\n".join(fixed_lines)
     allowance = max(12, max_bytes - len(fixed.encode("utf-8")) - 1)
     required[2] = _trim_utf8(required[2], allowance)
     message = "\n".join(required + ([footer] if footer else []))
@@ -172,3 +199,7 @@ def _trim_utf8(text: str, limit: int) -> str:
     if len(encoded) <= limit:
         return text
     return encoded[:limit].decode("utf-8", errors="ignore").rstrip()
+
+
+def _coordinate(value: float) -> str:
+    return f"{value:.5f}".rstrip("0").rstrip(".")

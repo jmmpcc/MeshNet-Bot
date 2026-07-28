@@ -169,9 +169,6 @@ def execute_action(action: ActionDefinition) -> dict[str, Any]:
     argv = list(action.argv)
     if action.kind == "systemd":
         argv = ["systemctl", action.operation, action.unit]
-        if action.mutating:
-            argv.insert(0, "sudo")
-            argv.insert(1, "-n")
     try:
         done = subprocess.run(
             argv, cwd=REPO_DIR, capture_output=True, text=True, encoding="utf-8",

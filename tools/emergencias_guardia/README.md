@@ -238,14 +238,29 @@ El broker aplica:
 - ejecución en un hilo para no bloquear el receptor;
 - `no_bridge` en respuestas Meshtastic.
 
-No se realizan avisos automáticos. Las incidencias municipales actuales solo
-se ofrecen bajo demanda.
+Las consultas DM y los avisos automáticos son flujos independientes:
+
+- el broker atiende las consultas DM mediante la API local;
+- el temporizador de `emergencias_guardia` recolecta fuentes y publica
+  únicamente novedades incrementales mediante el control del broker;
+- la aplicación no abre una segunda conexión MeshCore o Meshtastic.
 
 ## Formato y enrutamiento por canales
 
 Cada incidencia se convierte en un mensaje autocontenido de hasta 140 bytes.
 No se divide una descripción larga en partes huérfanas: se conserva siempre
 gravedad, categoría, ubicación, vigencia y fuente.
+
+Cuando la fuente aporta coordenadas válidas, el mensaje incluye un enlace
+directo y compacto a Google Maps:
+
+```text
+https://maps.google.com/?q=41.5801,-1.1187
+```
+
+El enlace se genera localmente, sin acortadores ni servicios intermedios, y se
+omite si faltan las coordenadas o están fuera de rango. El formateador conserva
+el límite máximo configurado de 140 bytes.
 
 Ejemplo:
 
@@ -289,9 +304,12 @@ python3 emergencias_guardia.py notify enable
 
 En Meshtastic se sustituye `meshcore` por `meshtastic`.
 
-Antes de automatizar, el envío se prueba manualmente:
+Antes de automatizar, detenga temporalmente el temporizador, habilite las
+notificaciones y pruebe el envío manual:
 
 ```bash
+sudo systemctl stop meshnet-emergencias-check.timer
+python3 emergencias_guardia.py notify enable
 python3 emergencias_guardia.py notify send servicios
 python3 emergencias_guardia.py notify send emergencias
 python3 emergencias_guardia.py notify send meteo
@@ -304,8 +322,9 @@ exactamente la misma difusión; `--force` permite repetirla deliberadamente:
 python3 emergencias_guardia.py notify send emergencias --force
 ```
 
-La automatización no se habilitará hasta verificar los índices y el contenido
-real en cada canal.
+Una ruta sin eventos elegibles devuelve `no_eligible_events` y no transmite.
+La automatización no debe reactivarse hasta verificar los índices y el
+contenido real en cada canal.
 
 ## Avisos incrementales automáticos
 
@@ -331,25 +350,70 @@ Si las notificaciones están desactivadas, `check --notify-changes` actualiza la
 línea base sin acumular mensajes pendientes. Solo se encolan rutas cuyo canal
 está configurado.
 
-Secuencia segura de activación:
+### Primera activación segura
 
 ```bash
-# 1. Crear línea base sin transmitir
+# 1. Evitar que el temporizador se ejecute durante la configuración
+sudo systemctl stop meshnet-emergencias-check.timer
+
+# 2. Crear línea base sin transmitir
 python3 emergencias_guardia.py notify disable
 python3 emergencias_guardia.py check --notify-changes
 
-# 2. Revisar estado y salida
+# 3. Revisar estado y salida
 python3 emergencias_guardia.py notify status
 python3 emergencias_guardia.py notify preview
 
-# 3. Configurar canales, probar manualmente y habilitar
+# 4. Configurar los canales reales
 python3 emergencias_guardia.py notify set-channel servicios meshcore INDICE
-python3 emergencias_guardia.py notify send servicios
+python3 emergencias_guardia.py notify set-channel emergencias meshcore INDICE
+python3 emergencias_guardia.py notify set-channel meteo meshcore INDICE
+
+# 5. Habilitar y reanudar la recolección automática
 python3 emergencias_guardia.py notify enable
+sudo systemctl enable --now meshnet-emergencias-check.timer
+sudo systemctl start meshnet-emergencias-check.service
 ```
 
 `notify status` muestra si existe línea base, número de eventos observados,
 eventos ya difundidos y elementos pendientes.
+
+### Añadir DGT a una instalación municipal ya activa
+
+No habilite DGT directamente mientras el temporizador transmite: los eventos
+ya presentes en DGT podrían interpretarse como nuevos respecto a la línea base
+municipal. Utilice esta secuencia para incorporarlos silenciosamente:
+
+```bash
+cd /home/meshnet/MeshNet-Bot/tools/emergencias_guardia
+
+sudo systemctl stop meshnet-emergencias-check.timer
+python3 emergencias_guardia.py notify disable
+
+python3 emergencias_guardia.py area add province Zaragoza
+python3 emergencias_guardia.py source set-url dgt_datex \
+  'https://nap.dgt.es/datex2/v3/dgt/SituationPublication/datex2_v37.xml'
+python3 emergencias_guardia.py source test dgt_datex
+python3 emergencias_guardia.py source enable dgt_datex
+
+# Actualiza la línea base con DGT sin encolar ni transmitir
+python3 emergencias_guardia.py check --notify-changes
+
+python3 emergencias_guardia.py notify enable
+sudo systemctl enable --now meshnet-emergencias-check.timer
+sudo systemctl start meshnet-emergencias-check.service
+```
+
+`source test dgt_datex` debe devolver `ok: true`, un total nacional en
+`records` y un valor `accepted` mayor que cero cuando existan incidencias en el
+área configurada. El número exacto varía con el estado de las carreteras.
+
+Compruebe cuántos eventos DGT quedaron incorporados:
+
+```bash
+python3 emergencias_guardia.py list --json |
+  jq '[.events[] | select(.source == "dgt_datex")] | length'
+```
 
 ## systemd
 
@@ -386,6 +450,154 @@ El temporizador consulta cada dos minutos con un pequeño retardo aleatorio y
 ejecuta `check --notify-changes`. Con notificaciones desactivadas solo mantiene
 la API, el histórico y la línea base. Cuando se habilitan, procesa el spool
 incremental según las reglas anteriores.
+
+La unidad `meshnet-emergencias-check.service` es de tipo `oneshot`. Es normal
+que aparezca como `inactive (dead)` después de una ejecución correcta. Debe
+terminar con `status=0/SUCCESS`; la unidad que permanece activa es
+`meshnet-emergencias-check.timer`.
+
+### Comprobación operativa
+
+```bash
+cd /home/meshnet/MeshNet-Bot/tools/emergencias_guardia
+
+python3 emergencias_guardia.py doctor
+python3 emergencias_guardia.py source list
+python3 emergencias_guardia.py area list
+python3 emergencias_guardia.py notify status
+
+systemctl status meshnet-emergencias-api.service --no-pager
+systemctl status meshnet-emergencias-check.timer --no-pager
+systemctl list-timers --all | grep emergencias
+
+journalctl -u meshnet-emergencias-check.service -n 100 --no-pager
+curl -s http://127.0.0.1:8789/health
+```
+
+Una instalación preparada para emitir debe mostrar:
+
+- `municipal_json.enabled: true` y, si se usa, `dgt_datex.enabled: true`;
+- un área de provincia, municipio o radio habilitada;
+- `notify status` con `enabled: true`, `initialized: true` y `pending: 0`;
+- transporte `meshcore` o `meshtastic` y canales no negativos;
+- temporizador `active (waiting)` con una fecha futura en `Trigger`/`NEXT`;
+- cada fuente con `ok: true` en el diario;
+- `new`, `updated`, `resolved` y `sent` a cero cuando no hay novedades.
+
+La salida normal de cada ejecución contiene dos bloques:
+
+```json
+{
+  "fetch": {
+    "changes": {"new": 0, "updated": 0, "resolved": 0},
+    "sources": {}
+  },
+  "notifications": {
+    "queued": {"new": 0, "updated": 0, "resolved": 0},
+    "sent": 0,
+    "pending": 0
+  }
+}
+```
+
+Cuando exista una novedad, primero aumentará `queued`. Tras la entrega
+confirmada aumentarán `sent` y `delivered`. Si falla el transporte,
+`pending` conservará el aviso para reintentar.
+
+### Diagnóstico
+
+#### El temporizador muestra `active (elapsed)` y `Trigger: n/a`
+
+El temporizador se inició después de que venciera `OnBootSec` y todavía no
+tiene una ejecución de servicio desde la que calcular `OnUnitActiveSec`.
+Habilítelo para futuros reinicios y fuerce una ejecución:
+
+```bash
+sudo systemctl enable --now meshnet-emergencias-check.timer
+sudo systemctl start meshnet-emergencias-check.service
+systemctl list-timers --all | grep emergencias
+```
+
+Debe pasar a `active (waiting)` y mostrar la próxima ejecución.
+
+#### DGT devuelve `records` pero `accepted: 0`
+
+Primero confirme que el área está habilitada:
+
+```bash
+python3 emergencias_guardia.py area list
+```
+
+El parser DATEX II v3.7 debe leer explícitamente el campo `province`. Verifique
+que la copia desplegada contiene la revisión actual:
+
+```bash
+grep -nE 'province=first_text|xsi_type|laneclosures' \
+  emergencias/sources/datex2.py
+```
+
+Debe incluir:
+
+```python
+province=first_text(record, "province", "administrativeArea"),
+```
+
+Si aún aparece:
+
+```python
+province=first_text(record, "administrativeArea") or self.config.get("default_province", ""),
+```
+
+la Raspberry conserva el parser anterior. Sustituya el archivo completo; no
+cambie solo esa línea, porque la revisión v3.7 también interpreta `xsi:type` y
+las categorías de cierre de carriles. Después:
+
+```bash
+python3 -m py_compile emergencias/sources/datex2.py
+python3 emergencias_guardia.py notify disable
+python3 emergencias_guardia.py source test dgt_datex
+```
+
+No reactive las notificaciones hasta obtener `ok: true` y revisar `accepted`.
+
+#### La fuente falla temporalmente
+
+Una descarga fallida conserva la última copia válida y no resuelve todos los
+eventos. Revise `last_error` y el diario. La resolución solo se produce tras
+dos lecturas correctas consecutivas en las que el evento ya no aparece.
+
+#### Hay avisos pendientes
+
+```bash
+python3 emergencias_guardia.py notify status
+journalctl -u meshnet-emergencias-check.service -n 100 --no-pager
+```
+
+`pending` mayor que cero indica que la novedad está en el spool. Compruebe el
+broker, el índice del canal y el transporte; no borre `data/state.json`, porque
+contiene la línea base, los entregados y los reintentos.
+
+### Parada y reanudación
+
+Detener únicamente las consultas automáticas mantiene disponibles la API y las
+consultas DM:
+
+```bash
+sudo systemctl disable --now meshnet-emergencias-check.timer
+```
+
+Reanudar:
+
+```bash
+sudo systemctl enable --now meshnet-emergencias-check.timer
+sudo systemctl start meshnet-emergencias-check.service
+```
+
+Detener también la API local:
+
+```bash
+sudo systemctl disable --now meshnet-emergencias-api.service
+```
 
 ## Validación
 

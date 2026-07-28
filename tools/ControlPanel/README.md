@@ -43,21 +43,21 @@ token se conserva solamente en `sessionStorage` del navegador.
 
 ## systemd y permisos
 
-La unidad `systemd/meshnet-control-panel.service` inicia el panel. Añada
-`EnvironmentFile=/home/meshnet/.config/meshnet-control-panel.env` en un override
-y guarde allí `CONTROLPANEL_TOKEN=...` con permisos `0600`.
+La unidad `systemd/meshnet-control-panel.service` inicia el panel y lee
+`/home/meshnet/.config/meshnet-control-panel.env`. Guarde allí
+`CONTROLPANEL_TOKEN=...` con permisos `0600`.
 
 Las acciones de lectura usan `systemctl` sin privilegios. Las mutaciones usan
-`sudo -n systemctl` y requieren la lista mínima incluida:
+PolicyKit y requieren la regla mínima incluida:
 
 ```bash
-sudo install -o root -g root -m 0440 \
-  systemd/meshnet-control-panel.sudoers /etc/sudoers.d/meshnet-control-panel
-sudo visudo -cf /etc/sudoers.d/meshnet-control-panel
+sudo install -o root -g root -m 0644 \
+  systemd/50-meshnet-control-panel.rules \
+  /etc/polkit-1/rules.d/50-meshnet-control-panel.rules
 ```
 
 No se concede acceso general a `systemctl`, Python ni un shell. Al registrar una
-aplicación futura, añada al `sudoers` solo sus operaciones y unidades exactas.
+aplicación futura, añada a la regla solo sus operaciones y unidades exactas.
 
 ## Formato de manifiesto
 
