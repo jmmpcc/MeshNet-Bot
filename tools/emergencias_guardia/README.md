@@ -109,6 +109,23 @@ No habilite una fuente hasta confirmar su licencia, estabilidad y semántica.
 `source test` descarga y normaliza; por ello actualiza la copia local y el
 histórico, pero no envía mensajes por radio.
 
+## Filtro de propagación
+
+La recogida conserva todas las incidencias aceptadas. De forma independiente se
+puede decidir qué severidades y categorías podrán difundirse:
+
+```bash
+python3 emergencias_guardia.py filters show
+python3 emergencias_guardia.py filters set \
+  --minimum-severity high \
+  --categories wildfire,urban_fire,road_closed,traffic_collision
+```
+
+Las severidades son `low`, `medium`, `high` y `critical`. Una lista de categorías
+vacía bloquea toda propagación. Cambiar el filtro no envía mensajes por sí mismo;
+se aplica en las siguientes ejecuciones de `check --notify-changes`. El mismo
+ajuste está disponible visualmente en MeshNet ControlPanel.
+
 ## Áreas y categorías
 
 ```bash

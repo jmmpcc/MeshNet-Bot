@@ -61,6 +61,14 @@ def parser() -> argparse.ArgumentParser:
         item = category.add_parser(action)
         item.add_argument("name", choices=sorted(VALID_CATEGORIES))
 
+    filters = commands.add_parser("filters", help="gestiona qué alertas se propagan").add_subparsers(
+        dest="filters_command", required=True
+    )
+    filters.add_parser("show")
+    filters_set = filters.add_parser("set")
+    filters_set.add_argument("--minimum-severity", required=True, choices=VALID_SEVERITIES)
+    filters_set.add_argument("--categories", required=True)
+
     source = commands.add_parser("source", help="gestiona conectores").add_subparsers(
         dest="source_command", required=True
     )
@@ -154,6 +162,8 @@ def main(argv: list[str] | None = None) -> int:
         _areas(config, args)
     elif args.command == "category":
         _categories(config, args)
+    elif args.command == "filters":
+        return _filters(config, args)
     elif args.command == "source":
         return _sources(config, args)
     elif args.command == "notify":
@@ -217,6 +227,37 @@ def _categories(config: dict[str, Any], args: argparse.Namespace) -> None:
     config["filters"]["categories"] = sorted(enabled)
     save_config(config)
     print_json({"ok": True, "category": args.name, "enabled": args.name in enabled})
+
+
+def _filters(config: dict[str, Any], args: argparse.Namespace) -> int:
+    current = config.setdefault("notifications", {}).setdefault("propagation_filter", {
+        "minimum_severity": "low",
+        "categories": sorted(VALID_CATEGORIES),
+    })
+    if args.filters_command == "show":
+        print_json({
+            "minimum_severity": current.get("minimum_severity", "low"),
+            "categories": [
+                {"name": name, "enabled": name in set(current.get("categories", []))}
+                for name in sorted(VALID_CATEGORIES)
+            ],
+        })
+        return 0
+    requested = {item.strip() for item in args.categories.split(",") if item.strip()}
+    unknown = requested - VALID_CATEGORIES
+    if unknown:
+        print_json({"ok": False, "error": "categorías desconocidas", "categories": sorted(unknown)})
+        return 2
+    current["minimum_severity"] = args.minimum_severity
+    current["categories"] = sorted(requested)
+    save_config(config)
+    print_json({
+        "ok": True,
+        "minimum_severity": args.minimum_severity,
+        "categories": sorted(requested),
+        "note": "El filtro se aplicará en las próximas comprobaciones y propagaciones.",
+    })
+    return 0
 
 
 def _sources(config: dict[str, Any], args: argparse.Namespace) -> int:

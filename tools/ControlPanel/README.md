@@ -11,7 +11,8 @@ Panel web independiente para supervisar y operar las aplicaciones instaladas en
 - inicia, detiene y reinicia sus servicios API;
 - consulta servicios y temporizadores;
 - ejecuta únicamente acciones CLI declaradas por el administrador;
-- muestra resultados JSON, texto y errores con salida y timeout limitados;
+- convierte los resultados técnicos en tarjetas, campos y listas legibles;
+- permite elegir severidad y categorías propagables de Emergencias;
 - exige confirmación para paradas, reinicios, publicaciones y notificaciones.
 
 Los manifiestos incluidos cubren Farmacias y Emergencias: estado, actualización,
@@ -23,29 +24,30 @@ El navegador nunca puede enviar un comando, argumentos, ruta o unidad systemd.
 ## Instalación
 
 ```bash
-cd tools/ControlPanel
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-export CONTROLPANEL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-.venv/bin/python control_panel.py
+cd ~/MeshNet-Bot/tools/ControlPanel
+chmod +x start_control_panel.sh
+./start_control_panel.sh
 ```
 
-Escucha por defecto en `http://127.0.0.1:8790`. Variables:
+El script crea `.venv`, instala las dependencias si faltan, muestra la dirección
+local y de red, y abre el navegador automáticamente cuando existe un escritorio
+gráfico. En una Raspberry sin escritorio, abra desde otro equipo la dirección
+indicada, por ejemplo `http://192.168.1.69:8790`.
+
+El ejecutable directo escucha en `127.0.0.1`; el script escucha en `0.0.0.0`
+para permitir acceso desde la red privada. Variables:
 
 - `CONTROLPANEL_HOST` y `CONTROLPANEL_PORT`: escucha;
-- `CONTROLPANEL_TOKEN`: secreto obligatorio para habilitar o ejecutar acciones;
 - `CONTROLPANEL_STATE`: archivo de estado;
 - `CONTROLPANEL_MANIFESTS`: directorio alternativo de manifiestos.
 
-Sin token, las consultas siguen disponibles localmente, pero cualquier escritura
-devuelve `503`. Para acceso en red use HTTPS mediante un proxy autenticado. El
-token se conserva solamente en `sessionStorage` del navegador.
+El panel no solicita token. Debe publicarse únicamente en una red privada y no
+exponerse directamente a Internet, ya que contiene acciones operativas.
 
 ## systemd y permisos
 
-La unidad `systemd/meshnet-control-panel.service` inicia el panel y lee
-`/home/meshnet/.config/meshnet-control-panel.env`. Guarde allí
-`CONTROLPANEL_TOKEN=...` con permisos `0600`.
+La unidad `systemd/meshnet-control-panel.service` inicia el panel de forma
+permanente.
 
 Las acciones de lectura usan `systemctl` sin privilegios. Las mutaciones usan
 PolicyKit y requieren la regla mínima incluida:
@@ -82,6 +84,18 @@ aplicación futura, añada a la regla solo sus operaciones y unidades exactas.
 Tipos permitidos: `command` con un `argv` fijo, y `systemd` con una operación
 entre `status`, `start`, `stop`, `restart`, `enable` y `disable`. Los ids,
 unidades, timeout (1–300 s) y duplicados se validan al arrancar.
+
+## Filtros de Emergencias
+
+La tarjeta de Emergencias permite seleccionar:
+
+- severidad mínima: baja, media, alta o crítica;
+- categorías propagables: incendios, tráfico, cortes, meteorología, servicios,
+  seguridad pública y otras.
+
+Guardar el filtro modifica la configuración persistente de
+`emergencias_guardia`. No envía mensajes inmediatamente; se aplica a las
+próximas comprobaciones y propagaciones.
 
 ## Pruebas
 

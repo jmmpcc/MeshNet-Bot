@@ -11,6 +11,8 @@
 {"id":"areas","name":"Ver áreas","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","area","list"]},
 {"id":"categories","name":"Ver categorías","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","category","list"]},
 {"id":"notifications","name":"Estado avisos","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","notify","status"]},
+{"id":"test_zaragoza","name":"Probar fuente Zaragoza","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","source","test","municipal_json"],"timeout":120,"mutating":true},
+{"id":"test_dgt","name":"Probar fuente DGT","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","source","test","dgt_datex"],"timeout":120,"mutating":true},
 {"id":"fetch","name":"Actualizar datos","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","fetch"],"timeout":120,"mutating":true},
 {"id":"check","name":"Comprobar y avisar","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","check","--notify-changes"],"timeout":120,"mutating":true,"confirm":true},
 {"id":"doctor","name":"Diagnóstico","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","doctor"],"timeout":90}]}

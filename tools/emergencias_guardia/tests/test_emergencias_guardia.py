@@ -204,6 +204,35 @@ class EngineTests(unittest.TestCase):
 
 
 class ApiAndFormattingTests(unittest.TestCase):
+    def test_filters_cli_updates_minimum_severity_and_categories(self):
+        cfg = config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.json"
+            with mock.patch("emergencias.cli.load_config", return_value=cfg), \
+                 mock.patch("emergencias.cli.save_config") as save:
+                from emergencias.cli import main
+                result = main([
+                    "filters", "set", "--minimum-severity", "high",
+                    "--categories", "wildfire,road_closed",
+                ])
+                self.assertEqual(result, 0)
+                saved = save.call_args.args[0]
+                propagation = saved["notifications"]["propagation_filter"]
+                self.assertEqual(propagation["minimum_severity"], "high")
+                self.assertEqual(propagation["categories"], ["road_closed", "wildfire"])
+
+    def test_propagation_filter_does_not_remove_collected_events(self):
+        cfg = config()
+        cfg["notifications"]["propagation_filter"] = {
+            "minimum_severity": "high", "categories": ["road_closed"],
+        }
+        medium = Event("x:1", "x", "1", "road_closed", severity="medium")
+        other = Event("x:2", "x", "2", "wildfire", severity="critical")
+        high = Event("x:3", "x", "3", "road_closed", severity="high")
+        self.assertIsNone(notifier.route_event(medium, cfg))
+        self.assertIsNone(notifier.route_event(other, cfg))
+        self.assertEqual(notifier.route_event(high, cfg), "emergencias")
+
     def test_systemd_uses_incremental_check_without_direct_radio_process(self):
         systemd = APP_DIR / "systemd"
         service = (systemd / "meshnet-emergencias-check.service").read_text(encoding="utf-8")

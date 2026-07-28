@@ -45,15 +45,16 @@ def test_probe_reports_connection_errors(monkeypatch):
 def test_dashboard_escapes_dynamic_values():
     assert "innerHTML=d.tools.map" in web_admin.DASHBOARD
     assert "const esc=" in web_admin.DASHBOARD
+    assert "Token de ControlPanel" not in web_admin.DASHBOARD
+    assert "JSON.stringify(d.data" not in web_admin.DASHBOARD
 
 
 def test_api_can_enable_allowlisted_tool(tmp_path):
     item = registry(tmp_path)
-    client = TestClient(web_admin.create_app(item, token="secret"))
-    headers = {"Authorization": "Bearer secret"}
-    assert client.get("/api/tools", headers=headers).json()["tools"][0]["enabled"] is False
+    client = TestClient(web_admin.create_app(item))
+    assert client.get("/api/tools").json()["tools"][0]["enabled"] is False
 
-    response = client.put("/api/tools/demo/enabled", json={"enabled": True}, headers=headers)
+    response = client.put("/api/tools/demo/enabled", json={"enabled": True})
 
     assert response.status_code == 200
     assert response.json() == {"id": "demo", "enabled": True}
@@ -63,12 +64,6 @@ def test_api_blocks_health_for_disabled_tool(tmp_path):
     client = TestClient(web_admin.create_app(registry(tmp_path)))
     response = client.get("/api/tools/demo/health")
     assert response.status_code == 409
-
-
-def test_api_rejects_writes_without_configured_token(tmp_path):
-    client = TestClient(web_admin.create_app(registry(tmp_path), token=""))
-    response = client.put("/api/tools/demo/enabled", json={"enabled": True})
-    assert response.status_code == 503
 
 
 def test_manifest_loader_discovers_future_tools(tmp_path):
@@ -97,11 +92,10 @@ def test_action_uses_only_server_side_allowlist(tmp_path, monkeypatch):
         return Result()
 
     monkeypatch.setattr(web_admin.subprocess, "run", fake_run)
-    client = TestClient(web_admin.create_app(item, token="secret"))
+    client = TestClient(web_admin.create_app(item))
     response = client.post(
         "/api/tools/demo/actions/inspect",
         json={"confirmed": False, "argv": ["evil"]},
-        headers={"Authorization": "Bearer secret"},
     )
     assert response.status_code == 200
     assert seen["argv"] == ["program", "status"]
@@ -115,9 +109,8 @@ def test_confirmed_action_requires_confirmation(tmp_path, monkeypatch):
     tools = (web_admin.ToolDefinition("demo", "Demo", "Test", "http://demo", actions=(action,)),)
     item = web_admin.ToolRegistry(tmp_path / "state.json", tools)
     item.set_enabled("demo", True)
-    client = TestClient(web_admin.create_app(item, token="secret"))
+    client = TestClient(web_admin.create_app(item))
     response = client.post(
         "/api/tools/demo/actions/stop", json={"confirmed": False},
-        headers={"Authorization": "Bearer secret"},
     )
     assert response.status_code == 409

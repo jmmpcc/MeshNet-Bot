@@ -31,6 +31,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_events_per_broadcast": 3,
         "inter_message_delay_seconds": 8,
         "allow_satellite_detection": False,
+        "propagation_filter": {
+            "minimum_severity": "low",
+            "categories": sorted(VALID_CATEGORIES),
+        },
         "incremental": {
             "batch_window_seconds": {
                 "emergencias": 0,
