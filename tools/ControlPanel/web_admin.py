@@ -157,6 +157,67 @@ class EmergencyFiltersPayload(BaseModel):
     categories: list[str]
 
 
+class CommunicationChannelsPayload(BaseModel):
+    transport: str
+    meshcore_channel: int
+    meshtastic_channel: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.model_dump() if hasattr(self, "model_dump") else self.dict()
+
+
+FARMACIAS_ENV_FILE = Path(
+    os.getenv("CONTROLPANEL_FARMACIAS_ENV", str(REPO_DIR / "tools/farmacias_guardia/.env"))
+)
+CHANNEL_KEYS = {
+    "FARMACIAS_BROADCAST_TRANSPORT",
+    "FARMACIAS_MESHCORE_CHANNEL",
+    "FARMACIAS_MESHTASTIC_CHANNEL",
+}
+
+
+def read_env_values(path: Path, keys: set[str]) -> dict[str, str]:
+    """Lee únicamente claves públicas permitidas sin exponer el resto del .env."""
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key in keys:
+            values[key] = value.strip().strip('"').strip("'")
+    return values
+
+
+def update_env_values(path: Path, updates: dict[str, str]) -> None:
+    """Actualiza atómicamente claves permitidas conservando comentarios y secretos."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    output, replaced = [], set()
+    for line in lines:
+        match = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*)=", line)
+        if match and match.group(2) in updates:
+            key = match.group(2)
+            output.append(f"{key}={updates[key]}")
+            replaced.add(key)
+        else:
+            output.append(line)
+    if output and output[-1]:
+        output.append("")
+    output.extend(f"{key}={updates[key]}" for key in updates if key not in replaced)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text("\n".join(output) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
 def probe(tool: ToolDefinition, timeout: float = 2) -> dict[str, Any]:
     request = Request(tool.url.rstrip("/") + tool.health_path, headers={"Accept": "application/json"})
     try:
@@ -242,6 +303,14 @@ def create_app(registry: ToolRegistry | None = None) -> FastAPI:
         )
         return execute_action(action)
 
+    def validate_channels(payload: CommunicationChannelsPayload, transports: set[str]) -> None:
+        if payload.transport not in transports:
+            raise HTTPException(status_code=422, detail="Transporte no válido")
+        if not all(-1 <= channel <= 255 for channel in (
+            payload.meshcore_channel, payload.meshtastic_channel,
+        )):
+            raise HTTPException(status_code=422, detail="El canal debe estar entre -1 y 255")
+
     @app.get("/api/emergencias/filters")
     def get_emergency_filters() -> dict[str, Any]:
         result = emergency_filter_action("filters", "show")
@@ -269,6 +338,60 @@ def create_app(registry: ToolRegistry | None = None) -> FastAPI:
             raise HTTPException(status_code=502, detail=result["stderr"] or result["stdout"])
         return result["data"] or {}
 
+    @app.get("/api/emergencias/channels")
+    def get_emergency_channels() -> dict[str, Any]:
+        result = emergency_filter_action("notify", "status")
+        if not result["ok"]:
+            raise HTTPException(status_code=502, detail=result["stderr"] or "No se pudieron leer los canales")
+        data = result["data"] or {}
+        routes = data.get("routes", {})
+        return {
+            "transport": data.get("transport", "meshcore"),
+            "enabled": bool(data.get("enabled", False)),
+            "routes": {
+                route: {
+                    "meshcore_channel": int(routes.get(route, {}).get("meshcore_channel", -1)),
+                    "meshtastic_channel": int(routes.get(route, {}).get("meshtastic_channel", -1)),
+                }
+                for route in ("emergencias", "servicios", "meteo")
+            },
+        }
+
+    @app.put("/api/emergencias/channels/{route}")
+    def set_emergency_channels(route: str, payload: CommunicationChannelsPayload) -> dict[str, Any]:
+        if route not in {"emergencias", "servicios", "meteo"}:
+            raise HTTPException(status_code=404, detail="Ruta de emergencias desconocida")
+        validate_channels(payload, {"meshcore", "meshtastic"})
+        commands = (
+            ("notify", "set-channel", route, "meshcore", str(payload.meshcore_channel)),
+            ("notify", "set-channel", route, "meshtastic", str(payload.meshtastic_channel)),
+            ("notify", "set-transport", payload.transport),
+        )
+        for arguments in commands:
+            result = emergency_filter_action(*arguments)
+            if not result["ok"]:
+                raise HTTPException(status_code=502, detail=result["stderr"] or result["stdout"])
+        return {"ok": True, "route": route, **payload.as_dict()}
+
+    @app.get("/api/farmacias/channels")
+    def get_pharmacy_channels() -> dict[str, Any]:
+        values = read_env_values(FARMACIAS_ENV_FILE, CHANNEL_KEYS)
+        return {
+            "transport": values.get("FARMACIAS_BROADCAST_TRANSPORT", "auto"),
+            "meshcore_channel": int(values.get("FARMACIAS_MESHCORE_CHANNEL", "-1")),
+            "meshtastic_channel": int(values.get("FARMACIAS_MESHTASTIC_CHANNEL", "-1")),
+        }
+
+    @app.put("/api/farmacias/channels")
+    def set_pharmacy_channels(payload: CommunicationChannelsPayload) -> dict[str, Any]:
+        validate_channels(payload, {"auto", "meshcore", "meshtastic"})
+        update_env_values(FARMACIAS_ENV_FILE, {
+            "FARMACIAS_BROADCAST_TRANSPORT": payload.transport,
+            "FARMACIAS_MESHCORE_CHANNEL": str(payload.meshcore_channel),
+            "FARMACIAS_MESHTASTIC_CHANNEL": str(payload.meshtastic_channel),
+        })
+        return {"ok": True, **payload.as_dict(), "restart_required": True}
+
     return app
 
 
@@ -283,6 +406,7 @@ h1,h2,h3,p{margin:0 0 10px}.sub,.muted{color:var(--muted)}.grid{display:grid;gri
 button{border:0;border-radius:10px;padding:9px 12px;font-weight:750;cursor:pointer;background:var(--accent);color:#05251b;transition:.15s}button:hover{transform:translateY(-1px)}button.secondary{background:#263f57;color:white}button.danger{background:#5b2d32;color:#ffd4d1}button:disabled{opacity:.4;transform:none}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:15px}
 .result{display:none;margin-top:18px;border-top:1px solid var(--line);padding-top:16px;max-height:520px;overflow:auto}.result.visible{display:block}.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px}.field,.item{background:#091a2a99;border:1px solid #213e57;border-radius:11px;padding:10px}.key{display:block;color:#7f9ab3;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}.value{overflow-wrap:anywhere}.list{display:grid;gap:9px}.pill{display:inline-block;border-radius:20px;padding:4px 8px;background:#243d55;margin:2px;font-size:.82rem}
 .filterbox{margin-top:18px;padding:15px;background:#091a2a99;border:1px solid var(--line);border-radius:14px}.severity{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.severity select{background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:7px;margin:12px 0}.checks label{background:#142b44;border-radius:8px;padding:7px}.empty{color:var(--muted);font-style:italic}
+.channel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:9px;margin:12px 0}.channel-grid label{color:var(--muted);font-size:.82rem}.channel-grid select,.channel-grid input{display:block;width:100%;margin-top:5px;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.routebox{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.routebox:first-child{border:0;padding-top:0;margin-top:0}
 @media(max-width:520px){.grid{grid-template-columns:1fr}header,main{padding:16px}.card{padding:17px}}
 </style></head><body><header><div class="logo">MN</div><div><h1>MeshNet Control</h1><div class="sub">Estado, datos y operación de aplicaciones independientes</div></div></header><main><div id="tools" class="grid"></div></main>
 <script>
@@ -300,13 +424,19 @@ function render(v,k=''){
 }
 async function request(url,options={}){const r=await fetch(url,{headers,...options});const d=await r.json();if(!r.ok)throw Error(d.detail||'No se pudo completar la operación');return d}
 function filterHtml(t){return t.id!=='emergencias_guardia'?'':`<section class="filterbox"><h3>Filtro de propagación</h3><p class="muted">Elige qué alertas podrán enviarse en las próximas comprobaciones.</p><div id="filters-${t.id}" class="empty">Cargando filtros…</div></section>`}
-async function load(){const d=await request('/api/tools');document.querySelector('#tools').innerHTML=d.tools.map(t=>`<article class="card"><div class="row"><h2>${esc(t.name)}</h2><span class="badge ${t.enabled?'on':''}">${t.enabled?'HABILITADA':'DESHABILITADA'}</span></div><p class="sub">${esc(t.description)}</p><div class="actions"><button onclick="toggle('${t.id}',${!t.enabled})">${t.enabled?'Deshabilitar':'Habilitar'}</button><button class="secondary" ${t.enabled?'':'disabled'} onclick="health('${t.id}')">Comprobar salud</button></div><div class="actions">${t.actions.map(a=>`<button class="${a.confirm?'danger':(a.mutating?'':'secondary')}" ${t.enabled?'':'disabled'} onclick="run('${t.id}','${a.id}',${a.confirm},'${esc(a.name)}')">${esc(a.name)}</button>`).join('')}</div>${filterHtml(t)}<div class="result" id="r-${t.id}"></div></article>`).join('');if(d.tools.some(t=>t.id==='emergencias_guardia'))loadFilters()}
+function channelHtml(t){return !['emergencias_guardia','farmacias_guardia'].includes(t.id)?'':`<section class="filterbox"><h3>Canales de comunicación</h3><p class="muted">Consulta y modifica los canales de difusión. Usa -1 para dejar un canal sin configurar.</p><div id="channels-${t.id}" class="empty">Cargando canales…</div></section>`}
+async function load(){const d=await request('/api/tools');document.querySelector('#tools').innerHTML=d.tools.map(t=>`<article class="card"><div class="row"><h2>${esc(t.name)}</h2><span class="badge ${t.enabled?'on':''}">${t.enabled?'HABILITADA':'DESHABILITADA'}</span></div><p class="sub">${esc(t.description)}</p><div class="actions"><button onclick="toggle('${t.id}',${!t.enabled})">${t.enabled?'Deshabilitar':'Habilitar'}</button><button class="secondary" ${t.enabled?'':'disabled'} onclick="health('${t.id}')">Comprobar salud</button></div><div class="actions">${t.actions.map(a=>`<button class="${a.confirm?'danger':(a.mutating?'':'secondary')}" ${t.enabled?'':'disabled'} onclick="run('${t.id}','${a.id}',${a.confirm},'${esc(a.name)}')">${esc(a.name)}</button>`).join('')}</div>${channelHtml(t)}${filterHtml(t)}<div class="result" id="r-${t.id}"></div></article>`).join('');if(d.tools.some(t=>t.id==='emergencias_guardia')){loadFilters();loadEmergencyChannels()}if(d.tools.some(t=>t.id==='farmacias_guardia'))loadPharmacyChannels()}
 async function toggle(id,enabled){await request(`/api/tools/${id}/enabled`,{method:'PUT',body:JSON.stringify({enabled})});load()}
 async function health(id){show(id,'Comprobando…',true);try{const d=await request(`/api/tools/${id}/health`);show(id,render(d.details??d))}catch(e){show(id,render({error:e.message}))}}
 async function run(id,a,needs,name){if(needs&&!confirm(`¿Ejecutar “${name}”?`))return;show(id,'Ejecutando…',true);try{const d=await request(`/api/tools/${id}/actions/${a}`,{method:'POST',body:JSON.stringify({confirmed:true})});show(id,render(d.data??{correcto:d.ok,salida:d.stdout,error:d.stderr}))}catch(e){show(id,render({error:e.message}))}}
 function show(id,html,text=false){const n=document.querySelector('#r-'+id);n.classList.add('visible');n.innerHTML=text?`<span class="muted">${esc(html)}</span>`:html}
 async function loadFilters(){const box=document.querySelector('#filters-emergencias_guardia');try{const d=await request('/api/emergencias/filters');box.innerHTML=`<div class="severity"><label>Severidad mínima <select id="severity">${['low','medium','high','critical'].map(x=>`<option value="${x}" ${d.minimum_severity===x?'selected':''}>${{low:'Baja',medium:'Media',high:'Alta',critical:'Crítica'}[x]}</option>`).join('')}</select></label></div><div class="checks">${d.categories.map(c=>`<label><input type="checkbox" value="${c.name}" ${c.enabled?'checked':''}> ${esc(catLabels[c.name]||c.name)}</label>`).join('')}</div><button onclick="saveFilters()">Guardar filtro</button>`}catch(e){box.textContent=e.message}}
 async function saveFilters(){const categories=[...document.querySelectorAll('#filters-emergencias_guardia input:checked')].map(x=>x.value);try{const d=await request('/api/emergencias/filters',{method:'PUT',body:JSON.stringify({minimum_severity:document.querySelector('#severity').value,categories})});show('emergencias_guardia',render({correcto:true,severidad:d.minimum_severity,categorías:d.categories,nota:d.note}));loadFilters()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
+const channelFields=(prefix,d,transports)=>`<div class="channel-grid"><label>Transporte<select id="${prefix}-transport">${transports.map(x=>`<option value="${x}" ${d.transport===x?'selected':''}>${x==='auto'?'Automático':x==='meshcore'?'MeshCore':'Meshtastic'}</option>`).join('')}</select></label><label>Canal MeshCore<input id="${prefix}-meshcore" type="number" min="-1" max="255" value="${Number(d.meshcore_channel)}"></label><label>Canal Meshtastic<input id="${prefix}-meshtastic" type="number" min="-1" max="255" value="${Number(d.meshtastic_channel)}"></label></div>`;
+async function loadEmergencyChannels(){const box=document.querySelector('#channels-emergencias_guardia');try{const d=await request('/api/emergencias/channels');box.innerHTML=Object.entries(d.routes).map(([route,c])=>`<div class="routebox"><strong>${esc({emergencias:'Emergencias',servicios:'Servicios',meteo:'Meteorología'}[route])}</strong>${channelFields('em-'+route,{...c,transport:d.transport},['meshcore','meshtastic'])}<button onclick="saveEmergencyChannels('${route}')">Guardar canales</button></div>`).join('')}catch(e){box.textContent=e.message}}
+async function saveEmergencyChannels(route){const prefix='em-'+route,payload={transport:document.querySelector('#'+prefix+'-transport').value,meshcore_channel:Number(document.querySelector('#'+prefix+'-meshcore').value),meshtastic_channel:Number(document.querySelector('#'+prefix+'-meshtastic').value)};try{await request('/api/emergencias/channels/'+route,{method:'PUT',body:JSON.stringify(payload)});show('emergencias_guardia',render({correcto:true,ruta:route,...payload}));loadEmergencyChannels()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
+async function loadPharmacyChannels(){const box=document.querySelector('#channels-farmacias_guardia');try{const d=await request('/api/farmacias/channels');box.innerHTML=channelFields('farma',d,['auto','meshcore','meshtastic'])+'<button onclick="savePharmacyChannels()">Guardar canales</button>'}catch(e){box.textContent=e.message}}
+async function savePharmacyChannels(){const payload={transport:document.querySelector('#farma-transport').value,meshcore_channel:Number(document.querySelector('#farma-meshcore').value),meshtastic_channel:Number(document.querySelector('#farma-meshtastic').value)};try{const d=await request('/api/farmacias/channels',{method:'PUT',body:JSON.stringify(payload)});show('farmacias_guardia',render({correcto:true,...payload,nota:d.restart_required?'Reinicie la API de Farmacias para aplicar el cambio.':''}));loadPharmacyChannels()}catch(e){show('farmacias_guardia',render({error:e.message}))}}
 load().catch(e=>document.querySelector('#tools').innerHTML=`<div class="card">${esc(e.message)}</div>`);
 </script></body></html>"""
 
