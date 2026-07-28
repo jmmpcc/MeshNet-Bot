@@ -327,10 +327,96 @@ docker compose up -d --build
 ```
 
 ## Raspberry Pi
+
+La Raspberry debe tratarse como equipo de despliegue. Los cambios de código se
+realizan y prueban en Windows, se publican con GitHub Desktop y después se
+descargan en la Raspberry. No se deben copiar manualmente archivos del programa,
+porque Git los detectará como modificaciones locales y puede bloquear futuras
+actualizaciones.
+
+Flujo recomendado:
+
+```text
+Windows → GitHub Desktop: commit + push
+GitHub → Raspberry: git pull --ff-only
+Raspberry → reiniciar únicamente el servicio afectado
+```
+
+Antes de actualizar:
+
 ```bash
-git pull
+cd ~/MeshNet-Bot
+git status --short
+```
+
+El comando no debe mostrar cambios. Si aparecen archivos modificados o sin
+seguimiento, no continúe con el `pull`: revíselos o guárdelos primero. No use
+`git reset --hard` ni `git clean` para resolverlo.
+
+Actualización normal:
+
+```bash
+cd ~/MeshNet-Bot
+git fetch origin
+git pull --ff-only origin main
+git log -1 --oneline
+```
+
+Los archivos de configuración y datos de ejecución permanecen únicamente en la
+Raspberry y no deben copiarse desde Windows ni incluirse en Git:
+
+```text
+.env
+bot_data/
+tools/ControlPanel/data/
+tools/emergencias_guardia/data/
+tools/farmacias_guardia/data/
+.venv/
+```
+
+Después de actualizar, reinicie solo los componentes afectados.
+
+ControlPanel:
+
+```bash
+sudo systemctl restart meshnet-control-panel.service
+```
+
+Si se ejecuta manualmente:
+
+```bash
+cd ~/MeshNet-Bot/tools/ControlPanel
+bash start_control_panel.sh
+```
+
+Emergencias:
+
+```bash
+sudo systemctl restart meshnet-emergencias-api.service
+sudo systemctl restart meshnet-emergencias-check.timer
+```
+
+Farmacias:
+
+```bash
+sudo systemctl restart meshnet-farmacias-api.service
+sudo systemctl restart meshnet-farmacias-check.timer
+```
+
+Contenedores Docker:
+
+```bash
 docker compose -f docker-compose.rpi.yml pull
 docker compose -f docker-compose.rpi.yml up -d
+```
+
+Si fue necesario crear un `stash` de respaldo durante una actualización, no
+ejecute automáticamente `git stash pop`: podría restaurar versiones antiguas
+sobre el código recién actualizado. Revise primero su contenido con:
+
+```bash
+git stash list
+git stash show --stat stash@{0}
 ```
 
 ---
@@ -1429,4 +1515,3 @@ Este proyecto está disponible bajo licencia **MIT**. Repo  EB2EAS
 👉 Envía el mismo mensaje a los 5, 10 y 25 minutos.
 
 ---
-

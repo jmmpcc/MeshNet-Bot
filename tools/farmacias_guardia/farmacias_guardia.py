@@ -929,6 +929,15 @@ def main() -> int:
     elif args.command == "fetch":
         payload = save_current(fetch()); print(json.dumps({"ok": True, "records": len(payload["pharmacies"]), "hash": payload["hash"]}, ensure_ascii=False))
     elif args.command == "preview":
+        if not CURRENT_FILE.exists():
+            print(json.dumps({
+                "ok": False,
+                "error": (
+                    "No hay datos locales de farmacias. "
+                    "Pulse «Actualizar datos» antes de «Ver farmacias»."
+                ),
+            }, ensure_ascii=False))
+            return 1
         network, channel = broadcast_target()
         for msg in broadcast_messages(network):
             print(f"--- {len(msg.encode('utf-8'))} bytes ---\n{msg}")

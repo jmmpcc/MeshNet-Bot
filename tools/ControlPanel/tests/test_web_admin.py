@@ -49,6 +49,10 @@ def test_dashboard_escapes_dynamic_values():
     assert "JSON.stringify(d.data" not in web_admin.DASHBOARD
 
 
+def test_dashboard_reserves_danger_style_for_confirmed_actions():
+    assert "a.confirm?'danger':(a.mutating?'':'secondary')" in web_admin.DASHBOARD
+
+
 def test_api_can_enable_allowlisted_tool(tmp_path):
     item = registry(tmp_path)
     client = TestClient(web_admin.create_app(item))

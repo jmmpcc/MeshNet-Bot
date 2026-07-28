@@ -3,7 +3,10 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "farmacias_guardia.py"
 spec = importlib.util.spec_from_file_location("farmacias_guardia_app", MODULE_PATH)
@@ -14,6 +17,21 @@ spec.loader.exec_module(app)
 
 
 class FarmaciasAppTests(unittest.TestCase):
+    def test_preview_without_local_data_returns_clear_panel_message(self):
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                mock.patch.object(app, "CURRENT_FILE", Path(temp_dir) / "current.json"),
+                mock.patch.object(sys, "argv", ["farmacias_guardia.py", "preview"]),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(app.main(), 1)
+
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["ok"])
+        self.assertIn("Actualizar datos", result["error"])
+        self.assertNotIn("Traceback", output.getvalue())
+
     def test_systemd_checks_for_new_pharmacies_every_three_hours(self):
         systemd_dir = MODULE_PATH.parent / "systemd"
         daily_service = (systemd_dir / "meshnet-farmacias-daily.service").read_text(encoding="utf-8")
