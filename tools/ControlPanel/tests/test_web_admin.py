@@ -223,6 +223,58 @@ def test_channel_configuration_requires_enabled_application(tmp_path, monkeypatc
     assert not path.exists()
 
 
+def test_emergency_filters_require_enabled_application(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_execute(action):
+        calls.append(action)
+        return {"ok": True, "returncode": 0, "stdout": "{}", "stderr": "",
+                "data": {}, "truncated": False}
+
+    monkeypatch.setattr(web_admin, "execute_action", fake_execute)
+    client = TestClient(web_admin.create_app(
+        web_admin.ToolRegistry(
+            tmp_path / "state.json",
+            (web_admin.ToolDefinition(
+                "emergencias_guardia", "Emergencias", "Test", "http://demo"
+            ),),
+        )
+    ))
+
+    assert client.get("/api/emergencias/filters").status_code == 409
+    response = client.put("/api/emergencias/filters", json={
+        "severities": ["high"], "categories": ["storm"],
+    })
+    assert response.status_code == 409
+    assert calls == []
+
+
+def test_emergency_filters_api_sends_individual_severities(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_execute(action):
+        calls.append(action.argv)
+        return {"ok": True, "returncode": 0, "stdout": '{"ok": true}', "stderr": "",
+                "data": {"ok": True, "severities": ["low", "high"]}, "truncated": False}
+
+    monkeypatch.setattr(web_admin, "execute_action", fake_execute)
+    client = TestClient(web_admin.create_app(
+        enabled_registry(tmp_path, "emergencias_guardia")
+    ))
+
+    response = client.put("/api/emergencias/filters", json={
+        "severities": ["high", "low"], "categories": ["storm"],
+    })
+
+    assert response.status_code == 200
+    assert calls[0][-4:] == ("--severities", "low,high", "--categories", "storm")
+
+
+def test_dashboard_hides_configuration_controls_for_disabled_applications():
+    assert "function filterHtml(t){return !t.enabled" in web_admin.DASHBOARD
+    assert "function channelHtml(t){return !t.enabled" in web_admin.DASHBOARD
+
+
 def test_emergency_route_update_does_not_change_global_transport(tmp_path, monkeypatch):
     calls = []
 
