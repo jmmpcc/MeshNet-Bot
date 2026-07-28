@@ -118,3 +118,76 @@ def test_confirmed_action_requires_confirmation(tmp_path, monkeypatch):
         "/api/tools/demo/actions/stop", json={"confirmed": False},
     )
     assert response.status_code == 409
+
+
+def test_env_channel_update_preserves_unrelated_values(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("# configuración\nSECRET=keep-me\nFARMACIAS_MESHCORE_CHANNEL=1\n")
+    path.chmod(0o640)
+
+    web_admin.update_env_values(path, {
+        "FARMACIAS_BROADCAST_TRANSPORT": "meshtastic",
+        "FARMACIAS_MESHCORE_CHANNEL": "4",
+        "FARMACIAS_MESHTASTIC_CHANNEL": "7",
+    })
+
+    text = path.read_text()
+    assert "SECRET=keep-me" in text
+    assert "FARMACIAS_MESHCORE_CHANNEL=4" in text
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert web_admin.read_env_values(path, web_admin.CHANNEL_KEYS) == {
+        "FARMACIAS_BROADCAST_TRANSPORT": "meshtastic",
+        "FARMACIAS_MESHCORE_CHANNEL": "4",
+        "FARMACIAS_MESHTASTIC_CHANNEL": "7",
+    }
+
+
+def test_new_pharmacy_env_is_private(tmp_path):
+    path = tmp_path / ".env"
+    web_admin.update_env_values(path, {"FARMACIAS_MESHCORE_CHANNEL": "2"})
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_pharmacy_channels_api_reads_and_updates_env(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text("FARMACIAS_BROADCAST_TRANSPORT=auto\nFARMACIAS_MESHCORE_CHANNEL=2\n")
+    monkeypatch.setattr(web_admin, "FARMACIAS_ENV_FILE", path)
+    client = TestClient(web_admin.create_app(registry(tmp_path)))
+
+    assert client.get("/api/farmacias/channels").json() == {
+        "transport": "auto", "effective_transport": "meshcore",
+        "radio_profile": None,
+        "meshcore_channel": 2, "meshtastic_channel": -1,
+    }
+    response = client.put("/api/farmacias/channels", json={
+        "transport": "meshcore", "meshcore_channel": 5, "meshtastic_channel": 3,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["restart_required"] is True
+    assert "FARMACIAS_MESHCORE_CHANNEL=5" in path.read_text()
+
+
+def test_pharmacy_channels_api_rejects_invalid_channel(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_admin, "FARMACIAS_ENV_FILE", tmp_path / ".env")
+    client = TestClient(web_admin.create_app(registry(tmp_path)))
+    response = client.put("/api/farmacias/channels", json={
+        "transport": "meshcore", "meshcore_channel": 300, "meshtastic_channel": 1,
+    })
+    assert response.status_code == 422
+
+
+def test_pharmacy_channels_api_rejects_meshtastic_for_meshcore_only(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text("RADIO_PROFILE=meshcore_only\nFARMACIAS_MESHCORE_CHANNEL=2\n")
+    monkeypatch.setattr(web_admin, "FARMACIAS_ENV_FILE", path)
+    client = TestClient(web_admin.create_app(registry(tmp_path)))
+
+    status = client.get("/api/farmacias/channels").json()
+    assert status["effective_transport"] == "meshcore"
+    response = client.put("/api/farmacias/channels", json={
+        "transport": "meshtastic", "meshcore_channel": 2, "meshtastic_channel": 3,
+    })
+
+    assert response.status_code == 422
+    assert "meshcore_only" in response.json()["detail"]
