@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from urllib.error import URLError
 
@@ -9,6 +10,13 @@ from fastapi.testclient import TestClient
 def registry(tmp_path: Path) -> web_admin.ToolRegistry:
     tools = (web_admin.ToolDefinition("demo", "Demo", "Servicio de prueba", "http://demo:1"),)
     return web_admin.ToolRegistry(tmp_path / "state.json", tools)
+
+
+def enabled_registry(tmp_path: Path, tool_id: str) -> web_admin.ToolRegistry:
+    tools = (web_admin.ToolDefinition(tool_id, tool_id, "Servicio de prueba", "http://demo:1"),)
+    item = web_admin.ToolRegistry(tmp_path / "state.json", tools)
+    item.set_enabled(tool_id, True)
+    return item
 
 
 def test_registry_defaults_disabled_and_persists(tmp_path):
@@ -134,7 +142,8 @@ def test_env_channel_update_preserves_unrelated_values(tmp_path):
     text = path.read_text()
     assert "SECRET=keep-me" in text
     assert "FARMACIAS_MESHCORE_CHANNEL=4" in text
-    assert path.stat().st_mode & 0o777 == 0o640
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o640
     assert web_admin.read_env_values(path, web_admin.CHANNEL_KEYS) == {
         "FARMACIAS_BROADCAST_TRANSPORT": "meshtastic",
         "FARMACIAS_MESHCORE_CHANNEL": "4",
@@ -145,14 +154,15 @@ def test_env_channel_update_preserves_unrelated_values(tmp_path):
 def test_new_pharmacy_env_is_private(tmp_path):
     path = tmp_path / ".env"
     web_admin.update_env_values(path, {"FARMACIAS_MESHCORE_CHANNEL": "2"})
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_pharmacy_channels_api_reads_and_updates_env(tmp_path, monkeypatch):
     path = tmp_path / ".env"
     path.write_text("FARMACIAS_BROADCAST_TRANSPORT=auto\nFARMACIAS_MESHCORE_CHANNEL=2\n")
     monkeypatch.setattr(web_admin, "FARMACIAS_ENV_FILE", path)
-    client = TestClient(web_admin.create_app(registry(tmp_path)))
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "farmacias_guardia")))
 
     assert client.get("/api/farmacias/channels").json() == {
         "transport": "auto", "effective_transport": "meshcore",
@@ -170,7 +180,7 @@ def test_pharmacy_channels_api_reads_and_updates_env(tmp_path, monkeypatch):
 
 def test_pharmacy_channels_api_rejects_invalid_channel(tmp_path, monkeypatch):
     monkeypatch.setattr(web_admin, "FARMACIAS_ENV_FILE", tmp_path / ".env")
-    client = TestClient(web_admin.create_app(registry(tmp_path)))
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "farmacias_guardia")))
     response = client.put("/api/farmacias/channels", json={
         "transport": "meshcore", "meshcore_channel": 300, "meshtastic_channel": 1,
     })
@@ -181,7 +191,7 @@ def test_pharmacy_channels_api_rejects_meshtastic_for_meshcore_only(tmp_path, mo
     path = tmp_path / ".env"
     path.write_text("RADIO_PROFILE=meshcore_only\nFARMACIAS_MESHCORE_CHANNEL=2\n")
     monkeypatch.setattr(web_admin, "FARMACIAS_ENV_FILE", path)
-    client = TestClient(web_admin.create_app(registry(tmp_path)))
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "farmacias_guardia")))
 
     status = client.get("/api/farmacias/channels").json()
     assert status["effective_transport"] == "meshcore"
@@ -191,3 +201,69 @@ def test_pharmacy_channels_api_rejects_meshtastic_for_meshcore_only(tmp_path, mo
 
     assert response.status_code == 422
     assert "meshcore_only" in response.json()["detail"]
+
+
+def test_channel_configuration_requires_enabled_application(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    monkeypatch.setattr(web_admin, "FARMACIAS_ENV_FILE", path)
+    client = TestClient(web_admin.create_app(
+        web_admin.ToolRegistry(
+            tmp_path / "state.json",
+            (web_admin.ToolDefinition(
+                "farmacias_guardia", "Farmacias", "Test", "http://demo"
+            ),),
+        )
+    ))
+
+    assert client.get("/api/farmacias/channels").status_code == 409
+    response = client.put("/api/farmacias/channels", json={
+        "transport": "meshcore", "meshcore_channel": 1, "meshtastic_channel": -1,
+    })
+    assert response.status_code == 409
+    assert not path.exists()
+
+
+def test_emergency_route_update_does_not_change_global_transport(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_execute(action):
+        calls.append(action.argv[-5:])
+        return {"ok": True, "returncode": 0, "stdout": '{"ok": true}',
+                "stderr": "", "data": {"ok": True}, "truncated": False}
+
+    monkeypatch.setattr(web_admin, "execute_action", fake_execute)
+    client = TestClient(web_admin.create_app(
+        enabled_registry(tmp_path, "emergencias_guardia")
+    ))
+
+    response = client.put("/api/emergencias/channels/servicios", json={
+        "meshcore_channel": 4, "meshtastic_channel": 7,
+    })
+
+    assert response.status_code == 200
+    assert [call[-4:] for call in calls] == [
+        ("set-channel", "servicios", "meshcore", "4"),
+        ("set-channel", "servicios", "meshtastic", "7"),
+    ]
+    assert all("set-transport" not in call for call in calls)
+
+
+def test_emergency_transport_has_one_global_endpoint(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_execute(action):
+        calls.append(action.argv[-3:])
+        return {"ok": True, "returncode": 0, "stdout": '{"ok": true}',
+                "stderr": "", "data": {"ok": True}, "truncated": False}
+
+    monkeypatch.setattr(web_admin, "execute_action", fake_execute)
+    client = TestClient(web_admin.create_app(
+        enabled_registry(tmp_path, "emergencias_guardia")
+    ))
+
+    response = client.put("/api/emergencias/transport", json={
+        "transport": "meshcore",
+    })
+
+    assert response.status_code == 200
+    assert calls == [("notify", "set-transport", "meshcore")]
