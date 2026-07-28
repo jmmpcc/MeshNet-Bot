@@ -297,6 +297,17 @@ Las reglas iniciales son:
 - sin difusión: eventos futuros, caducados, resueltos, no verificados o
   detecciones satelitales sin confirmación.
 
+El filtro de propagación permite habilitar cada severidad de forma independiente
+(`low`, `medium`, `high` y `critical`). Por ejemplo, para propagar solo alertas
+bajas y altas:
+
+```bash
+python3 emergencias_guardia.py filters set --severities low,high --categories road_closed,storm
+```
+
+La opción anterior `--minimum-severity` continúa disponible para configuraciones
+y automatizaciones existentes, y selecciona esa severidad y todas las superiores.
+
 La difusión está desactivada por defecto y todos los canales comienzan en `-1`.
 Primero debe revisarse la salida:
 

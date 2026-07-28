@@ -154,7 +154,7 @@ class ActionPayload(BaseModel):
 
 
 class EmergencyFiltersPayload(BaseModel):
-    minimum_severity: str
+    severities: list[str]
     categories: list[str]
 
 
@@ -350,6 +350,7 @@ def create_app(registry: ToolRegistry | None = None) -> FastAPI:
 
     @app.get("/api/emergencias/filters")
     def get_emergency_filters() -> dict[str, Any]:
+        require_enabled("emergencias_guardia")
         result = emergency_filter_action("filters", "show")
         if not result["ok"]:
             raise HTTPException(status_code=502, detail=result["stderr"] or "No se pudieron leer los filtros")
@@ -357,6 +358,7 @@ def create_app(registry: ToolRegistry | None = None) -> FastAPI:
 
     @app.put("/api/emergencias/filters")
     def set_emergency_filters(payload: EmergencyFiltersPayload) -> dict[str, Any]:
+        require_enabled("emergencias_guardia")
         severities = {"low", "medium", "high", "critical"}
         categories = {
             "wildfire", "urban_fire", "industrial_fire", "traffic_collision",
@@ -365,10 +367,14 @@ def create_app(registry: ToolRegistry | None = None) -> FastAPI:
             "water_outage", "gas_outage", "public_safety", "civil_protection", "other",
         }
         selected = set(payload.categories)
-        if payload.minimum_severity not in severities or not selected.issubset(categories):
+        selected_severities = set(payload.severities)
+        if not selected_severities.issubset(severities) or not selected.issubset(categories):
             raise HTTPException(status_code=422, detail="Filtro de emergencias no válido")
         result = emergency_filter_action(
-            "filters", "set", "--minimum-severity", payload.minimum_severity,
+            "filters", "set", "--severities", ",".join(
+                severity for severity in ("low", "medium", "high", "critical")
+                if severity in selected_severities
+            ),
             "--categories", ",".join(sorted(selected)),
         )
         if not result["ok"]:
@@ -497,15 +503,15 @@ function render(v,k=''){
   return `<span>${esc(v)}</span>`;
 }
 async function request(url,options={}){const r=await fetch(url,{headers,...options});const d=await r.json();if(!r.ok)throw Error(d.detail||'No se pudo completar la operación');return d}
-function filterHtml(t){return t.id!=='emergencias_guardia'?'':`<section class="filterbox"><h3>Filtro de propagación</h3><p class="muted">Elige qué alertas podrán enviarse en las próximas comprobaciones.</p><div id="filters-${t.id}" class="empty">Cargando filtros…</div></section>`}
+function filterHtml(t){return !t.enabled||t.id!=='emergencias_guardia'?'':`<section class="filterbox"><h3>Filtro de propagación</h3><p class="muted">Elige qué alertas podrán enviarse en las próximas comprobaciones.</p><div id="filters-${t.id}" class="empty">Cargando filtros…</div></section>`}
 function channelHtml(t){return !t.enabled||!['emergencias_guardia','farmacias_guardia'].includes(t.id)?'':`<section class="filterbox"><h3>Canales de comunicación</h3><p class="muted">Consulta y modifica los canales de difusión. Usa -1 para dejar un canal sin configurar.</p><div id="channels-${t.id}" class="empty">Cargando canales…</div></section>`}
 async function load(){const d=await request('/api/tools');document.querySelector('#tools').innerHTML=d.tools.map(t=>`<article class="card"><div class="row"><h2>${esc(t.name)}</h2><span class="badge ${t.enabled?'on':''}">${t.enabled?'HABILITADA':'DESHABILITADA'}</span></div><p class="sub">${esc(t.description)}</p><div class="actions"><button onclick="toggle('${t.id}',${!t.enabled})">${t.enabled?'Deshabilitar':'Habilitar'}</button><button class="secondary" ${t.enabled?'':'disabled'} onclick="health('${t.id}')">Comprobar salud</button></div><div class="actions">${t.actions.map(a=>`<button class="${a.confirm?'danger':(a.mutating?'':'secondary')}" ${t.enabled?'':'disabled'} onclick="run('${t.id}','${a.id}',${a.confirm},'${esc(a.name)}')">${esc(a.name)}</button>`).join('')}</div>${channelHtml(t)}${filterHtml(t)}<div class="result" id="r-${t.id}"></div></article>`).join('');if(d.tools.some(t=>t.id==='emergencias_guardia'&&t.enabled)){loadFilters();loadEmergencyChannels()}if(d.tools.some(t=>t.id==='farmacias_guardia'&&t.enabled))loadPharmacyChannels()}
 async function toggle(id,enabled){await request(`/api/tools/${id}/enabled`,{method:'PUT',body:JSON.stringify({enabled})});load()}
 async function health(id){show(id,'Comprobando…',true);try{const d=await request(`/api/tools/${id}/health`);show(id,render(d.details??d))}catch(e){show(id,render({error:e.message}))}}
 async function run(id,a,needs,name){if(needs&&!confirm(`¿Ejecutar “${name}”?`))return;show(id,'Ejecutando…',true);try{const d=await request(`/api/tools/${id}/actions/${a}`,{method:'POST',body:JSON.stringify({confirmed:true})});show(id,render(d.data??{correcto:d.ok,salida:d.stdout,error:d.stderr}))}catch(e){show(id,render({error:e.message}))}}
 function show(id,html,text=false){const n=document.querySelector('#r-'+id);n.classList.add('visible');n.innerHTML=text?`<span class="muted">${esc(html)}</span>`:html}
-async function loadFilters(){const box=document.querySelector('#filters-emergencias_guardia');try{const d=await request('/api/emergencias/filters');box.innerHTML=`<div class="severity"><label>Severidad mínima <select id="severity">${['low','medium','high','critical'].map(x=>`<option value="${x}" ${d.minimum_severity===x?'selected':''}>${{low:'Baja',medium:'Media',high:'Alta',critical:'Crítica'}[x]}</option>`).join('')}</select></label></div><div class="checks">${d.categories.map(c=>`<label><input type="checkbox" value="${c.name}" ${c.enabled?'checked':''}> ${esc(catLabels[c.name]||c.name)}</label>`).join('')}</div><button onclick="saveFilters()">Guardar filtro</button>`}catch(e){box.textContent=e.message}}
-async function saveFilters(){const categories=[...document.querySelectorAll('#filters-emergencias_guardia input:checked')].map(x=>x.value);try{const d=await request('/api/emergencias/filters',{method:'PUT',body:JSON.stringify({minimum_severity:document.querySelector('#severity').value,categories})});show('emergencias_guardia',render({correcto:true,severidad:d.minimum_severity,categorías:d.categories,nota:d.note}));loadFilters()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
+async function loadFilters(){const box=document.querySelector('#filters-emergencias_guardia');try{const d=await request('/api/emergencias/filters');box.innerHTML=`<strong>Severidades propagables</strong><div class="checks">${d.severities.map(s=>`<label><input class="severity-filter" type="checkbox" value="${s.name}" ${s.enabled?'checked':''}> ${{low:'Baja',medium:'Media',high:'Alta',critical:'Crítica'}[s.name]}</label>`).join('')}</div><strong>Categorías propagables</strong><div class="checks">${d.categories.map(c=>`<label><input class="category-filter" type="checkbox" value="${c.name}" ${c.enabled?'checked':''}> ${esc(catLabels[c.name]||c.name)}</label>`).join('')}</div><button onclick="saveFilters()">Guardar filtro</button>`}catch(e){box.textContent=e.message}}
+async function saveFilters(){const severities=[...document.querySelectorAll('#filters-emergencias_guardia .severity-filter:checked')].map(x=>x.value),categories=[...document.querySelectorAll('#filters-emergencias_guardia .category-filter:checked')].map(x=>x.value);try{const d=await request('/api/emergencias/filters',{method:'PUT',body:JSON.stringify({severities,categories})});show('emergencias_guardia',render({correcto:true,severidades:d.severities,categorías:d.categories,nota:d.note}));loadFilters()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
 const channelInputs=(prefix,d)=>`<div class="channel-grid"><label>Canal MeshCore<input id="${prefix}-meshcore" type="number" min="-1" max="255" value="${Number(d.meshcore_channel)}"></label><label>Canal Meshtastic<input id="${prefix}-meshtastic" type="number" min="-1" max="255" value="${Number(d.meshtastic_channel)}"></label></div>`;
 const transportSelect=(prefix,current,values)=>`<label>Transporte<select id="${prefix}-transport">${values.map(x=>`<option value="${x}" ${current===x?'selected':''}>${x==='auto'?'Automático':x==='meshcore'?'MeshCore':'Meshtastic'}</option>`).join('')}</select></label>`;
 async function loadEmergencyChannels(){const box=document.querySelector('#channels-emergencias_guardia');if(!box)return;try{const d=await request('/api/emergencias/channels');const globalTransport=`<div class="routebox"><strong>Transporte global</strong><div class="channel-grid">${transportSelect('em-global',d.transport,['meshcore','meshtastic'])}</div><button onclick="saveEmergencyTransport()">Guardar transporte</button></div>`;box.innerHTML=globalTransport+Object.entries(d.routes).map(([route,c])=>`<div class="routebox"><strong>${esc({emergencias:'Emergencias',servicios:'Servicios',meteo:'Meteorología'}[route])}</strong>${channelInputs('em-'+route,c)}<button onclick="saveEmergencyChannels('${route}')">Guardar canales</button></div>`).join('')}catch(e){box.textContent=e.message}}
