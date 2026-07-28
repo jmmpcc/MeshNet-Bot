@@ -104,8 +104,13 @@ próximas comprobaciones y propagaciones.
 Las tarjetas de Farmacias y Emergencias muestran el transporte activo y los
 índices de canal de MeshCore y Meshtastic. El valor `-1` deja ese destino sin
 configurar. Emergencias guarda los canales por separado para las rutas de
-emergencias, servicios y meteorología; Farmacias actualiza únicamente esas tres
-claves públicas en su `.env`, conservando el resto de variables y secretos.
+emergencias, servicios y meteorología, mientras que el transporte es único para
+las tres rutas. Farmacias actualiza únicamente esas tres claves públicas en su
+`.env`, conservando el resto de variables y secretos.
+
+Los controles de canales solo aparecen cuando la aplicación está habilitada.
+La API aplica la misma comprobación y rechaza cualquier lectura o escritura de
+canales mientras la tarjeta permanezca deshabilitada.
 
 Después de cambiar los canales de Farmacias, reinicie su API desde la propia
 tarjeta para que el proceso vuelva a cargar el `.env`. Emergencias lee su
