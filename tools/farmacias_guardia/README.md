@@ -107,6 +107,10 @@ FARMACIAS_MESHTASTIC_CHANNEL=3
 - `FARMACIAS_MESHTASTIC_CHANNEL`: índice real del canal Meshtastic `FARMACIA`.
 
 Con `RADIO_PROFILE=meshcore_only` y transporte `auto`, la difusión se realiza por MeshCore.
+Si el perfil se cambia a `meshcore_only` pero queda guardado explícitamente
+`FARMACIAS_BROADCAST_TRANSPORT=meshtastic`, la aplicación utiliza MeshCore como
+respaldo seguro y avisa por `stderr`; así no intenta publicar mediante una
+interfaz Meshtastic que el broker tiene deshabilitada.
 
 ### API local
 

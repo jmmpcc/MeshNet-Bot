@@ -147,7 +147,9 @@ def test_pharmacy_channels_api_reads_and_updates_env(tmp_path, monkeypatch):
     client = TestClient(web_admin.create_app(registry(tmp_path)))
 
     assert client.get("/api/farmacias/channels").json() == {
-        "transport": "auto", "meshcore_channel": 2, "meshtastic_channel": -1,
+        "transport": "auto", "effective_transport": "meshtastic",
+        "radio_profile": "meshtastic_a_meshcore_embedded_b",
+        "meshcore_channel": 2, "meshtastic_channel": -1,
     }
     response = client.put("/api/farmacias/channels", json={
         "transport": "meshcore", "meshcore_channel": 5, "meshtastic_channel": 3,
@@ -165,3 +167,19 @@ def test_pharmacy_channels_api_rejects_invalid_channel(tmp_path, monkeypatch):
         "transport": "meshcore", "meshcore_channel": 300, "meshtastic_channel": 1,
     })
     assert response.status_code == 422
+
+
+def test_pharmacy_channels_api_rejects_meshtastic_for_meshcore_only(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text("RADIO_PROFILE=meshcore_only\nFARMACIAS_MESHCORE_CHANNEL=2\n")
+    monkeypatch.setattr(web_admin, "FARMACIAS_ENV_FILE", path)
+    client = TestClient(web_admin.create_app(registry(tmp_path)))
+
+    status = client.get("/api/farmacias/channels").json()
+    assert status["effective_transport"] == "meshcore"
+    response = client.put("/api/farmacias/channels", json={
+        "transport": "meshtastic", "meshcore_channel": 2, "meshtastic_channel": 3,
+    })
+
+    assert response.status_code == 422
+    assert "meshcore_only" in response.json()["detail"]

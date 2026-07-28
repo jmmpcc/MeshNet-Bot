@@ -111,6 +111,11 @@ Después de cambiar los canales de Farmacias, reinicie su API desde la propia
 tarjeta para que el proceso vuelva a cargar el `.env`. Emergencias lee su
 configuración persistente en cada ejecución programada.
 
+El panel muestra también el perfil de radio y la salida efectiva. Con
+`RADIO_PROFILE=meshcore_only` no permite seleccionar Meshtastic; si una
+configuración antigua todavía lo solicita, Farmacias cambia de forma segura a
+MeshCore al publicar para evitar el error `meshtastic_disabled_by_radio_profile`.
+
 ## Pruebas
 
 ```bash

@@ -77,6 +77,22 @@ class FarmaciasAppTests(unittest.TestCase):
             else:
                 os.environ["FARMACIAS_BROADCAST_TRANSPORT"] = original_transport
 
+    def test_meshcore_only_falls_back_from_stale_meshtastic_transport(self):
+        with mock.patch.dict(os.environ, {
+            "RADIO_PROFILE": "meshcore_only",
+            "FARMACIAS_BROADCAST_TRANSPORT": "meshtastic",
+            "FARMACIAS_MESHCORE_CHANNEL": "4",
+            "FARMACIAS_MESHTASTIC_CHANNEL": "7",
+        }, clear=False):
+            self.assertEqual(app.broadcast_target(), ("meshcore", 4))
+
+    def test_broadcast_target_rejects_unknown_transport(self):
+        with mock.patch.dict(os.environ, {
+            "FARMACIAS_BROADCAST_TRANSPORT": "radio_desconocida",
+        }, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "auto, meshcore o meshtastic"):
+                app.broadcast_target()
+
     def test_normalize_generic_api_record(self):
         item = app.normalize_record({
             "title": "Farmacia Ejemplo",

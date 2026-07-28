@@ -557,6 +557,10 @@ def radio_profile() -> str:
 def broadcast_target() -> tuple[str, int]:
     configured = os.getenv("FARMACIAS_BROADCAST_TRANSPORT", "auto").strip().lower()
     profile = radio_profile()
+    if configured not in {"auto", "meshcore", "meshtastic"}:
+        raise RuntimeError(
+            "FARMACIAS_BROADCAST_TRANSPORT debe ser auto, meshcore o meshtastic"
+        )
     if configured == "auto":
         if profile == "meshcore_only":
             configured = "meshcore"
@@ -564,6 +568,17 @@ def broadcast_target() -> tuple[str, int]:
             configured = "meshtastic"
         else:
             configured = os.getenv("FARMACIAS_MIXED_PROFILE_BROADCAST", "meshcore").strip().lower()
+    # Un valor explícito antiguo puede quedar en el .env tras cambiar el perfil
+    # de radio. En meshcore_only nunca debemos intentar SEND_TEXT, porque el
+    # broker rechazará correctamente el adaptador Meshtastic deshabilitado.
+    if profile == "meshcore_only" and configured == "meshtastic":
+        print(
+            "[farmacias] FARMACIAS_BROADCAST_TRANSPORT=meshtastic no es "
+            "compatible con RADIO_PROFILE=meshcore_only; se usará MeshCore",
+            file=sys.stderr,
+            flush=True,
+        )
+        configured = "meshcore"
     channel_var = "FARMACIAS_MESHCORE_CHANNEL" if configured == "meshcore" else "FARMACIAS_MESHTASTIC_CHANNEL"
     return configured, int(os.getenv(channel_var, "-1"))
 
