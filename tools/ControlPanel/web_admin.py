@@ -176,6 +176,19 @@ class EmergencyCollectionPayload(BaseModel):
     firms_map_key: str = ""
     radius: EmergencyRadiusPayload = Field(default_factory=EmergencyRadiusPayload)
 
+class EmergencyRadiusPayload(BaseModel):
+    enabled: bool = False
+    latitude: float = 41.6488
+    longitude: float = -0.8891
+    radius_km: float = 150
+
+
+class EmergencyCollectionPayload(BaseModel):
+    sources: list[str]
+    provinces: list[str]
+    categories: list[str]
+    firms_map_key: str = ""
+    radius: EmergencyRadiusPayload = EmergencyRadiusPayload()
 
 class CommunicationChannelsPayload(BaseModel):
     transport: str

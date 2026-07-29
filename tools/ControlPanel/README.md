@@ -170,6 +170,13 @@ media y Terremoto en alta sin que Protección Civil alta ni Terremoto medio se
 propaguen. Los botones de columna seleccionan toda una severidad y **Limpiar
 matriz** bloquea todas las combinaciones.
 
+La tarjeta muestra una matriz de propagación con una fila por categoría y una
+columna por severidad (`baja`, `media`, `alta` y `crítica`). Cada casilla decide
+una combinación exacta. Por ejemplo, se puede habilitar Protección Civil en
+media y Terremoto en alta sin que Protección Civil alta ni Terremoto medio se
+propaguen. Los botones de columna seleccionan toda una severidad y **Limpiar
+matriz** bloquea todas las combinaciones.
+
 Guardar el filtro modifica la configuración persistente de
 `emergencias_guardia`. No envía mensajes inmediatamente; se aplica a las
 próximas comprobaciones y propagaciones.
