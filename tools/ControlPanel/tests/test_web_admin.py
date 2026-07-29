@@ -92,8 +92,24 @@ def test_systemd_installer_is_valid_and_adapts_repository_path():
     result = subprocess.run(["bash", "-n", str(installer)], capture_output=True, text=True)
     assert result.returncode == 0
     text = installer.read_text(encoding="utf-8")
-    assert 'sed "s|/home/meshnet/MeshNet-Bot|${REPO_DIR}|g"' in text
+    assert 'SERVICE_USER="${SUDO_USER:-$(id -un)}"' in text
+    assert '-e "s|/home/meshnet/MeshNet-Bot|${escaped_repo}|g"' in text
+    assert '-e "s|^User=meshnet$|User=${SERVICE_USER}|"' in text
+    assert 'subject.user == \\"${SERVICE_USER}\\"' in text
+    assert '"${temporary_polkit}"' in text
+    assert 'pip" install -r "${SCRIPT_DIR}/requirements.txt"' in text
     assert 'systemctl enable --now "${UNIT_NAME}"' in text
+
+
+def test_emergency_collection_radius_uses_a_fresh_default_model():
+    first = web_admin.EmergencyCollectionPayload(
+        sources=[], provinces=[], categories=[]
+    )
+    second = web_admin.EmergencyCollectionPayload(
+        sources=[], provinces=[], categories=[]
+    )
+
+    assert first.radius is not second.radius
 
 
 def test_dashboard_reserves_danger_style_for_confirmed_actions():
