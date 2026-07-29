@@ -54,6 +54,35 @@ bash tools/ControlPanel/start_control_panel.sh
 Si sí existen cambios propios, no use `git restore`: resuelva los bloques de
 conflicto manualmente y ejecute `python3 -m py_compile` sobre ambos archivos.
 
+Si `origin/main` también contiene los marcadores (es decir, fueron publicados
+por error), restaurar desde `origin/main` no sirve. Primero localice una rama
+remota limpia y verifíquela **antes** de copiar el archivo. Para la rama de
+desarrollo de Emergencias:
+
+```bash
+cd ~/MeshNet-Bot
+git fetch origin --prune
+CLEAN_REF=origin/codex/investigar-implementacion-extraccion-datos-emergencias
+
+git show "$CLEAN_REF:tools/ControlPanel/web_admin.py" |
+  grep -nE '^(<<<<<<<|=======|>>>>>>>)' && {
+    echo "La rama candidata también está contaminada"; exit 1;
+  }
+
+git restore --source="$CLEAN_REF" --worktree \
+  tools/ControlPanel/web_admin.py \
+  tools/ControlPanel/control_panel.py \
+  tools/ControlPanel/start_control_panel.sh
+
+python3 -m py_compile \
+  tools/ControlPanel/web_admin.py \
+  tools/ControlPanel/control_panel.py
+```
+
+Este procedimiento no toca directorios `data/` ni archivos `.env`. El archivo
+restaurado aparecerá como modificado respecto a `main` hasta que la corrección
+limpia se integre en esa rama; no use `git clean` para resolverlo.
+
 El ejecutable directo escucha en `127.0.0.1`; el script escucha en `0.0.0.0`
 para permitir acceso desde la red privada. Variables:
 
@@ -122,6 +151,7 @@ con la selección actual. La matriz utiliza colores por severidad y mantiene
 fijas sus cabeceras durante el desplazamiento. Los guardados importantes se
 confirman mediante avisos breves en pantalla, conservando el detalle técnico en
 el resultado de la tarjeta.
+
 La sección **Recogida de emergencias** permite habilitar independientemente
 Ayuntamiento de Zaragoza, DGT, terremotos IGN y focos térmicos NASA FIRMS. Se
 pueden seleccionar los tipos conservados, una o varias provincias y un radio.
@@ -133,12 +163,12 @@ navegador si existe, nunca su valor.
 Esta configuración es distinta del filtro de propagación: la primera decide qué
 se descarga y conserva; el segundo decide qué puede enviarse por radio.
 
-La tarjeta de Emergencias permite seleccionar:
-
-- severidades propagables, seleccionables individualmente: baja, media, alta y
-  crítica;
-- categorías propagables: incendios, tráfico, cortes, meteorología, servicios,
-  seguridad pública y otras.
+La tarjeta muestra una matriz de propagación con una fila por categoría y una
+columna por severidad (`baja`, `media`, `alta` y `crítica`). Cada casilla decide
+una combinación exacta. Por ejemplo, se puede habilitar Protección Civil en
+media y Terremoto en alta sin que Protección Civil alta ni Terremoto medio se
+propaguen. Los botones de columna seleccionan toda una severidad y **Limpiar
+matriz** bloquea todas las combinaciones.
 
 La tarjeta muestra una matriz de propagación con una fila por categoría y una
 columna por severidad (`baja`, `media`, `alta` y `crítica`). Cada casilla decide

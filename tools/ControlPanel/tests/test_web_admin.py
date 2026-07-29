@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from urllib.error import URLError
@@ -68,6 +69,13 @@ def test_start_script_reports_unresolved_git_conflicts_before_python(tmp_path):
     assert result.returncode == 2
     assert "marcadores de conflicto Git" in result.stderr
     assert "git restore" in result.stderr
+
+
+def test_tracked_control_panel_sources_have_no_merge_markers():
+    marker = re.compile(r"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
+    for name in ("web_admin.py", "control_panel.py", "start_control_panel.sh"):
+        text = (web_admin.BASE_DIR / name).read_text(encoding="utf-8")
+        assert marker.search(text) is None, f"marcador de conflicto en {name}"
 
 
 def test_dashboard_reserves_danger_style_for_confirmed_actions():
