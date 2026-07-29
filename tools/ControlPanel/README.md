@@ -107,9 +107,17 @@ para permitir acceso desde la red privada. Variables:
 - `CONTROLPANEL_MANIFESTS`: directorio alternativo de manifiestos.
 - `CONTROLPANEL_EMERGENCIAS_CONFIG`: configuración JSON de Emergencias;
 - `CONTROLPANEL_EMERGENCIAS_ENV`: fichero privado que contiene `FIRMS_MAP_KEY`.
+- `CONTROLPANEL_TOKEN`: contraseña del usuario web `admin`.
 
-El panel no solicita token. Debe publicarse únicamente en una red privada y no
-exponerse directamente a Internet, ya que contiene acciones operativas.
+El acceso se protege mediante autenticación HTTP Basic cuando se configura
+`CONTROLPANEL_TOKEN`. El instalador genera un token aleatorio, lo guarda en
+`tools/ControlPanel/.env` con permisos `0600` y lo muestra una sola vez. El
+arranque manual también carga ese archivo; si escucha en una dirección de red y
+no existe token persistente, crea uno temporal y lo muestra en la terminal.
+
+Use el usuario `admin` y el token como contraseña. Aunque exista autenticación,
+publique el panel únicamente en una red privada: HTTP Basic no cifra el tráfico
+y no debe exponerse directamente a Internet sin HTTPS.
 
 ## systemd y permisos
 
@@ -118,8 +126,9 @@ permanente.
 
 Que `start_control_panel.sh` funcione manualmente no instala esta unidad. Si
 `systemctl` responde `Unit meshnet-control-panel.service could not be found`,
-instálela con el asistente, que adapta las rutas al repositorio actual, instala
-la regla PolicyKit mínima y habilita el servicio:
+instálela con el asistente, que crea el entorno virtual, adapta las rutas y el
+usuario de la unidad a la instalación actual, instala la regla PolicyKit mínima
+para ese mismo usuario y habilita el servicio:
 
 ```bash
 cd ~/MeshNet-Bot/tools/ControlPanel
@@ -127,12 +136,21 @@ chmod +x install_control_panel_service.sh
 ./install_control_panel_service.sh
 ```
 
+Ejecute el asistente desde la cuenta que gestiona el repositorio, **sin**
+anteponer `sudo`: solicitará privilegios únicamente para copiar la unidad y la
+regla. Por seguridad, rechaza instalar el proceso web como `root`.
+
 Después, el panel queda disponible tras reinicios y se comprueba con:
 
 ```bash
 systemctl status meshnet-control-panel.service --no-pager
-curl -s http://127.0.0.1:8790/api/tools | python3 -m json.tool
+curl -s http://127.0.0.1:8790/health | python3 -m json.tool
 ```
+
+El instalador espera hasta diez segundos a que `/health` confirme el arranque.
+Este endpoint no consulta las APIs externas: informa de la versión del panel y
+del número de aplicaciones registradas y habilitadas, por lo que también puede
+usarse como sonda local de monitorización.
 
 Las acciones de lectura usan `systemctl` sin privilegios. Las mutaciones usan
 PolicyKit y requieren la regla mínima incluida:
