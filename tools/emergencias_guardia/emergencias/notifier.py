@@ -32,6 +32,7 @@ SERVICE_CATEGORIES = {
 }
 SERIOUS_CATEGORIES = {
     "wildfire", "urban_fire", "industrial_fire", "traffic_collision",
+    "earthquake", "tsunami", "volcanic", "landslide",
     "road_closed", "flood", "chemical", "public_safety", "civil_protection",
 }
 OFFICIAL_VERIFICATIONS = {"official", "confirmed_multi_source"}
