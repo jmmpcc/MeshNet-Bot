@@ -364,7 +364,8 @@ def create_app(registry: ToolRegistry | None = None) -> FastAPI:
             "wildfire", "urban_fire", "industrial_fire", "traffic_collision",
             "road_closed", "lane_closed", "traffic_obstruction", "flood", "storm",
             "snow", "strong_wind", "extreme_temperature", "chemical", "power_outage",
-            "water_outage", "gas_outage", "public_safety", "civil_protection", "other",
+            "water_outage", "gas_outage", "public_safety", "civil_protection",
+            "earthquake", "tsunami", "volcanic", "landslide", "other",
         }
         selected = set(payload.categories)
         selected_severities = set(payload.severities)
@@ -492,7 +493,7 @@ button{border:0;border-radius:10px;padding:9px 12px;font-weight:750;cursor:point
 <script>
 const headers={'Content-Type':'application/json'};
 const labels={ok:'Correcto',enabled:'Habilitado',error:'Error',events:'Eventos',sources:'Fuentes',records:'Recibidos',accepted:'Aceptados',last_success:'Último éxito',last_error:'Último error',current_exists:'Datos locales',minimum_severity:'Severidad mínima',categories:'Categorías',changes:'Cambios',new:'Nuevas',updated:'Actualizadas',resolved:'Resueltas',problems:'Problemas',areas:'Áreas',pending:'Pendientes',delivered:'Entregados',observed:'Observados'};
-const catLabels={wildfire:'Incendio forestal',urban_fire:'Incendio urbano',industrial_fire:'Incendio industrial',traffic_collision:'Colisión de tráfico',road_closed:'Carretera cortada',lane_closed:'Carril cerrado',traffic_obstruction:'Obstáculo o afección',flood:'Inundación',storm:'Tormenta',snow:'Nieve',strong_wind:'Viento fuerte',extreme_temperature:'Temperatura extrema',chemical:'Riesgo químico',power_outage:'Corte eléctrico',water_outage:'Corte de agua',gas_outage:'Corte de gas',public_safety:'Seguridad pública',civil_protection:'Protección civil',other:'Otras'};
+const catLabels={wildfire:'Incendio forestal',urban_fire:'Incendio urbano',industrial_fire:'Incendio industrial',traffic_collision:'Colisión de tráfico',road_closed:'Carretera cortada',lane_closed:'Carril cerrado',traffic_obstruction:'Obstáculo o afección',flood:'Inundación',storm:'Tormenta',snow:'Nieve',strong_wind:'Viento fuerte',extreme_temperature:'Temperatura extrema',chemical:'Riesgo químico',power_outage:'Corte eléctrico',water_outage:'Corte de agua',gas_outage:'Corte de gas',public_safety:'Seguridad pública',civil_protection:'Protección civil',earthquake:'Terremoto',tsunami:'Tsunami',volcanic:'Actividad volcánica',landslide:'Deslizamiento',other:'Otras'};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const label=k=>esc(labels[k]||catLabels[k]||String(k).replaceAll('_',' '));
 function render(v,k=''){
