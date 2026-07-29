@@ -10,6 +10,7 @@ Group=meshnet
 WorkingDirectory=/home/meshnet/MeshNet-Bot/tools/ControlPanel
 Environment=CONTROLPANEL_HOST=0.0.0.0
 Environment=CONTROLPANEL_PORT=8790
+EnvironmentFile=-/home/meshnet/MeshNet-Bot/tools/ControlPanel/.env
 ExecStart=/home/meshnet/MeshNet-Bot/tools/ControlPanel/.venv/bin/python control_panel.py
 Restart=on-failure
 RestartSec=5
