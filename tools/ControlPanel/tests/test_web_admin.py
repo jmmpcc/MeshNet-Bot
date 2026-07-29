@@ -101,7 +101,8 @@ def test_systemd_installer_is_valid_and_adapts_repository_path():
     assert 'subject.user == \\"${SERVICE_USER}\\"' in text
     assert '"${temporary_polkit}"' in text
     assert 'pip" install -r "${SCRIPT_DIR}/requirements.txt"' in text
-    assert 'systemctl enable --now "${UNIT_NAME}"' in text
+    assert 'systemctl enable "${UNIT_NAME}"' in text
+    assert 'systemctl restart "${UNIT_NAME}"' in text
     assert 'http://127.0.0.1:8790/health' in text
     assert 'Panel en red: http://${LAN_IP}:8790' in text
 

@@ -161,6 +161,10 @@ systemctl status meshnet-control-panel.service --no-pager
 journalctl -u meshnet-control-panel.service -n 50 --no-pager
 ```
 
+El instalador reinicia siempre una unidad existente después de actualizarla.
+Esto es necesario porque `systemctl enable --now` por sí solo no recarga un
+proceso que ya estaba activo y podía dejar ejecutándose la versión anterior.
+
 El instalador espera hasta diez segundos a que `/health` confirme el arranque.
 Este endpoint no consulta las APIs externas: informa de la versión del panel y
 del número de aplicaciones registradas y habilitadas, por lo que también puede

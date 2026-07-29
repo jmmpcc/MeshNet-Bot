@@ -55,7 +55,32 @@ sudo install -d -o root -g root -m 0755 "/etc/polkit-1/rules.d"
 sudo install -o root -g root -m 0644 "${temporary_polkit}" \
     "/etc/polkit-1/rules.d/50-meshnet-control-panel.rules"
 sudo systemctl daemon-reload
-sudo systemctl enable --now "${UNIT_NAME}"
+sudo systemctl enable "${UNIT_NAME}"
+# `enable --now` no reinicia una unidad que ya estaba activa. Es necesario
+# reiniciarla para aplicar cambios de código, usuario, ruta o dirección de escucha.
+sudo systemctl restart "${UNIT_NAME}"
+
+echo "[control-panel] Esperando la comprobación de salud..."
+"${SCRIPT_DIR}/.venv/bin/python" - <<'PY'
+import json
+import time
+from urllib.error import URLError
+from urllib.request import urlopen
+
+url = "http://127.0.0.1:8790/health"
+for attempt in range(20):
+    try:
+        with urlopen(url, timeout=1) as response:
+            payload = json.load(response)
+        if response.status == 200 and payload.get("ok") is True:
+            print("[control-panel] Salud correcta:", json.dumps(payload, ensure_ascii=False))
+            break
+    except (OSError, URLError, ValueError):
+        pass
+    time.sleep(0.5)
+else:
+    raise SystemExit("[control-panel] El servicio no respondió correctamente en /health")
+PY
 
 echo "[control-panel] Esperando la comprobación de salud..."
 "${SCRIPT_DIR}/.venv/bin/python" - <<'PY'
