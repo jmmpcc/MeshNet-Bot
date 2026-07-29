@@ -309,6 +309,26 @@ def test_emergency_filters_api_sends_individual_severities(tmp_path, monkeypatch
     assert calls[0][-4:] == ("--severities", "low,high", "--categories", "storm")
 
 
+def test_emergency_filters_api_sends_category_severity_matrix(tmp_path, monkeypatch):
+    calls = []
+    def fake_execute(action):
+        calls.append(action.argv)
+        return {"ok": True, "returncode": 0, "stdout": '{"ok":true}', "stderr": "",
+                "data": {"ok": True, "rules": {"medium": ["civil_protection"]}},
+                "truncated": False}
+    monkeypatch.setattr(web_admin, "execute_action", fake_execute)
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "emergencias_guardia")))
+    response = client.put("/api/emergencias/filters", json={"rules": {
+        "medium": ["civil_protection"], "high": ["earthquake"],
+    }})
+    assert response.status_code == 200
+    assert calls[0][-2] == "--rules-json"
+    rules = json.loads(calls[0][-1])
+    assert rules["medium"] == ["civil_protection"]
+    assert rules["high"] == ["earthquake"]
+    assert rules["low"] == [] and rules["critical"] == []
+
+
 def test_dashboard_hides_configuration_controls_for_disabled_applications():
     assert "function collectionHtml(t){return !t.enabled" in web_admin.DASHBOARD
     assert "function filterHtml(t){return !t.enabled" in web_admin.DASHBOARD

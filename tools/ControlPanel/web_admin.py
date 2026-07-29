@@ -157,8 +157,24 @@ class ActionPayload(BaseModel):
 
 
 class EmergencyFiltersPayload(BaseModel):
-    severities: list[str]
+    severities: list[str] = []
+    categories: list[str] = []
+    rules: dict[str, list[str]] | None = None
+
+
+class EmergencyRadiusPayload(BaseModel):
+    enabled: bool = False
+    latitude: float = 41.6488
+    longitude: float = -0.8891
+    radius_km: float = 150
+
+
+class EmergencyCollectionPayload(BaseModel):
+    sources: list[str]
+    provinces: list[str]
     categories: list[str]
+    firms_map_key: str = ""
+    radius: EmergencyRadiusPayload = EmergencyRadiusPayload()
 
 
 class EmergencyRadiusPayload(BaseModel):
@@ -515,6 +531,17 @@ def create_app(registry: ToolRegistry | None = None) -> FastAPI:
             "water_outage", "gas_outage", "public_safety", "civil_protection",
             "earthquake", "tsunami", "volcanic", "landslide", "other",
         }
+        if payload.rules is not None:
+            if set(payload.rules) - severities or any(
+                not set(values).issubset(categories) for values in payload.rules.values()
+            ):
+                raise HTTPException(status_code=422, detail="Matriz de propagación no válida")
+            rules = {severity: sorted(set(payload.rules.get(severity, [])))
+                     for severity in ("low", "medium", "high", "critical")}
+            result = emergency_filter_action("filters", "set", "--rules-json", json.dumps(rules))
+            if not result["ok"]:
+                raise HTTPException(status_code=502, detail=result["stderr"] or result["stdout"])
+            return result["data"] or {}
         selected = set(payload.categories)
         selected_severities = set(payload.severities)
         if not selected_severities.issubset(severities) or not selected.issubset(categories):
@@ -637,6 +664,7 @@ button{border:0;border-radius:10px;padding:9px 12px;font-weight:750;cursor:point
 .filterbox{margin-top:18px;padding:15px;background:#091a2a99;border:1px solid var(--line);border-radius:14px}.severity{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.severity select{background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:7px;margin:12px 0}.checks label{background:#142b44;border-radius:8px;padding:7px}.empty{color:var(--muted);font-style:italic}
 .channel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:9px;margin:12px 0}.channel-grid label{color:var(--muted);font-size:.82rem}.channel-grid select,.channel-grid input{display:block;width:100%;margin-top:5px;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.routebox{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.routebox:first-child{border:0;padding-top:0;margin-top:0}
 .config-section{margin:14px 0}.config-section summary{cursor:pointer;font-weight:750;margin-bottom:8px}.config-section input[type=password],.config-section input[type=number]{width:100%;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.hint{font-size:.82rem;color:var(--muted);margin:7px 0}.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.matrix-wrap{overflow-x:auto;margin:12px 0}.matrix{width:100%;border-collapse:collapse;min-width:560px}.matrix th,.matrix td{padding:8px;border-bottom:1px solid var(--line);text-align:center}.matrix th:first-child,.matrix td:first-child{text-align:left;position:sticky;left:0;background:#102238}.matrix input{width:18px;height:18px}
 @media(max-width:520px){.grid{grid-template-columns:1fr}header,main{padding:16px}.card{padding:17px}}
 </style></head><body><header><div class="logo">MN</div><div><h1>MeshNet Control</h1><div class="sub">Estado, datos y operación de aplicaciones independientes</div></div></header><main><div id="tools" class="grid"></div></main>
 <script>
@@ -665,8 +693,9 @@ const sourceLabels={municipal_json:'Ayuntamiento de Zaragoza',dgt_datex:'DGT —
 function toggleChecks(selector,value){document.querySelectorAll(selector).forEach(x=>x.checked=value)}
 async function loadCollection(){const box=document.querySelector('#collection-emergencias_guardia');if(!box)return;try{const d=await request('/api/emergencias/collection');const sources=d.sources.map(x=>`<label><input class="collection-source" type="checkbox" value="${x.id}" ${x.enabled?'checked':''}> ${esc(sourceLabels[x.id]||x.id)}</label>`).join('');const provinces=d.provinces.map(x=>`<label><input class="collection-province" type="checkbox" value="${esc(x.name)}" ${x.enabled?'checked':''}> ${esc(x.name)}</label>`).join('');const cats=d.categories.map(x=>`<label><input class="collection-category" type="checkbox" value="${x.name}" ${x.enabled?'checked':''}> ${esc(catLabels[x.name]||x.name)}</label>`).join('');box.innerHTML=`<div class="config-section"><strong>Fuentes consultadas</strong><div class="checks">${sources}</div><label>MAP_KEY de NASA FIRMS <input id="firms-key" type="password" autocomplete="new-password" placeholder="${d.firms_key_configured?'Configurada — dejar vacío para conservar':'Introducir MAP_KEY'}"></label><p class="hint">La clave nunca se devuelve al navegador. Déjala vacía para conservar la actual.</p></div><details class="config-section" open><summary>Tipos de incidencia recogidos</summary><div class="toolbar"><button class="secondary" onclick="toggleChecks('.collection-category',true)">Todos</button><button class="secondary" onclick="toggleChecks('.collection-category',false)">Ninguno</button></div><div class="checks">${cats}</div></details><details class="config-section"><summary>Provincias (${d.provinces.filter(x=>x.enabled).length} seleccionadas)</summary><p class="hint">Se aplican a fuentes que informan la provincia, como DGT.</p><div class="toolbar"><button class="secondary" onclick="toggleChecks('.collection-province',true)">Toda España</button><button class="secondary" onclick="toggleChecks('.collection-province',false)">Limpiar</button></div><div class="checks">${provinces}</div></details><div class="config-section"><label><input id="radius-enabled" type="checkbox" ${d.radius.enabled?'checked':''}> Usar también un radio geográfico</label><p class="hint">Necesario para IGN y FIRMS, que proporcionan coordenadas pero no siempre provincia.</p><div class="channel-grid"><label>Latitud<input id="radius-lat" type="number" step="0.0001" value="${d.radius.latitude}"></label><label>Longitud<input id="radius-lon" type="number" step="0.0001" value="${d.radius.longitude}"></label><label>Radio (km)<input id="radius-km" type="number" min="1" max="1000" value="${d.radius.radius_km}"></label></div></div><button onclick="saveCollection()">Guardar recogida</button>`}catch(e){box.textContent=e.message}}
 async function saveCollection(){const values=s=>[...document.querySelectorAll(s+':checked')].map(x=>x.value),payload={sources:values('.collection-source'),provinces:values('.collection-province'),categories:values('.collection-category'),firms_map_key:document.querySelector('#firms-key').value,radius:{enabled:document.querySelector('#radius-enabled').checked,latitude:Number(document.querySelector('#radius-lat').value),longitude:Number(document.querySelector('#radius-lon').value),radius_km:Number(document.querySelector('#radius-km').value)}};try{const d=await request('/api/emergencias/collection',{method:'PUT',body:JSON.stringify(payload)});show('emergencias_guardia',render({correcto:true,fuentes:d.sources,provincias:d.provinces,tipos:d.categories}));loadCollection()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
-async function loadFilters(){const box=document.querySelector('#filters-emergencias_guardia');try{const d=await request('/api/emergencias/filters');box.innerHTML=`<strong>Severidades propagables</strong><div class="checks">${d.severities.map(s=>`<label><input class="severity-filter" type="checkbox" value="${s.name}" ${s.enabled?'checked':''}> ${{low:'Baja',medium:'Media',high:'Alta',critical:'Crítica'}[s.name]}</label>`).join('')}</div><strong>Categorías propagables</strong><div class="checks">${d.categories.map(c=>`<label><input class="category-filter" type="checkbox" value="${c.name}" ${c.enabled?'checked':''}> ${esc(catLabels[c.name]||c.name)}</label>`).join('')}</div><button onclick="saveFilters()">Guardar filtro</button>`}catch(e){box.textContent=e.message}}
-async function saveFilters(){const severities=[...document.querySelectorAll('#filters-emergencias_guardia .severity-filter:checked')].map(x=>x.value),categories=[...document.querySelectorAll('#filters-emergencias_guardia .category-filter:checked')].map(x=>x.value);try{const d=await request('/api/emergencias/filters',{method:'PUT',body:JSON.stringify({severities,categories})});show('emergencias_guardia',render({correcto:true,severidades:d.severities,categorías:d.categories,nota:d.note}));loadFilters()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
+const severityLabels={low:'Baja',medium:'Media',high:'Alta',critical:'Crítica'};
+async function loadFilters(){const box=document.querySelector('#filters-emergencias_guardia');try{const d=await request('/api/emergencias/filters'),levels=['low','medium','high','critical'];const head=levels.map(s=>`<th>${severityLabels[s]}<br><button class="secondary" onclick="toggleChecks('.rule-'+s,true)">Todo</button></th>`).join('');const rows=d.categories.map(c=>`<tr><td>${esc(catLabels[c.name]||c.name)}</td>${levels.map(s=>`<td><input class="prop-rule rule-${s}" data-severity="${s}" data-category="${c.name}" type="checkbox" ${(d.rules[s]||[]).includes(c.name)?'checked':''}></td>`).join('')}</tr>`).join('');box.innerHTML=`<p class="hint">Marca exactamente qué categoría puede propagarse en cada severidad. Una casilla vacía bloquea esa combinación.</p><div class="matrix-wrap"><table class="matrix"><thead><tr><th>Tipo</th>${head}</tr></thead><tbody>${rows}</tbody></table></div><div class="toolbar"><button class="secondary" onclick="toggleChecks('.prop-rule',false)">Limpiar matriz</button><button onclick="saveFilters()">Guardar matriz</button></div>`}catch(e){box.textContent=e.message}}
+async function saveFilters(){const rules={low:[],medium:[],high:[],critical:[]};document.querySelectorAll('.prop-rule:checked').forEach(x=>rules[x.dataset.severity].push(x.dataset.category));try{const d=await request('/api/emergencias/filters',{method:'PUT',body:JSON.stringify({rules})});show('emergencias_guardia',render({correcto:true,matriz:d.rules,nota:d.note}));loadFilters()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
 const channelInputs=(prefix,d)=>`<div class="channel-grid"><label>Canal MeshCore<input id="${prefix}-meshcore" type="number" min="-1" max="255" value="${Number(d.meshcore_channel)}"></label><label>Canal Meshtastic<input id="${prefix}-meshtastic" type="number" min="-1" max="255" value="${Number(d.meshtastic_channel)}"></label></div>`;
 const transportSelect=(prefix,current,values)=>`<label>Transporte<select id="${prefix}-transport">${values.map(x=>`<option value="${x}" ${current===x?'selected':''}>${x==='auto'?'Automático':x==='meshcore'?'MeshCore':'Meshtastic'}</option>`).join('')}</select></label>`;
 async function loadEmergencyChannels(){const box=document.querySelector('#channels-emergencias_guardia');if(!box)return;try{const d=await request('/api/emergencias/channels');const globalTransport=`<div class="routebox"><strong>Transporte global</strong><div class="channel-grid">${transportSelect('em-global',d.transport,['meshcore','meshtastic'])}</div><button onclick="saveEmergencyTransport()">Guardar transporte</button></div>`;box.innerHTML=globalTransport+Object.entries(d.routes).map(([route,c])=>`<div class="routebox"><strong>${esc({emergencias:'Emergencias',servicios:'Servicios',meteo:'Meteorología'}[route])}</strong>${channelInputs('em-'+route,c)}<button onclick="saveEmergencyChannels('${route}')">Guardar canales</button></div>`).join('')}catch(e){box.textContent=e.message}}

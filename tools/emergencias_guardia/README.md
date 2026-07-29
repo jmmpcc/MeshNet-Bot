@@ -202,6 +202,12 @@ bloqueadas aunque se habilite la ruta, salvo que el operador cambie expresamente
 La recogida conserva todas las incidencias aceptadas. De forma independiente se
 puede decidir qué severidades y categorías podrán difundirse:
 
+En el ControlPanel este filtro se presenta como una matriz **categoría ×
+severidad**. Las casillas son exactas: habilitar `civil_protection` en `medium`
+no habilita esa categoría en `high`, y habilitar `earthquake` en `high` no lo
+habilita en `medium`. Una categoría grave oficial seleccionada explícitamente
+en la matriz se dirige a `EMERGENCIAS` incluso si su severidad es media.
+
 ```bash
 python3 emergencias_guardia.py filters show
 python3 emergencias_guardia.py filters set \

@@ -104,12 +104,12 @@ navegador si existe, nunca su valor.
 Esta configuración es distinta del filtro de propagación: la primera decide qué
 se descarga y conserva; el segundo decide qué puede enviarse por radio.
 
-La tarjeta de Emergencias permite seleccionar:
-
-- severidades propagables, seleccionables individualmente: baja, media, alta y
-  crítica;
-- categorías propagables: incendios, tráfico, cortes, meteorología, servicios,
-  seguridad pública y otras.
+La tarjeta muestra una matriz de propagación con una fila por categoría y una
+columna por severidad (`baja`, `media`, `alta` y `crítica`). Cada casilla decide
+una combinación exacta. Por ejemplo, se puede habilitar Protección Civil en
+media y Terremoto en alta sin que Protección Civil alta ni Terremoto medio se
+propaguen. Los botones de columna seleccionan toda una severidad y **Limpiar
+matriz** bloquea todas las combinaciones.
 
 Guardar el filtro modifica la configuración persistente de
 `emergencias_guardia`. No envía mensajes inmediatamente; se aplica a las
