@@ -87,6 +87,25 @@ def test_tracked_control_panel_sources_have_no_merge_markers():
         assert marker.search(text) is None, f"marcador de conflicto en {name}"
 
 
+def test_start_script_reports_unresolved_git_conflicts_before_python(tmp_path):
+    script = Path(web_admin.BASE_DIR / "start_control_panel.sh")
+    target = tmp_path / "start_control_panel.sh"
+    target.write_text(script.read_text())
+    (tmp_path / "web_admin.py").write_text("<<<<<<< ours\nvalue = 1\n=======\nvalue = 2\n>>>>>>> theirs\n")
+    (tmp_path / "control_panel.py").write_text("")
+    result = subprocess.run(["bash", str(target)], capture_output=True, text=True, check=False)
+    assert result.returncode == 2
+    assert "marcadores de conflicto Git" in result.stderr
+    assert "git restore" in result.stderr
+
+
+def test_tracked_control_panel_sources_have_no_merge_markers():
+    marker = re.compile(r"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
+    for name in ("web_admin.py", "control_panel.py", "start_control_panel.sh"):
+        text = (web_admin.BASE_DIR / name).read_text(encoding="utf-8")
+        assert marker.search(text) is None, f"marcador de conflicto en {name}"
+
+
 def test_dashboard_reserves_danger_style_for_confirmed_actions():
     assert "a.confirm?'danger':(a.mutating?'':'secondary')" in web_admin.DASHBOARD
 
