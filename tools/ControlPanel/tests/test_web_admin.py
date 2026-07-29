@@ -115,6 +115,17 @@ def test_emergency_collection_radius_uses_a_fresh_default_model():
     assert first.radius is not second.radius
 
 
+def test_emergency_collection_radius_uses_a_fresh_default_model():
+    first = web_admin.EmergencyCollectionPayload(
+        sources=[], provinces=[], categories=[]
+    )
+    second = web_admin.EmergencyCollectionPayload(
+        sources=[], provinces=[], categories=[]
+    )
+
+    assert first.radius is not second.radius
+
+
 def test_dashboard_reserves_danger_style_for_confirmed_actions():
     assert "a.confirm?'danger':(a.mutating?'':'secondary')" in web_admin.DASHBOARD
 
