@@ -270,6 +270,7 @@ class EngineTests(unittest.TestCase):
 
 
 class ApiAndFormattingTests(unittest.TestCase):
+
     def test_filters_cli_saves_category_by_severity_matrix(self):
         cfg = config()
         rules = {"medium": ["civil_protection"], "high": ["earthquake", "wildfire"]}

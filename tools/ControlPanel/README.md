@@ -122,7 +122,6 @@ con la selección actual. La matriz utiliza colores por severidad y mantiene
 fijas sus cabeceras durante el desplazamiento. Los guardados importantes se
 confirman mediante avisos breves en pantalla, conservando el detalle técnico en
 el resultado de la tarjeta.
-
 La sección **Recogida de emergencias** permite habilitar independientemente
 Ayuntamiento de Zaragoza, DGT, terremotos IGN y focos térmicos NASA FIRMS. Se
 pueden seleccionar los tipos conservados, una o varias provincias y un radio.
@@ -133,6 +132,13 @@ navegador si existe, nunca su valor.
 
 Esta configuración es distinta del filtro de propagación: la primera decide qué
 se descarga y conserva; el segundo decide qué puede enviarse por radio.
+
+La tarjeta de Emergencias permite seleccionar:
+
+- severidades propagables, seleccionables individualmente: baja, media, alta y
+  crítica;
+- categorías propagables: incendios, tráfico, cortes, meteorología, servicios,
+  seguridad pública y otras.
 
 La tarjeta muestra una matriz de propagación con una fila por categoría y una
 columna por severidad (`baja`, `media`, `alta` y `crítica`). Cada casilla decide
