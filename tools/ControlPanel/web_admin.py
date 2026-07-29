@@ -1,9 +1,12 @@
 """Panel operativo seguro para aplicaciones independientes de MeshNet."""
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
+import secrets
 import unicodedata
 import subprocess
 import sys
@@ -15,8 +18,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -378,9 +381,33 @@ def execute_action(action: ActionDefinition) -> dict[str, Any]:
         return {"ok": False, "returncode": None, "stdout": "", "stderr": str(exc), "data": None}
 
 
-def create_app(registry: ToolRegistry | None = None) -> FastAPI:
+def create_app(registry: ToolRegistry | None = None, auth_token: str | None = None) -> FastAPI:
     registry = registry or ToolRegistry(Path(os.getenv("CONTROLPANEL_STATE", str(BASE_DIR / "data/state.json"))))
     app = FastAPI(title="MeshNet Control", version="1.0.0")
+    configured_token = auth_token if auth_token is not None else os.getenv("CONTROLPANEL_TOKEN", "")
+
+    @app.middleware("http")
+    async def require_authentication(request: FastAPIRequest, call_next):
+        if not configured_token or request.url.path == "/health":
+            return await call_next(request)
+        authorization = request.headers.get("authorization", "")
+        try:
+            scheme, encoded = authorization.split(" ", 1)
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+            username, supplied_token = decoded.split(":", 1)
+        except (ValueError, UnicodeDecodeError, binascii.Error):
+            username, supplied_token, scheme = "", "", ""
+        authenticated = (
+            scheme.casefold() == "basic"
+            and secrets.compare_digest(username, "admin")
+            and secrets.compare_digest(supplied_token, configured_token)
+        )
+        if not authenticated:
+            return JSONResponse(
+                {"detail": "Autenticación requerida"}, status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="MeshNet ControlPanel", charset="UTF-8"'},
+            )
+        return await call_next(request)
 
     def require_enabled(tool_id: str) -> None:
         if not registry.enabled(tool_id):
