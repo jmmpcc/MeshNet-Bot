@@ -132,6 +132,12 @@ En una instalación donde el broker se ejecuta en Docker y la aplicación en el 
 FARMACIAS_API_HOST=0.0.0.0
 ```
 
+La unidad `meshnet-farmacias-api.service` incluida en el repositorio fija este
+valor para el caso Docker incluso si falta en el `.env`. Un
+valor definido mediante `systemctl edit meshnet-farmacias-api.service` tiene
+prioridad; después de cambiarlo hay que ejecutar `daemon-reload` y reiniciar la
+unidad.
+
 ### Límites de los mensajes
 
 ```env
@@ -148,7 +154,7 @@ El `.env` de MeshNet-Bot debe indicar dónde está la API independiente:
 
 ```env
 FARMACIAS_COMMAND_ENABLED=true
-FARMACIAS_SERVICE_URL=http://172.17.0.1:8788/query
+FARMACIAS_SERVICE_URL=http://host.docker.internal:8788/query
 FARMACIAS_SERVICE_TIMEOUT_SECONDS=3
 
 FARMACIAS_MESHCORE_CHANNEL=1
@@ -162,12 +168,14 @@ FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE=6
 FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS=1
 ```
 
-La IP `172.17.0.1` es un ejemplo. Debe utilizarse una dirección del host accesible desde el contenedor. Para obtener la gateway real del contenedor:
-
 `FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE` limita las consultas filtradas. El
 comando exacto `farma` es la excepción: devuelve todas las guardias presentes
 en `current.json`, espaciando sus partes con
 `FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS`.
+
+`docker-compose.rpi.yml` registra `host.docker.internal` contra la puerta de
+enlace del host, por lo que no es necesario fijar una IP como `172.17.0.1`. Para
+comprobar la gateway real del contenedor si se usa otro despliegue:
 
 ```bash
 docker exec meshnet-broker python3 -c '
@@ -181,6 +189,41 @@ for line in open("/proc/net/route"):
 ```
 
 No es necesario integrar la aplicación en Docker ni modificar su código para relacionarla con el broker.
+
+## Diagnóstico de `Connection refused`
+
+El mensaje del broker `URLError: [Errno 111] Connection refused` significa que
+el comando fue reconocido correctamente, pero la API no está escuchando en el
+host o solo está ligada a `127.0.0.1`. En la Raspberry, compruebe y recupere el
+servicio con:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now meshnet-farmacias-api.service
+sudo systemctl restart meshnet-farmacias-api.service
+sudo systemctl status meshnet-farmacias-api.service --no-pager
+curl -fsS http://127.0.0.1:8788/health
+docker exec meshnet-broker python3 -c 'import urllib.request; print(urllib.request.urlopen("http://host.docker.internal:8788/health", timeout=3).read().decode())'
+```
+
+El último comando es la comprobación decisiva: reproduce la conexión desde el
+mismo contenedor que procesa `farma`. Si el primer `curl` funciona y el último
+no, confirme que la unidad cargada contiene
+`Environment=FARMACIAS_API_HOST=0.0.0.0` mediante:
+
+```bash
+systemctl cat meshnet-farmacias-api.service
+sudo ss -ltnp | grep ':8788'
+```
+
+Tras actualizar el repositorio, vuelva a copiar la unidad suministrada y
+reiníciela para que systemd no conserve una versión anterior:
+
+```bash
+sudo install -m 0644 tools/farmacias_guardia/systemd/meshnet-farmacias-api.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart meshnet-farmacias-api.service
+```
 
 # Comandos CLI
 

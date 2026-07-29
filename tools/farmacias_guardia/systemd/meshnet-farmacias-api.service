@@ -7,6 +7,11 @@ Wants=network-online.target
 Type=simple
 User=meshnet
 WorkingDirectory=/home/meshnet/MeshNet-Bot/tools/farmacias_guardia
+# El broker se ejecuta en Docker y llega a esta API por la interfaz bridge del
+# host. Este valor también evita que una instalación sin .env quede escuchando
+# únicamente en 127.0.0.1, que no es accesible desde el contenedor.
+Environment=FARMACIAS_API_HOST=0.0.0.0
+Environment=FARMACIAS_API_PORT=8788
 ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/farmacias_guardia/farmacias_guardia.py serve
 Restart=always
 RestartSec=5
