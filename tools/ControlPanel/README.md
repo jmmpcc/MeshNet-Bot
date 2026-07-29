@@ -93,6 +93,20 @@ unidades, timeout (1–300 s) y duplicados se validan al arrancar.
 
 ## Filtros de Emergencias
 
+La tarjeta de Emergencias se organiza en pestañas para no mezclar operación y
+configuración:
+
+- **Resumen**: disponibilidad de API, estado del recolector, última recogida,
+  fuentes activas, pendientes, áreas y estado individual de cada fuente;
+- **Fuentes y cobertura**: orígenes, tipos recogidos, MAP_KEY, provincias y radio;
+- **Propagación**: matriz categoría×severidad y canales de comunicación.
+
+El selector de provincias incluye búsqueda normalizada (ignora acentos) y chips
+con la selección actual. La matriz utiliza colores por severidad y mantiene
+fijas sus cabeceras durante el desplazamiento. Los guardados importantes se
+confirman mediante avisos breves en pantalla, conservando el detalle técnico en
+el resultado de la tarjeta.
+
 La sección **Recogida de emergencias** permite habilitar independientemente
 Ayuntamiento de Zaragoza, DGT, terremotos IGN y focos térmicos NASA FIRMS. Se
 pueden seleccionar los tipos conservados, una o varias provincias y un radio.

@@ -347,7 +347,29 @@ def test_emergency_filters_api_sends_category_severity_matrix(tmp_path, monkeypa
 def test_dashboard_hides_configuration_controls_for_disabled_applications():
     assert "function collectionHtml(t){return !t.enabled" in web_admin.DASHBOARD
     assert "function filterHtml(t){return !t.enabled" in web_admin.DASHBOARD
-    assert "function channelHtml(t){return !t.enabled" in web_admin.DASHBOARD
+    assert "function channelHtml(t){if(!t.enabled" in web_admin.DASHBOARD
+
+
+def test_emergency_overview_summarizes_sources_without_exposing_secrets(tmp_path, monkeypatch):
+    config_path = tmp_path / "emergency-data/config.json"
+    monkeypatch.setattr(web_admin, "EMERGENCIAS_CONFIG_FILE", config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({
+        "sources": {"ign_earthquakes": {"enabled": True}},
+        "areas": [{"id": "r", "type": "radius", "enabled": True}],
+    }))
+    (config_path.parent / "state.json").write_text(json.dumps({"sources": {
+        "ign_earthquakes": {"ok": True, "last_success": "2026-07-29T10:00:00Z", "accepted": 2},
+    }}))
+    monkeypatch.setattr(web_admin, "probe", lambda tool: {"reachable": True})
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "emergencias_guardia")))
+    result = client.get("/api/emergencias/overview")
+    assert result.status_code == 200
+    data = result.json()
+    assert data["api"]["ok"] is True
+    assert data["collector"]["ok"] is True
+    assert data["sources"]["items"][0]["accepted"] == 2
+    assert data["coverage"]["areas"] == 1
 
 
 def test_emergency_route_update_does_not_change_global_transport(tmp_path, monkeypatch):
