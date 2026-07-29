@@ -14,7 +14,7 @@ VALID_CATEGORIES = {
     "road_closed", "lane_closed", "traffic_obstruction", "flood", "storm",
     "snow", "strong_wind", "extreme_temperature", "chemical",
     "power_outage", "water_outage", "gas_outage", "public_safety",
-    "civil_protection", "other",
+    "civil_protection", "earthquake", "tsunami", "volcanic", "landslide", "other",
 }
 VALID_SEVERITIES = ("low", "medium", "high", "critical")
 SEVERITY_RANK = {name: index for index, name in enumerate(VALID_SEVERITIES)}
