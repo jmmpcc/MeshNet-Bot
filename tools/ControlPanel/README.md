@@ -118,8 +118,9 @@ permanente.
 
 Que `start_control_panel.sh` funcione manualmente no instala esta unidad. Si
 `systemctl` responde `Unit meshnet-control-panel.service could not be found`,
-instálela con el asistente, que adapta las rutas al repositorio actual, instala
-la regla PolicyKit mínima y habilita el servicio:
+instálela con el asistente, que crea el entorno virtual, adapta las rutas y el
+usuario de la unidad a la instalación actual, instala la regla PolicyKit mínima
+y habilita el servicio:
 
 ```bash
 cd ~/MeshNet-Bot/tools/ControlPanel
