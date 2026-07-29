@@ -17,7 +17,7 @@ TERMINAL_STATUSES = {"resolved", "cancelled", "expired"}
 def event_matches(event: Event, config: dict[str, Any], query: dict[str, Any] | None = None) -> bool:
     query = query or {}
     categories = set(config["filters"].get("categories", []))
-    if categories and event.category not in categories:
+    if "categories" in config["filters"] and event.category not in categories:
         return False
     minimum = query.get("minimum_severity") or config["filters"].get("minimum_severity", "low")
     if SEVERITY_RANK.get(event.severity, 0) < SEVERITY_RANK.get(minimum, 0):

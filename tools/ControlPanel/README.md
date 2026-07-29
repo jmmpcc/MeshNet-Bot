@@ -12,6 +12,8 @@ Panel web independiente para supervisar y operar las aplicaciones instaladas en
 - consulta servicios y temporizadores;
 - ejecuta únicamente acciones CLI declaradas por el administrador;
 - convierte los resultados técnicos en tarjetas, campos y listas legibles;
+- configura las fuentes de Emergencias, los tipos que se recogen, una o varias
+  provincias, un radio geográfico y la MAP_KEY de FIRMS sin volver a mostrarla;
 - permite elegir severidad y categorías propagables de Emergencias;
 - muestra y permite editar los canales MeshCore y Meshtastic de Farmacias y de
   cada ruta de Emergencias (emergencias, servicios y meteorología);
@@ -36,12 +38,75 @@ local y de red, y abre el navegador automáticamente cuando existe un escritorio
 gráfico. En una Raspberry sin escritorio, abra desde otro equipo la dirección
 indicada, por ejemplo `http://192.168.1.69:8790`.
 
+Antes de anunciar que el panel está disponible, el script comprueba que
+`web_admin.py` y `control_panel.py` no contienen marcadores de conflicto Git y
+que ambos compilan. Si aparece `<<<<<<< ours`, `=======` o `>>>>>>> theirs`, la
+copia local quedó a medio resolver y Python no puede ejecutarla. Si no hay
+cambios locales que conservar, se recupera la versión del repositorio con:
+
+```bash
+cd ~/MeshNet-Bot
+git restore tools/ControlPanel/web_admin.py tools/ControlPanel/control_panel.py
+git pull
+bash tools/ControlPanel/start_control_panel.sh
+```
+
+Si sí existen cambios propios, no use `git restore`: resuelva los bloques de
+conflicto manualmente y ejecute `python3 -m py_compile` sobre ambos archivos.
+
+Si `origin/main` también contiene los marcadores (es decir, fueron publicados
+por error), restaurar desde `origin/main` no sirve. Primero localice una rama
+remota limpia y verifíquela **antes** de copiar el archivo. Para la rama de
+desarrollo de Emergencias:
+
+```bash
+cd ~/MeshNet-Bot
+git fetch origin --prune
+CLEAN_REF=origin/codex/investigar-implementacion-extraccion-datos-emergencias
+
+git show "$CLEAN_REF:tools/ControlPanel/web_admin.py" |
+  grep -nE '^(<<<<<<<|=======|>>>>>>>)' && {
+    echo "La rama candidata también está contaminada"; exit 1;
+  }
+
+git restore --source="$CLEAN_REF" --worktree \
+  tools/ControlPanel/web_admin.py \
+  tools/ControlPanel/control_panel.py \
+  tools/ControlPanel/start_control_panel.sh
+
+python3 -m py_compile \
+  tools/ControlPanel/web_admin.py \
+  tools/ControlPanel/control_panel.py
+```
+
+Este procedimiento no toca directorios `data/` ni archivos `.env`. El archivo
+restaurado aparecerá como modificado respecto a `main` hasta que la corrección
+limpia se integre en esa rama; no use `git clean` para resolverlo.
+
+### Página vacía después de reparar los conflictos
+
+El HTML del panel se sirve ahora con `Cache-Control: no-store` y muestra un
+estado inicial “Cargando aplicaciones…”. Si JavaScript falla, sustituye la
+página vacía por el motivo del error y sugiere consultar `/api/tools`. Tras
+actualizar una instalación que hubiera servido el JavaScript conflictivo:
+
+```bash
+sudo systemctl restart meshnet-control-panel.service
+curl -s http://127.0.0.1:8790/api/tools | python3 -m json.tool
+```
+
+Después use `Ctrl+F5` o una ventana privada. Si `/api/tools` devuelve la lista de
+aplicaciones pero el navegador conserva una pantalla antigua, se trata de caché;
+si el endpoint falla, revise `journalctl -u meshnet-control-panel.service`.
+
 El ejecutable directo escucha en `127.0.0.1`; el script escucha en `0.0.0.0`
 para permitir acceso desde la red privada. Variables:
 
 - `CONTROLPANEL_HOST` y `CONTROLPANEL_PORT`: escucha;
 - `CONTROLPANEL_STATE`: archivo de estado;
 - `CONTROLPANEL_MANIFESTS`: directorio alternativo de manifiestos.
+- `CONTROLPANEL_EMERGENCIAS_CONFIG`: configuración JSON de Emergencias;
+- `CONTROLPANEL_EMERGENCIAS_ENV`: fichero privado que contiene `FIRMS_MAP_KEY`.
 
 El panel no solicita token. Debe publicarse únicamente en una red privada y no
 exponerse directamente a Internet, ya que contiene acciones operativas.
@@ -89,18 +154,50 @@ unidades, timeout (1–300 s) y duplicados se validan al arrancar.
 
 ## Filtros de Emergencias
 
-La tarjeta de Emergencias permite seleccionar:
+La tarjeta de Emergencias se organiza en pestañas para no mezclar operación y
+configuración:
 
-- severidades propagables, seleccionables individualmente: baja, media, alta y
-  crítica;
-- categorías propagables: incendios, tráfico, cortes, meteorología, servicios,
-  seguridad pública y otras.
+- **Resumen**: disponibilidad de API, estado del recolector, última recogida,
+  fuentes activas, pendientes, áreas y estado individual de cada fuente;
+- **Fuentes y cobertura**: orígenes, tipos recogidos, MAP_KEY, provincias y radio;
+- **Propagación**: matriz categoría×severidad y canales de comunicación.
+
+El selector de provincias incluye búsqueda normalizada (ignora acentos) y chips
+con la selección actual. La matriz utiliza colores por severidad y mantiene
+fijas sus cabeceras durante el desplazamiento. Los guardados importantes se
+confirman mediante avisos breves en pantalla, conservando el detalle técnico en
+el resultado de la tarjeta.
+
+La sección **Recogida de emergencias** permite habilitar independientemente
+Ayuntamiento de Zaragoza, DGT, terremotos IGN y focos térmicos NASA FIRMS. Se
+pueden seleccionar los tipos conservados, una o varias provincias y un radio.
+Las provincias se usan cuando la fuente informa el límite administrativo; IGN
+y FIRMS necesitan el radio porque publican coordenadas. Si FIRMS está activo,
+el panel exige una MAP_KEY, la guarda con permisos privados y solo devuelve al
+navegador si existe, nunca su valor.
+
+Esta configuración es distinta del filtro de propagación: la primera decide qué
+se descarga y conserva; el segundo decide qué puede enviarse por radio.
+
+La tarjeta muestra una matriz de propagación con una fila por categoría y una
+columna por severidad (`baja`, `media`, `alta` y `crítica`). Cada casilla decide
+una combinación exacta. Por ejemplo, se puede habilitar Protección Civil en
+media y Terremoto en alta sin que Protección Civil alta ni Terremoto medio se
+propaguen. Los botones de columna seleccionan toda una severidad y **Limpiar
+matriz** bloquea todas las combinaciones.
 
 Guardar el filtro modifica la configuración persistente de
 `emergencias_guardia`. No envía mensajes inmediatamente; se aplica a las
 próximas comprobaciones y propagaciones.
 
 ## Canales de comunicación
+
+La **API de consultas** y el **recolector programado** son unidades distintas.
+La primera atiende consultas DM y el botón *Comprobar salud*; el temporizador
+descarga fuentes y puede difundir cambios a la malla aunque la API no esté
+instalada. Por eso los botones systemd se denominan explícitamente “API de
+consultas”. Si falta su unidad, el panel muestra una explicación y el paso de
+instalación en vez de presentar únicamente el error bruto de systemd.
 
 Las tarjetas de Farmacias y Emergencias muestran el transporte activo y los
 índices de canal de MeshCore y Meshtastic. El valor `-1` deja ese destino sin

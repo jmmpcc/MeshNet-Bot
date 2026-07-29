@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import subprocess
 from pathlib import Path
 from urllib.error import URLError
 
@@ -55,6 +57,34 @@ def test_dashboard_escapes_dynamic_values():
     assert "const esc=" in web_admin.DASHBOARD
     assert "Token de ControlPanel" not in web_admin.DASHBOARD
     assert "JSON.stringify(d.data" not in web_admin.DASHBOARD
+    assert "Cargando aplicaciones" in web_admin.DASHBOARD
+    assert "fatalUi" in web_admin.DASHBOARD
+
+
+def test_dashboard_disables_browser_cache(tmp_path):
+    client = TestClient(web_admin.create_app(registry(tmp_path)))
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate, max-age=0"
+
+
+def test_start_script_reports_unresolved_git_conflicts_before_python(tmp_path):
+    script = Path(web_admin.BASE_DIR / "start_control_panel.sh")
+    target = tmp_path / "start_control_panel.sh"
+    target.write_text(script.read_text())
+    (tmp_path / "web_admin.py").write_text("<<<<<<< ours\nvalue = 1\n=======\nvalue = 2\n>>>>>>> theirs\n")
+    (tmp_path / "control_panel.py").write_text("")
+    result = subprocess.run(["bash", str(target)], capture_output=True, text=True, check=False)
+    assert result.returncode == 2
+    assert "marcadores de conflicto Git" in result.stderr
+    assert "git restore" in result.stderr
+
+
+def test_tracked_control_panel_sources_have_no_merge_markers():
+    marker = re.compile(r"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
+    for name in ("web_admin.py", "control_panel.py", "start_control_panel.sh"):
+        text = (web_admin.BASE_DIR / name).read_text(encoding="utf-8")
+        assert marker.search(text) is None, f"marcador de conflicto en {name}"
 
 
 def test_dashboard_reserves_danger_style_for_confirmed_actions():
@@ -126,6 +156,21 @@ def test_confirmed_action_requires_confirmation(tmp_path, monkeypatch):
         "/api/tools/demo/actions/stop", json={"confirmed": False},
     )
     assert response.status_code == 409
+
+
+def test_missing_emergency_api_unit_explains_collector_is_independent(monkeypatch):
+    class Result:
+        returncode, stdout = 4, ""
+        stderr = "Unit meshnet-emergencias-api.service could not be found.\n"
+    monkeypatch.setattr(web_admin.subprocess, "run", lambda *args, **kwargs: Result())
+    result = web_admin.execute_action(web_admin.ActionDefinition(
+        "api_status", "Estado API de consultas", "systemd",
+        unit="meshnet-emergencias-api.service", operation="status",
+    ))
+    assert result["ok"] is False
+    assert result["data"]["instalado"] is False
+    assert "recolector puede seguir enviando" in result["data"]["explicación"]
+    assert "daemon-reload" in result["data"]["solución"]
 
 
 def test_env_channel_update_preserves_unrelated_values(tmp_path):
@@ -249,6 +294,45 @@ def test_emergency_filters_require_enabled_application(tmp_path, monkeypatch):
     assert calls == []
 
 
+def test_emergency_collection_api_updates_sources_provinces_radius_and_key(tmp_path, monkeypatch):
+    config_path, env_path = tmp_path / "config.json", tmp_path / ".env"
+    monkeypatch.setattr(web_admin, "EMERGENCIAS_CONFIG_FILE", config_path)
+    monkeypatch.setattr(web_admin, "EMERGENCIAS_ENV_FILE", env_path)
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "emergencias_guardia")))
+    payload = {
+        "sources": ["dgt_datex", "ign_earthquakes", "nasa_firms"],
+        "provinces": ["Huesca", "Zaragoza"],
+        "categories": ["earthquake", "wildfire", "road_closed"],
+        "firms_map_key": "real-test-key",
+        "radius": {"enabled": True, "latitude": 41.65, "longitude": -0.89, "radius_km": 175},
+    }
+    response = client.put("/api/emergencias/collection", json=payload)
+    assert response.status_code == 200
+    saved = json.loads(config_path.read_text())
+    assert saved["sources"]["dgt_datex"]["enabled"] is True
+    assert saved["sources"]["municipal_json"]["enabled"] is False
+    assert {area["name"] for area in saved["areas"] if area["type"] == "province"} == {"Huesca", "Zaragoza"}
+    assert next(area for area in saved["areas"] if area["id"] == "panel-radius")["radius_km"] == 175
+    assert env_path.read_text().strip() == "FIRMS_MAP_KEY=real-test-key"
+
+    returned = client.get("/api/emergencias/collection").json()
+    assert returned["firms_key_configured"] is True
+    assert "real-test-key" not in json.dumps(returned)
+    assert {item["name"] for item in returned["provinces"] if item["enabled"]} == {"Huesca", "Zaragoza"}
+
+
+def test_emergency_collection_requires_radius_for_coordinate_sources(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_admin, "EMERGENCIAS_CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(web_admin, "EMERGENCIAS_ENV_FILE", tmp_path / ".env")
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "emergencias_guardia")))
+    response = client.put("/api/emergencias/collection", json={
+        "sources": ["ign_earthquakes"], "provinces": ["Zaragoza"],
+        "categories": ["earthquake"], "radius": {"enabled": False},
+    })
+    assert response.status_code == 422
+    assert "radio" in response.json()["detail"]
+
+
 def test_emergency_filters_api_sends_individual_severities(tmp_path, monkeypatch):
     calls = []
 
@@ -270,9 +354,52 @@ def test_emergency_filters_api_sends_individual_severities(tmp_path, monkeypatch
     assert calls[0][-4:] == ("--severities", "low,high", "--categories", "storm")
 
 
+def test_emergency_filters_api_sends_category_severity_matrix(tmp_path, monkeypatch):
+    calls = []
+    def fake_execute(action):
+        calls.append(action.argv)
+        return {"ok": True, "returncode": 0, "stdout": '{"ok":true}', "stderr": "",
+                "data": {"ok": True, "rules": {"medium": ["civil_protection"]}},
+                "truncated": False}
+    monkeypatch.setattr(web_admin, "execute_action", fake_execute)
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "emergencias_guardia")))
+    response = client.put("/api/emergencias/filters", json={"rules": {
+        "medium": ["civil_protection"], "high": ["earthquake"],
+    }})
+    assert response.status_code == 200
+    assert calls[0][-2] == "--rules-json"
+    rules = json.loads(calls[0][-1])
+    assert rules["medium"] == ["civil_protection"]
+    assert rules["high"] == ["earthquake"]
+    assert rules["low"] == [] and rules["critical"] == []
+
+
 def test_dashboard_hides_configuration_controls_for_disabled_applications():
+    assert "function collectionHtml(t){return !t.enabled" in web_admin.DASHBOARD
     assert "function filterHtml(t){return !t.enabled" in web_admin.DASHBOARD
-    assert "function channelHtml(t){return !t.enabled" in web_admin.DASHBOARD
+    assert "function channelHtml(t){if(!t.enabled" in web_admin.DASHBOARD
+
+
+def test_emergency_overview_summarizes_sources_without_exposing_secrets(tmp_path, monkeypatch):
+    config_path = tmp_path / "emergency-data/config.json"
+    monkeypatch.setattr(web_admin, "EMERGENCIAS_CONFIG_FILE", config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({
+        "sources": {"ign_earthquakes": {"enabled": True}},
+        "areas": [{"id": "r", "type": "radius", "enabled": True}],
+    }))
+    (config_path.parent / "state.json").write_text(json.dumps({"sources": {
+        "ign_earthquakes": {"ok": True, "last_success": "2026-07-29T10:00:00Z", "accepted": 2},
+    }}))
+    monkeypatch.setattr(web_admin, "probe", lambda tool: {"reachable": True})
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "emergencias_guardia")))
+    result = client.get("/api/emergencias/overview")
+    assert result.status_code == 200
+    data = result.json()
+    assert data["api"]["ok"] is True
+    assert data["collector"]["ok"] is True
+    assert data["sources"]["items"][0]["accepted"] == 2
+    assert data["coverage"]["areas"] == 1
 
 
 def test_emergency_route_update_does_not_change_global_transport(tmp_path, monkeypatch):

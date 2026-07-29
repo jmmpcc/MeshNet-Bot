@@ -19,6 +19,7 @@ def query_from_text(text: str) -> dict[str, Any] | None:
         term = " ".join(words[1:])
         aliases = {
             "incendios": "wildfire", "incendio": "wildfire",
+            "terremotos": "earthquake", "terremoto": "earthquake",
             "trafico": "traffic_collision", "tráfico": "traffic_collision",
             "carreteras": "road_closed",
         }
