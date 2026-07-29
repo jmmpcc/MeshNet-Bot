@@ -20,6 +20,10 @@ class FirmsSource(HttpSource):
         map_key = clean_text(os.getenv(key_env))
         if not map_key:
             raise SourceError(f"falta la variable de entorno {key_env}")
+        if map_key.casefold() in {"su_map_key", "your_map_key", "map_key", "demo"}:
+            raise SourceError(
+                f"{key_env} contiene el texto de ejemplo; sustitúyalo por la MAP_KEY real de NASA FIRMS"
+            )
         template = clean_text(self.config.get("url_template"))
         if not template:
             raise SourceError("url_template no configurada")

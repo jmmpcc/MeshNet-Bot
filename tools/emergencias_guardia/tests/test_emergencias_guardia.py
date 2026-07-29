@@ -71,6 +71,16 @@ class ParserTests(unittest.TestCase):
         self.assertNotIn("url", source.config)
         self.assertNotIn("secret", json.dumps(write.call_args.args[1]))
 
+    def test_firms_rejects_documentation_placeholder_before_http(self):
+        source = FirmsSource("nasa_firms", {
+            "url_template": "https://example.test/{map_key}/{source}/{bbox}/{days}",
+        }, config())
+        with mock.patch.dict("os.environ", {"FIRMS_MAP_KEY": "SU_MAP_KEY"}), \
+                mock.patch.object(HttpSource, "fetch_bytes") as fetch:
+            with self.assertRaisesRegex(SourceError, "texto de ejemplo"):
+                source.fetch_bytes()
+        fetch.assert_not_called()
+
     def test_rss_rejects_dtd(self):
         source = RssSource("feed", {"url": "file:///fixture.xml"}, config())
         with self.assertRaises(SourceError):
@@ -196,6 +206,11 @@ class ParserTests(unittest.TestCase):
 
 
 class EngineTests(unittest.TestCase):
+    def test_empty_collection_categories_collects_nothing(self):
+        cfg = config()
+        cfg["filters"]["categories"] = []
+        self.assertFalse(engine.event_matches(Event("x:0", "x", "0", "earthquake"), cfg))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)

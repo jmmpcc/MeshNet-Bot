@@ -161,15 +161,15 @@ habilitarlo y dejar activo el temporizador. Para FIRMS hace falta además obtene
 una MAP_KEY gratuita y hacerla visible al servicio systemd:
 
 ```bash
-sudo install -d -m 0750 /etc/meshnet
-sudo sh -c 'umask 077; printf "%s\n" "FIRMS_MAP_KEY=SU_MAP_KEY" > /etc/meshnet/emergencias_guardia.env'
-sudo chown root:meshnet /etc/meshnet/emergencias_guardia.env
-
 cd /home/meshnet/MeshNet-Bot/tools/emergencias_guardia
+umask 077
+printf "%s\n" "FIRMS_MAP_KEY=SU_MAP_KEY" > .env
+
 python3 emergencias_guardia.py area add radius entorno-zaragoza \
   --lat 41.6488 --lon -0.8891 --km 150
 python3 emergencias_guardia.py source test ign_earthquakes
-sudo -u meshnet env FIRMS_MAP_KEY=SU_MAP_KEY python3 emergencias_guardia.py source test nasa_firms
+set -a; . ./.env; set +a
+python3 emergencias_guardia.py source test nasa_firms
 python3 emergencias_guardia.py source enable ign_earthquakes
 python3 emergencias_guardia.py source enable nasa_firms
 
@@ -177,6 +177,16 @@ sudo cp systemd/meshnet-emergencias-check.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now meshnet-emergencias-check.timer
 sudo systemctl start meshnet-emergencias-check.service
+```
+
+`SU_MAP_KEY` es solo un marcador: debe sustituirse en el fichero por
+la clave real entregada al registrarse en NASA FIRMS. Enviar literalmente
+`FIRMS_MAP_KEY=SU_MAP_KEY` no autentica la petición; la aplicación lo detecta
+antes de llamar a la API y muestra un error explicativo. Para comprobar qué
+valor leerá systemd sin imprimir el secreto:
+
+```bash
+sh -c '. ./.env; test -n "$FIRMS_MAP_KEY" && echo "FIRMS_MAP_KEY configurada"'
 ```
 
 Después se comprueba la recolección con `source list`, `status` y `list`. La
