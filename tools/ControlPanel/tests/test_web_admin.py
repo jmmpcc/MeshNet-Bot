@@ -128,6 +128,21 @@ def test_confirmed_action_requires_confirmation(tmp_path, monkeypatch):
     assert response.status_code == 409
 
 
+def test_missing_emergency_api_unit_explains_collector_is_independent(monkeypatch):
+    class Result:
+        returncode, stdout = 4, ""
+        stderr = "Unit meshnet-emergencias-api.service could not be found.\n"
+    monkeypatch.setattr(web_admin.subprocess, "run", lambda *args, **kwargs: Result())
+    result = web_admin.execute_action(web_admin.ActionDefinition(
+        "api_status", "Estado API de consultas", "systemd",
+        unit="meshnet-emergencias-api.service", operation="status",
+    ))
+    assert result["ok"] is False
+    assert result["data"]["instalado"] is False
+    assert "recolector puede seguir enviando" in result["data"]["explicación"]
+    assert "daemon-reload" in result["data"]["solución"]
+
+
 def test_env_channel_update_preserves_unrelated_values(tmp_path):
     path = tmp_path / ".env"
     path.write_text("# configuración\nSECRET=keep-me\nFARMACIAS_MESHCORE_CHANNEL=1\n")

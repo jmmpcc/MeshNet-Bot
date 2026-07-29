@@ -117,6 +117,13 @@ próximas comprobaciones y propagaciones.
 
 ## Canales de comunicación
 
+La **API de consultas** y el **recolector programado** son unidades distintas.
+La primera atiende consultas DM y el botón *Comprobar salud*; el temporizador
+descarga fuentes y puede difundir cambios a la malla aunque la API no esté
+instalada. Por eso los botones systemd se denominan explícitamente “API de
+consultas”. Si falta su unidad, el panel muestra una explicación y el paso de
+instalación en vez de presentar únicamente el error bruto de systemd.
+
 Las tarjetas de Farmacias y Emergencias muestran el transporte activo y los
 índices de canal de MeshCore y Meshtastic. El valor `-1` deja ese destino sin
 configurar. Emergencias guarda los canales por separado para las rutas de

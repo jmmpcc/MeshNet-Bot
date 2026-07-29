@@ -547,6 +547,12 @@ systemd/meshnet-emergencias-check.service
 systemd/meshnet-emergencias-check.timer
 ```
 
+`meshnet-emergencias-api.service` atiende la API local usada por consultas y
+por **Comprobar salud**. `meshnet-emergencias-check.timer` activa el recolector
+independiente que consulta fuentes y difunde cambios. Por tanto, que falte la
+unidad de API no impide necesariamente los envíos programados, pero sí deja sin
+servicio las consultas HTTP/DM y hace fallar la comprobación de salud.
+
 Antes de habilitarlos, configure y pruebe las fuentes:
 
 ```bash

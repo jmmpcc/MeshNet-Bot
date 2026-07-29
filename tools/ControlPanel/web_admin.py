@@ -177,21 +177,6 @@ class EmergencyCollectionPayload(BaseModel):
     radius: EmergencyRadiusPayload = EmergencyRadiusPayload()
 
 
-class EmergencyRadiusPayload(BaseModel):
-    enabled: bool = False
-    latitude: float = 41.6488
-    longitude: float = -0.8891
-    radius_km: float = 150
-
-
-class EmergencyCollectionPayload(BaseModel):
-    sources: list[str]
-    provinces: list[str]
-    categories: list[str]
-    firms_map_key: str = ""
-    radius: EmergencyRadiusPayload = EmergencyRadiusPayload()
-
-
 class CommunicationChannelsPayload(BaseModel):
     transport: str
     meshcore_channel: int
@@ -364,6 +349,25 @@ def execute_action(action: ActionDefinition) -> dict[str, Any]:
             data = json.loads(stdout) if stdout.strip() else None
         except json.JSONDecodeError:
             data = None
+        missing_unit = action.kind == "systemd" and (
+            "could not be found" in stderr.casefold() or "not-found" in stdout.casefold()
+        )
+        if missing_unit:
+            data = {
+                "instalado": False,
+                "unidad": action.unit,
+                "explicación": (
+                    "El recolector puede seguir enviando avisos mediante el temporizador; "
+                    "esta unidad separada solo mantiene la API de consultas disponible."
+                    if action.unit == "meshnet-emergencias-api.service" else
+                    "La unidad systemd no está instalada en este equipo."
+                ),
+                "solución": (
+                    "Instale systemd/meshnet-emergencias-api.service y ejecute systemctl daemon-reload."
+                    if action.unit == "meshnet-emergencias-api.service" else
+                    "Instale la unidad y ejecute systemctl daemon-reload."
+                ),
+            }
         return {"ok": done.returncode == 0, "returncode": done.returncode, "stdout": stdout,
                 "stderr": stderr, "data": data,
                 "truncated": len(done.stdout) > MAX_OUTPUT or len(done.stderr) > MAX_OUTPUT}
