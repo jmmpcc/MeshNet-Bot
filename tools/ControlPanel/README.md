@@ -12,6 +12,8 @@ Panel web independiente para supervisar y operar las aplicaciones instaladas en
 - consulta servicios y temporizadores;
 - ejecuta únicamente acciones CLI declaradas por el administrador;
 - convierte los resultados técnicos en tarjetas, campos y listas legibles;
+- configura las fuentes de Emergencias, los tipos que se recogen, una o varias
+  provincias, un radio geográfico y la MAP_KEY de FIRMS sin volver a mostrarla;
 - permite elegir severidad y categorías propagables de Emergencias;
 - muestra y permite editar los canales MeshCore y Meshtastic de Farmacias y de
   cada ruta de Emergencias (emergencias, servicios y meteorología);
@@ -42,6 +44,8 @@ para permitir acceso desde la red privada. Variables:
 - `CONTROLPANEL_HOST` y `CONTROLPANEL_PORT`: escucha;
 - `CONTROLPANEL_STATE`: archivo de estado;
 - `CONTROLPANEL_MANIFESTS`: directorio alternativo de manifiestos.
+- `CONTROLPANEL_EMERGENCIAS_CONFIG`: configuración JSON de Emergencias;
+- `CONTROLPANEL_EMERGENCIAS_ENV`: fichero privado que contiene `FIRMS_MAP_KEY`.
 
 El panel no solicita token. Debe publicarse únicamente en una red privada y no
 exponerse directamente a Internet, ya que contiene acciones operativas.
@@ -89,18 +93,36 @@ unidades, timeout (1–300 s) y duplicados se validan al arrancar.
 
 ## Filtros de Emergencias
 
-La tarjeta de Emergencias permite seleccionar:
+La sección **Recogida de emergencias** permite habilitar independientemente
+Ayuntamiento de Zaragoza, DGT, terremotos IGN y focos térmicos NASA FIRMS. Se
+pueden seleccionar los tipos conservados, una o varias provincias y un radio.
+Las provincias se usan cuando la fuente informa el límite administrativo; IGN
+y FIRMS necesitan el radio porque publican coordenadas. Si FIRMS está activo,
+el panel exige una MAP_KEY, la guarda con permisos privados y solo devuelve al
+navegador si existe, nunca su valor.
 
-- severidades propagables, seleccionables individualmente: baja, media, alta y
-  crítica;
-- categorías propagables: incendios, tráfico, cortes, meteorología, servicios,
-  seguridad pública y otras.
+Esta configuración es distinta del filtro de propagación: la primera decide qué
+se descarga y conserva; el segundo decide qué puede enviarse por radio.
+
+La tarjeta muestra una matriz de propagación con una fila por categoría y una
+columna por severidad (`baja`, `media`, `alta` y `crítica`). Cada casilla decide
+una combinación exacta. Por ejemplo, se puede habilitar Protección Civil en
+media y Terremoto en alta sin que Protección Civil alta ni Terremoto medio se
+propaguen. Los botones de columna seleccionan toda una severidad y **Limpiar
+matriz** bloquea todas las combinaciones.
 
 Guardar el filtro modifica la configuración persistente de
 `emergencias_guardia`. No envía mensajes inmediatamente; se aplica a las
 próximas comprobaciones y propagaciones.
 
 ## Canales de comunicación
+
+La **API de consultas** y el **recolector programado** son unidades distintas.
+La primera atiende consultas DM y el botón *Comprobar salud*; el temporizador
+descarga fuentes y puede difundir cambios a la malla aunque la API no esté
+instalada. Por eso los botones systemd se denominan explícitamente “API de
+consultas”. Si falta su unidad, el panel muestra una explicación y el paso de
+instalación en vez de presentar únicamente el error bruto de systemd.
 
 Las tarjetas de Farmacias y Emergencias muestran el transporte activo y los
 índices de canal de MeshCore y Meshtastic. El valor `-1` deja ese destino sin
