@@ -128,12 +128,21 @@ chmod +x install_control_panel_service.sh
 ./install_control_panel_service.sh
 ```
 
+Ejecute el asistente desde la cuenta que gestiona el repositorio, **sin**
+anteponer `sudo`: solicitará privilegios únicamente para copiar la unidad y la
+regla. Por seguridad, rechaza instalar el proceso web como `root`.
+
 Después, el panel queda disponible tras reinicios y se comprueba con:
 
 ```bash
 systemctl status meshnet-control-panel.service --no-pager
-curl -s http://127.0.0.1:8790/api/tools | python3 -m json.tool
+curl -s http://127.0.0.1:8790/health | python3 -m json.tool
 ```
+
+El instalador espera hasta diez segundos a que `/health` confirme el arranque.
+Este endpoint no consulta las APIs externas: informa de la versión del panel y
+del número de aplicaciones registradas y habilitadas, por lo que también puede
+usarse como sonda local de monitorización.
 
 Las acciones de lectura usan `systemctl` sin privilegios. Las mutaciones usan
 PolicyKit y requieren la regla mínima incluida:
