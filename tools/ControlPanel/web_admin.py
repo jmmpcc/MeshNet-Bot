@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent.parent
@@ -157,8 +157,8 @@ class ActionPayload(BaseModel):
 
 
 class EmergencyFiltersPayload(BaseModel):
-    severities: list[str] = []
-    categories: list[str] = []
+    severities: list[str] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
     rules: dict[str, list[str]] | None = None
 
 
@@ -172,7 +172,9 @@ class EmergencyRadiusPayload(BaseModel):
 class EmergencyCollectionPayload(BaseModel):
     sources: list[str]
     provinces: list[str]
-<<<<<<< ours
+    categories: list[str]
+    firms_map_key: str = ""
+    radius: EmergencyRadiusPayload = Field(default_factory=EmergencyRadiusPayload)
     categories: list[str]
     firms_map_key: str = ""
     radius: EmergencyRadiusPayload = EmergencyRadiusPayload()
@@ -188,12 +190,9 @@ class EmergencyRadiusPayload(BaseModel):
 class EmergencyCollectionPayload(BaseModel):
     sources: list[str]
     provinces: list[str]
-=======
->>>>>>> theirs
     categories: list[str]
     firms_map_key: str = ""
     radius: EmergencyRadiusPayload = EmergencyRadiusPayload()
-
 
 class CommunicationChannelsPayload(BaseModel):
     transport: str
@@ -484,8 +483,6 @@ def create_app(registry: ToolRegistry | None = None) -> FastAPI:
             "firms_key_configured": key_configured,
         }
 
-<<<<<<< ours
-=======
     @app.get("/api/emergencias/overview")
     def get_emergency_overview() -> dict[str, Any]:
         require_enabled("emergencias_guardia")
@@ -522,7 +519,6 @@ def create_app(registry: ToolRegistry | None = None) -> FastAPI:
             "coverage": {"areas": len([area for area in config.get("areas", []) if area.get("enabled", True)])},
         }
 
->>>>>>> theirs
     @app.put("/api/emergencias/collection")
     def set_emergency_collection(payload: EmergencyCollectionPayload) -> dict[str, Any]:
         require_enabled("emergencias_guardia")
@@ -725,15 +721,12 @@ button{border:0;border-radius:10px;padding:9px 12px;font-weight:750;cursor:point
 .filterbox{margin-top:18px;padding:15px;background:#091a2a99;border:1px solid var(--line);border-radius:14px}.severity{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.severity select{background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:7px;margin:12px 0}.checks label{background:#142b44;border-radius:8px;padding:7px}.empty{color:var(--muted);font-style:italic}
 .channel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:9px;margin:12px 0}.channel-grid label{color:var(--muted);font-size:.82rem}.channel-grid select,.channel-grid input{display:block;width:100%;margin-top:5px;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.routebox{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.routebox:first-child{border:0;padding-top:0;margin-top:0}
 .config-section{margin:14px 0}.config-section summary{cursor:pointer;font-weight:750;margin-bottom:8px}.config-section input[type=password],.config-section input[type=number]{width:100%;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.hint{font-size:.82rem;color:var(--muted);margin:7px 0}.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
-<<<<<<< ours
-<<<<<<< ours
-=======
-.matrix-wrap{overflow-x:auto;margin:12px 0}.matrix{width:100%;border-collapse:collapse;min-width:560px}.matrix th,.matrix td{padding:8px;border-bottom:1px solid var(--line);text-align:center}.matrix th:first-child,.matrix td:first-child{text-align:left;position:sticky;left:0;background:#102238}.matrix input{width:18px;height:18px}
->>>>>>> theirs
-=======
 .matrix-wrap{overflow-x:auto;margin:12px 0}.matrix{width:100%;border-collapse:collapse;min-width:560px}.matrix th,.matrix td{padding:8px;border-bottom:1px solid var(--line);text-align:center}.matrix th:first-child,.matrix td:first-child{text-align:left;position:sticky;left:0;background:#102238}.matrix input{width:18px;height:18px}
 .tabs{display:flex;gap:6px;overflow-x:auto;margin:18px 0 8px;padding-bottom:4px}.tab{white-space:nowrap;background:#213b53;color:#dceafa}.tab.active{background:var(--accent);color:#05251b}.tab-panel{display:none}.tab-panel.active{display:block}.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.status-card{padding:13px;border:1px solid var(--line);border-radius:13px;background:#091a2a}.status-card strong{display:block;font-size:1.15rem;margin-top:5px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#687b8d;margin-right:6px}.dot.ok{background:var(--accent)}.dot.warn{background:#ffc857}.source-status{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin-top:12px}.province-search{width:100%;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:9px}.chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}.chip{background:#24465f;border-radius:20px;padding:5px 9px;font-size:.82rem}.matrix th.sev-low{color:#75c8ff}.matrix th.sev-medium{color:#ffd166}.matrix th.sev-high{color:#ff9f43}.matrix th.sev-critical{color:#ff7770}.matrix tr:hover td{background:#18334a}.toasts{position:fixed;right:18px;bottom:18px;z-index:20;display:grid;gap:8px;max-width:360px}.toast{padding:12px 15px;border-radius:11px;background:#124d3d;color:#d8fff1;box-shadow:0 10px 30px #0008}.toast.bad{background:#5b2d32;color:#ffd4d1}
->>>>>>> theirs
+
+.matrix-wrap{overflow-x:auto;margin:12px 0}.matrix{width:100%;border-collapse:collapse;min-width:560px}.matrix th,.matrix td{padding:8px;border-bottom:1px solid var(--line);text-align:center}.matrix th:first-child,.matrix td:first-child{text-align:left;position:sticky;left:0;background:#102238}.matrix input{width:18px;height:18px}
+.tabs{display:flex;gap:6px;overflow-x:auto;margin:18px 0 8px;padding-bottom:4px}.tab{white-space:nowrap;background:#213b53;color:#dceafa}.tab.active{background:var(--accent);color:#05251b}.tab-panel{display:none}.tab-panel.active{display:block}.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.status-card{padding:13px;border:1px solid var(--line);border-radius:13px;background:#091a2a}.status-card strong{display:block;font-size:1.15rem;margin-top:5px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#687b8d;margin-right:6px}.dot.ok{background:var(--accent)}.dot.warn{background:#ffc857}.source-status{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin-top:12px}.province-search{width:100%;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:9px}.chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}.chip{background:#24465f;border-radius:20px;padding:5px 9px;font-size:.82rem}.matrix th.sev-low{color:#75c8ff}.matrix th.sev-medium{color:#ffd166}.matrix th.sev-high{color:#ff9f43}.matrix th.sev-critical{color:#ff7770}.matrix tr:hover td{background:#18334a}.toasts{position:fixed;right:18px;bottom:18px;z-index:20;display:grid;gap:8px;max-width:360px}.toast{padding:12px 15px;border-radius:11px;background:#124d3d;color:#d8fff1;box-shadow:0 10px 30px #0008}.toast.bad{background:#5b2d32;color:#ffd4d1}
+
 @media(max-width:520px){.grid{grid-template-columns:1fr}header,main{padding:16px}.card{padding:17px}}
 </style></head><body><header><div class="logo">MN</div><div><h1>MeshNet Control</h1><div class="sub">Estado, datos y operación de aplicaciones independientes</div></div></header><main><div id="tools" class="grid"></div></main><div id="toasts" class="toasts"></div>
 <script>
@@ -750,37 +743,28 @@ function render(v,k=''){
   return `<span>${esc(v)}</span>`;
 }
 async function request(url,options={}){const r=await fetch(url,{headers,...options});const d=await r.json();if(!r.ok)throw Error(d.detail||'No se pudo completar la operación');return d}
-<<<<<<< ours
 function filterHtml(t){return !t.enabled||t.id!=='emergencias_guardia'?'':`<section class="filterbox"><h3>Filtro de propagación</h3><p class="muted">Elige qué alertas podrán enviarse en las próximas comprobaciones.</p><div id="filters-${t.id}" class="empty">Cargando filtros…</div></section>`}
 function collectionHtml(t){return !t.enabled||t.id!=='emergencias_guardia'?'':`<section class="filterbox"><h3>Recogida de emergencias</h3><p class="muted">Configura fuentes, tipos de incidencia y cobertura geográfica.</p><div id="collection-${t.id}" class="empty">Cargando configuración…</div></section>`}
 function channelHtml(t){return !t.enabled||!['emergencias_guardia','farmacias_guardia'].includes(t.id)?'':`<section class="filterbox"><h3>Canales de comunicación</h3><p class="muted">Consulta y modifica los canales de difusión. Usa -1 para dejar un canal sin configurar.</p><div id="channels-${t.id}" class="empty">Cargando canales…</div></section>`}
 async function load(){const d=await request('/api/tools');document.querySelector('#tools').innerHTML=d.tools.map(t=>`<article class="card"><div class="row"><h2>${esc(t.name)}</h2><span class="badge ${t.enabled?'on':''}">${t.enabled?'HABILITADA':'DESHABILITADA'}</span></div><p class="sub">${esc(t.description)}</p><div class="actions"><button onclick="toggle('${t.id}',${!t.enabled})">${t.enabled?'Deshabilitar':'Habilitar'}</button><button class="secondary" ${t.enabled?'':'disabled'} onclick="health('${t.id}')">Comprobar salud</button></div><div class="actions">${t.actions.map(a=>`<button class="${a.confirm?'danger':(a.mutating?'':'secondary')}" ${t.enabled?'':'disabled'} onclick="run('${t.id}','${a.id}',${a.confirm},'${esc(a.name)}')">${esc(a.name)}</button>`).join('')}</div>${collectionHtml(t)}${channelHtml(t)}${filterHtml(t)}<div class="result" id="r-${t.id}"></div></article>`).join('');if(d.tools.some(t=>t.id==='emergencias_guardia'&&t.enabled)){loadCollection();loadFilters();loadEmergencyChannels()}if(d.tools.some(t=>t.id==='farmacias_guardia'&&t.enabled))loadPharmacyChannels()}
-=======
 function emergencyTabsHtml(t){return !t.enabled||t.id!=='emergencias_guardia'?'':`<nav class="tabs"><button class="tab active" onclick="openEmergencyTab('summary',this)">Resumen</button><button class="tab" onclick="openEmergencyTab('collection',this)">Fuentes y cobertura</button><button class="tab" onclick="openEmergencyTab('propagation',this)">Propagación</button></nav>`}
 function summaryHtml(t){return !t.enabled||t.id!=='emergencias_guardia'?'':`<section class="filterbox tab-panel active" data-emtab="summary"><h3>Resumen operativo</h3><div id="overview-emergencias_guardia" class="empty">Cargando estado…</div></section>`}
 function filterHtml(t){return !t.enabled||t.id!=='emergencias_guardia'?'':`<section class="filterbox tab-panel" data-emtab="propagation"><h3>Matriz de propagación</h3><p class="muted">Elige las combinaciones exactas que podrán enviarse.</p><div id="filters-${t.id}" class="empty">Cargando filtros…</div></section>`}
 function collectionHtml(t){return !t.enabled||t.id!=='emergencias_guardia'?'':`<section class="filterbox tab-panel" data-emtab="collection"><h3>Fuentes y cobertura</h3><p class="muted">Configura orígenes, tipos de incidencia y ámbito geográfico.</p><div id="collection-${t.id}" class="empty">Cargando configuración…</div></section>`}
 function channelHtml(t){if(!t.enabled||!['emergencias_guardia','farmacias_guardia'].includes(t.id))return '';const tab=t.id==='emergencias_guardia'?' tab-panel':'';const attr=t.id==='emergencias_guardia'?' data-emtab="propagation"':'';return `<section class="filterbox${tab}"${attr}><h3>Canales de comunicación</h3><p class="muted">Consulta y modifica los canales de difusión. Usa -1 para dejar un canal sin configurar.</p><div id="channels-${t.id}" class="empty">Cargando canales…</div></section>`}
 async function load(){const d=await request('/api/tools');document.querySelector('#tools').innerHTML=d.tools.map(t=>`<article class="card"><div class="row"><h2>${esc(t.name)}</h2><span class="badge ${t.enabled?'on':''}">${t.enabled?'HABILITADA':'DESHABILITADA'}</span></div><p class="sub">${esc(t.description)}</p><div class="actions"><button onclick="toggle('${t.id}',${!t.enabled})">${t.enabled?'Deshabilitar':'Habilitar'}</button><button class="secondary" ${t.enabled?'':'disabled'} onclick="health('${t.id}')">Comprobar salud</button></div><div class="actions">${t.actions.map(a=>`<button class="${a.confirm?'danger':(a.mutating?'':'secondary')}" ${t.enabled?'':'disabled'} onclick="run('${t.id}','${a.id}',${a.confirm},'${esc(a.name)}')">${esc(a.name)}</button>`).join('')}</div>${emergencyTabsHtml(t)}${summaryHtml(t)}${collectionHtml(t)}${channelHtml(t)}${filterHtml(t)}<div class="result" id="r-${t.id}"></div></article>`).join('');if(d.tools.some(t=>t.id==='emergencias_guardia'&&t.enabled)){loadOverview();loadCollection();loadFilters();loadEmergencyChannels()}if(d.tools.some(t=>t.id==='farmacias_guardia'&&t.enabled))loadPharmacyChannels()}
->>>>>>> theirs
+
 async function toggle(id,enabled){await request(`/api/tools/${id}/enabled`,{method:'PUT',body:JSON.stringify({enabled})});load()}
 async function health(id){show(id,'Comprobando…',true);try{const d=await request(`/api/tools/${id}/health`);show(id,render(d.details??d))}catch(e){show(id,render({error:e.message}))}}
 async function run(id,a,needs,name){if(needs&&!confirm(`¿Ejecutar “${name}”?`))return;show(id,'Ejecutando…',true);try{const d=await request(`/api/tools/${id}/actions/${a}`,{method:'POST',body:JSON.stringify({confirmed:true})});show(id,render(d.data??{correcto:d.ok,salida:d.stdout,error:d.stderr}))}catch(e){show(id,render({error:e.message}))}}
 function show(id,html,text=false){const n=document.querySelector('#r-'+id);n.classList.add('visible');n.innerHTML=text?`<span class="muted">${esc(html)}</span>`:html}
-<<<<<<< ours
 const sourceLabels={municipal_json:'Ayuntamiento de Zaragoza',dgt_datex:'DGT — tráfico y carreteras',ign_earthquakes:'IGN — terremotos',nasa_firms:'NASA FIRMS — focos térmicos'};
 function toggleChecks(selector,value){document.querySelectorAll(selector).forEach(x=>x.checked=value)}
 async function loadCollection(){const box=document.querySelector('#collection-emergencias_guardia');if(!box)return;try{const d=await request('/api/emergencias/collection');const sources=d.sources.map(x=>`<label><input class="collection-source" type="checkbox" value="${x.id}" ${x.enabled?'checked':''}> ${esc(sourceLabels[x.id]||x.id)}</label>`).join('');const provinces=d.provinces.map(x=>`<label><input class="collection-province" type="checkbox" value="${esc(x.name)}" ${x.enabled?'checked':''}> ${esc(x.name)}</label>`).join('');const cats=d.categories.map(x=>`<label><input class="collection-category" type="checkbox" value="${x.name}" ${x.enabled?'checked':''}> ${esc(catLabels[x.name]||x.name)}</label>`).join('');box.innerHTML=`<div class="config-section"><strong>Fuentes consultadas</strong><div class="checks">${sources}</div><label>MAP_KEY de NASA FIRMS <input id="firms-key" type="password" autocomplete="new-password" placeholder="${d.firms_key_configured?'Configurada — dejar vacío para conservar':'Introducir MAP_KEY'}"></label><p class="hint">La clave nunca se devuelve al navegador. Déjala vacía para conservar la actual.</p></div><details class="config-section" open><summary>Tipos de incidencia recogidos</summary><div class="toolbar"><button class="secondary" onclick="toggleChecks('.collection-category',true)">Todos</button><button class="secondary" onclick="toggleChecks('.collection-category',false)">Ninguno</button></div><div class="checks">${cats}</div></details><details class="config-section"><summary>Provincias (${d.provinces.filter(x=>x.enabled).length} seleccionadas)</summary><p class="hint">Se aplican a fuentes que informan la provincia, como DGT.</p><div class="toolbar"><button class="secondary" onclick="toggleChecks('.collection-province',true)">Toda España</button><button class="secondary" onclick="toggleChecks('.collection-province',false)">Limpiar</button></div><div class="checks">${provinces}</div></details><div class="config-section"><label><input id="radius-enabled" type="checkbox" ${d.radius.enabled?'checked':''}> Usar también un radio geográfico</label><p class="hint">Necesario para IGN y FIRMS, que proporcionan coordenadas pero no siempre provincia.</p><div class="channel-grid"><label>Latitud<input id="radius-lat" type="number" step="0.0001" value="${d.radius.latitude}"></label><label>Longitud<input id="radius-lon" type="number" step="0.0001" value="${d.radius.longitude}"></label><label>Radio (km)<input id="radius-km" type="number" min="1" max="1000" value="${d.radius.radius_km}"></label></div></div><button onclick="saveCollection()">Guardar recogida</button>`}catch(e){box.textContent=e.message}}
 async function saveCollection(){const values=s=>[...document.querySelectorAll(s+':checked')].map(x=>x.value),payload={sources:values('.collection-source'),provinces:values('.collection-province'),categories:values('.collection-category'),firms_map_key:document.querySelector('#firms-key').value,radius:{enabled:document.querySelector('#radius-enabled').checked,latitude:Number(document.querySelector('#radius-lat').value),longitude:Number(document.querySelector('#radius-lon').value),radius_km:Number(document.querySelector('#radius-km').value)}};try{const d=await request('/api/emergencias/collection',{method:'PUT',body:JSON.stringify(payload)});show('emergencias_guardia',render({correcto:true,fuentes:d.sources,provincias:d.provinces,tipos:d.categories}));loadCollection()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
-<<<<<<< ours
 async function loadFilters(){const box=document.querySelector('#filters-emergencias_guardia');try{const d=await request('/api/emergencias/filters');box.innerHTML=`<strong>Severidades propagables</strong><div class="checks">${d.severities.map(s=>`<label><input class="severity-filter" type="checkbox" value="${s.name}" ${s.enabled?'checked':''}> ${{low:'Baja',medium:'Media',high:'Alta',critical:'Crítica'}[s.name]}</label>`).join('')}</div><strong>Categorías propagables</strong><div class="checks">${d.categories.map(c=>`<label><input class="category-filter" type="checkbox" value="${c.name}" ${c.enabled?'checked':''}> ${esc(catLabels[c.name]||c.name)}</label>`).join('')}</div><button onclick="saveFilters()">Guardar filtro</button>`}catch(e){box.textContent=e.message}}
 async function saveFilters(){const severities=[...document.querySelectorAll('#filters-emergencias_guardia .severity-filter:checked')].map(x=>x.value),categories=[...document.querySelectorAll('#filters-emergencias_guardia .category-filter:checked')].map(x=>x.value);try{const d=await request('/api/emergencias/filters',{method:'PUT',body:JSON.stringify({severities,categories})});show('emergencias_guardia',render({correcto:true,severidades:d.severities,categorías:d.categories,nota:d.note}));loadFilters()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
-=======
-const severityLabels={low:'Baja',medium:'Media',high:'Alta',critical:'Crítica'};
-async function loadFilters(){const box=document.querySelector('#filters-emergencias_guardia');try{const d=await request('/api/emergencias/filters'),levels=['low','medium','high','critical'];const head=levels.map(s=>`<th>${severityLabels[s]}<br><button class="secondary" onclick="toggleChecks('.rule-'+s,true)">Todo</button></th>`).join('');const rows=d.categories.map(c=>`<tr><td>${esc(catLabels[c.name]||c.name)}</td>${levels.map(s=>`<td><input class="prop-rule rule-${s}" data-severity="${s}" data-category="${c.name}" type="checkbox" ${(d.rules[s]||[]).includes(c.name)?'checked':''}></td>`).join('')}</tr>`).join('');box.innerHTML=`<p class="hint">Marca exactamente qué categoría puede propagarse en cada severidad. Una casilla vacía bloquea esa combinación.</p><div class="matrix-wrap"><table class="matrix"><thead><tr><th>Tipo</th>${head}</tr></thead><tbody>${rows}</tbody></table></div><div class="toolbar"><button class="secondary" onclick="toggleChecks('.prop-rule',false)">Limpiar matriz</button><button onclick="saveFilters()">Guardar matriz</button></div>`}catch(e){box.textContent=e.message}}
-async function saveFilters(){const rules={low:[],medium:[],high:[],critical:[]};document.querySelectorAll('.prop-rule:checked').forEach(x=>rules[x.dataset.severity].push(x.dataset.category));try{const d=await request('/api/emergencias/filters',{method:'PUT',body:JSON.stringify({rules})});show('emergencias_guardia',render({correcto:true,matriz:d.rules,nota:d.note}));loadFilters()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
->>>>>>> theirs
-=======
+
 function toast(message,bad=false){const n=document.createElement('div');n.className='toast'+(bad?' bad':'');n.textContent=message;document.querySelector('#toasts').appendChild(n);setTimeout(()=>n.remove(),4500)}
 function openEmergencyTab(name,button){document.querySelectorAll('[data-emtab]').forEach(x=>x.classList.toggle('active',x.dataset.emtab===name));document.querySelectorAll('.tabs .tab').forEach(x=>x.classList.remove('active'));button.classList.add('active')}
 const ago=value=>{if(!value)return 'Sin datos';const seconds=Math.max(0,(Date.now()-new Date(value).getTime())/1000);if(seconds<90)return 'Hace menos de 1 min';if(seconds<3600)return `Hace ${Math.floor(seconds/60)} min`;if(seconds<86400)return `Hace ${Math.floor(seconds/3600)} h`;return new Date(value).toLocaleString('es-ES')};
@@ -794,7 +778,7 @@ async function saveCollection(){const values=s=>[...document.querySelectorAll(s+
 const severityLabels={low:'Baja',medium:'Media',high:'Alta',critical:'Crítica'};
 async function loadFilters(){const box=document.querySelector('#filters-emergencias_guardia');try{const d=await request('/api/emergencias/filters'),levels=['low','medium','high','critical'];const head=levels.map(s=>`<th class="sev-${s}">${severityLabels[s]}<br><button class="secondary" onclick="toggleChecks('.rule-'+s,true)">Todo</button></th>`).join('');const rows=d.categories.map(c=>`<tr><td>${esc(catLabels[c.name]||c.name)}</td>${levels.map(s=>`<td><input class="prop-rule rule-${s}" data-severity="${s}" data-category="${c.name}" type="checkbox" ${(d.rules[s]||[]).includes(c.name)?'checked':''}></td>`).join('')}</tr>`).join('');box.innerHTML=`<p class="hint">Marca exactamente qué categoría puede propagarse en cada severidad. Una casilla vacía bloquea esa combinación.</p><div class="matrix-wrap"><table class="matrix"><thead><tr><th>Tipo</th>${head}</tr></thead><tbody>${rows}</tbody></table></div><div class="toolbar"><button class="secondary" onclick="toggleChecks('.prop-rule',false)">Limpiar matriz</button><button onclick="saveFilters()">Guardar matriz</button></div>`}catch(e){box.textContent=e.message}}
 async function saveFilters(){const rules={low:[],medium:[],high:[],critical:[]};document.querySelectorAll('.prop-rule:checked').forEach(x=>rules[x.dataset.severity].push(x.dataset.category));try{const d=await request('/api/emergencias/filters',{method:'PUT',body:JSON.stringify({rules})});show('emergencias_guardia',render({correcto:true,matriz:d.rules,nota:d.note}));toast('Matriz de propagación guardada');loadFilters()}catch(e){toast(e.message,true);show('emergencias_guardia',render({error:e.message}))}}
->>>>>>> theirs
+
 const channelInputs=(prefix,d)=>`<div class="channel-grid"><label>Canal MeshCore<input id="${prefix}-meshcore" type="number" min="-1" max="255" value="${Number(d.meshcore_channel)}"></label><label>Canal Meshtastic<input id="${prefix}-meshtastic" type="number" min="-1" max="255" value="${Number(d.meshtastic_channel)}"></label></div>`;
 const transportSelect=(prefix,current,values)=>`<label>Transporte<select id="${prefix}-transport">${values.map(x=>`<option value="${x}" ${current===x?'selected':''}>${x==='auto'?'Automático':x==='meshcore'?'MeshCore':'Meshtastic'}</option>`).join('')}</select></label>`;
 async function loadEmergencyChannels(){const box=document.querySelector('#channels-emergencias_guardia');if(!box)return;try{const d=await request('/api/emergencias/channels');const globalTransport=`<div class="routebox"><strong>Transporte global</strong><div class="channel-grid">${transportSelect('em-global',d.transport,['meshcore','meshtastic'])}</div><button onclick="saveEmergencyTransport()">Guardar transporte</button></div>`;box.innerHTML=globalTransport+Object.entries(d.routes).map(([route,c])=>`<div class="routebox"><strong>${esc({emergencias:'Emergencias',servicios:'Servicios',meteo:'Meteorología'}[route])}</strong>${channelInputs('em-'+route,c)}<button onclick="saveEmergencyChannels('${route}')">Guardar canales</button></div>`).join('')}catch(e){box.textContent=e.message}}

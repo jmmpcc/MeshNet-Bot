@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 from urllib.error import URLError
 
@@ -55,6 +56,18 @@ def test_dashboard_escapes_dynamic_values():
     assert "const esc=" in web_admin.DASHBOARD
     assert "Token de ControlPanel" not in web_admin.DASHBOARD
     assert "JSON.stringify(d.data" not in web_admin.DASHBOARD
+
+
+def test_start_script_reports_unresolved_git_conflicts_before_python(tmp_path):
+    script = Path(web_admin.BASE_DIR / "start_control_panel.sh")
+    target = tmp_path / "start_control_panel.sh"
+    target.write_text(script.read_text())
+    (tmp_path / "web_admin.py").write_text("<<<<<<< ours\nvalue = 1\n=======\nvalue = 2\n>>>>>>> theirs\n")
+    (tmp_path / "control_panel.py").write_text("")
+    result = subprocess.run(["bash", str(target)], capture_output=True, text=True, check=False)
+    assert result.returncode == 2
+    assert "marcadores de conflicto Git" in result.stderr
+    assert "git restore" in result.stderr
 
 
 def test_dashboard_reserves_danger_style_for_confirmed_actions():

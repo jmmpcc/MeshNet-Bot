@@ -38,6 +38,22 @@ local y de red, y abre el navegador automáticamente cuando existe un escritorio
 gráfico. En una Raspberry sin escritorio, abra desde otro equipo la dirección
 indicada, por ejemplo `http://192.168.1.69:8790`.
 
+Antes de anunciar que el panel está disponible, el script comprueba que
+`web_admin.py` y `control_panel.py` no contienen marcadores de conflicto Git y
+que ambos compilan. Si aparece `<<<<<<< ours`, `=======` o `>>>>>>> theirs`, la
+copia local quedó a medio resolver y Python no puede ejecutarla. Si no hay
+cambios locales que conservar, se recupera la versión del repositorio con:
+
+```bash
+cd ~/MeshNet-Bot
+git restore tools/ControlPanel/web_admin.py tools/ControlPanel/control_panel.py
+git pull
+bash tools/ControlPanel/start_control_panel.sh
+```
+
+Si sí existen cambios propios, no use `git restore`: resuelva los bloques de
+conflicto manualmente y ejecute `python3 -m py_compile` sobre ambos archivos.
+
 El ejecutable directo escucha en `127.0.0.1`; el script escucha en `0.0.0.0`
 para permitir acceso desde la red privada. Variables:
 
@@ -93,8 +109,6 @@ unidades, timeout (1–300 s) y duplicados se validan al arrancar.
 
 ## Filtros de Emergencias
 
-<<<<<<< ours
-=======
 La tarjeta de Emergencias se organiza en pestañas para no mezclar operación y
 configuración:
 
@@ -108,8 +122,6 @@ con la selección actual. La matriz utiliza colores por severidad y mantiene
 fijas sus cabeceras durante el desplazamiento. Los guardados importantes se
 confirman mediante avisos breves en pantalla, conservando el detalle técnico en
 el resultado de la tarjeta.
-
->>>>>>> theirs
 La sección **Recogida de emergencias** permite habilitar independientemente
 Ayuntamiento de Zaragoza, DGT, terremotos IGN y focos térmicos NASA FIRMS. Se
 pueden seleccionar los tipos conservados, una o varias provincias y un radio.
@@ -121,27 +133,19 @@ navegador si existe, nunca su valor.
 Esta configuración es distinta del filtro de propagación: la primera decide qué
 se descarga y conserva; el segundo decide qué puede enviarse por radio.
 
-<<<<<<< ours
-<<<<<<< ours
 La tarjeta de Emergencias permite seleccionar:
 
 - severidades propagables, seleccionables individualmente: baja, media, alta y
   crítica;
 - categorías propagables: incendios, tráfico, cortes, meteorología, servicios,
   seguridad pública y otras.
-=======
-=======
->>>>>>> theirs
+
 La tarjeta muestra una matriz de propagación con una fila por categoría y una
 columna por severidad (`baja`, `media`, `alta` y `crítica`). Cada casilla decide
 una combinación exacta. Por ejemplo, se puede habilitar Protección Civil en
 media y Terremoto en alta sin que Protección Civil alta ni Terremoto medio se
 propaguen. Los botones de columna seleccionan toda una severidad y **Limpiar
 matriz** bloquea todas las combinaciones.
-<<<<<<< ours
->>>>>>> theirs
-=======
->>>>>>> theirs
 
 Guardar el filtro modifica la configuración persistente de
 `emergencias_guardia`. No envía mensajes inmediatamente; se aplica a las

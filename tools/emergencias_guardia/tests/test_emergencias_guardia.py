@@ -270,11 +270,7 @@ class EngineTests(unittest.TestCase):
 
 
 class ApiAndFormattingTests(unittest.TestCase):
-<<<<<<< ours
-<<<<<<< ours
-=======
-=======
->>>>>>> theirs
+
     def test_filters_cli_saves_category_by_severity_matrix(self):
         cfg = config()
         rules = {"medium": ["civil_protection"], "high": ["earthquake", "wildfire"]}
@@ -289,10 +285,6 @@ class ApiAndFormattingTests(unittest.TestCase):
                          ["earthquake", "wildfire"])
         save.assert_called_once()
 
-<<<<<<< ours
->>>>>>> theirs
-=======
->>>>>>> theirs
     def test_firms_source_can_be_enabled_with_url_template(self):
         cfg = config()
         with tempfile.TemporaryDirectory() as directory, \
