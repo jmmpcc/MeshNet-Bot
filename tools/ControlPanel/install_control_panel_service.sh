@@ -82,6 +82,28 @@ else:
     raise SystemExit("[control-panel] El servicio no respondió correctamente en /health")
 PY
 
+echo "[control-panel] Esperando la comprobación de salud..."
+"${SCRIPT_DIR}/.venv/bin/python" - <<'PY'
+import json
+import time
+from urllib.error import URLError
+from urllib.request import urlopen
+
+url = "http://127.0.0.1:8790/health"
+for attempt in range(20):
+    try:
+        with urlopen(url, timeout=1) as response:
+            payload = json.load(response)
+        if response.status == 200 and payload.get("ok") is True:
+            print("[control-panel] Salud correcta:", json.dumps(payload, ensure_ascii=False))
+            break
+    except (OSError, URLError, ValueError):
+        pass
+    time.sleep(0.5)
+else:
+    raise SystemExit("[control-panel] El servicio no respondió correctamente en /health")
+PY
+
 echo "[control-panel] Servicio instalado y habilitado."
 LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo "[control-panel] Panel local: http://127.0.0.1:8790"

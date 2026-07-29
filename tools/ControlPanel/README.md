@@ -107,6 +107,7 @@ para permitir acceso desde la red privada. Variables:
 - `CONTROLPANEL_MANIFESTS`: directorio alternativo de manifiestos.
 - `CONTROLPANEL_EMERGENCIAS_CONFIG`: configuración JSON de Emergencias;
 - `CONTROLPANEL_EMERGENCIAS_ENV`: fichero privado que contiene `FIRMS_MAP_KEY`.
+- `CONTROLPANEL_TOKEN`: contraseña del usuario web `admin`.
 
 El panel no solicita usuario ni contraseña. Publíquelo únicamente en una red
 privada de confianza y no lo exponga directamente a Internet, ya que contiene

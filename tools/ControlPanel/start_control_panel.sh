@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${CONTROLPANEL_VENV:-${SCRIPT_DIR}/.venv}"
 HOST="${CONTROLPANEL_HOST:-0.0.0.0}"
 PORT="${CONTROLPANEL_PORT:-8790}"
+ENV_FILE="${SCRIPT_DIR}/.env"
 
 cd "${SCRIPT_DIR}"
 
@@ -29,6 +30,17 @@ fi
 if ! "${VENV_DIR}/bin/python" -m py_compile web_admin.py control_panel.py; then
     echo >&2 "[control-panel] ERROR: el código del panel no supera la comprobación de sintaxis."
     exit 2
+fi
+
+if [[ -z "${CONTROLPANEL_TOKEN:-}" && -r "${ENV_FILE}" ]]; then
+    CONTROLPANEL_TOKEN="$(sed -n 's/^CONTROLPANEL_TOKEN=//p' "${ENV_FILE}" | tail -n 1)"
+    export CONTROLPANEL_TOKEN
+fi
+if [[ "${HOST}" != "127.0.0.1" && "${HOST}" != "::1" && "${HOST}" != "localhost" && -z "${CONTROLPANEL_TOKEN:-}" ]]; then
+    CONTROLPANEL_TOKEN="$("${VENV_DIR}/bin/python" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    export CONTROLPANEL_TOKEN
+    echo "[control-panel] Usuario web: admin"
+    echo "[control-panel] Token temporal: ${CONTROLPANEL_TOKEN}"
 fi
 
 LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
