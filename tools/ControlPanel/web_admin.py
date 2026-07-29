@@ -176,12 +176,6 @@ class EmergencyCollectionPayload(BaseModel):
     firms_map_key: str = ""
     radius: EmergencyRadiusPayload = Field(default_factory=EmergencyRadiusPayload)
 
-class EmergencyCollectionPayload(BaseModel):
-    sources: list[str]
-    provinces: list[str]
-    categories: list[str]
-    firms_map_key: str = ""
-    radius: EmergencyRadiusPayload = EmergencyRadiusPayload()
 
 class CommunicationChannelsPayload(BaseModel):
     transport: str
@@ -402,6 +396,19 @@ def create_app(registry: ToolRegistry | None = None) -> FastAPI:
     @app.get("/api/tools")
     def list_tools() -> dict[str, Any]:
         return {"tools": registry.items()}
+
+    @app.get("/health")
+    def control_panel_health() -> dict[str, Any]:
+        tools = registry.items()
+        return {
+            "ok": True,
+            "service": "meshnet-control-panel",
+            "version": app.version,
+            "tools": {
+                "registered": len(tools),
+                "enabled": sum(bool(tool["enabled"]) for tool in tools),
+            },
+        }
 
     @app.put("/api/tools/{tool_id}/enabled")
     def set_enabled(tool_id: str, payload: EnabledPayload) -> dict[str, Any]:

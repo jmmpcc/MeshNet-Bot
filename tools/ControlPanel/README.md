@@ -108,8 +108,14 @@ para permitir acceso desde la red privada. Variables:
 - `CONTROLPANEL_EMERGENCIAS_CONFIG`: configuración JSON de Emergencias;
 - `CONTROLPANEL_EMERGENCIAS_ENV`: fichero privado que contiene `FIRMS_MAP_KEY`.
 
-El panel no solicita token. Debe publicarse únicamente en una red privada y no
-exponerse directamente a Internet, ya que contiene acciones operativas.
+El panel no solicita usuario ni contraseña. Publíquelo únicamente en una red
+privada de confianza y no lo exponga directamente a Internet, ya que contiene
+acciones operativas.
+
+Si actualiza desde una versión que solicitaba credenciales, vuelva a ejecutar
+`./install_control_panel_service.sh` para reemplazar la unidad y reiniciar el
+servicio. El antiguo `CONTROLPANEL_TOKEN` de `tools/ControlPanel/.env` ya no se
+lee y puede eliminarse manualmente.
 
 ## systemd y permisos
 
@@ -118,8 +124,9 @@ permanente.
 
 Que `start_control_panel.sh` funcione manualmente no instala esta unidad. Si
 `systemctl` responde `Unit meshnet-control-panel.service could not be found`,
-instálela con el asistente, que adapta las rutas al repositorio actual, instala
-la regla PolicyKit mínima y habilita el servicio:
+instálela con el asistente, que crea el entorno virtual, adapta las rutas y el
+usuario de la unidad a la instalación actual, instala la regla PolicyKit mínima
+para ese mismo usuario y habilita el servicio:
 
 ```bash
 cd ~/MeshNet-Bot/tools/ControlPanel
@@ -127,12 +134,36 @@ chmod +x install_control_panel_service.sh
 ./install_control_panel_service.sh
 ```
 
+Ejecute el asistente desde la cuenta que gestiona el repositorio, **sin**
+anteponer `sudo`: solicitará privilegios únicamente para copiar la unidad y la
+regla. Por seguridad, rechaza instalar el proceso web como `root`.
+
 Después, el panel queda disponible tras reinicios y se comprueba con:
 
 ```bash
 systemctl status meshnet-control-panel.service --no-pager
-curl -s http://127.0.0.1:8790/api/tools | python3 -m json.tool
+curl -s http://127.0.0.1:8790/health | python3 -m json.tool
 ```
+
+La unidad instalada escucha en la red privada (`0.0.0.0`). Desde otro equipo,
+abra `http://IP_DE_LA_RASPBERRY:8790`; `127.0.0.1` solo funciona en el propio
+equipo donde se ejecuta el servicio. El instalador muestra ambas direcciones al
+terminar.
+
+Si una instalación anterior continúa ligada a `127.0.0.1`, vuelva a ejecutar
+`./install_control_panel_service.sh` para actualizar la unidad. Compruebe la
+dirección efectiva y los últimos errores con:
+
+```bash
+systemctl show meshnet-control-panel.service -p Environment --no-pager
+systemctl status meshnet-control-panel.service --no-pager
+journalctl -u meshnet-control-panel.service -n 50 --no-pager
+```
+
+El instalador espera hasta diez segundos a que `/health` confirme el arranque.
+Este endpoint no consulta las APIs externas: informa de la versión del panel y
+del número de aplicaciones registradas y habilitadas, por lo que también puede
+usarse como sonda local de monitorización.
 
 Las acciones de lectura usan `systemctl` sin privilegios. Las mutaciones usan
 PolicyKit y requieren la regla mínima incluida:

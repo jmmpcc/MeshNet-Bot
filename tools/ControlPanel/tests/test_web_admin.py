@@ -92,8 +92,33 @@ def test_systemd_installer_is_valid_and_adapts_repository_path():
     result = subprocess.run(["bash", "-n", str(installer)], capture_output=True, text=True)
     assert result.returncode == 0
     text = installer.read_text(encoding="utf-8")
-    assert 'sed "s|/home/meshnet/MeshNet-Bot|${REPO_DIR}|g"' in text
+    assert 'SERVICE_USER="${SUDO_USER:-$(id -un)}"' in text
+    assert 'id -u "${SERVICE_USER}"' in text
+    assert 'No se instalará el panel como root' in text
+    assert '-e "s|/home/meshnet/MeshNet-Bot|${escaped_repo}|g"' in text
+    assert '-e "s|^User=meshnet$|User=${SERVICE_USER}|"' in text
+    assert 'subject.user == \\"${SERVICE_USER}\\"' in text
+    assert '"${temporary_polkit}"' in text
+    assert 'pip" install -r "${SCRIPT_DIR}/requirements.txt"' in text
     assert 'systemctl enable --now "${UNIT_NAME}"' in text
+    assert 'http://127.0.0.1:8790/health' in text
+    assert 'Panel en red: http://${LAN_IP}:8790' in text
+
+
+def test_systemd_service_listens_on_lan():
+    unit = (web_admin.BASE_DIR / "systemd/meshnet-control-panel.service").read_text()
+    assert "Environment=CONTROLPANEL_HOST=0.0.0.0" in unit
+
+
+def test_emergency_collection_radius_uses_a_fresh_default_model():
+    first = web_admin.EmergencyCollectionPayload(
+        sources=[], provinces=[], categories=[]
+    )
+    second = web_admin.EmergencyCollectionPayload(
+        sources=[], provinces=[], categories=[]
+    )
+
+    assert first.radius is not second.radius
 
 
 def test_dashboard_reserves_danger_style_for_confirmed_actions():
@@ -109,6 +134,24 @@ def test_api_can_enable_allowlisted_tool(tmp_path):
 
     assert response.status_code == 200
     assert response.json() == {"id": "demo", "enabled": True}
+
+
+def test_health_reports_service_and_registry_counts(tmp_path):
+    item = registry(tmp_path)
+    client = TestClient(web_admin.create_app(item))
+
+    initial = client.get("/health")
+    item.set_enabled("demo", True)
+    enabled = client.get("/health")
+
+    assert initial.status_code == 200
+    assert initial.json() == {
+        "ok": True,
+        "service": "meshnet-control-panel",
+        "version": "1.0.0",
+        "tools": {"registered": 1, "enabled": 0},
+    }
+    assert enabled.json()["tools"] == {"registered": 1, "enabled": 1}
 
 
 def test_api_blocks_health_for_disabled_tool(tmp_path):
