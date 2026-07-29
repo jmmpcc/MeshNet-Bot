@@ -128,6 +128,21 @@ def test_confirmed_action_requires_confirmation(tmp_path, monkeypatch):
     assert response.status_code == 409
 
 
+def test_missing_emergency_api_unit_explains_collector_is_independent(monkeypatch):
+    class Result:
+        returncode, stdout = 4, ""
+        stderr = "Unit meshnet-emergencias-api.service could not be found.\n"
+    monkeypatch.setattr(web_admin.subprocess, "run", lambda *args, **kwargs: Result())
+    result = web_admin.execute_action(web_admin.ActionDefinition(
+        "api_status", "Estado API de consultas", "systemd",
+        unit="meshnet-emergencias-api.service", operation="status",
+    ))
+    assert result["ok"] is False
+    assert result["data"]["instalado"] is False
+    assert "recolector puede seguir enviando" in result["data"]["explicación"]
+    assert "daemon-reload" in result["data"]["solución"]
+
+
 def test_env_channel_update_preserves_unrelated_values(tmp_path):
     path = tmp_path / ".env"
     path.write_text("# configuración\nSECRET=keep-me\nFARMACIAS_MESHCORE_CHANNEL=1\n")
@@ -309,10 +324,52 @@ def test_emergency_filters_api_sends_individual_severities(tmp_path, monkeypatch
     assert calls[0][-4:] == ("--severities", "low,high", "--categories", "storm")
 
 
+def test_emergency_filters_api_sends_category_severity_matrix(tmp_path, monkeypatch):
+    calls = []
+    def fake_execute(action):
+        calls.append(action.argv)
+        return {"ok": True, "returncode": 0, "stdout": '{"ok":true}', "stderr": "",
+                "data": {"ok": True, "rules": {"medium": ["civil_protection"]}},
+                "truncated": False}
+    monkeypatch.setattr(web_admin, "execute_action", fake_execute)
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "emergencias_guardia")))
+    response = client.put("/api/emergencias/filters", json={"rules": {
+        "medium": ["civil_protection"], "high": ["earthquake"],
+    }})
+    assert response.status_code == 200
+    assert calls[0][-2] == "--rules-json"
+    rules = json.loads(calls[0][-1])
+    assert rules["medium"] == ["civil_protection"]
+    assert rules["high"] == ["earthquake"]
+    assert rules["low"] == [] and rules["critical"] == []
+
+
 def test_dashboard_hides_configuration_controls_for_disabled_applications():
     assert "function collectionHtml(t){return !t.enabled" in web_admin.DASHBOARD
     assert "function filterHtml(t){return !t.enabled" in web_admin.DASHBOARD
-    assert "function channelHtml(t){return !t.enabled" in web_admin.DASHBOARD
+    assert "function channelHtml(t){if(!t.enabled" in web_admin.DASHBOARD
+
+
+def test_emergency_overview_summarizes_sources_without_exposing_secrets(tmp_path, monkeypatch):
+    config_path = tmp_path / "emergency-data/config.json"
+    monkeypatch.setattr(web_admin, "EMERGENCIAS_CONFIG_FILE", config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({
+        "sources": {"ign_earthquakes": {"enabled": True}},
+        "areas": [{"id": "r", "type": "radius", "enabled": True}],
+    }))
+    (config_path.parent / "state.json").write_text(json.dumps({"sources": {
+        "ign_earthquakes": {"ok": True, "last_success": "2026-07-29T10:00:00Z", "accepted": 2},
+    }}))
+    monkeypatch.setattr(web_admin, "probe", lambda tool: {"reachable": True})
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "emergencias_guardia")))
+    result = client.get("/api/emergencias/overview")
+    assert result.status_code == 200
+    data = result.json()
+    assert data["api"]["ok"] is True
+    assert data["collector"]["ok"] is True
+    assert data["sources"]["items"][0]["accepted"] == 2
+    assert data["coverage"]["areas"] == 1
 
 
 def test_emergency_route_update_does_not_change_global_transport(tmp_path, monkeypatch):

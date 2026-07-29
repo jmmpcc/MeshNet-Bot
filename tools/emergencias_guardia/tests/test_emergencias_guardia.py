@@ -270,6 +270,29 @@ class EngineTests(unittest.TestCase):
 
 
 class ApiAndFormattingTests(unittest.TestCase):
+<<<<<<< ours
+<<<<<<< ours
+=======
+=======
+>>>>>>> theirs
+    def test_filters_cli_saves_category_by_severity_matrix(self):
+        cfg = config()
+        rules = {"medium": ["civil_protection"], "high": ["earthquake", "wildfire"]}
+        with mock.patch("emergencias.cli.load_config", return_value=cfg), \
+                mock.patch("emergencias.cli.save_config") as save:
+            from emergencias.cli import main
+            result = main(["filters", "set", "--rules-json", json.dumps(rules)])
+        self.assertEqual(result, 0)
+        self.assertEqual(cfg["notifications"]["propagation_filter"]["rules"]["medium"],
+                         ["civil_protection"])
+        self.assertEqual(cfg["notifications"]["propagation_filter"]["rules"]["high"],
+                         ["earthquake", "wildfire"])
+        save.assert_called_once()
+
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
     def test_firms_source_can_be_enabled_with_url_template(self):
         cfg = config()
         with tempfile.TemporaryDirectory() as directory, \
@@ -400,6 +423,19 @@ class ApiAndFormattingTests(unittest.TestCase):
 
 
 class NotifierTests(unittest.TestCase):
+    def test_propagation_matrix_matches_category_and_exact_severity(self):
+        cfg = config()
+        cfg["notifications"]["propagation_filter"]["rules"] = {
+            "low": [], "medium": ["civil_protection"],
+            "high": ["earthquake"], "critical": ["wildfire"],
+        }
+        medium_civil = Event("x:1", "x", "1", "civil_protection", severity="medium")
+        high_civil = Event("x:2", "x", "2", "civil_protection", severity="high")
+        high_quake = Event("x:3", "x", "3", "earthquake", severity="high")
+        self.assertEqual(notifier.route_event(medium_civil, cfg), "emergencias")
+        self.assertIsNone(notifier.route_event(high_civil, cfg))
+        self.assertEqual(notifier.route_event(high_quake, cfg), "emergencias")
+
     @staticmethod
     def _incremental_config():
         cfg = config()

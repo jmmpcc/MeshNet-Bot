@@ -44,18 +44,24 @@ def route_event(event: Event, config: dict[str, Any]) -> str | None:
         return None
     notifications = config["notifications"]
     propagation = notifications.get("propagation_filter", {})
-    configured_categories = propagation.get("categories")
-    selected_categories = set(configured_categories or [])
-    if configured_categories is not None and event.category not in selected_categories:
-        return None
-    configured_severities = propagation.get("severities")
-    if configured_severities is not None:
-        if event.severity not in set(configured_severities):
+    rules = propagation.get("rules")
+    matrix_enabled = isinstance(rules, dict)
+    if matrix_enabled:
+        if event.category not in set(rules.get(event.severity, [])):
             return None
     else:
-        minimum = propagation.get("minimum_severity", "low")
-        if SEVERITY_RANK.get(event.severity, 0) < SEVERITY_RANK.get(minimum, 0):
+        configured_categories = propagation.get("categories")
+        selected_categories = set(configured_categories or [])
+        if configured_categories is not None and event.category not in selected_categories:
             return None
+        configured_severities = propagation.get("severities")
+        if configured_severities is not None:
+            if event.severity not in set(configured_severities):
+                return None
+        else:
+            minimum = propagation.get("minimum_severity", "low")
+            if SEVERITY_RANK.get(event.severity, 0) < SEVERITY_RANK.get(minimum, 0):
+                return None
     if (
         event.verification == "satellite_detection"
         and not notifications.get("allow_satellite_detection", False)
@@ -65,7 +71,7 @@ def route_event(event: Event, config: dict[str, Any]) -> str | None:
         return "meteo"
     if (
         event.category in SERIOUS_CATEGORIES
-        and SEVERITY_RANK.get(event.severity, 0) >= SEVERITY_RANK["high"]
+        and (matrix_enabled or SEVERITY_RANK.get(event.severity, 0) >= SEVERITY_RANK["high"])
         and event.verification in OFFICIAL_VERIFICATIONS
     ):
         return "emergencias"

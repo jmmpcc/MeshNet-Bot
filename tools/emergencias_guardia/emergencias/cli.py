@@ -66,10 +66,11 @@ def parser() -> argparse.ArgumentParser:
     )
     filters.add_parser("show")
     filters_set = filters.add_parser("set")
-    severity_filter = filters_set.add_mutually_exclusive_group(required=True)
+    severity_filter = filters_set.add_mutually_exclusive_group()
     severity_filter.add_argument("--severities")
     severity_filter.add_argument("--minimum-severity", choices=VALID_SEVERITIES)
-    filters_set.add_argument("--categories", required=True)
+    filters_set.add_argument("--categories")
+    filters_set.add_argument("--rules-json")
 
     source = commands.add_parser("source", help="gestiona conectores").add_subparsers(
         dest="source_command", required=True
@@ -241,6 +242,13 @@ def _filters(config: dict[str, Any], args: argparse.Namespace) -> int:
         minimum_rank = VALID_SEVERITIES.index(current.get("minimum_severity", "low"))
         configured_severities = VALID_SEVERITIES[minimum_rank:]
     if args.filters_command == "show":
+        rules = current.get("rules")
+        if not isinstance(rules, dict):
+            selected_categories = set(current.get("categories", []))
+            rules = {
+                severity: sorted(selected_categories) if severity in set(configured_severities) else []
+                for severity in VALID_SEVERITIES
+            }
         print_json({
             "severities": [
                 {"name": name, "enabled": name in set(configured_severities)}
@@ -249,9 +257,39 @@ def _filters(config: dict[str, Any], args: argparse.Namespace) -> int:
             "categories": [
                 {"name": name, "enabled": name in set(current.get("categories", []))}
                 for name in sorted(VALID_CATEGORIES)
-            ],
+            ], "rules": rules,
         })
         return 0
+    if args.rules_json is not None:
+        try:
+            supplied_rules = json.loads(args.rules_json)
+        except json.JSONDecodeError:
+            print_json({"ok": False, "error": "rules-json no es JSON válido"})
+            return 2
+        if not isinstance(supplied_rules, dict) or set(supplied_rules) - set(VALID_SEVERITIES):
+            print_json({"ok": False, "error": "matriz de severidades no válida"})
+            return 2
+        rules: dict[str, list[str]] = {}
+        for severity in VALID_SEVERITIES:
+            values = supplied_rules.get(severity, [])
+            if not isinstance(values, list) or set(values) - VALID_CATEGORIES:
+                print_json({"ok": False, "error": "categorías desconocidas en la matriz"})
+                return 2
+            rules[severity] = sorted(set(values))
+        current.pop("minimum_severity", None)
+        current.pop("severities", None)
+        current.pop("categories", None)
+        current["rules"] = rules
+        save_config(config)
+        print_json({"ok": True, "rules": rules,
+                    "note": "La matriz se aplicará en las próximas comprobaciones y propagaciones."})
+        return 0
+    if args.categories is None:
+        print_json({"ok": False, "error": "indique --categories o --rules-json"})
+        return 2
+    if args.severities is None and args.minimum_severity is None:
+        print_json({"ok": False, "error": "indique --severities o --minimum-severity"})
+        return 2
     requested = {item.strip() for item in args.categories.split(",") if item.strip()}
     unknown = requested - VALID_CATEGORIES
     if unknown:
@@ -268,6 +306,7 @@ def _filters(config: dict[str, Any], args: argparse.Namespace) -> int:
         minimum_rank = VALID_SEVERITIES.index(args.minimum_severity)
         severities = set(VALID_SEVERITIES[minimum_rank:])
     current.pop("minimum_severity", None)
+    current.pop("rules", None)
     current["severities"] = [name for name in VALID_SEVERITIES if name in severities]
     current["categories"] = sorted(requested)
     save_config(config)

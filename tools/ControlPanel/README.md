@@ -93,6 +93,23 @@ unidades, timeout (1–300 s) y duplicados se validan al arrancar.
 
 ## Filtros de Emergencias
 
+<<<<<<< ours
+=======
+La tarjeta de Emergencias se organiza en pestañas para no mezclar operación y
+configuración:
+
+- **Resumen**: disponibilidad de API, estado del recolector, última recogida,
+  fuentes activas, pendientes, áreas y estado individual de cada fuente;
+- **Fuentes y cobertura**: orígenes, tipos recogidos, MAP_KEY, provincias y radio;
+- **Propagación**: matriz categoría×severidad y canales de comunicación.
+
+El selector de provincias incluye búsqueda normalizada (ignora acentos) y chips
+con la selección actual. La matriz utiliza colores por severidad y mantiene
+fijas sus cabeceras durante el desplazamiento. Los guardados importantes se
+confirman mediante avisos breves en pantalla, conservando el detalle técnico en
+el resultado de la tarjeta.
+
+>>>>>>> theirs
 La sección **Recogida de emergencias** permite habilitar independientemente
 Ayuntamiento de Zaragoza, DGT, terremotos IGN y focos térmicos NASA FIRMS. Se
 pueden seleccionar los tipos conservados, una o varias provincias y un radio.
@@ -104,18 +121,40 @@ navegador si existe, nunca su valor.
 Esta configuración es distinta del filtro de propagación: la primera decide qué
 se descarga y conserva; el segundo decide qué puede enviarse por radio.
 
+<<<<<<< ours
+<<<<<<< ours
 La tarjeta de Emergencias permite seleccionar:
 
 - severidades propagables, seleccionables individualmente: baja, media, alta y
   crítica;
 - categorías propagables: incendios, tráfico, cortes, meteorología, servicios,
   seguridad pública y otras.
+=======
+=======
+>>>>>>> theirs
+La tarjeta muestra una matriz de propagación con una fila por categoría y una
+columna por severidad (`baja`, `media`, `alta` y `crítica`). Cada casilla decide
+una combinación exacta. Por ejemplo, se puede habilitar Protección Civil en
+media y Terremoto en alta sin que Protección Civil alta ni Terremoto medio se
+propaguen. Los botones de columna seleccionan toda una severidad y **Limpiar
+matriz** bloquea todas las combinaciones.
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
 
 Guardar el filtro modifica la configuración persistente de
 `emergencias_guardia`. No envía mensajes inmediatamente; se aplica a las
 próximas comprobaciones y propagaciones.
 
 ## Canales de comunicación
+
+La **API de consultas** y el **recolector programado** son unidades distintas.
+La primera atiende consultas DM y el botón *Comprobar salud*; el temporizador
+descarga fuentes y puede difundir cambios a la malla aunque la API no esté
+instalada. Por eso los botones systemd se denominan explícitamente “API de
+consultas”. Si falta su unidad, el panel muestra una explicación y el paso de
+instalación en vez de presentar únicamente el error bruto de systemd.
 
 Las tarjetas de Farmacias y Emergencias muestran el transporte activo y los
 índices de canal de MeshCore y Meshtastic. El valor `-1` deja ese destino sin
