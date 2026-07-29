@@ -1,8 +1,8 @@
 {"id":"emergencias_guardia","name":"Emergencias","description":"Incidencias, fuentes, áreas, categorías, histórico y avisos.","url":"http://127.0.0.1:8789","url_env":"EMERGENCIAS_PANEL_URL","actions":[
-{"id":"api_status","name":"Estado API","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"status"},
-{"id":"api_start","name":"Iniciar API","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"start","mutating":true},
-{"id":"api_stop","name":"Detener API","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"stop","mutating":true,"confirm":true},
-{"id":"api_restart","name":"Reiniciar API","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"restart","mutating":true,"confirm":true},
+{"id":"api_status","name":"Estado API de consultas","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"status"},
+{"id":"api_start","name":"Iniciar API de consultas","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"start","mutating":true},
+{"id":"api_stop","name":"Detener API de consultas","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"stop","mutating":true,"confirm":true},
+{"id":"api_restart","name":"Reiniciar API de consultas","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"restart","mutating":true,"confirm":true},
 {"id":"timer","name":"Temporizador","kind":"systemd","unit":"meshnet-emergencias-check.timer","operation":"status"},
 {"id":"status","name":"Estado de fuentes","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","status"]},
 {"id":"events","name":"Ver emergencias","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","list"]},
