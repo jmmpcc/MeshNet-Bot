@@ -116,6 +116,24 @@ exponerse directamente a Internet, ya que contiene acciones operativas.
 La unidad `systemd/meshnet-control-panel.service` inicia el panel de forma
 permanente.
 
+Que `start_control_panel.sh` funcione manualmente no instala esta unidad. Si
+`systemctl` responde `Unit meshnet-control-panel.service could not be found`,
+instálela con el asistente, que adapta las rutas al repositorio actual, instala
+la regla PolicyKit mínima y habilita el servicio:
+
+```bash
+cd ~/MeshNet-Bot/tools/ControlPanel
+chmod +x install_control_panel_service.sh
+./install_control_panel_service.sh
+```
+
+Después, el panel queda disponible tras reinicios y se comprueba con:
+
+```bash
+systemctl status meshnet-control-panel.service --no-pager
+curl -s http://127.0.0.1:8790/api/tools | python3 -m json.tool
+```
+
 Las acciones de lectura usan `systemctl` sin privilegios. Las mutaciones usan
 PolicyKit y requieren la regla mínima incluida:
 

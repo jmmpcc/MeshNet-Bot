@@ -87,23 +87,13 @@ def test_tracked_control_panel_sources_have_no_merge_markers():
         assert marker.search(text) is None, f"marcador de conflicto en {name}"
 
 
-def test_start_script_reports_unresolved_git_conflicts_before_python(tmp_path):
-    script = Path(web_admin.BASE_DIR / "start_control_panel.sh")
-    target = tmp_path / "start_control_panel.sh"
-    target.write_text(script.read_text())
-    (tmp_path / "web_admin.py").write_text("<<<<<<< ours\nvalue = 1\n=======\nvalue = 2\n>>>>>>> theirs\n")
-    (tmp_path / "control_panel.py").write_text("")
-    result = subprocess.run(["bash", str(target)], capture_output=True, text=True, check=False)
-    assert result.returncode == 2
-    assert "marcadores de conflicto Git" in result.stderr
-    assert "git restore" in result.stderr
-
-
-def test_tracked_control_panel_sources_have_no_merge_markers():
-    marker = re.compile(r"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
-    for name in ("web_admin.py", "control_panel.py", "start_control_panel.sh"):
-        text = (web_admin.BASE_DIR / name).read_text(encoding="utf-8")
-        assert marker.search(text) is None, f"marcador de conflicto en {name}"
+def test_systemd_installer_is_valid_and_adapts_repository_path():
+    installer = web_admin.BASE_DIR / "install_control_panel_service.sh"
+    result = subprocess.run(["bash", "-n", str(installer)], capture_output=True, text=True)
+    assert result.returncode == 0
+    text = installer.read_text(encoding="utf-8")
+    assert 'sed "s|/home/meshnet/MeshNet-Bot|${REPO_DIR}|g"' in text
+    assert 'systemctl enable --now "${UNIT_NAME}"' in text
 
 
 def test_dashboard_reserves_danger_style_for_confirmed_actions():

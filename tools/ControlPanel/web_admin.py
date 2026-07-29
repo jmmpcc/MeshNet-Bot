@@ -176,7 +176,6 @@ class EmergencyCollectionPayload(BaseModel):
     firms_map_key: str = ""
     radius: EmergencyRadiusPayload = Field(default_factory=EmergencyRadiusPayload)
 
-
 class EmergencyCollectionPayload(BaseModel):
     sources: list[str]
     provinces: list[str]
