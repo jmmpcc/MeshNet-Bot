@@ -431,6 +431,7 @@ def create_app(registry: ToolRegistry | None = None, auth_token: str | None = No
             "ok": True,
             "service": "meshnet-control-panel",
             "version": app.version,
+            "authentication": False,
             "tools": {
                 "registered": len(tools),
                 "enabled": sum(bool(tool["enabled"]) for tool in tools),

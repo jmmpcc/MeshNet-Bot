@@ -165,6 +165,11 @@ El instalador reinicia siempre una unidad existente después de actualizarla.
 Esto es necesario porque `systemctl enable --now` por sí solo no recarga un
 proceso que ya estaba activo y podía dejar ejecutándose la versión anterior.
 
+Además de `/health`, el instalador consulta `/api/tools` sin credenciales y solo
+termina correctamente si la API responde sin `WWW-Authenticate`. El campo
+`"authentication": false` de `/health` permite confirmar que está ejecutándose
+la versión que ya no solicita usuario ni contraseña.
+
 El instalador espera hasta diez segundos a que `/health` confirme el arranque.
 Este endpoint no consulta las APIs externas: informa de la versión del panel y
 del número de aplicaciones registradas y habilitadas, por lo que también puede

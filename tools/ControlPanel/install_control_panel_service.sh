@@ -72,36 +72,34 @@ for attempt in range(20):
     try:
         with urlopen(url, timeout=1) as response:
             payload = json.load(response)
-        if response.status == 200 and payload.get("ok") is True:
+        if (
+            response.status == 200
+            and payload.get("ok") is True
+            and payload.get("authentication") is False
+        ):
             print("[control-panel] Salud correcta:", json.dumps(payload, ensure_ascii=False))
             break
     except (OSError, URLError, ValueError):
         pass
     time.sleep(0.5)
 else:
-    raise SystemExit("[control-panel] El servicio no respondió correctamente en /health")
+    raise SystemExit(
+        "[control-panel] El servicio no confirmó la versión sin autenticación en /health"
+    )
 PY
 
-echo "[control-panel] Esperando la comprobación de salud..."
 "${SCRIPT_DIR}/.venv/bin/python" - <<'PY'
-import json
-import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-url = "http://127.0.0.1:8790/health"
-for attempt in range(20):
-    try:
-        with urlopen(url, timeout=1) as response:
-            payload = json.load(response)
-        if response.status == 200 and payload.get("ok") is True:
-            print("[control-panel] Salud correcta:", json.dumps(payload, ensure_ascii=False))
-            break
-    except (OSError, URLError, ValueError):
-        pass
-    time.sleep(0.5)
-else:
-    raise SystemExit("[control-panel] El servicio no respondió correctamente en /health")
+try:
+    with urlopen("http://127.0.0.1:8790/api/tools", timeout=2) as response:
+        valid = response.status == 200 and not response.headers.get("WWW-Authenticate")
+except (HTTPError, URLError, OSError):
+    valid = False
+if not valid:
+    raise SystemExit("[control-panel] /api/tools todavía solicita autenticación o no responde")
+print("[control-panel] API accesible sin usuario ni contraseña.")
 PY
 
 echo "[control-panel] Servicio instalado y habilitado."

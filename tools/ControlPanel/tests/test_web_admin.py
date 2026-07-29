@@ -104,6 +104,8 @@ def test_systemd_installer_is_valid_and_adapts_repository_path():
     assert 'systemctl enable "${UNIT_NAME}"' in text
     assert 'systemctl restart "${UNIT_NAME}"' in text
     assert 'http://127.0.0.1:8790/health' in text
+    assert 'http://127.0.0.1:8790/api/tools' in text
+    assert 'payload.get("authentication") is False' in text
     assert 'Panel en red: http://${LAN_IP}:8790' in text
 
 
@@ -151,6 +153,7 @@ def test_health_reports_service_and_registry_counts(tmp_path):
         "ok": True,
         "service": "meshnet-control-panel",
         "version": "1.0.0",
+        "authentication": False,
         "tools": {"registered": 1, "enabled": 0},
     }
     assert enabled.json()["tools"] == {"registered": 1, "enabled": 1}
