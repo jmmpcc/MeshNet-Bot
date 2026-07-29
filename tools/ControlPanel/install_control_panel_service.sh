@@ -6,7 +6,6 @@ REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 UNIT_NAME="meshnet-control-panel.service"
 UNIT_SOURCE="${SCRIPT_DIR}/systemd/${UNIT_NAME}"
 POLKIT_SOURCE="${SCRIPT_DIR}/systemd/50-meshnet-control-panel.rules"
-ENV_FILE="${SCRIPT_DIR}/.env"
 SERVICE_USER="${SUDO_USER:-$(id -un)}"
 SERVICE_GROUP="$(id -gn "${SERVICE_USER}")"
 
@@ -50,18 +49,6 @@ if [[ ! -r "${SCRIPT_DIR}/.venv/bin/python" || ! -x "${SCRIPT_DIR}/.venv/bin/pyt
     exit 2
 fi
 
-if ! grep -q '^CONTROLPANEL_TOKEN=' "${ENV_FILE}" 2>/dev/null; then
-    token="$("${SCRIPT_DIR}/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(32))')"
-    if [[ -s "${ENV_FILE}" ]]; then
-        printf '\n' >> "${ENV_FILE}"
-    fi
-    printf 'CONTROLPANEL_TOKEN=%s\n' "${token}" >> "${ENV_FILE}"
-    echo "[control-panel] Usuario web: admin"
-    echo "[control-panel] Token web generado: ${token}"
-    echo "[control-panel] Guárdelo ahora; no volverá a mostrarse."
-fi
-chmod 0600 "${ENV_FILE}"
-
 echo "[control-panel] Instalando ${UNIT_NAME} para ${SERVICE_USER}:${SERVICE_GROUP} en ${REPO_DIR}"
 sudo install -o root -g root -m 0644 "${temporary_unit}" "/etc/systemd/system/${UNIT_NAME}"
 sudo install -d -o root -g root -m 0755 "/etc/polkit-1/rules.d"
@@ -93,4 +80,9 @@ else:
 PY
 
 echo "[control-panel] Servicio instalado y habilitado."
+LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+echo "[control-panel] Panel local: http://127.0.0.1:8790"
+if [[ -n "${LAN_IP}" ]]; then
+    echo "[control-panel] Panel en red: http://${LAN_IP}:8790"
+fi
 sudo systemctl status "${UNIT_NAME}" --no-pager

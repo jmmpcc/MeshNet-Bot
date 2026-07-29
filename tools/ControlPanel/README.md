@@ -109,15 +109,14 @@ para permitir acceso desde la red privada. Variables:
 - `CONTROLPANEL_EMERGENCIAS_ENV`: fichero privado que contiene `FIRMS_MAP_KEY`.
 - `CONTROLPANEL_TOKEN`: contraseña del usuario web `admin`.
 
-El acceso se protege mediante autenticación HTTP Basic cuando se configura
-`CONTROLPANEL_TOKEN`. El instalador genera un token aleatorio, lo guarda en
-`tools/ControlPanel/.env` con permisos `0600` y lo muestra una sola vez. El
-arranque manual también carga ese archivo; si escucha en una dirección de red y
-no existe token persistente, crea uno temporal y lo muestra en la terminal.
+El panel no solicita usuario ni contraseña. Publíquelo únicamente en una red
+privada de confianza y no lo exponga directamente a Internet, ya que contiene
+acciones operativas.
 
-Use el usuario `admin` y el token como contraseña. Aunque exista autenticación,
-publique el panel únicamente en una red privada: HTTP Basic no cifra el tráfico
-y no debe exponerse directamente a Internet sin HTTPS.
+Si actualiza desde una versión que solicitaba credenciales, vuelva a ejecutar
+`./install_control_panel_service.sh` para reemplazar la unidad y reiniciar el
+servicio. El antiguo `CONTROLPANEL_TOKEN` de `tools/ControlPanel/.env` ya no se
+lee y puede eliminarse manualmente.
 
 ## systemd y permisos
 
@@ -145,6 +144,21 @@ Después, el panel queda disponible tras reinicios y se comprueba con:
 ```bash
 systemctl status meshnet-control-panel.service --no-pager
 curl -s http://127.0.0.1:8790/health | python3 -m json.tool
+```
+
+La unidad instalada escucha en la red privada (`0.0.0.0`). Desde otro equipo,
+abra `http://IP_DE_LA_RASPBERRY:8790`; `127.0.0.1` solo funciona en el propio
+equipo donde se ejecuta el servicio. El instalador muestra ambas direcciones al
+terminar.
+
+Si una instalación anterior continúa ligada a `127.0.0.1`, vuelva a ejecutar
+`./install_control_panel_service.sh` para actualizar la unidad. Compruebe la
+dirección efectiva y los últimos errores con:
+
+```bash
+systemctl show meshnet-control-panel.service -p Environment --no-pager
+systemctl status meshnet-control-panel.service --no-pager
+journalctl -u meshnet-control-panel.service -n 50 --no-pager
 ```
 
 El instalador espera hasta diez segundos a que `/health` confirme el arranque.
