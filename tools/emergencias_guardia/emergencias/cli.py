@@ -178,7 +178,7 @@ def _doctor(config: dict[str, Any]) -> int:
     for source_id, source in config.get("sources", {}).items():
         if source.get("type") not in SOURCE_TYPES:
             problems.append(f"{source_id}: tipo desconocido")
-        if source.get("enabled") and not str(source.get("url", "")).strip():
+        if source.get("enabled") and not _source_has_endpoint(source):
             problems.append(f"{source_id}: habilitada sin URL")
     checks = {
         "ok": not problems, "config": str(CONFIG_FILE), "data_dir": str(DATA_DIR),
@@ -298,7 +298,7 @@ def _sources(config: dict[str, Any], args: argparse.Namespace) -> int:
         print_json({"ok": True, "source": args.name, "url": args.url})
     elif args.source_command in {"enable", "disable"}:
         enabled = args.source_command == "enable"
-        if enabled and not str(sources[args.name].get("url", "")).strip():
+        if enabled and not _source_has_endpoint(sources[args.name]):
             print_json({"ok": False, "error": "configure primero la URL", "source": args.name})
             return 2
         sources[args.name]["enabled"] = enabled
@@ -311,6 +311,11 @@ def _sources(config: dict[str, Any], args: argparse.Namespace) -> int:
         print_json(report)
         return 0 if report["sources"].get(args.name, {}).get("ok") else 1
     return 0
+
+
+def _source_has_endpoint(source: dict[str, Any]) -> bool:
+    """Los conectores autenticados pueden construir la URL desde una plantilla."""
+    return bool(str(source.get("url") or source.get("url_template") or "").strip())
 
 
 def _notifications(config: dict[str, Any], args: argparse.Namespace) -> int:

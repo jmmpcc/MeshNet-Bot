@@ -83,6 +83,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "source_url": "uri",
             },
         },
+        "ign_earthquakes": {
+            "type": "rss", "enabled": False,
+            "url": "https://www.ign.es/ign/RssTools/sismologia.xml",
+            "profile": "ign_earthquakes", "verification": "official",
+            "require_areas": True,
+        },
+        "nasa_firms": {
+            "type": "firms", "enabled": False,
+            "url_template": "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/{source}/{bbox}/{days}",
+            "api_key_env": "FIRMS_MAP_KEY", "dataset": "VIIRS_SNPP_NRT",
+            "bbox": [-9.4, 35.8, 4.4, 43.9], "days": 1,
+            "verification": "satellite_detection", "require_areas": True,
+        },
     },
 }
 

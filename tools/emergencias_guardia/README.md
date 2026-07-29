@@ -11,6 +11,8 @@ Esta primera fase usa únicamente la biblioteca estándar de Python y aporta:
 - API local en el puerto `8789`.
 - conectores configurables para DGT DATEX II y fuentes municipales JSON/GeoJSON;
 - adaptación inicial verificada para la API de incidencias del Ayuntamiento de Zaragoza;
+- terremotos del feed RSS/GeoRSS oficial del Instituto Geográfico Nacional (IGN);
+- detecciones térmicas de incendios de NASA FIRMS (opcionales, requieren `MAP_KEY`);
 - caché HTTP con `ETag` y `Last-Modified`;
 - límites de tamaño y tiempo de descarga;
 - rechazo de DTD y entidades en XML;
@@ -108,6 +110,82 @@ Ejemplo de mapeo:
 No habilite una fuente hasta confirmar su licencia, estabilidad y semántica.
 `source test` descarga y normaliza; por ello actualiza la copia local y el
 histórico, pero no envía mensajes por radio.
+
+### Terremotos (IGN)
+
+El conector `ign_earthquakes` consume el RSS oficial del IGN, extrae GeoRSS,
+magnitud y fecha, y asigna severidad (`low` < 3,5; `medium` < 5; `high` < 6;
+`critical` >= 6). Como el feed normalmente aporta coordenadas pero no provincia,
+se recomienda un área circular en vez de un filtro administrativo:
+
+```bash
+python3 emergencias_guardia.py area add radius entorno-zaragoza \
+  --lat 41.6488 --lon -0.8891 --km 150
+python3 emergencias_guardia.py source test ign_earthquakes
+python3 emergencias_guardia.py source enable ign_earthquakes
+```
+
+### Incendios (NASA FIRMS)
+
+FIRMS no informa de incendios oficialmente confirmados: ofrece anomalías
+térmicas observadas por satélite. Por ello los eventos se guardan siempre como
+`satellite_detection`, el mensaje lo indica y **no se difunden por defecto**.
+El conector consulta VIIRS SNPP NRT para la caja de España configurada en
+`sources.nasa_firms.bbox` y después aplica las áreas locales:
+
+```bash
+export FIRMS_MAP_KEY='clave-obtenida-en-NASA-FIRMS'
+python3 emergencias_guardia.py area add radius entorno-zaragoza \
+  --lat 41.6488 --lon -0.8891 --km 150
+python3 emergencias_guardia.py source test nasa_firms
+python3 emergencias_guardia.py source enable nasa_firms
+```
+
+La clave solo se lee de la variable `FIRMS_MAP_KEY`; no se escribe en
+`data/config.json`, la caché ni el histórico. Para propagar detecciones no
+confirmadas hay que establecer deliberadamente
+`notifications.allow_satellite_detection: true`, después de valorar falsos
+positivos (industria, quemas controladas y otros focos térmicos).
+
+La arquitectura ya admite otros riesgos oficiales mediante conectores `rss`
+(RSS, Atom y GeoRSS) y `json` (JSON/GeoJSON). Se han añadido las categorías
+`earthquake`, `tsunami`, `volcanic` y `landslide`; antes de incorporar una nueva
+fuente se debe documentar su organismo, licencia, cobertura, frecuencia,
+identificador estable y criterio de cierre. No se recomienda extraer HTML si
+existe un feed o API oficial.
+
+### Qué falta activar en una instalación existente
+
+Para **recoger y consultar** terremotos basta con crear un área, probar el feed,
+habilitarlo y dejar activo el temporizador. Para FIRMS hace falta además obtener
+una MAP_KEY gratuita y hacerla visible al servicio systemd:
+
+```bash
+sudo install -d -m 0750 /etc/meshnet
+sudo sh -c 'umask 077; printf "%s\n" "FIRMS_MAP_KEY=SU_MAP_KEY" > /etc/meshnet/emergencias_guardia.env'
+sudo chown root:meshnet /etc/meshnet/emergencias_guardia.env
+
+cd /home/meshnet/MeshNet-Bot/tools/emergencias_guardia
+python3 emergencias_guardia.py area add radius entorno-zaragoza \
+  --lat 41.6488 --lon -0.8891 --km 150
+python3 emergencias_guardia.py source test ign_earthquakes
+sudo -u meshnet env FIRMS_MAP_KEY=SU_MAP_KEY python3 emergencias_guardia.py source test nasa_firms
+python3 emergencias_guardia.py source enable ign_earthquakes
+python3 emergencias_guardia.py source enable nasa_firms
+
+sudo cp systemd/meshnet-emergencias-check.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now meshnet-emergencias-check.timer
+sudo systemctl start meshnet-emergencias-check.service
+```
+
+Después se comprueba la recolección con `source list`, `status` y `list`. La
+**difusión automática por radio es opcional y separada**: requiere configurar el
+transporte y el índice real del canal `emergencias`, crear primero una línea base
+silenciosa y finalmente ejecutar `notify enable`. Los terremotos `high` o
+`critical` oficiales pueden entrar en esa ruta. Las detecciones FIRMS siguen
+bloqueadas aunque se habilite la ruta, salvo que el operador cambie expresamente
+`notifications.allow_satellite_detection` por el riesgo de falsos positivos.
 
 ## Filtro de propagación
 

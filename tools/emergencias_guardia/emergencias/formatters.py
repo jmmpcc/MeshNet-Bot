@@ -15,7 +15,9 @@ CATEGORY_LABELS = {
     "extreme_temperature": "TEMPERATURA EXTREMA", "chemical": "RIESGO QUÍMICO",
     "power_outage": "CORTE ELÉCTRICO", "water_outage": "CORTE DE AGUA",
     "gas_outage": "CORTE DE GAS", "public_safety": "SEGURIDAD",
-    "civil_protection": "PROTECCIÓN CIVIL", "other": "INCIDENCIA",
+    "civil_protection": "PROTECCIÓN CIVIL", "earthquake": "TERREMOTO",
+    "tsunami": "TSUNAMI", "volcanic": "VOLCÁN", "landslide": "DESLIZAMIENTO",
+    "other": "INCIDENCIA",
 }
 
 SEVERITY_LABELS = {
@@ -30,6 +32,7 @@ SOURCE_LABELS = {
     "copernicus_effis": "EFFIS",
     "ran": "Protección Civil",
     "infoar": "INFOAR",
+    "ign_earthquakes": "IGN",
 }
 
 
