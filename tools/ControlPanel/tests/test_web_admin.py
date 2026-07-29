@@ -95,6 +95,8 @@ def test_systemd_installer_is_valid_and_adapts_repository_path():
     assert 'SERVICE_USER="${SUDO_USER:-$(id -un)}"' in text
     assert '-e "s|/home/meshnet/MeshNet-Bot|${escaped_repo}|g"' in text
     assert '-e "s|^User=meshnet$|User=${SERVICE_USER}|"' in text
+    assert 'subject.user == \\"${SERVICE_USER}\\"' in text
+    assert '"${temporary_polkit}"' in text
     assert 'pip" install -r "${SCRIPT_DIR}/requirements.txt"' in text
     assert 'systemctl enable --now "${UNIT_NAME}"' in text
 
