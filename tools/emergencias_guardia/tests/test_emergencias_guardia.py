@@ -15,9 +15,11 @@ from emergencias.config import DEFAULT_CONFIG
 from emergencias.formatters import byte_chunks, compact_messages, google_maps_url
 from emergencias.models import Event
 from emergencias import notifier
-from emergencias.sources.base import SourceError
+from emergencias.sources.base import FetchResult, HttpSource, SourceError
 from emergencias.sources.datex2 import Datex2Source
 from emergencias.sources.json_source import JsonSource
+from emergencias.sources.rss import RssSource
+from emergencias.sources.firms import FirmsSource
 
 
 def config():
@@ -25,6 +27,65 @@ def config():
 
 
 class ParserTests(unittest.TestCase):
+    def test_ign_georss_earthquake_is_normalized(self):
+        source = RssSource("ign_earthquakes", {
+            "url": "file:///fixture.xml", "profile": "ign_earthquakes",
+            "verification": "official",
+        }, config())
+        body = b'''<rss xmlns:georss="http://www.georss.org/georss"><channel><item>
+          <guid>es2026test</guid><title>Terremoto de magnitud 4.2 en ZARAGOZA</title>
+          <description><![CDATA[Evento revisado por el IGN]]></description>
+          <link>https://www.ign.es/evento/es2026test</link>
+          <pubDate>Wed, 29 Jul 2026 08:30:00 GMT</pubDate>
+          <georss:point>41.65 -0.89</georss:point>
+        </item></channel></rss>'''
+        event = source.parse(body)[0]
+        self.assertEqual(event.category, "earthquake")
+        self.assertEqual(event.severity, "medium")
+        self.assertEqual(event.metadata["magnitude"], 4.2)
+        self.assertEqual((event.latitude, event.longitude), (41.65, -0.89))
+        self.assertEqual(event.verification, "official")
+
+    def test_firms_hotspot_is_explicitly_satellite_detection(self):
+        source = FirmsSource("nasa_firms", {}, config())
+        body = ("latitude,longitude,acq_date,acq_time,satellite,confidence,frp\n"
+                "41.6501,-0.8891,2026-07-29,0830,N,high,125.4\n").encode()
+        event = source.parse(body)[0]
+        self.assertEqual(event.category, "wildfire")
+        self.assertEqual(event.verification, "satellite_detection")
+        self.assertEqual(event.severity, "high")
+        self.assertEqual(event.metadata["frp_mw"], 125.4)
+
+    def test_firms_key_is_not_written_to_cache_metadata(self):
+        source = FirmsSource("nasa_firms", {
+            "url_template": "https://example.test/{map_key}/{source}/{bbox}/{days}",
+            "dataset": "VIIRS", "bbox": [-2, 40, 0, 42], "days": 1,
+        }, config())
+        fetched = FetchResult(b"", False, {"url": "https://example.test/secret"})
+        with mock.patch.dict("os.environ", {"FIRMS_MAP_KEY": "secret"}), \
+                mock.patch.object(HttpSource, "fetch_bytes", return_value=fetched), \
+                mock.patch("emergencias.sources.firms.atomic_write_json") as write:
+            result = source.fetch_bytes()
+        self.assertNotIn("secret", result.metadata["url"])
+        self.assertIn("***", result.metadata["url"])
+        self.assertNotIn("url", source.config)
+        self.assertNotIn("secret", json.dumps(write.call_args.args[1]))
+
+    def test_firms_rejects_documentation_placeholder_before_http(self):
+        source = FirmsSource("nasa_firms", {
+            "url_template": "https://example.test/{map_key}/{source}/{bbox}/{days}",
+        }, config())
+        with mock.patch.dict("os.environ", {"FIRMS_MAP_KEY": "SU_MAP_KEY"}), \
+                mock.patch.object(HttpSource, "fetch_bytes") as fetch:
+            with self.assertRaisesRegex(SourceError, "texto de ejemplo"):
+                source.fetch_bytes()
+        fetch.assert_not_called()
+
+    def test_rss_rejects_dtd(self):
+        source = RssSource("feed", {"url": "file:///fixture.xml"}, config())
+        with self.assertRaises(SourceError):
+            source.parse(b'<!DOCTYPE x [<!ENTITY boom "bad">]><rss>&boom;</rss>')
+
     def test_json_geojson_is_normalized(self):
         source = JsonSource("municipal_json", {
             "url": "file:///fixture.json", "verification": "official",
@@ -145,6 +206,11 @@ class ParserTests(unittest.TestCase):
 
 
 class EngineTests(unittest.TestCase):
+    def test_empty_collection_categories_collects_nothing(self):
+        cfg = config()
+        cfg["filters"]["categories"] = []
+        self.assertFalse(engine.event_matches(Event("x:0", "x", "0", "earthquake"), cfg))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
@@ -204,6 +270,31 @@ class EngineTests(unittest.TestCase):
 
 
 class ApiAndFormattingTests(unittest.TestCase):
+    def test_filters_cli_saves_category_by_severity_matrix(self):
+        cfg = config()
+        rules = {"medium": ["civil_protection"], "high": ["earthquake", "wildfire"]}
+        with mock.patch("emergencias.cli.load_config", return_value=cfg), \
+                mock.patch("emergencias.cli.save_config") as save:
+            from emergencias.cli import main
+            result = main(["filters", "set", "--rules-json", json.dumps(rules)])
+        self.assertEqual(result, 0)
+        self.assertEqual(cfg["notifications"]["propagation_filter"]["rules"]["medium"],
+                         ["civil_protection"])
+        self.assertEqual(cfg["notifications"]["propagation_filter"]["rules"]["high"],
+                         ["earthquake", "wildfire"])
+        save.assert_called_once()
+
+    def test_firms_source_can_be_enabled_with_url_template(self):
+        cfg = config()
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch("emergencias.cli.load_config", return_value=cfg), \
+                mock.patch("emergencias.cli.save_config") as save:
+            from emergencias.cli import main
+            result = main(["source", "enable", "nasa_firms"])
+        self.assertEqual(result, 0)
+        self.assertTrue(cfg["sources"]["nasa_firms"]["enabled"])
+        save.assert_called_once()
+
     def test_filters_cli_updates_selected_severities_and_categories(self):
         cfg = config()
         with tempfile.TemporaryDirectory() as directory:
@@ -269,6 +360,7 @@ class ApiAndFormattingTests(unittest.TestCase):
 
     def test_query_aliases(self):
         self.assertEqual(query_from_text("emergencias incendios"), {"category": "wildfire"})
+        self.assertEqual(query_from_text("emergencias terremotos"), {"category": "earthquake"})
         self.assertEqual(query_from_text("emergencias A-2"), {"road": "A-2"})
         self.assertIsNone(query_from_text("farma"))
 
@@ -322,6 +414,19 @@ class ApiAndFormattingTests(unittest.TestCase):
 
 
 class NotifierTests(unittest.TestCase):
+    def test_propagation_matrix_matches_category_and_exact_severity(self):
+        cfg = config()
+        cfg["notifications"]["propagation_filter"]["rules"] = {
+            "low": [], "medium": ["civil_protection"],
+            "high": ["earthquake"], "critical": ["wildfire"],
+        }
+        medium_civil = Event("x:1", "x", "1", "civil_protection", severity="medium")
+        high_civil = Event("x:2", "x", "2", "civil_protection", severity="high")
+        high_quake = Event("x:3", "x", "3", "earthquake", severity="high")
+        self.assertEqual(notifier.route_event(medium_civil, cfg), "emergencias")
+        self.assertIsNone(notifier.route_event(high_civil, cfg))
+        self.assertEqual(notifier.route_event(high_quake, cfg), "emergencias")
+
     @staticmethod
     def _incremental_config():
         cfg = config()
