@@ -176,12 +176,6 @@ class EmergencyCollectionPayload(BaseModel):
     firms_map_key: str = ""
     radius: EmergencyRadiusPayload = Field(default_factory=EmergencyRadiusPayload)
 
-class EmergencyRadiusPayload(BaseModel):
-    enabled: bool = False
-    latitude: float = 41.6488
-    longitude: float = -0.8891
-    radius_km: float = 150
-
 
 class EmergencyCollectionPayload(BaseModel):
     sources: list[str]
@@ -400,8 +394,11 @@ def create_app(registry: ToolRegistry | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail="Habilite la aplicación antes de configurarla")
 
     @app.get("/", response_class=HTMLResponse)
-    def dashboard() -> str:
-        return DASHBOARD
+    def dashboard() -> HTMLResponse:
+        return HTMLResponse(DASHBOARD, headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        })
 
     @app.get("/api/tools")
     def list_tools() -> dict[str, Any]:
@@ -720,8 +717,11 @@ button{border:0;border-radius:10px;padding:9px 12px;font-weight:750;cursor:point
 .matrix-wrap{overflow-x:auto;margin:12px 0}.matrix{width:100%;border-collapse:collapse;min-width:560px}.matrix th,.matrix td{padding:8px;border-bottom:1px solid var(--line);text-align:center}.matrix th:first-child,.matrix td:first-child{text-align:left;position:sticky;left:0;background:#102238}.matrix input{width:18px;height:18px}
 .tabs{display:flex;gap:6px;overflow-x:auto;margin:18px 0 8px;padding-bottom:4px}.tab{white-space:nowrap;background:#213b53;color:#dceafa}.tab.active{background:var(--accent);color:#05251b}.tab-panel{display:none}.tab-panel.active{display:block}.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.status-card{padding:13px;border:1px solid var(--line);border-radius:13px;background:#091a2a}.status-card strong{display:block;font-size:1.15rem;margin-top:5px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#687b8d;margin-right:6px}.dot.ok{background:var(--accent)}.dot.warn{background:#ffc857}.source-status{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin-top:12px}.province-search{width:100%;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:9px}.chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}.chip{background:#24465f;border-radius:20px;padding:5px 9px;font-size:.82rem}.matrix th.sev-low{color:#75c8ff}.matrix th.sev-medium{color:#ffd166}.matrix th.sev-high{color:#ff9f43}.matrix th.sev-critical{color:#ff7770}.matrix tr:hover td{background:#18334a}.toasts{position:fixed;right:18px;bottom:18px;z-index:20;display:grid;gap:8px;max-width:360px}.toast{padding:12px 15px;border-radius:11px;background:#124d3d;color:#d8fff1;box-shadow:0 10px 30px #0008}.toast.bad{background:#5b2d32;color:#ffd4d1}
 @media(max-width:520px){.grid{grid-template-columns:1fr}header,main{padding:16px}.card{padding:17px}}
-</style></head><body><header><div class="logo">MN</div><div><h1>MeshNet Control</h1><div class="sub">Estado, datos y operación de aplicaciones independientes</div></div></header><main><div id="tools" class="grid"></div></main><div id="toasts" class="toasts"></div>
+</style></head><body><header><div class="logo">MN</div><div><h1>MeshNet Control</h1><div class="sub">Estado, datos y operación de aplicaciones independientes · UI 2</div></div></header><main><div id="tools" class="grid"><div class="card"><h2>Cargando aplicaciones…</h2><p class="muted">Si este mensaje no desaparece, recarga sin caché y revisa la consola del navegador.</p></div></div><noscript><div class="card"><h2>JavaScript deshabilitado</h2><p>El ControlPanel necesita JavaScript para mostrar las aplicaciones.</p></div></noscript></main><div id="toasts" class="toasts"></div>
 <script>
+function fatalUi(title,message){const box=document.querySelector('#tools');if(!box)return;box.innerHTML='<div class="card"><h2 class="ui-error-title"></h2><p class="pill bad ui-error-message"></p><p class="muted">Recarga con Ctrl+F5. Si continúa, abre /api/tools.</p></div>';box.querySelector('.ui-error-title').textContent=title;box.querySelector('.ui-error-message').textContent=String(message)}
+window.addEventListener('error',event=>fatalUi('No se pudo mostrar el panel',event.message||'Error JavaScript'));
+window.addEventListener('unhandledrejection',event=>fatalUi('Error cargando el panel',(event.reason&&event.reason.message)||event.reason||'Error desconocido'));
 const headers={'Content-Type':'application/json'};
 const labels={ok:'Correcto',enabled:'Habilitado',error:'Error',events:'Eventos',sources:'Fuentes',records:'Recibidos',accepted:'Aceptados',last_success:'Último éxito',last_error:'Último error',current_exists:'Datos locales',minimum_severity:'Severidad mínima',categories:'Categorías',changes:'Cambios',new:'Nuevas',updated:'Actualizadas',resolved:'Resueltas',problems:'Problemas',areas:'Áreas',pending:'Pendientes',delivered:'Entregados',observed:'Observados'};
 const catLabels={wildfire:'Incendio forestal',urban_fire:'Incendio urbano',industrial_fire:'Incendio industrial',traffic_collision:'Colisión de tráfico',road_closed:'Carretera cortada',lane_closed:'Carril cerrado',traffic_obstruction:'Obstáculo o afección',flood:'Inundación',storm:'Tormenta',snow:'Nieve',strong_wind:'Viento fuerte',extreme_temperature:'Temperatura extrema',chemical:'Riesgo químico',power_outage:'Corte eléctrico',water_outage:'Corte de agua',gas_outage:'Corte de gas',public_safety:'Seguridad pública',civil_protection:'Protección civil',earthquake:'Terremoto',tsunami:'Tsunami',volcanic:'Actividad volcánica',landslide:'Deslizamiento',other:'Otras'};

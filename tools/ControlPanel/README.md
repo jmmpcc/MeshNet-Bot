@@ -83,6 +83,22 @@ Este procedimiento no toca directorios `data/` ni archivos `.env`. El archivo
 restaurado aparecerá como modificado respecto a `main` hasta que la corrección
 limpia se integre en esa rama; no use `git clean` para resolverlo.
 
+### Página vacía después de reparar los conflictos
+
+El HTML del panel se sirve ahora con `Cache-Control: no-store` y muestra un
+estado inicial “Cargando aplicaciones…”. Si JavaScript falla, sustituye la
+página vacía por el motivo del error y sugiere consultar `/api/tools`. Tras
+actualizar una instalación que hubiera servido el JavaScript conflictivo:
+
+```bash
+sudo systemctl restart meshnet-control-panel.service
+curl -s http://127.0.0.1:8790/api/tools | python3 -m json.tool
+```
+
+Después use `Ctrl+F5` o una ventana privada. Si `/api/tools` devuelve la lista de
+aplicaciones pero el navegador conserva una pantalla antigua, se trata de caché;
+si el endpoint falla, revise `journalctl -u meshnet-control-panel.service`.
+
 El ejecutable directo escucha en `127.0.0.1`; el script escucha en `0.0.0.0`
 para permitir acceso desde la red privada. Variables:
 
@@ -162,13 +178,6 @@ navegador si existe, nunca su valor.
 
 Esta configuración es distinta del filtro de propagación: la primera decide qué
 se descarga y conserva; el segundo decide qué puede enviarse por radio.
-
-La tarjeta muestra una matriz de propagación con una fila por categoría y una
-columna por severidad (`baja`, `media`, `alta` y `crítica`). Cada casilla decide
-una combinación exacta. Por ejemplo, se puede habilitar Protección Civil en
-media y Terremoto en alta sin que Protección Civil alta ni Terremoto medio se
-propaguen. Los botones de columna seleccionan toda una severidad y **Limpiar
-matriz** bloquea todas las combinaciones.
 
 La tarjeta muestra una matriz de propagación con una fila por categoría y una
 columna por severidad (`baja`, `media`, `alta` y `crítica`). Cada casilla decide
