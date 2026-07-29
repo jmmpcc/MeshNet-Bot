@@ -107,9 +107,17 @@ para permitir acceso desde la red privada. Variables:
 - `CONTROLPANEL_MANIFESTS`: directorio alternativo de manifiestos.
 - `CONTROLPANEL_EMERGENCIAS_CONFIG`: configuración JSON de Emergencias;
 - `CONTROLPANEL_EMERGENCIAS_ENV`: fichero privado que contiene `FIRMS_MAP_KEY`.
+- `CONTROLPANEL_TOKEN`: contraseña del usuario web `admin`.
 
-El panel no solicita token. Debe publicarse únicamente en una red privada y no
-exponerse directamente a Internet, ya que contiene acciones operativas.
+El acceso se protege mediante autenticación HTTP Basic cuando se configura
+`CONTROLPANEL_TOKEN`. El instalador genera un token aleatorio, lo guarda en
+`tools/ControlPanel/.env` con permisos `0600` y lo muestra una sola vez. El
+arranque manual también carga ese archivo; si escucha en una dirección de red y
+no existe token persistente, crea uno temporal y lo muestra en la terminal.
+
+Use el usuario `admin` y el token como contraseña. Aunque exista autenticación,
+publique el panel únicamente en una red privada: HTTP Basic no cifra el tráfico
+y no debe exponerse directamente a Internet sin HTTPS.
 
 ## systemd y permisos
 

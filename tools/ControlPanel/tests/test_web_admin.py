@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -102,17 +103,7 @@ def test_systemd_installer_is_valid_and_adapts_repository_path():
     assert 'pip" install -r "${SCRIPT_DIR}/requirements.txt"' in text
     assert 'systemctl enable --now "${UNIT_NAME}"' in text
     assert 'http://127.0.0.1:8790/health' in text
-
-
-def test_emergency_collection_radius_uses_a_fresh_default_model():
-    first = web_admin.EmergencyCollectionPayload(
-        sources=[], provinces=[], categories=[]
-    )
-    second = web_admin.EmergencyCollectionPayload(
-        sources=[], provinces=[], categories=[]
-    )
-
-    assert first.radius is not second.radius
+    assert 'CONTROLPANEL_TOKEN=' in text
 
 
 def test_emergency_collection_radius_uses_a_fresh_default_model():
@@ -157,6 +148,28 @@ def test_health_reports_service_and_registry_counts(tmp_path):
         "tools": {"registered": 1, "enabled": 0},
     }
     assert enabled.json()["tools"] == {"registered": 1, "enabled": 1}
+
+
+def test_authentication_protects_dashboard_and_api_but_not_health(tmp_path):
+    client = TestClient(web_admin.create_app(registry(tmp_path), auth_token="secret-token"))
+
+    assert client.get("/health").status_code == 200
+    unauthorized = client.get("/api/tools")
+    assert unauthorized.status_code == 401
+    assert unauthorized.headers["www-authenticate"].startswith("Basic ")
+
+    credentials = base64.b64encode(b"admin:secret-token").decode("ascii")
+    authorized = client.get("/api/tools", headers={"Authorization": f"Basic {credentials}"})
+    assert authorized.status_code == 200
+
+
+def test_authentication_rejects_wrong_user_or_token(tmp_path):
+    client = TestClient(web_admin.create_app(registry(tmp_path), auth_token="secret-token"))
+    for value in (b"operator:secret-token", b"admin:wrong-token", b"invalid"):
+        credentials = base64.b64encode(value).decode("ascii")
+        assert client.get(
+            "/api/tools", headers={"Authorization": f"Basic {credentials}"}
+        ).status_code == 401
 
 
 def test_api_blocks_health_for_disabled_tool(tmp_path):
