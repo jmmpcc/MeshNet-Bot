@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from source.auto_reply import AutoReply
 
@@ -43,3 +44,14 @@ def test_configuration_is_reloaded_without_restart(tmp_path):
         "meshcore": {"channels": [4]},
     }))
     assert responder.reply_for("meshcore", 4, "hola") == "OK hola"
+
+
+def test_broker_owns_auto_reply_transport_and_bridge_does_not():
+    broker = Path("source/Meshtastic_Broker.py").read_text(encoding="utf-8")
+    bridge = Path("source/mesh_triple_bridge_brokerhub.py").read_text(encoding="utf-8")
+
+    assert 'AUTO_REPLY.reply_for("meshtastic"' in broker
+    assert 'AUTO_REPLY.reply_for("meshcore"' in broker
+    assert '"origin": "auto_reply"' in broker
+    assert '"no_bridge": True' in broker
+    assert "AutoReply" not in bridge

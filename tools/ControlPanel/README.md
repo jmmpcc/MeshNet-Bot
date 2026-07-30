@@ -5,10 +5,14 @@
 El panel incluye una configuración global para responder automáticamente en canales
 concretos de MeshCore y Meshtastic. El texto debe contener `{message}`, que se sustituye
 por el mensaje recibido (por ejemplo, `Recibido, {message}`). La configuración se guarda
-de forma atómica en `bot_data/auto_reply.json` y el bridge la recarga en caliente, sin
-necesidad de reiniciarlo. El bridge y el panel deben compartir el volumen `bot_data`; puede
+de forma atómica en `bot_data/auto_reply.json` y el broker la recarga en caliente, sin
+necesidad de reiniciarlo. El broker y el panel deben compartir el volumen `bot_data`; puede
 sobrescribirse la ubicación en ambos procesos con `AUTO_REPLY_CONFIG` y
 `CONTROLPANEL_AUTO_REPLY_CONFIG`, respectivamente.
+
+La respuesta sale siempre desde el broker: Meshtastic usa su cola `SENDQ` resiliente y
+MeshCore usa la cola del motor embebido. El callback de recepción nunca abre una conexión
+ni transmite directamente, y el bridge externo no genera respuestas automáticas.
 
 Panel web independiente para supervisar y operar las aplicaciones instaladas en
 `tools/`. No depende de Docker ni modifica el panel web de Meshtastic.

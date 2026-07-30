@@ -41,6 +41,7 @@ import os
 
 from pubsub import pub
 from meshtastic.tcp_interface import TCPInterface
+from auto_reply import AutoReply
 
 
 # === [NUEVO] BBS (broker-side) ==============================================
@@ -84,6 +85,43 @@ except Exception as _e_mc:
     _MESHCORE_IMPORT_ERROR = f"{type(_e_mc).__name__}: {_e_mc}"
 
 MESHCORE_ENGINE = None  # instancia global (si se habilita)
+
+
+def _auto_reply_config_path() -> Path:
+    configured = (os.getenv("AUTO_REPLY_CONFIG") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    data_dir = (os.getenv("BOT_DATA_DIR") or "").strip()
+    if data_dir:
+        return Path(data_dir).expanduser() / "auto_reply.json"
+    container_data = Path("/app/bot_data")
+    if container_data.exists():
+        return container_data / "auto_reply.json"
+    return Path(__file__).resolve().parent.parent / "bot_data/auto_reply.json"
+
+
+AUTO_REPLY = AutoReply(_auto_reply_config_path())
+
+
+def _enqueue_meshtastic_auto_reply(channel: int, text: str) -> bool:
+    """Encola la respuesta por la única ruta TX propiedad del broker."""
+    reply = AUTO_REPLY.reply_for("meshtastic", int(channel), text)
+    if reply is None:
+        return False
+    queue = globals().get("SENDQ")
+    if queue is None or not hasattr(queue, "offer"):
+        return False
+    queue.offer({
+        "channel": int(channel),
+        "text": reply,
+        "destination": None,
+        "require_ack": False,
+        "type": "text",
+        "no_bridge": True,
+        "origin": "auto_reply",
+        "meta": {"auto_reply": 1},
+    }, coalesce=False)
+    return True
 
 def _env_truthy(name: str, default: str = "0") -> bool:
     v = (os.getenv(name, default) or default).strip().lower()
@@ -1742,6 +1780,21 @@ class MeshCoreEmbeddedBridge:
                         text_msg = rest
                 except Exception:
                     pass
+
+                # === Respuesta automática propiedad del broker ==============
+                # Se encola, nunca se transmite directamente desde el callback RX.
+                # Así comparte la conexión persistente, backoff y circuit breaker.
+                if kind == "chan" and chan_idx is not None:
+                    try:
+                        reply = AUTO_REPLY.reply_for("meshcore", int(chan_idx), text_msg)
+                        if reply is not None:
+                            self.enqueue_send_channel(int(chan_idx), reply)
+                    except Exception as _e_auto_reply:
+                        print(
+                            f"[auto-reply] MeshCore ch={chan_idx} ERROR: "
+                            f"{type(_e_auto_reply).__name__}: {_e_auto_reply}",
+                            flush=True,
+                        )
 
                 # === [FARMACIAS] Comando interno MeshCore =======================
                 # Los mensajes de contacto y de canal se aceptan; la respuesta se
@@ -8777,6 +8830,18 @@ class MeshReceiver:
                 if to_alias:
                     self._alias_cache_put(who_to, to_alias)
 
+            # === Respuesta automática propiedad del broker ==================
+            # SENDQ conserva una sola conexión al nodo y aplica su resiliencia.
+            try:
+                if str(portnum) == "TEXT_MESSAGE_APP" and isinstance(text, str):
+                    _enqueue_meshtastic_auto_reply(int(canal), text)
+            except Exception as _e_auto_reply:
+                if self.verbose:
+                    print(
+                        f"[auto-reply] Meshtastic ch={canal} ERROR: "
+                        f"{type(_e_auto_reply).__name__}: {_e_auto_reply}",
+                        flush=True,
+                    )
 
 
             # === Salida consola (fundamental) si --verbose y no text-only ===
