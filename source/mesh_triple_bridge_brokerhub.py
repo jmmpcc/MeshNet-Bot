@@ -29,6 +29,7 @@ from typing import Optional, Dict
 import heapq
 
 from pubsub import pub
+from auto_reply import AutoReply
 
 # ============================================================
 #  Compat TCPInterface: pool persistente si existe, si no SDK
@@ -1016,6 +1017,9 @@ class TripleBridge:
 
 
         self._meshcore_client: MeshCoreClient | None = None
+        self.auto_reply = AutoReply(os.getenv(
+            "AUTO_REPLY_CONFIG", "/app/bot_data/auto_reply.json"
+        ))
 
         # --- Hosts ---
         self.a_host, self.a_port = a_host, int(a_port or 4403)
@@ -1929,6 +1933,12 @@ class TripleBridge:
                 flush=True
             )
 
+            if want_text:
+                self.auto_reply.send(
+                    "meshtastic", ch, text,
+                    lambda reply: self._send_text_to_hub(reply, ch),
+                )
+
             self._bridge_from_a(ch, frm, text, decoded, want_text, want_pos, source=("tcp" if self.hub_mode == "tcp" else "hub"))
 
         except Exception as e:
@@ -2017,6 +2027,14 @@ class TripleBridge:
 
             who = f"CH{channel_idx}" if kind in ("chan", "channel") else (prefix or "CONTACT")
             tagged = f"[MESHCORE {who}] {text}".strip()
+
+            if kind in ("chan", "channel") and channel_idx is not None and self._meshcore_client:
+                self.auto_reply.send(
+                    "meshcore", int(channel_idx), text,
+                    lambda reply: self._meshcore_client.enqueue_send(
+                        {"kind": "chan", "channel_idx": int(channel_idx)}, reply
+                    ),
+                )
 
             # MeshCore -> A (hub)
             print(
@@ -2193,10 +2211,31 @@ class TripleBridge:
                 self._last_rx_c_ts = time.time()
 
             if came_from_a:
+                if want_text:
+                    self.auto_reply.send(
+                        "meshtastic", ch, text,
+                        lambda reply: self._send_text_to_hub(reply, ch),
+                    )
                 self._bridge_from_a(ch, frm, text, decoded, want_text, want_pos, source=("tcp" if self.hub_mode == "tcp" else "hub"))
             elif came_from_b:
+                if want_text:
+                    self.auto_reply.send(
+                        "meshtastic", ch, text,
+                        lambda reply: interface.sendText(
+                            reply, destinationId="^all", wantAck=False,
+                            wantResponse=False, channelIndex=ch,
+                        ),
+                    )
                 self._bridge_from_b(ch, frm, text, decoded, want_text, want_pos)
             elif came_from_c:
+                if want_text:
+                    self.auto_reply.send(
+                        "meshtastic", ch, text,
+                        lambda reply: interface.sendText(
+                            reply, destinationId="^all", wantAck=False,
+                            wantResponse=False, channelIndex=ch,
+                        ),
+                    )
                 self._bridge_from_c(ch, frm, text, decoded, want_text, want_pos)
 
         except Exception as e:
