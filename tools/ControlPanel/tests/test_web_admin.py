@@ -69,6 +69,38 @@ def test_dashboard_disables_browser_cache(tmp_path):
     assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate, max-age=0"
 
 
+def test_auto_reply_api_persists_validated_configuration(tmp_path, monkeypatch):
+    path = tmp_path / "auto_reply.json"
+    monkeypatch.setattr(web_admin, "AUTO_REPLY_CONFIG_FILE", path)
+    client = TestClient(web_admin.create_app(registry(tmp_path)))
+
+    response = client.put("/api/auto-reply", json={
+        "enabled": True,
+        "template": "Confirmado: {message}",
+        "meshcore_channels": [3, 3],
+        "meshtastic_channels": [0, 2],
+    })
+
+    assert response.status_code == 200
+    assert json.loads(path.read_text()) == {
+        "enabled": True,
+        "template": "Confirmado: {message}",
+        "meshcore": {"channels": [3]},
+        "meshtastic": {"channels": [0, 2]},
+    }
+    assert client.get("/api/auto-reply").json()["meshcore_channels"] == [3]
+
+
+def test_auto_reply_api_requires_message_placeholder(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_admin, "AUTO_REPLY_CONFIG_FILE", tmp_path / "auto_reply.json")
+    client = TestClient(web_admin.create_app(registry(tmp_path)))
+    response = client.put("/api/auto-reply", json={
+        "enabled": True, "template": "Gracias", "meshcore_channels": [],
+        "meshtastic_channels": [0],
+    })
+    assert response.status_code == 422
+
+
 def test_start_script_reports_unresolved_git_conflicts_before_python(tmp_path):
     script = Path(web_admin.BASE_DIR / "start_control_panel.sh")
     target = tmp_path / "start_control_panel.sh"

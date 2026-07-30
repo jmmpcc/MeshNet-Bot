@@ -201,9 +201,19 @@ class TransportPayload(BaseModel):
     transport: str
 
 
+class AutoReplyPayload(BaseModel):
+    enabled: bool = False
+    template: str = "Recibido, {message}"
+    meshcore_channels: list[int] = Field(default_factory=list)
+    meshtastic_channels: list[int] = Field(default_factory=list)
+
+
 FARMACIAS_ENV_FILE = Path(
     os.getenv("CONTROLPANEL_FARMACIAS_ENV", str(REPO_DIR / "tools/farmacias_guardia/.env"))
 )
+AUTO_REPLY_CONFIG_FILE = Path(os.getenv(
+    "CONTROLPANEL_AUTO_REPLY_CONFIG", str(REPO_DIR / "bot_data/auto_reply.json")
+))
 CHANNEL_KEYS = {
     "RADIO_PROFILE",
     "FARMACIAS_BROADCAST_TRANSPORT",
@@ -445,6 +455,41 @@ def create_app(registry: ToolRegistry | None = None, auth_token: str | None = No
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Aplicación desconocida") from exc
         return {"id": tool_id, "enabled": payload.enabled}
+
+    @app.get("/api/auto-reply")
+    def get_auto_reply() -> dict[str, Any]:
+        try:
+            data = json.loads(AUTO_REPLY_CONFIG_FILE.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            data = {}
+        return {
+            "enabled": bool(data.get("enabled", False)),
+            "template": str(data.get("template") or "Recibido, {message}"),
+            "meshcore_channels": data.get("meshcore", {}).get("channels", []),
+            "meshtastic_channels": data.get("meshtastic", {}).get("channels", []),
+        }
+
+    @app.put("/api/auto-reply")
+    def set_auto_reply(payload: AutoReplyPayload) -> dict[str, Any]:
+        template = " ".join(payload.template.split()).strip()
+        channels = payload.meshcore_channels + payload.meshtastic_channels
+        if not template or len(template) > 300:
+            raise HTTPException(status_code=422, detail="El texto debe tener entre 1 y 300 caracteres")
+        if template.count("{message}") != 1:
+            raise HTTPException(status_code=422, detail="El texto debe incluir {message} exactamente una vez")
+        if any(channel < 0 or channel > 255 for channel in channels):
+            raise HTTPException(status_code=422, detail="Los canales deben estar entre 0 y 255")
+        data = {
+            "enabled": payload.enabled,
+            "template": template,
+            "meshcore": {"channels": sorted(set(payload.meshcore_channels))},
+            "meshtastic": {"channels": sorted(set(payload.meshtastic_channels))},
+        }
+        AUTO_REPLY_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temporary = AUTO_REPLY_CONFIG_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(AUTO_REPLY_CONFIG_FILE)
+        return {"ok": True, **data}
 
     @app.get("/api/tools/{tool_id}/health")
     def tool_health(tool_id: str) -> dict[str, Any]:
@@ -746,12 +791,12 @@ h1,h2,h3,p{margin:0 0 10px}.sub,.muted{color:var(--muted)}.grid{display:grid;gri
 button{border:0;border-radius:10px;padding:9px 12px;font-weight:750;cursor:pointer;background:var(--accent);color:#05251b;transition:.15s}button:hover{transform:translateY(-1px)}button.secondary{background:#263f57;color:white}button.danger{background:#5b2d32;color:#ffd4d1}button:disabled{opacity:.4;transform:none}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:15px}
 .result{display:none;margin-top:18px;border-top:1px solid var(--line);padding-top:16px;max-height:520px;overflow:auto}.result.visible{display:block}.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px}.field,.item{background:#091a2a99;border:1px solid #213e57;border-radius:11px;padding:10px}.key{display:block;color:#7f9ab3;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}.value{overflow-wrap:anywhere}.list{display:grid;gap:9px}.pill{display:inline-block;border-radius:20px;padding:4px 8px;background:#243d55;margin:2px;font-size:.82rem}
 .filterbox{margin-top:18px;padding:15px;background:#091a2a99;border:1px solid var(--line);border-radius:14px}.severity{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.severity select{background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:7px;margin:12px 0}.checks label{background:#142b44;border-radius:8px;padding:7px}.empty{color:var(--muted);font-style:italic}
-.channel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:9px;margin:12px 0}.channel-grid label{color:var(--muted);font-size:.82rem}.channel-grid select,.channel-grid input{display:block;width:100%;margin-top:5px;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.routebox{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.routebox:first-child{border:0;padding-top:0;margin-top:0}
+.channel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:9px;margin:12px 0}.channel-grid label{color:var(--muted);font-size:.82rem}.channel-grid select,.channel-grid input,.channel-grid textarea{display:block;width:100%;margin-top:5px;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.routebox{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.routebox:first-child{border:0;padding-top:0;margin-top:0}
 .config-section{margin:14px 0}.config-section summary{cursor:pointer;font-weight:750;margin-bottom:8px}.config-section input[type=password],.config-section input[type=number]{width:100%;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:8px}.hint{font-size:.82rem;color:var(--muted);margin:7px 0}.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
 .matrix-wrap{overflow-x:auto;margin:12px 0}.matrix{width:100%;border-collapse:collapse;min-width:560px}.matrix th,.matrix td{padding:8px;border-bottom:1px solid var(--line);text-align:center}.matrix th:first-child,.matrix td:first-child{text-align:left;position:sticky;left:0;background:#102238}.matrix input{width:18px;height:18px}
 .tabs{display:flex;gap:6px;overflow-x:auto;margin:18px 0 8px;padding-bottom:4px}.tab{white-space:nowrap;background:#213b53;color:#dceafa}.tab.active{background:var(--accent);color:#05251b}.tab-panel{display:none}.tab-panel.active{display:block}.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.status-card{padding:13px;border:1px solid var(--line);border-radius:13px;background:#091a2a}.status-card strong{display:block;font-size:1.15rem;margin-top:5px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#687b8d;margin-right:6px}.dot.ok{background:var(--accent)}.dot.warn{background:#ffc857}.source-status{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin-top:12px}.province-search{width:100%;background:#173149;color:white;border:1px solid #365773;border-radius:8px;padding:9px}.chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}.chip{background:#24465f;border-radius:20px;padding:5px 9px;font-size:.82rem}.matrix th.sev-low{color:#75c8ff}.matrix th.sev-medium{color:#ffd166}.matrix th.sev-high{color:#ff9f43}.matrix th.sev-critical{color:#ff7770}.matrix tr:hover td{background:#18334a}.toasts{position:fixed;right:18px;bottom:18px;z-index:20;display:grid;gap:8px;max-width:360px}.toast{padding:12px 15px;border-radius:11px;background:#124d3d;color:#d8fff1;box-shadow:0 10px 30px #0008}.toast.bad{background:#5b2d32;color:#ffd4d1}
 @media(max-width:520px){.grid{grid-template-columns:1fr}header,main{padding:16px}.card{padding:17px}}
-</style></head><body><header><div class="logo">MN</div><div><h1>MeshNet Control</h1><div class="sub">Estado, datos y operación de aplicaciones independientes · UI 2</div></div></header><main><div id="tools" class="grid"><div class="card"><h2>Cargando aplicaciones…</h2><p class="muted">Si este mensaje no desaparece, recarga sin caché y revisa la consola del navegador.</p></div></div><noscript><div class="card"><h2>JavaScript deshabilitado</h2><p>El ControlPanel necesita JavaScript para mostrar las aplicaciones.</p></div></noscript></main><div id="toasts" class="toasts"></div>
+</style></head><body><header><div class="logo">MN</div><div><h1>MeshNet Control</h1><div class="sub">Estado, datos y operación de aplicaciones independientes · UI 2</div></div></header><main><section class="card" style="margin-bottom:20px"><div class="row"><h2>Respuesta automática</h2><span id="auto-reply-state" class="badge">CARGANDO</span></div><p class="sub">Responde en los canales elegidos del mismo transporte. Usa <strong>{message}</strong> para insertar el mensaje recibido.</p><div id="auto-reply" class="filterbox">Cargando configuración…</div></section><div id="tools" class="grid"><div class="card"><h2>Cargando aplicaciones…</h2><p class="muted">Si este mensaje no desaparece, recarga sin caché y revisa la consola del navegador.</p></div></div><noscript><div class="card"><h2>JavaScript deshabilitado</h2><p>El ControlPanel necesita JavaScript para mostrar las aplicaciones.</p></div></noscript></main><div id="toasts" class="toasts"></div>
 <script>
 function fatalUi(title,message){const box=document.querySelector('#tools');if(!box)return;box.innerHTML='<div class="card"><h2 class="ui-error-title"></h2><p class="pill bad ui-error-message"></p><p class="muted">Recarga con Ctrl+F5. Si continúa, abre /api/tools.</p></div>';box.querySelector('.ui-error-title').textContent=title;box.querySelector('.ui-error-message').textContent=String(message)}
 window.addEventListener('error',event=>fatalUi('No se pudo mostrar el panel',event.message||'Error JavaScript'));
@@ -774,8 +819,10 @@ function summaryHtml(t){return !t.enabled||t.id!=='emergencias_guardia'?'':`<sec
 function filterHtml(t){return !t.enabled||t.id!=='emergencias_guardia'?'':`<section class="filterbox tab-panel" data-emtab="propagation"><h3>Matriz de propagación</h3><p class="muted">Elige las combinaciones exactas que podrán enviarse.</p><div id="filters-${t.id}" class="empty">Cargando filtros…</div></section>`}
 function collectionHtml(t){return !t.enabled||t.id!=='emergencias_guardia'?'':`<section class="filterbox tab-panel" data-emtab="collection"><h3>Fuentes y cobertura</h3><p class="muted">Configura orígenes, tipos de incidencia y ámbito geográfico.</p><div id="collection-${t.id}" class="empty">Cargando configuración…</div></section>`}
 function channelHtml(t){if(!t.enabled||!['emergencias_guardia','farmacias_guardia'].includes(t.id))return '';const tab=t.id==='emergencias_guardia'?' tab-panel':'';const attr=t.id==='emergencias_guardia'?' data-emtab="propagation"':'';return `<section class="filterbox${tab}"${attr}><h3>Canales de comunicación</h3><p class="muted">Consulta y modifica los canales de difusión. Usa -1 para dejar un canal sin configurar.</p><div id="channels-${t.id}" class="empty">Cargando canales…</div></section>`}
-async function load(){const d=await request('/api/tools');document.querySelector('#tools').innerHTML=d.tools.map(t=>`<article class="card"><div class="row"><h2>${esc(t.name)}</h2><span class="badge ${t.enabled?'on':''}">${t.enabled?'HABILITADA':'DESHABILITADA'}</span></div><p class="sub">${esc(t.description)}</p><div class="actions"><button onclick="toggle('${t.id}',${!t.enabled})">${t.enabled?'Deshabilitar':'Habilitar'}</button><button class="secondary" ${t.enabled?'':'disabled'} onclick="health('${t.id}')">Comprobar salud</button></div><div class="actions">${t.actions.map(a=>`<button class="${a.confirm?'danger':(a.mutating?'':'secondary')}" ${t.enabled?'':'disabled'} onclick="run('${t.id}','${a.id}',${a.confirm},'${esc(a.name)}')">${esc(a.name)}</button>`).join('')}</div>${emergencyTabsHtml(t)}${summaryHtml(t)}${collectionHtml(t)}${channelHtml(t)}${filterHtml(t)}<div class="result" id="r-${t.id}"></div></article>`).join('');if(d.tools.some(t=>t.id==='emergencias_guardia'&&t.enabled)){loadOverview();loadCollection();loadFilters();loadEmergencyChannels()}if(d.tools.some(t=>t.id==='farmacias_guardia'&&t.enabled))loadPharmacyChannels()}
+async function load(){loadAutoReply();const d=await request('/api/tools');document.querySelector('#tools').innerHTML=d.tools.map(t=>`<article class="card"><div class="row"><h2>${esc(t.name)}</h2><span class="badge ${t.enabled?'on':''}">${t.enabled?'HABILITADA':'DESHABILITADA'}</span></div><p class="sub">${esc(t.description)}</p><div class="actions"><button onclick="toggle('${t.id}',${!t.enabled})">${t.enabled?'Deshabilitar':'Habilitar'}</button><button class="secondary" ${t.enabled?'':'disabled'} onclick="health('${t.id}')">Comprobar salud</button></div><div class="actions">${t.actions.map(a=>`<button class="${a.confirm?'danger':(a.mutating?'':'secondary')}" ${t.enabled?'':'disabled'} onclick="run('${t.id}','${a.id}',${a.confirm},'${esc(a.name)}')">${esc(a.name)}</button>`).join('')}</div>${emergencyTabsHtml(t)}${summaryHtml(t)}${collectionHtml(t)}${channelHtml(t)}${filterHtml(t)}<div class="result" id="r-${t.id}"></div></article>`).join('');if(d.tools.some(t=>t.id==='emergencias_guardia'&&t.enabled)){loadOverview();loadCollection();loadFilters();loadEmergencyChannels()}if(d.tools.some(t=>t.id==='farmacias_guardia'&&t.enabled))loadPharmacyChannels()}
 async function toggle(id,enabled){await request(`/api/tools/${id}/enabled`,{method:'PUT',body:JSON.stringify({enabled})});load()}
+async function loadAutoReply(){const box=document.querySelector('#auto-reply');try{const d=await request('/api/auto-reply'),state=document.querySelector('#auto-reply-state');state.textContent=d.enabled?'ACTIVA':'DESACTIVADA';state.className='badge '+(d.enabled?'on':'');box.innerHTML=`<label><input id="ar-enabled" type="checkbox" ${d.enabled?'checked':''}> Activar respuestas automáticas</label><div class="channel-grid"><label>Texto de respuesta<textarea id="ar-template" rows="3">${esc(d.template)}</textarea></label><label>Canales MeshCore<input id="ar-meshcore" value="${d.meshcore_channels.join(', ')}" placeholder="0, 2, 5"></label><label>Canales Meshtastic<input id="ar-meshtastic" value="${d.meshtastic_channels.join(', ')}" placeholder="0, 1, 3"></label></div><p class="hint">Separa varios canales con comas. Ejemplo: Recibido, {message}</p><button onclick="saveAutoReply()">Guardar respuesta automática</button>`}catch(e){box.textContent=e.message}}
+async function saveAutoReply(){const parse=id=>document.querySelector(id).value.split(',').map(x=>x.trim()).filter(Boolean).map(Number),payload={enabled:document.querySelector('#ar-enabled').checked,template:document.querySelector('#ar-template').value,meshcore_channels:parse('#ar-meshcore'),meshtastic_channels:parse('#ar-meshtastic')};if([...payload.meshcore_channels,...payload.meshtastic_channels].some(x=>!Number.isInteger(x))){toast('Los canales deben ser números enteros',true);return}try{await request('/api/auto-reply',{method:'PUT',body:JSON.stringify(payload)});toast('Respuesta automática guardada');loadAutoReply()}catch(e){toast(e.message,true)}}
 async function health(id){show(id,'Comprobando…',true);try{const d=await request(`/api/tools/${id}/health`);show(id,render(d.details??d))}catch(e){show(id,render({error:e.message}))}}
 async function run(id,a,needs,name){if(needs&&!confirm(`¿Ejecutar “${name}”?`))return;show(id,'Ejecutando…',true);try{const d=await request(`/api/tools/${id}/actions/${a}`,{method:'POST',body:JSON.stringify({confirmed:true})});show(id,render(d.data??{correcto:d.ok,salida:d.stdout,error:d.stderr}))}catch(e){show(id,render({error:e.message}))}}
 function show(id,html,text=false){const n=document.querySelector('#r-'+id);n.classList.add('visible');n.innerHTML=text?`<span class="muted">${esc(html)}</span>`:html}
