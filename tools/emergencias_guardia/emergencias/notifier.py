@@ -133,9 +133,14 @@ def preview_routes(
 def target_for(config: dict[str, Any], route: str) -> dict[str, Any]:
     notifications = config["notifications"]
     transport = str(notifications.get("transport", "meshcore")).strip().lower()
-    if transport not in {"meshcore", "meshtastic"}:
-        raise ValueError("transport debe ser meshcore o meshtastic")
+    if transport not in {"meshcore", "meshtastic", "both"}:
+        raise ValueError("transport debe ser meshcore, meshtastic o both")
     route_config = notifications["routes"][route]
+    if transport == "both":
+        return {"network": "both", "channel": -1, "targets": [
+            {"network": network, "channel": int(route_config[f"{network}_channel"])}
+            for network in ("meshcore", "meshtastic")
+        ]}
     return {
         "network": transport,
         "channel": int(route_config[f"{transport}_channel"]),
@@ -155,7 +160,8 @@ def send_route(
     if not selected:
         return {"sent": False, "reason": "no_eligible_events", "route": route}
     target = target_for(config, route)
-    if target["channel"] < 0:
+    targets = target.get("targets") or [target]
+    if any(destination["channel"] < 0 for destination in targets):
         return {"sent": False, "reason": "channel_not_configured", "route": route, "target": target}
     messages = compact_messages(
         selected,
@@ -170,18 +176,22 @@ def send_route(
 
     results = []
     delay = max(0.0, float(notifications.get("inter_message_delay_seconds", 8)))
-    for index, message in enumerate(messages):
-        response = _send_message(config, target, message)
-        if not response.get("ok"):
-            raise RuntimeError(f"broker rechazó mensaje {index + 1}: {response}")
-        results.append(response)
-        if delay and index + 1 < len(messages):
-            time.sleep(delay)
+    for destination in targets:
+        for index, message in enumerate(messages):
+            response = _send_message(config, destination, message)
+            if not response.get("ok"):
+                raise RuntimeError(
+                    f"broker rechazó mensaje {index + 1} ({destination['network']}): {response}"
+                )
+            results.append({"target": destination, "response": response})
+            if delay and index + 1 < len(messages):
+                time.sleep(delay)
     notification_state.update({
         "last_sent_hash": digest,
         "last_sent_at": datetime.now(timezone.utc).isoformat(),
         "network": target["network"],
         "channel": target["channel"],
+        "targets": targets,
         "messages": len(messages),
         "event_ids": [event.event_id for event in selected],
     })
@@ -349,7 +359,8 @@ def _deliver_pending(
 
     for (route, change), items in due_groups.items():
         target = target_for(config, route)
-        if target["channel"] < 0:
+        targets = target.get("targets") or [target]
+        if any(destination["channel"] < 0 for destination in targets):
             continue
         batch = items[:maximum]
         events = [Event.from_dict(item["event"]) for item in batch]
@@ -364,9 +375,12 @@ def _deliver_pending(
         ]
         for index, (item, event, message) in enumerate(zip(batch, events, messages)):
             try:
-                response = _send_message(config, target, message)
-                if not response.get("ok"):
-                    raise RuntimeError(f"broker rechazó el mensaje: {response}")
+                for destination in targets:
+                    response = _send_message(config, destination, message)
+                    if not response.get("ok"):
+                        raise RuntimeError(
+                            f"broker rechazó el mensaje ({destination['network']}): {response}"
+                        )
             except Exception as exc:
                 attempts = int(item.get("attempts", 0)) + 1
                 incremental_config = config["notifications"]["incremental"]
@@ -403,7 +417,8 @@ def _event_snapshot(event: Event, route: str) -> dict[str, Any]:
 
 def _route_is_configured(config: dict[str, Any], route: str) -> bool:
     try:
-        return target_for(config, route)["channel"] >= 0
+        target = target_for(config, route)
+        return all(item["channel"] >= 0 for item in (target.get("targets") or [target]))
     except (KeyError, TypeError, ValueError):
         return False
 
