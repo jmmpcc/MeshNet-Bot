@@ -550,7 +550,12 @@ def _default_email_network() -> str:
         return "meshcore"
     if raw in {"meshtastic", "mt", "radio"}:
         return "meshtastic"
-    return "meshcore" if (os.getenv("RADIO_PROFILE") or "").strip().lower() == "meshcore_only" else "meshtastic"
+    try:
+        from radio_profile import default_transport_for_radio_profile
+        return default_transport_for_radio_profile(os.getenv("RADIO_PROFILE")) or "meshtastic"
+    except Exception:
+        profile = (os.getenv("RADIO_PROFILE") or "").strip().lower().replace("-", "_")
+        return "meshcore" if profile in {"meshcore_only", "meshcore_a_meshtastic_embedded_b", "meshcore_a_meshtastic_b"} else "meshtastic"
 
 
 def parse_subject_route(subject: str, default_meshtastic_channel: int, default_network: str = "meshtastic") -> SubjectRoute:
@@ -571,8 +576,8 @@ def parse_subject_route(subject: str, default_meshtastic_channel: int, default_n
 
     Cuando no existe un prefijo válido se conserva todo el asunto y se utiliza
     EMAIL_MESH_CHANNEL sobre la red por defecto resuelta por configuración. En
-    RADIO_PROFILE=meshcore_only esa red por defecto es MeshCore, salvo que se
-    fuerce EMAIL_MESH_NETWORK=meshtastic.
+    Cuando el nodo A del perfil es MeshCore esa red es la predeterminada, salvo
+    que se fuerce ``EMAIL_MESH_NETWORK=meshtastic``.
 
     El canal Meshtastic se limita a 0..15 porque es el rango utilizado por el
     broker. Para MeshCore se admite 0..255; la disponibilidad real del índice

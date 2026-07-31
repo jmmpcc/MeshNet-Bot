@@ -17,6 +17,16 @@ seleccionado en `.env`.
 Se mantienen los aliases históricos `meshcore_embedded`,
 `meshtastic_a_meshcore_b` y `meshcore_a_meshtastic_b`.
 
+En el perfil invertido, las operaciones automáticas del panel, Farmacias,
+correo, APRS y tareas programadas conservan MeshCore (nodo A) como salida por
+defecto. Meshtastic (nodo B) continúa disponible cuando se selecciona de forma
+explícita; no se aplican las restricciones exclusivas de `meshcore_only`.
+
+El Control Panel permite además seleccionar **Ambos nodos** para las emisiones
+de Emergencias y Farmacias. En ese modo cada aviso se entrega directamente al
+canal MeshCore configurado en A y al canal Meshtastic configurado en B; los
+envíos incluyen `no_bridge`, por lo que no se duplican a través de la pasarela.
+
 ## Validación previa al despliegue
 
 Desde la raíz del proyecto:
