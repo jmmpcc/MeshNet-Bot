@@ -95,7 +95,7 @@ def parser() -> argparse.ArgumentParser:
     set_channel.add_argument("network", choices=("meshcore", "meshtastic"))
     set_channel.add_argument("channel", type=int)
     set_transport = notify.add_parser("set-transport")
-    set_transport.add_argument("network", choices=("meshcore", "meshtastic"))
+    set_transport.add_argument("network", choices=("meshcore", "meshtastic", "both"))
     notify.add_parser("enable")
     notify.add_parser("disable")
     send = notify.add_parser("send")
@@ -406,10 +406,11 @@ def _notifications(config: dict[str, Any], args: argparse.Namespace) -> int:
     if args.notify_command in {"enable", "disable"}:
         enabled = args.notify_command == "enable"
         if enabled:
-            configured = [
-                route for route in ROUTE_PREFIXES
-                if target_for(config, route)["channel"] >= 0
-            ]
+            configured = []
+            for route in ROUTE_PREFIXES:
+                target = target_for(config, route)
+                if all(item["channel"] >= 0 for item in (target.get("targets") or [target])):
+                    configured.append(route)
             if not configured:
                 print_json({
                     "ok": False,

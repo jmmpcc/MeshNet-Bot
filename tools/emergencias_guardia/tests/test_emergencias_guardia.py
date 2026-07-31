@@ -488,6 +488,29 @@ class NotifierTests(unittest.TestCase):
         self.assertTrue(first["sent"])
         self.assertEqual(second["reason"], "unchanged")
 
+    def test_send_can_use_meshcore_a_and_embedded_meshtastic_b(self):
+        cfg = config()
+        cfg["notifications"]["enabled"] = True
+        cfg["notifications"]["transport"] = "both"
+        cfg["notifications"]["inter_message_delay_seconds"] = 0
+        cfg["notifications"]["routes"]["servicios"].update({
+            "meshcore_channel": 2, "meshtastic_channel": 7,
+        })
+        event = Event("m:both", "municipal_json", "both", "road_closed", title="Corte")
+        targets = []
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(storage, "STATE_FILE", Path(directory) / "state.json"), \
+                mock.patch.object(
+                    notifier, "_send_message",
+                    side_effect=lambda _config, target, _message: targets.append(target) or {"ok": True},
+                ):
+            result = notifier.send_route([event], cfg, "servicios")
+        self.assertTrue(result["sent"])
+        self.assertEqual(targets, [
+            {"network": "meshcore", "channel": 2},
+            {"network": "meshtastic", "channel": 7},
+        ])
+
     def test_incremental_bootstrap_is_silent_then_sends_new_event(self):
         cfg = self._incremental_config()
         existing = Event(

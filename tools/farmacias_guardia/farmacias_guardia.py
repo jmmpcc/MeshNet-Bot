@@ -554,27 +554,29 @@ def radio_profile() -> str:
     # La aplicación es independiente del broker: si no se declara el perfil en
     # su propio .env no debemos inventar uno. El broker sigue siendo la fuente
     # de verdad y puede indicar una incompatibilidad al enviar.
-    return os.getenv("RADIO_PROFILE", "auto").strip().lower()
+    return os.getenv("RADIO_PROFILE", "auto").strip().lower().replace("-", "_")
 
 
-def broadcast_target() -> tuple[str, int]:
+def broadcast_targets() -> list[tuple[str, int]]:
     configured = os.getenv("FARMACIAS_BROADCAST_TRANSPORT", "auto").strip().lower()
     profile = radio_profile()
-    if configured not in {"auto", "meshcore", "meshtastic"}:
+    if configured not in {"auto", "meshcore", "meshtastic", "both"}:
         raise RuntimeError(
-            "FARMACIAS_BROADCAST_TRANSPORT debe ser auto, meshcore o meshtastic"
+            "FARMACIAS_BROADCAST_TRANSPORT debe ser auto, meshcore, meshtastic o both"
         )
     if configured == "auto":
         if profile == "meshcore_only":
             configured = "meshcore"
-        elif profile == "meshtastic_a_meshcore_embedded_b":
+        elif profile in {"meshtastic_a_meshcore_embedded_b", "meshtastic_a_meshcore_b", "meshcore_embedded"}:
             configured = "meshtastic"
+        elif profile in {"meshcore_a_meshtastic_embedded_b", "meshcore_a_meshtastic_b", "meshcore_meshtastic"}:
+            configured = "meshcore"
         else:
             configured = os.getenv("FARMACIAS_MIXED_PROFILE_BROADCAST", "meshcore").strip().lower()
     # Un valor explícito antiguo puede quedar en el .env tras cambiar el perfil
     # de radio. En meshcore_only nunca debemos intentar SEND_TEXT, porque el
     # broker rechazará correctamente el adaptador Meshtastic deshabilitado.
-    if profile == "meshcore_only" and configured == "meshtastic":
+    if profile == "meshcore_only" and configured in {"meshtastic", "both"}:
         print(
             "[farmacias] FARMACIAS_BROADCAST_TRANSPORT=meshtastic no es "
             "compatible con RADIO_PROFILE=meshcore_only; se usará MeshCore",
@@ -582,8 +584,15 @@ def broadcast_target() -> tuple[str, int]:
             flush=True,
         )
         configured = "meshcore"
-    channel_var = "FARMACIAS_MESHCORE_CHANNEL" if configured == "meshcore" else "FARMACIAS_MESHTASTIC_CHANNEL"
-    return configured, int(os.getenv(channel_var, "-1"))
+    networks = ("meshcore", "meshtastic") if configured == "both" else (configured,)
+    return [(network, int(os.getenv(
+        "FARMACIAS_MESHCORE_CHANNEL" if network == "meshcore" else "FARMACIAS_MESHTASTIC_CHANNEL", "-1"
+    ))) for network in networks]
+
+
+def broadcast_target() -> tuple[str, int]:
+    """Compatibilidad para consumidores que esperan un único destino."""
+    return broadcast_targets()[0]
 
 
 def broadcast_messages(
@@ -628,20 +637,26 @@ def send_pharmacies(pharmacies: list[Pharmacy], header: str) -> dict[str, Any]:
     """Difunde exclusivamente las farmacias indicadas con una cabecera propia."""
     if not pharmacies:
         return {"sent": False, "reason": "no_new_pharmacies"}
-    network, channel = broadcast_target()
-    if channel < 0:
-        raise RuntimeError(f"canal FARMACIAS no configurado para {network}")
-    messages = broadcast_messages(network, pharmacies, header)
+    return _send_to_targets(pharmacies=pharmacies, header=header)
+
+
+def _send_to_targets(pharmacies: list[Pharmacy] | None = None, header: str | None = None) -> dict[str, Any]:
     delay = max(0, int(os.getenv("FARMACIAS_INTER_MESSAGE_DELAY_SECONDS", "8")))
-    results = []
-    for index, message in enumerate(messages):
-        response, network, channel = send_broadcast_message(network, channel, message)
-        if not response.get("ok"):
-            raise RuntimeError(f"broker rechazó fragmento {index + 1}: {response}")
-        results.append(response)
-        if index + 1 < len(messages) and delay:
-            time.sleep(delay)
-    return {"sent": True, "network": network, "channel": channel, "messages": len(messages), "results": results}
+    deliveries = []
+    for network, channel in broadcast_targets():
+        if channel < 0:
+            raise RuntimeError(f"canal FARMACIAS no configurado para {network}")
+        messages, results = broadcast_messages(network, pharmacies, header), []
+        actual_network, actual_channel = network, channel
+        for index, message in enumerate(messages):
+            response, actual_network, actual_channel = send_broadcast_message(network, channel, message)
+            if not response.get("ok"):
+                raise RuntimeError(f"broker rechazó fragmento {index + 1} ({network}): {response}")
+            results.append(response)
+            if index + 1 < len(messages) and delay:
+                time.sleep(delay)
+        deliveries.append({"network": actual_network, "channel": actual_channel, "messages": len(messages), "results": results})
+    return {"sent": True, **deliveries[0], "deliveries": deliveries}
 
 
 def send_current(force: bool = False, only_if_changed: bool = False) -> dict[str, Any]:
@@ -649,27 +664,16 @@ def send_current(force: bool = False, only_if_changed: bool = False) -> dict[str
     state = json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
     if only_if_changed and current.get("hash") == state.get("last_sent_hash") and not force:
         return {"sent": False, "reason": "unchanged"}
-    network, channel = broadcast_target()
-    if channel < 0:
-        raise RuntimeError(f"canal FARMACIAS no configurado para {network}")
-    messages = broadcast_messages(network)
-    delay = max(0, int(os.getenv("FARMACIAS_INTER_MESSAGE_DELAY_SECONDS", "8")))
-    results = []
-    for index, message in enumerate(messages):
-        response, network, channel = send_broadcast_message(network, channel, message)
-        if not response.get("ok"):
-            raise RuntimeError(f"broker rechazó fragmento {index + 1}: {response}")
-        results.append(response)
-        if index + 1 < len(messages) and delay:
-            time.sleep(delay)
+    delivery = _send_to_targets()
     state.update({
         "last_sent_hash": current.get("hash"), "last_sent_at": datetime.now(TZ).isoformat(),
-        "last_network": network, "last_channel": channel, "last_messages": len(messages),
+        "last_network": delivery["network"], "last_channel": delivery["channel"],
+        "last_messages": delivery["messages"], "last_deliveries": delivery["deliveries"],
         "last_status": "broker_accepted",
     })
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"sent": True, "network": network, "channel": channel, "messages": len(messages), "results": results}
+    return delivery
 
 
 _MESH_EVENT_STOP = threading.Event()
@@ -1003,7 +1007,7 @@ def main() -> int:
             "data_dir": str(DATA_DIR),
             "current_exists": CURRENT_FILE.exists(),
             "profile": radio_profile(),
-            "target": broadcast_target(),
+            "targets": broadcast_targets(),
             "listener_enabled": env_bool("FARMACIAS_COMMAND_LISTENER_ENABLED", "1"),
             "broker_event": [
                 os.getenv("BROKER_EVENT_HOST", os.getenv("BROKER_CTRL_HOST", "127.0.0.1")),

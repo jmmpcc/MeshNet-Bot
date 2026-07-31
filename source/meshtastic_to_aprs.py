@@ -1558,15 +1558,24 @@ def _aprs_meshcore_mode() -> bool:
     """
     True cuando APRS→malla debe salir por MeshCore en vez de SEND_TEXT/Meshtastic.
 
-    Por defecto se activa automáticamente con RADIO_PROFILE=meshcore_only. También
-    puede forzarse con APRS_TO_MESHCORE=1 para despliegues mixtos/controlados.
+    Por defecto sigue el transporte principal de RADIO_PROFILE. Por tanto se
+    activa tanto en ``meshcore_only`` como en el perfil invertido con MeshCore A.
+    Puede forzarse con APRS_TO_MESHCORE para despliegues mixtos/controlados.
     """
     raw = (os.getenv("APRS_TO_MESHCORE") or "").strip().lower()
     if raw in {"1", "true", "on", "yes", "si", "sí"}:
         return True
     if raw in {"0", "false", "off", "no"}:
         return False
-    return _radio_profile() == "meshcore_only"
+    try:
+        from radio_profile import default_transport_for_radio_profile  # type: ignore
+        return default_transport_for_radio_profile(_radio_profile()) == "meshcore"
+    except Exception:
+        return _radio_profile() in {
+            "meshcore_only",
+            "meshcore_a_meshtastic_embedded_b",
+            "meshcore_a_meshtastic_b",
+        }
 
 
 def _parse_meshcore_channel_map_for_aprs() -> dict[int, dict]:
@@ -1665,12 +1674,12 @@ def _broker_send_meshcore_text(ch: int, text: str, timeout: float = 6.0, direct_
 
 
 def _broker_send_mesh_text(ch: int, text: str, dest: str | None = None, ack: bool = False, timeout: float = 6.0, direct_meshcore_channel: bool = False) -> dict:
-    """Ruta común APRS→malla: MeshCore en meshcore_only, Meshtastic en modo normal."""
+    """Ruta común APRS→malla, siguiendo el transporte principal del perfil."""
     if _aprs_meshcore_mode():
         if dest and str(dest).strip().lower() != "broadcast":
-            # En meshcore_only no existe DM Meshtastic/HOME. Para APRS sólo usamos
-            # canal/contacto MeshCore resuelto por MESHCORE_CHANNEL_MAP.
-            return {"ok": False, "error": "direct Meshtastic destination disabled in meshcore_only", "transport": "meshcore"}
+            # Una ruta APRS seleccionada para MeshCore no puede reutilizar un ID
+            # de destino Meshtastic; requiere mapa de canal/contacto MeshCore.
+            return {"ok": False, "error": "direct Meshtastic destination unavailable on MeshCore route", "transport": "meshcore"}
         return _broker_send_meshcore_text(ch, text, timeout=timeout, direct_channel_idx=direct_meshcore_channel)
     return _broker_send_text(ch, text, dest=dest, ack=ack, timeout=timeout)
 

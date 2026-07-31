@@ -141,6 +141,32 @@ def is_known_radio_profile(value: object, *, allow_legacy_empty: bool = True) ->
     return profile == PROFILE_LEGACY or profile in CANONICAL_PROFILES
 
 
+def default_transport_for_radio_profile(value: object) -> Optional[str]:
+    """Devuelve el transporte principal definido por ``RADIO_PROFILE``.
+
+    A diferencia de comprobar únicamente ``meshcore_only``, este helper también
+    conserva MeshCore como salida automática cuando es el nodo A del perfil
+    invertido. ``None`` mantiene el comportamiento legacy de los consumidores.
+    """
+    caps = resolve_radio_profile(value, env={}, strict=False)
+    return caps.default_transport if caps.valid and not caps.legacy_mode else None
+
+
+def radio_profile_enables_transport(value: object, transport: object) -> bool:
+    """Indica si un perfil explícito permite utilizar un transporte concreto."""
+    caps = resolve_radio_profile(value, env={}, strict=False)
+    if not caps.valid:
+        return False
+    if caps.legacy_mode:
+        return True
+    normalized = _normalize_token(transport)
+    if normalized == "meshcore":
+        return caps.meshcore_enabled
+    if normalized == "meshtastic":
+        return caps.meshtastic_enabled
+    return False
+
+
 def bridge_profile_matches_radio_profile(active_profile: object, configured_profile: object) -> bool:
     """Comprueba si un perfil JSON puede complementar ``RADIO_PROFILE``.
 

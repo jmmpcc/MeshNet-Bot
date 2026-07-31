@@ -728,7 +728,7 @@ def create_app(registry: ToolRegistry | None = None, auth_token: str | None = No
     @app.put("/api/emergencias/transport")
     def set_emergency_transport(payload: TransportPayload) -> dict[str, Any]:
         require_enabled("emergencias_guardia")
-        if payload.transport not in {"meshcore", "meshtastic"}:
+        if payload.transport not in {"meshcore", "meshtastic", "both"}:
             raise HTTPException(status_code=422, detail="Transporte no válido")
         result = emergency_filter_action("notify", "set-transport", payload.transport)
         if not result["ok"]:
@@ -739,14 +739,16 @@ def create_app(registry: ToolRegistry | None = None, auth_token: str | None = No
     def get_pharmacy_channels() -> dict[str, Any]:
         require_enabled("farmacias_guardia")
         values = read_env_values(FARMACIAS_ENV_FILE, CHANNEL_KEYS)
-        profile = values.get("RADIO_PROFILE", "").strip().lower()
+        profile = values.get("RADIO_PROFILE", "").strip().lower().replace("-", "_")
         transport = values.get("FARMACIAS_BROADCAST_TRANSPORT", "auto").strip().lower()
         effective_transport = transport
         if transport == "auto":
             if profile == "meshcore_only":
                 effective_transport = "meshcore"
-            elif profile == "meshtastic_a_meshcore_embedded_b":
+            elif profile in {"meshtastic_a_meshcore_embedded_b", "meshtastic_a_meshcore_b", "meshcore_embedded"}:
                 effective_transport = "meshtastic"
+            elif profile in {"meshcore_a_meshtastic_embedded_b", "meshcore_a_meshtastic_b", "meshcore_meshtastic"}:
+                effective_transport = "meshcore"
             else:
                 effective_transport = values.get("FARMACIAS_MIXED_PROFILE_BROADCAST", "meshcore")
         elif profile == "meshcore_only" and transport == "meshtastic":
@@ -762,10 +764,10 @@ def create_app(registry: ToolRegistry | None = None, auth_token: str | None = No
     @app.put("/api/farmacias/channels")
     def set_pharmacy_channels(payload: CommunicationChannelsPayload) -> dict[str, Any]:
         require_enabled("farmacias_guardia")
-        validate_channels(payload, {"auto", "meshcore", "meshtastic"})
+        validate_channels(payload, {"auto", "meshcore", "meshtastic", "both"})
         values = read_env_values(FARMACIAS_ENV_FILE, CHANNEL_KEYS)
-        profile = values.get("RADIO_PROFILE", "").strip().lower()
-        if profile == "meshcore_only" and payload.transport == "meshtastic":
+        profile = values.get("RADIO_PROFILE", "").strip().lower().replace("-", "_")
+        if profile == "meshcore_only" and payload.transport in {"meshtastic", "both"}:
             raise HTTPException(
                 status_code=422,
                 detail="El perfil meshcore_only no permite publicar por Meshtastic; use Automático o MeshCore",
@@ -840,11 +842,11 @@ const severityLabels={low:'Baja',medium:'Media',high:'Alta',critical:'Crítica'}
 async function loadFilters(){const box=document.querySelector('#filters-emergencias_guardia');try{const d=await request('/api/emergencias/filters'),levels=['low','medium','high','critical'];const head=levels.map(s=>`<th class="sev-${s}">${severityLabels[s]}<br><button class="secondary" onclick="toggleChecks('.rule-'+s,true)">Todo</button></th>`).join('');const rows=d.categories.map(c=>`<tr><td>${esc(catLabels[c.name]||c.name)}</td>${levels.map(s=>`<td><input class="prop-rule rule-${s}" data-severity="${s}" data-category="${c.name}" type="checkbox" ${(d.rules[s]||[]).includes(c.name)?'checked':''}></td>`).join('')}</tr>`).join('');box.innerHTML=`<p class="hint">Marca exactamente qué categoría puede propagarse en cada severidad. Una casilla vacía bloquea esa combinación.</p><div class="matrix-wrap"><table class="matrix"><thead><tr><th>Tipo</th>${head}</tr></thead><tbody>${rows}</tbody></table></div><div class="toolbar"><button class="secondary" onclick="toggleChecks('.prop-rule',false)">Limpiar matriz</button><button onclick="saveFilters()">Guardar matriz</button></div>`}catch(e){box.textContent=e.message}}
 async function saveFilters(){const rules={low:[],medium:[],high:[],critical:[]};document.querySelectorAll('.prop-rule:checked').forEach(x=>rules[x.dataset.severity].push(x.dataset.category));try{const d=await request('/api/emergencias/filters',{method:'PUT',body:JSON.stringify({rules})});show('emergencias_guardia',render({correcto:true,matriz:d.rules,nota:d.note}));toast('Matriz de propagación guardada');loadFilters()}catch(e){toast(e.message,true);show('emergencias_guardia',render({error:e.message}))}}
 const channelInputs=(prefix,d)=>`<div class="channel-grid"><label>Canal MeshCore<input id="${prefix}-meshcore" type="number" min="-1" max="255" value="${Number(d.meshcore_channel)}"></label><label>Canal Meshtastic<input id="${prefix}-meshtastic" type="number" min="-1" max="255" value="${Number(d.meshtastic_channel)}"></label></div>`;
-const transportSelect=(prefix,current,values)=>`<label>Transporte<select id="${prefix}-transport">${values.map(x=>`<option value="${x}" ${current===x?'selected':''}>${x==='auto'?'Automático':x==='meshcore'?'MeshCore':'Meshtastic'}</option>`).join('')}</select></label>`;
-async function loadEmergencyChannels(){const box=document.querySelector('#channels-emergencias_guardia');if(!box)return;try{const d=await request('/api/emergencias/channels');const globalTransport=`<div class="routebox"><strong>Transporte global</strong><div class="channel-grid">${transportSelect('em-global',d.transport,['meshcore','meshtastic'])}</div><button onclick="saveEmergencyTransport()">Guardar transporte</button></div>`;box.innerHTML=globalTransport+Object.entries(d.routes).map(([route,c])=>`<div class="routebox"><strong>${esc({emergencias:'Emergencias',servicios:'Servicios',meteo:'Meteorología'}[route])}</strong>${channelInputs('em-'+route,c)}<button onclick="saveEmergencyChannels('${route}')">Guardar canales</button></div>`).join('')}catch(e){box.textContent=e.message}}
+const transportSelect=(prefix,current,values)=>`<label>Transporte<select id="${prefix}-transport">${values.map(x=>`<option value="${x}" ${current===x?'selected':''}>${x==='auto'?'Automático':x==='meshcore'?'MeshCore (nodo A)':x==='meshtastic'?'Meshtastic (nodo B embebido)':'Ambos nodos'}</option>`).join('')}</select></label>`;
+async function loadEmergencyChannels(){const box=document.querySelector('#channels-emergencias_guardia');if(!box)return;try{const d=await request('/api/emergencias/channels');const globalTransport=`<div class="routebox"><strong>Transporte global</strong><p class="hint">En modo embebido puede enviar por MeshCore A, Meshtastic B o por ambos nodos.</p><div class="channel-grid">${transportSelect('em-global',d.transport,['meshcore','meshtastic','both'])}</div><button onclick="saveEmergencyTransport()">Guardar transporte</button></div>`;box.innerHTML=globalTransport+Object.entries(d.routes).map(([route,c])=>`<div class="routebox"><strong>${esc({emergencias:'Emergencias',servicios:'Servicios',meteo:'Meteorología'}[route])}</strong>${channelInputs('em-'+route,c)}<button onclick="saveEmergencyChannels('${route}')">Guardar canales</button></div>`).join('')}catch(e){box.textContent=e.message}}
 async function saveEmergencyTransport(){const transport=document.querySelector('#em-global-transport').value;try{await request('/api/emergencias/transport',{method:'PUT',body:JSON.stringify({transport})});show('emergencias_guardia',render({correcto:true,transporte:transport}));loadEmergencyChannels()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
 async function saveEmergencyChannels(route){const prefix='em-'+route,payload={meshcore_channel:Number(document.querySelector('#'+prefix+'-meshcore').value),meshtastic_channel:Number(document.querySelector('#'+prefix+'-meshtastic').value)};try{await request('/api/emergencias/channels/'+route,{method:'PUT',body:JSON.stringify(payload)});show('emergencias_guardia',render({correcto:true,ruta:route,...payload}));loadEmergencyChannels()}catch(e){show('emergencias_guardia',render({error:e.message}))}}
-async function loadPharmacyChannels(){const box=document.querySelector('#channels-farmacias_guardia');if(!box)return;try{const d=await request('/api/farmacias/channels');const warning=d.radio_profile==='meshcore_only'&&d.transport==='meshtastic'?'<p class="pill bad">Meshtastic no está disponible con meshcore_only; la publicación usará MeshCore.</p>':'';const profile=d.radio_profile||'No definido en Farmacias (se comprobará con el broker al publicar)';box.innerHTML=`<p class="muted">Perfil: ${esc(profile)} · salida configurada: ${esc(d.effective_transport)}</p>${warning}<div class="channel-grid">${transportSelect('farma',d.transport,['auto','meshcore','meshtastic'])}</div>`+channelInputs('farma',d)+'<button onclick="savePharmacyChannels()">Guardar canales</button>'}catch(e){box.textContent=e.message}}
+async function loadPharmacyChannels(){const box=document.querySelector('#channels-farmacias_guardia');if(!box)return;try{const d=await request('/api/farmacias/channels');const warning=d.radio_profile==='meshcore_only'&&['meshtastic','both'].includes(d.transport)?'<p class="pill bad">Meshtastic no está disponible con meshcore_only; la publicación usará MeshCore.</p>':'';const profile=d.radio_profile||'No definido en Farmacias (se comprobará con el broker al publicar)';box.innerHTML=`<p class="muted">Perfil: ${esc(profile)} · salida configurada: ${esc(d.effective_transport)}</p>${warning}<p class="hint">En modo embebido seleccione Meshtastic para usar el nodo B, o Ambos nodos para publicar por A y B.</p><div class="channel-grid">${transportSelect('farma',d.transport,['auto','meshcore','meshtastic','both'])}</div>`+channelInputs('farma',d)+'<button onclick="savePharmacyChannels()">Guardar canales</button>'}catch(e){box.textContent=e.message}}
 async function savePharmacyChannels(){const payload={transport:document.querySelector('#farma-transport').value,meshcore_channel:Number(document.querySelector('#farma-meshcore').value),meshtastic_channel:Number(document.querySelector('#farma-meshtastic').value)};try{const d=await request('/api/farmacias/channels',{method:'PUT',body:JSON.stringify(payload)});show('farmacias_guardia',render({correcto:true,...payload,nota:d.restart_required?'Reinicie la API de Farmacias para aplicar el cambio.':''}));loadPharmacyChannels()}catch(e){show('farmacias_guardia',render({error:e.message}))}}
 load().catch(e=>document.querySelector('#tools').innerHTML=`<div class="card">${esc(e.message)}</div>`);
 </script></body></html>"""

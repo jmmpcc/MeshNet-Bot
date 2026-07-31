@@ -5838,7 +5838,10 @@ def parse_dest_channel_and_text(args: List[str], nodes_map: Dict[str, str]) -> T
     canal = BROKER_CHANNEL
     forced = False
 
-    toks = [t for t in (args or []) if t and t.strip()]
+    # En el diálogo ForceReply, "canal 2" llega como un único token; en el
+    # comando directo llega como dos. Normalizamos ambas formas antes de parsear.
+    from send_command_parser import normalize_send_args
+    toks = normalize_send_args(args)
     if not toks:
         return None, canal, "", forced
 
@@ -9473,6 +9476,21 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     bump_stat(update.effective_user.id, update.effective_user.username or "", "enviar")
     msg = update.effective_message
     args = list(context.args or [])
+
+    # Sin argumentos se inicia el diálogo guiado. Este retorno solo funciona si
+    # /enviar está registrado exclusivamente como entry point del
+    # ConversationHandler (véase build_application()).
+    if not args:
+        await msg.reply_text(
+            "Indica el destino Meshtastic:\n"
+            "• canal N (por ejemplo: canal 2)\n"
+            "• broadcast:N\n"
+            "• !id:N o alias:N\n\n"
+            "Después te pediré el texto a enviar.",
+            reply_markup=ForceReply(selective=True),
+        )
+        return ASK_SEND_DEST
+
     transport = _normalize_transport_token(args[0]) if args else None
     if transport:
         args = args[1:]
@@ -17624,7 +17642,6 @@ def build_application() -> Application:
    
 # (El resto ya lo tienes: ver_nodos, traceroute, telemetria, enviar, enviar_ack, escuchar, parar_escucha, vecinos, estado, ayuda…)
 
-    app.add_handler(CommandHandler("enviar", enviar_cmd))
     app.add_handler(CommandHandler("enviar_mc", enviar_mc_cmd))
     app.add_handler(CommandHandler(["enviar_mc_dm", "dm_mc"], enviar_mc_dm_cmd))
     app.add_handler(CommandHandler("mc_contactos", mc_contactos_cmd))
@@ -17713,7 +17730,9 @@ def build_application() -> Application:
 
 # ...
   
-    # Conversación /enviar
+    # Conversación /enviar. Es también el único registro del comando: añadir
+    # antes un CommandHandler independiente consumiría /enviar y descartaría el
+    # estado ASK_SEND_DEST devuelto por enviar_cmd.
     conv = ConversationHandler(
         entry_points=[CommandHandler("enviar", enviar_cmd)],
         states={
