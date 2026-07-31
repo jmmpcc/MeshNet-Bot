@@ -30,7 +30,9 @@ from radio_profile import (  # noqa: E402
     PROFILE_MESHTASTIC_A_MESHCORE_B,
     apply_radio_profile_to_environment,
     bridge_profile_matches_radio_profile,
+    default_transport_for_radio_profile,
     normalize_radio_profile,
+    radio_profile_enables_transport,
     resolve_radio_profile,
     validate_radio_profile_environment,
 )
@@ -88,6 +90,12 @@ class RadioProfileCapabilityTests(unittest.TestCase):
         self.assertEqual(caps.node_b_transport, "meshtastic")
         self.assertEqual(caps.default_transport, "meshcore")
         self.assertEqual(caps.environment_overrides["BRIDGE_ENABLED"], "0")
+        self.assertEqual(default_transport_for_radio_profile("meshcore_a_meshtastic_b"), "meshcore")
+        self.assertTrue(radio_profile_enables_transport(PROFILE_MESHCORE_A_MESHTASTIC_B, "meshcore"))
+        self.assertTrue(radio_profile_enables_transport(PROFILE_MESHCORE_A_MESHTASTIC_B, "meshtastic"))
+
+    def test_meshcore_only_does_not_enable_meshtastic(self) -> None:
+        self.assertFalse(radio_profile_enables_transport(PROFILE_MESHCORE_ONLY, "meshtastic"))
 
     def test_unknown_profile_never_applies_partial_overrides(self) -> None:
         env = {"RADIO_PROFILE": "perfil_inexistente", "BRIDGE_ENABLED": "1"}

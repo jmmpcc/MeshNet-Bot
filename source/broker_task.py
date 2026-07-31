@@ -51,6 +51,19 @@ def _is_meshcore_only_profile() -> bool:
     return _radio_profile() == "meshcore_only"
 
 
+def _uses_meshcore_default_transport() -> bool:
+    """True si las tareas legacy ``transport=mesh`` deben salir por MeshCore."""
+    try:
+        from radio_profile import default_transport_for_radio_profile
+        return default_transport_for_radio_profile(_radio_profile()) == "meshcore"
+    except Exception:
+        return _radio_profile() in {
+            "meshcore_only",
+            "meshcore_a_meshtastic_embedded_b",
+            "meshcore_a_meshtastic_b",
+        }
+
+
 def _parse_meshcore_channel_map(raw: str | None) -> dict[int, dict]:
     """
     Parsea MESHCORE_CHANNEL_MAP para enrutar canales lógicos Meshtastic a MeshCore.
@@ -581,11 +594,14 @@ class _TaskManager:
             self._fail_or_retry(t, error)
             return
 
-        # 2) En RADIO_PROFILE=meshcore_only no debe salir ninguna tarea por Meshtastic.
+        # 2) Las tareas legacy transport=mesh siguen el transporte principal.
         #    Las tareas antiguas/legacy suelen guardar transport=mesh y channel=<canal lógico>;
         #    si ese canal está definido como pasarela en MESHCORE_CHANNEL_MAP, lo convertimos
         #    aquí en envío MeshCore real antes de llegar al sender Meshtastic.
-        if _is_meshcore_only_profile() and transport in ("", "mesh", "meshtastic", "both"):
+        #    En meshcore_only se redirige además cualquier selección Meshtastic,
+        #    mientras que el perfil combinado permite elegir explícitamente el nodo B.
+        redirect_transports = ("", "mesh", "meshtastic", "both") if _is_meshcore_only_profile() else ("", "mesh")
+        if _uses_meshcore_default_transport() and transport in redirect_transports:
             meshcore_meta = _meshcore_meta_for_meshtastic_channel(t.channel, meta)
             if meshcore_meta is not None:
                 if transport == "both":
@@ -595,12 +611,12 @@ class _TaskManager:
                 meta = meshcore_meta
                 transport = str(meta.get("transport") or "meshcore").strip().lower()
                 self._logger.info(
-                    f"[Tasks] RADIO_PROFILE=meshcore_only: redirigiendo {t.id} "
+                    f"[Tasks] RADIO_PROFILE={_radio_profile()}: redirigiendo {t.id} "
                     f"ch={t.channel} desde Meshtastic a MeshCore"
                 )
             else:
                 error = (
-                    f"RADIO_PROFILE=meshcore_only blocks Meshtastic scheduled task on ch={t.channel}; "
+                    f"RADIO_PROFILE={_radio_profile()} requiere una ruta MeshCore para la tarea ch={t.channel}; "
                     "define MESHCORE_CHANNEL_MAP for this channel or schedule it as MeshCore"
                 )
                 self._fail_or_retry(t, error)

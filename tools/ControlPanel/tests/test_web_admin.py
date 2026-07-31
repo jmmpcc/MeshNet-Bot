@@ -337,6 +337,27 @@ def test_pharmacy_channels_api_rejects_meshtastic_for_meshcore_only(tmp_path, mo
     assert "meshcore_only" in response.json()["detail"]
 
 
+def test_pharmacy_channels_auto_follows_meshcore_a_inverted_profile(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text(
+        "RADIO_PROFILE=meshcore_a_meshtastic_embedded_b\n"
+        "FARMACIAS_BROADCAST_TRANSPORT=auto\n"
+        "FARMACIAS_MESHCORE_CHANNEL=2\n"
+        "FARMACIAS_MESHTASTIC_CHANNEL=3\n"
+    )
+    monkeypatch.setattr(web_admin, "FARMACIAS_ENV_FILE", path)
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "farmacias_guardia")))
+
+    status = client.get("/api/farmacias/channels").json()
+    assert status["radio_profile"] == "meshcore_a_meshtastic_embedded_b"
+    assert status["effective_transport"] == "meshcore"
+
+    response = client.put("/api/farmacias/channels", json={
+        "transport": "meshtastic", "meshcore_channel": 2, "meshtastic_channel": 3,
+    })
+    assert response.status_code == 200
+
+
 def test_channel_configuration_requires_enabled_application(tmp_path, monkeypatch):
     path = tmp_path / ".env"
     monkeypatch.setattr(web_admin, "FARMACIAS_ENV_FILE", path)
@@ -535,3 +556,16 @@ def test_emergency_transport_has_one_global_endpoint(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert calls == [("notify", "set-transport", "meshcore")]
+
+
+def test_emergency_transport_accepts_both_embedded_nodes(tmp_path, monkeypatch):
+    calls = []
+    def fake_execute(action):
+        calls.append(action.argv[-3:])
+        return {"ok": True, "returncode": 0, "stdout": '{"ok": true}',
+                "stderr": "", "data": {"ok": True}, "truncated": False}
+    monkeypatch.setattr(web_admin, "execute_action", fake_execute)
+    client = TestClient(web_admin.create_app(enabled_registry(tmp_path, "emergencias_guardia")))
+    response = client.put("/api/emergencias/transport", json={"transport": "both"})
+    assert response.status_code == 200
+    assert calls == [("notify", "set-transport", "both")]

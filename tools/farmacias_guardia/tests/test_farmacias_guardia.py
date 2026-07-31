@@ -86,11 +86,40 @@ class FarmaciasAppTests(unittest.TestCase):
         }, clear=False):
             self.assertEqual(app.broadcast_target(), ("meshcore", 4))
 
+    def test_inverted_profile_auto_uses_primary_meshcore_node(self):
+        with mock.patch.dict(os.environ, {
+            "RADIO_PROFILE": "meshcore_a_meshtastic_embedded_b",
+            "FARMACIAS_BROADCAST_TRANSPORT": "auto",
+            "FARMACIAS_MESHCORE_CHANNEL": "4",
+            "FARMACIAS_MESHTASTIC_CHANNEL": "7",
+        }, clear=False):
+            self.assertEqual(app.broadcast_target(), ("meshcore", 4))
+
+    def test_inverted_profile_can_broadcast_through_both_embedded_nodes(self):
+        calls = []
+        with (
+            mock.patch.object(app, "broker_request", side_effect=lambda command, params: calls.append((command, params)) or {"ok": True}),
+            mock.patch.object(app.time, "sleep"),
+            mock.patch.dict(os.environ, {
+                "RADIO_PROFILE": "meshcore_a_meshtastic_embedded_b",
+                "FARMACIAS_BROADCAST_TRANSPORT": "both",
+                "FARMACIAS_MESHCORE_CHANNEL": "4",
+                "FARMACIAS_MESHTASTIC_CHANNEL": "7",
+            }, clear=False),
+        ):
+            result = app.send_pharmacies(
+                [app.Pharmacy("Nueva", "C/ Nueva 1", "976", "Zaragoza", "Centro", "G", "2026-07-25", "new-1")],
+                "FARMACIAS",
+            )
+        self.assertEqual([item["network"] for item in result["deliveries"]], ["meshcore", "meshtastic"])
+        self.assertEqual([call[0] for call in calls], ["MESHCORE_SEND", "SEND_TEXT"])
+        self.assertTrue(calls[1][1]["no_bridge"])
+
     def test_broadcast_target_rejects_unknown_transport(self):
         with mock.patch.dict(os.environ, {
             "FARMACIAS_BROADCAST_TRANSPORT": "radio_desconocida",
         }, clear=False):
-            with self.assertRaisesRegex(RuntimeError, "auto, meshcore o meshtastic"):
+            with self.assertRaisesRegex(RuntimeError, "auto, meshcore, meshtastic o both"):
                 app.broadcast_target()
 
     def test_send_retries_meshcore_when_broker_reports_meshtastic_disabled(self):

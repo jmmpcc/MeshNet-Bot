@@ -234,9 +234,6 @@ BROADCAST_REQUEST_ACK=1
 # Mensajes largos -> se trocean para Telegram
 TELEGRAM_MAX_CHARS = 3900
 
-# Estados ConversationHandler (para /enviar)
-ASK_SEND_DEST, ASK_SEND_TEXT = range(2)
-
 # Ventana de escucha para métricas rápidas del broker en /ver_nodos enriquecido
 METRICS_LISTEN_SEC = float(os.getenv("METRICS_LISTEN_SEC", "5.0"))
 
@@ -9473,6 +9470,28 @@ async def enviar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     bump_stat(update.effective_user.id, update.effective_user.username or "", "enviar")
     msg = update.effective_message
     args = list(context.args or [])
+
+    # Sin argumentos se muestra la ayuda completa. /enviar es deliberadamente
+    # un comando directo: no abre ForceReply ni mantiene estado conversacional.
+    if not args:
+        await msg.reply_text(
+            "Uso:\n"
+            "• <b>/enviar canal N texto</b> — Broadcast Meshtastic por el canal N.\n"
+            "• <b>/enviar broadcast:N texto</b> — Broadcast explícito por el canal N.\n"
+            "• <b>/enviar !id:N texto</b> — Mensaje directo a un nodo por el canal N.\n"
+            "• <b>/enviar alias:N texto</b> — Mensaje directo usando un alias.\n"
+            "• <b>/enviar aprs CALL: texto</b> — Solo APRS.\n"
+            "• <b>/enviar ambos canal N aprs CALL texto</b> — Meshtastic y APRS.\n"
+            "• Añade <b>forzado</b> antes de <b>canal</b> para omitir el traceroute previo.\n\n"
+            "Ejemplos:\n"
+            "<code>/enviar canal 2 Aviso de prueba</code>\n"
+            "<code>/enviar broadcast:1 Mensaje general</code>\n"
+            "<code>/enviar !b03df4cc:2 Mensaje directo</code>\n"
+            "<code>/enviar aprs EB2ABC-7: Aviso APRS</code>",
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
     transport = _normalize_transport_token(args[0]) if args else None
     if transport:
         args = args[1:]
@@ -15470,57 +15489,6 @@ async def cancelar_tarea_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 
-# ---- Diálogo /enviar (Forcereply)
-
-async def on_send_dest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    dest = (update.effective_message.text or "").strip()
-    context.user_data["send_dest"] = dest
-    await update.effective_message.reply_text("Escribe el texto a enviar:", reply_markup=ForceReply(selective=True))
-    return ASK_SEND_TEXT
-
-async def on_send_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    texto = (update.effective_message.text or "").strip()
-    dest_token = context.user_data.pop("send_dest", "broadcast")
-    nodes_map = context.user_data.get("nodes_map") or build_nodes_mapping()
-
-    node_id, canal, texto_final, forced_flag = parse_dest_channel_and_text([dest_token, texto], nodes_map)
-
-    traceroute_ok = None; hops = 0
-    if TRACEROUTE_CHECK and node_id:
-        res = traceroute_node(node_id, timeout=min(TRACEROUTE_TIMEOUT, 20))
-        traceroute_ok = bool(res.ok); hops = res.hops
-        if not traceroute_ok:
-            forced_flag = True
-
-    out, pid = send_text_message(node_id, texto_final, canal=canal)
-    respuestas = await quick_broker_listen(node_id, canal, SEND_LISTEN_SEC)
-
-    dest_txt = "broadcast" if node_id is None else node_id
-    resumen = (
-        f"✉️ Envío a {dest_txt} (canal {canal})\n"
-        f"Resultado: {out}\n"
-        f"Forzado: {'Sí' if forced_flag else 'No'}\n"
-        f"Respuestas en {SEND_LISTEN_SEC}s: {respuestas}"
-    )
-    if traceroute_ok is not None:
-        resumen += f"\nTraceroute previo: {'OK' if traceroute_ok else 'Sin ruta'} (hops={hops})"
-    for ch in chunk_text(resumen):
-        await send_pre(update.effective_message, ch)
-
-    _append_send_log_row([
-        time.strftime("%Y-%m-%d %H:%M:%S"),
-        dest_txt, canal,
-        (texto_final[:200] + "…") if texto_final and len(texto_final) > 200 else (texto_final or texto),
-        "1" if forced_flag else "0",
-        "" if traceroute_ok is None else ("1" if traceroute_ok else "0"),
-        hops, respuestas,
-    ])
-    return ConversationHandler.END
-
-async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.effective_message.reply_text("Cancelado.", reply_markup=ReplyKeyboardRemove())
-    return ConversationHandler.END
-
 # -------------------------
 # ESCUCHA BROKER CONTINUA
 # -------------------------
@@ -17713,19 +17681,6 @@ def build_application() -> Application:
 
 # ...
   
-    # Conversación /enviar
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("enviar", enviar_cmd)],
-        states={
-            ASK_SEND_DEST: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_send_dest)],
-            ASK_SEND_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_send_text)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_conversation)],
-        name="enviar_conv",
-        persistent=False,
-    )
-    app.add_handler(conv)
-
     # Menú (callback) y ForceReply del menú
     app.add_handler(CallbackQueryHandler(mc_dm_contact_cb, pattern=r"^mc_dm:"))
     app.add_handler(CallbackQueryHandler(on_cb))
