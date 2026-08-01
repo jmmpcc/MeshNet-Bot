@@ -98,6 +98,18 @@ class BbsTransportTests(unittest.TestCase):
         )
         self.assertIsNone(result)
 
+    def test_bbs_command_is_consumed_when_engine_is_disabled(self) -> None:
+        result = handle_bbs_transport_command(
+            engine=None,
+            text="#BBS",
+            source_id="a1b2c3",
+            channel=9,
+            is_direct=False,
+            bbs_callsign="EA2BBS-5",
+            allowed_channels={9},
+        )
+        self.assertEqual(result, ())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

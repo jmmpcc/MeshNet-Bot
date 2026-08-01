@@ -39,7 +39,7 @@ def _clean_chunks(chunks: Optional[Iterable[object]]) -> tuple[str, ...]:
 
 def handle_bbs_transport_command(
     *,
-    engine: object,
+    engine: Optional[object],
     text: str,
     source_id: str,
     channel: Optional[int],
@@ -61,6 +61,12 @@ def handle_bbs_transport_command(
     command = str(text or "").strip()
     if not command.upper().startswith("#BBS"):
         return None
+
+    # Un comando de control BBS nunca debe continuar por el bridge hacia la
+    # otra radio. Esto también se aplica mientras el motor está desactivado o
+    # no pudo inicializarse: en ese caso se consume sin generar respuesta.
+    if engine is None:
+        return ()
 
     callsign = str(bbs_callsign or "").strip().upper()
     sender = str(source_id or "").strip()

@@ -1790,39 +1790,48 @@ class MeshCoreEmbeddedBridge:
                         from bbs_transport import handle_bbs_transport_command
 
                         bbs = globals().get("BBS_ENGINE")
-                        if bbs is not None:
-                            raw_allowed = (
-                                os.getenv("BBS_MESHCORE_CHANNELS")
-                                or os.getenv("BBS_CHANNELS")
-                                or os.getenv("BBS_CHANNEL")
-                                or ""
-                            )
-                            allowed_channels = set()
-                            for item in raw_allowed.split(","):
-                                try:
-                                    allowed_channels.add(int(item.strip()))
-                                except (TypeError, ValueError):
-                                    continue
+                        raw_allowed = (
+                            os.getenv("BBS_MESHCORE_CHANNELS")
+                            or os.getenv("BBS_CHANNELS")
+                            or os.getenv("BBS_CHANNEL")
+                            or ""
+                        )
+                        allowed_channels = set()
+                        for item in raw_allowed.split(","):
+                            try:
+                                allowed_channels.add(int(item.strip()))
+                            except (TypeError, ValueError):
+                                continue
 
-                            replies = handle_bbs_transport_command(
-                                engine=bbs,
-                                text=text_msg,
-                                source_id=pref,
-                                channel=chan_idx,
-                                is_direct=(kind == "contact"),
-                                bbs_callsign=(os.getenv("BBS_CALLSIGN") or getattr(bbs, "bbs_callsign", "")),
-                                allowed_channels=allowed_channels,
-                                dm_channel=int(os.getenv("BBS_DM_CHANNEL", "0") or "0"),
-                                dm_only=_env_truthy("BBS_DM_ONLY", "1"),
-                                dm_init_hint=_env_truthy("BBS_DM_INIT_HINT", "1"),
+                        replies = handle_bbs_transport_command(
+                            engine=bbs,
+                            text=text_msg,
+                            source_id=pref,
+                            channel=chan_idx,
+                            is_direct=(kind == "contact"),
+                            bbs_callsign=(
+                                os.getenv("BBS_CALLSIGN")
+                                or getattr(bbs, "bbs_callsign", "")
+                            ),
+                            allowed_channels=allowed_channels,
+                            dm_channel=int(os.getenv("BBS_DM_CHANNEL", "0") or "0"),
+                            dm_only=_env_truthy("BBS_DM_ONLY", "1"),
+                            dm_init_hint=_env_truthy("BBS_DM_INIT_HINT", "1"),
+                        )
+                        for reply in replies or ():
+                            if reply.direct:
+                                self.enqueue_send_contact(pref, reply.text)
+                            else:
+                                self.enqueue_send_channel(reply.channel, reply.text)
+                        if bbs is None:
+                            print(
+                                "[BBS] MeshCore: comando consumido; motor BBS desactivado",
+                                flush=True,
                             )
-                            for reply in replies or ():
-                                if reply.direct:
-                                    self.enqueue_send_contact(pref, reply.text)
-                                else:
-                                    self.enqueue_send_channel(reply.channel, reply.text)
-                            self._last_ok = time.time()
-                            return
+                        self._last_ok = time.time()
+                        # Nunca dejar que un comando BBS recibido por MeshCore
+                        # caiga al flujo normal, que lo inyectaría en Meshtastic.
+                        return
                     except Exception as _e_bbs:
                         self._last_err = f"bbs_meshcore: {type(_e_bbs).__name__}: {_e_bbs}"
                         print(f"[BBS] MeshCore WARN: {self._last_err}", flush=True)
