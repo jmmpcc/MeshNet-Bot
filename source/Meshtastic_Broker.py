@@ -1781,6 +1781,53 @@ class MeshCoreEmbeddedBridge:
                 except Exception:
                     pass
 
+                # === [BBS] Comandos recibidos directamente por MeshCore ======
+                # El motor BBS es común a ambas radios. Se responde por el mismo
+                # transporte de entrada y se conserva la política Meshtastic:
+                # DM, canales autorizados, direccionamiento multi-BBS y DM_ONLY.
+                if text_msg.upper().startswith("#BBS"):
+                    try:
+                        from bbs_transport import handle_bbs_transport_command
+
+                        bbs = globals().get("BBS_ENGINE")
+                        if bbs is not None:
+                            raw_allowed = (
+                                os.getenv("BBS_MESHCORE_CHANNELS")
+                                or os.getenv("BBS_CHANNELS")
+                                or os.getenv("BBS_CHANNEL")
+                                or ""
+                            )
+                            allowed_channels = set()
+                            for item in raw_allowed.split(","):
+                                try:
+                                    allowed_channels.add(int(item.strip()))
+                                except (TypeError, ValueError):
+                                    continue
+
+                            replies = handle_bbs_transport_command(
+                                engine=bbs,
+                                text=text_msg,
+                                source_id=pref,
+                                channel=chan_idx,
+                                is_direct=(kind == "contact"),
+                                bbs_callsign=(os.getenv("BBS_CALLSIGN") or getattr(bbs, "bbs_callsign", "")),
+                                allowed_channels=allowed_channels,
+                                dm_channel=int(os.getenv("BBS_DM_CHANNEL", "0") or "0"),
+                                dm_only=_env_truthy("BBS_DM_ONLY", "1"),
+                                dm_init_hint=_env_truthy("BBS_DM_INIT_HINT", "1"),
+                            )
+                            for reply in replies or ():
+                                if reply.direct:
+                                    self.enqueue_send_contact(pref, reply.text)
+                                else:
+                                    self.enqueue_send_channel(reply.channel, reply.text)
+                            self._last_ok = time.time()
+                            return
+                    except Exception as _e_bbs:
+                        self._last_err = f"bbs_meshcore: {type(_e_bbs).__name__}: {_e_bbs}"
+                        print(f"[BBS] MeshCore WARN: {self._last_err}", flush=True)
+                        return
+
                 # === Respuesta automática propiedad del broker ==============
                 # Se encola, nunca se transmite directamente desde el callback RX.
                 # Así comparte la conexión persistente, backoff y circuit breaker.
