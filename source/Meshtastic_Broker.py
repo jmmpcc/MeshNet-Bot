@@ -1769,13 +1769,13 @@ class MeshCoreEmbeddedBridge:
                 # En algunos CHANNEL_MSG_RECV MeshCore no llega pubkey_prefix; en ese caso
                 # resolvemos el alias visual contra contactos/aliases para poder responder por DM.
                 try:
-                    m = re.match(r"^([A-Za-z0-9_./@+\-]{3,32})\s*:\s+(.+)$", text_msg)
-                    if m:
-                        extracted = (m.group(1) or "").strip()
-                        rest = (m.group(2) or "").strip()
-                        if extracted and not alias:
+                    from bbs_transport import unwrap_meshcore_sender_prefix
+
+                    extracted, rest = unwrap_meshcore_sender_prefix(text_msg)
+                    if extracted:
+                        if not alias:
                             alias = extracted
-                        if extracted and not pref:
+                        if not pref:
                             pref = self._meshcore_contact_prefix_by_name(extracted)
                         text_msg = rest
                 except Exception:
