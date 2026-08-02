@@ -9,7 +9,10 @@ SOURCE_DIR = Path(__file__).resolve().parents[1] / "source"
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
 
-from bbs_transport import handle_bbs_transport_command  # noqa: E402
+from bbs_transport import (  # noqa: E402
+    handle_bbs_transport_command,
+    unwrap_meshcore_sender_prefix,
+)
 
 
 class FakeBbs:
@@ -22,6 +25,16 @@ class FakeBbs:
 
 
 class BbsTransportTests(unittest.TestCase):
+    def test_meshcore_sender_prefix_without_space_exposes_bbs_command(self) -> None:
+        alias, command = unwrap_meshcore_sender_prefix("EA2FBO_V4:#BBS EA2BBS-5 MENU")
+        self.assertEqual(alias, "EA2FBO_V4")
+        self.assertEqual(command, "#BBS EA2BBS-5 MENU")
+
+    def test_normal_text_is_not_scanned_for_embedded_bbs_token(self) -> None:
+        alias, text = unwrap_meshcore_sender_prefix("comentario sobre #BBS MENU")
+        self.assertEqual(alias, "")
+        self.assertEqual(text, "comentario sobre #BBS MENU")
+
     def test_meshcore_dm_is_processed_and_replied_by_dm(self) -> None:
         engine = FakeBbs()
         replies = handle_bbs_transport_command(

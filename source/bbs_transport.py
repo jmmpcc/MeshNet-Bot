@@ -10,6 +10,7 @@ abrir conexiones por su cuenta.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -21,6 +22,28 @@ class BbsReply:
     text: str
     direct: bool
     channel: int
+
+
+_MESHCORE_SENDER_PREFIX_RE = re.compile(
+    r"^([A-Za-z0-9_./@+\-]{3,32})\s*:\s*(.+)$",
+    flags=re.DOTALL,
+)
+
+
+def unwrap_meshcore_sender_prefix(value: object) -> tuple[str, str]:
+    """Separa el prefijo ``ALIAS:`` que MeshCore añade a algunos mensajes.
+
+    Según firmware/cliente, el separador puede llegar como ``ALIAS: texto`` o
+    ``ALIAS:texto``. Mantener esta normalización en una función pequeña permite
+    interceptar el comando BBS antes de que el bridge lo trate como texto
+    ordinario, sin buscar ``#BBS`` en medio de conversaciones normales.
+    """
+
+    text = str(value or "").strip()
+    match = _MESHCORE_SENDER_PREFIX_RE.match(text)
+    if not match:
+        return "", text
+    return (match.group(1) or "").strip(), (match.group(2) or "").strip()
 
 
 def _looks_like_callsign(value: str) -> bool:
@@ -126,4 +149,8 @@ def handle_bbs_transport_command(
     return tuple(BbsReply(chunk, reply_direct, reply_channel) for chunk in chunks)
 
 
-__all__ = ["BbsReply", "handle_bbs_transport_command"]
+__all__ = [
+    "BbsReply",
+    "handle_bbs_transport_command",
+    "unwrap_meshcore_sender_prefix",
+]
