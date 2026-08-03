@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# v7.0.28
-# v7.0.28: unifica el versionado visible e interno del broker y WebPanel.
+# v7.0.30
+# v7.0.30: unifica metadatos de versión tras la corrección segura del descubrimiento MeshCore.
 
 from __future__ import annotations
 """
-Meshtastic_Broker.py v7.0.28 — Broker MeshNet con servidor BBS y soporte de perfiles de radio.
+Meshtastic_Broker.py v7.0.30 — Broker MeshNet con servidor BBS y soporte de perfiles de radio.
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -1515,16 +1515,59 @@ class MeshCoreEmbeddedBridge:
             )
             discovery_payload = None
             if discover or not path_bytes:
+                send_discovery_raw = getattr(commands, "_send_path_discovery_raw", None)
                 send_discovery_sync = getattr(commands, "send_path_discovery_sync", None)
-                send_discovery = getattr(commands, "send_path_discovery", None)
+                send_discovery_legacy = getattr(commands, "send_path_discovery", None)
                 wait_for_event = getattr(mc, "wait_for_event", None)
                 event = None
 
-                # ``meshcore_py`` recomienda expresamente la variante síncrona.
-                # Esta API coordina internamente el envío y la recepción de
-                # PATH_RESPONSE, evita el warning deprecado y serializa la
-                # operación mediante el lock propio de peticiones MeshCore.
-                if callable(send_discovery_sync):
+                async def _discover_with_registered_wait(send_callable):
+                    """Registra PATH_RESPONSE antes de emitir el descubrimiento.
+
+                    ``meshcore_py.send_path_discovery_sync()`` registra la espera
+                    después del envío. En companions rápidos la respuesta puede
+                    procesarse durante el retorno del comando y perderse. Este
+                    helper conserva el orden seguro espera -> envío -> respuesta,
+                    cancela la tarea ante cualquier error y reutiliza el lock de
+                    peticiones de la librería cuando está disponible.
+                    """
+                    if not callable(wait_for_event):
+                        raise RuntimeError("meshcore_path_discovery_wait_unavailable")
+
+                    async def _send_and_wait():
+                        wait_task = asyncio.create_task(
+                            wait_for_event(_MCEventType.PATH_RESPONSE, timeout=timeout)
+                        )
+                        try:
+                            sent = await send_callable(contact)
+                            if getattr(sent, "type", None) == _MCEventType.ERROR:
+                                raise RuntimeError(
+                                    "meshcore_path_discovery_error: "
+                                    f"{getattr(sent, 'payload', None)}"
+                                )
+                            response = await wait_task
+                            if response is None:
+                                raise RuntimeError("meshcore_path_discovery_no_response")
+                            return response
+                        except Exception:
+                            if not wait_task.done():
+                                wait_task.cancel()
+                            raise
+
+                    request_lock = getattr(commands, "_mesh_request_lock", None)
+                    if request_lock is not None and hasattr(request_lock, "__aenter__"):
+                        async with request_lock:
+                            return await _send_and_wait()
+                    return await _send_and_wait()
+
+                # Camino preferente: método raw sin warning, pero con la espera
+                # registrada previamente y con el lock propio de meshcore_py.
+                if callable(send_discovery_raw):
+                    event = await _discover_with_registered_wait(send_discovery_raw)
+
+                # Fallback para versiones donde solo existe la API síncrona.
+                # Se usa únicamente cuando no está disponible el método raw.
+                elif callable(send_discovery_sync):
                     event = await send_discovery_sync(
                         contact,
                         timeout=timeout,
@@ -1537,28 +1580,10 @@ class MeshCoreEmbeddedBridge:
                             f"meshcore_path_discovery_error: {getattr(event, 'payload', None)}"
                         )
 
-                # Compatibilidad defensiva con versiones antiguas de
-                # ``meshcore_py`` que todavía no expongan la API síncrona.
-                elif callable(send_discovery):
-                    if not callable(wait_for_event):
-                        raise RuntimeError("meshcore_path_discovery_wait_unavailable")
-
-                    # Registrar la espera ANTES del envío evita perder una
-                    # PATH_RESPONSE que llegue inmediatamente desde el companion.
-                    wait_task = asyncio.create_task(
-                        wait_for_event(_MCEventType.PATH_RESPONSE, timeout=timeout)
-                    )
-                    try:
-                        sent = await send_discovery(contact)
-                        if getattr(sent, "type", None) == _MCEventType.ERROR:
-                            raise RuntimeError(
-                                f"meshcore_path_discovery_error: {getattr(sent, 'payload', None)}"
-                            )
-                        event = await wait_task
-                    except Exception:
-                        if not wait_task.done():
-                            wait_task.cancel()
-                        raise
+                # Último fallback para librerías antiguas. Puede emitir el warning
+                # deprecado, pero conserva el orden seguro de la espera.
+                elif callable(send_discovery_legacy):
+                    event = await _discover_with_registered_wait(send_discovery_legacy)
                 else:
                     raise RuntimeError("meshcore_path_discovery_api_unavailable")
 
@@ -11419,9 +11444,9 @@ def main():
     init_broker_tasks()
 
     if meshcore_only:
-        print(f"🟢 Broker v7.0.28 listo en RADIO_PROFILE=meshcore_only; sirviendo en {args.bind}:{args.port}", flush=True)
+        print(f"🟢 Broker v7.0.30 listo en RADIO_PROFILE=meshcore_only; sirviendo en {args.bind}:{args.port}", flush=True)
     else:
-        print(f"🟢 Broker v7.0.28 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
+        print(f"🟢 Broker v7.0.30 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
     print("   Clientes pueden conectarse por TCP y leer líneas JSONL (una por evento).", flush=True)
 
     # === [NUEVO] Inicializar motor BBS (broker-side) ======================================
