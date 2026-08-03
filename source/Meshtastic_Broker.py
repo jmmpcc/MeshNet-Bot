@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # v7.0.12
+# v7.0.20 WebPanel: añadido OPS_STATUS de solo lectura sobre este broker actual.
 
 from __future__ import annotations
 """
@@ -6526,6 +6527,360 @@ def _iter_backlog_jsonl(since_ts: int | None, until_ts: int | None, channel: int
                 return
 
 
+
+
+# === [v7.0.20] Observabilidad operativa consciente de RADIO_PROFILE ===========
+def _ops_safe_queue_size(obj) -> int | None:
+    """Obtiene el tamaño de una cola sin consumir elementos ni alterar su estado.
+
+    Uso:
+        pending = _ops_safe_queue_size(SENDQ)
+
+    Parámetros:
+        obj:
+            Cola o contenedor a inspeccionar. Admite las implementaciones actuales
+            de SendQueue, asyncio.Queue, deque y variantes compatibles.
+
+    Funcionalidad:
+        - Consulta métodos públicos cuando existen.
+        - Usa atributos internos únicamente como fallback de solo lectura.
+        - Devuelve None si el tamaño no puede determinarse de forma segura.
+    """
+    if obj is None:
+        return None
+    for name in ("qsize", "size", "pending_count"):
+        try:
+            value = getattr(obj, name, None)
+            value = value() if callable(value) else value
+            if value is not None:
+                return max(0, int(value))
+        except Exception:
+            pass
+    for name in ("_q", "queue", "_queue", "items", "_items"):
+        try:
+            value = getattr(obj, name, None)
+            if value is not None:
+                return max(0, len(value))
+        except Exception:
+            pass
+    try:
+        return max(0, len(obj))
+    except Exception:
+        return None
+
+
+def _ops_safe_queue_capacity(obj) -> int | None:
+    """Obtiene la capacidad configurada de una cola sin modificarla.
+
+    Devuelve None para colas sin límite o cuando la implementación no expone
+    una capacidad interpretable.
+    """
+    if obj is None:
+        return None
+    for name in ("maxsize", "max_size", "capacity", "_maxsize", "_max_size", "max_items"):
+        try:
+            value = getattr(obj, name, None)
+            value = value() if callable(value) else value
+            if value is not None:
+                ivalue = int(value)
+                return ivalue if ivalue > 0 else None
+        except Exception:
+            pass
+    return None
+
+
+def _ops_profile_runtime_snapshot() -> dict:
+    """Construye el estado real del perfil y de sus backends, solo en lectura.
+
+    Fuente de verdad:
+        1. RADIO_PROFILE_RUNTIME generado por radio_profile.py durante el arranque.
+        2. RADIO_PROFILE normalizado por el resolvedor común.
+        3. Variables históricas únicamente como fallback defensivo.
+
+    Perfiles cubiertos:
+        - meshcore_only: nodo A exclusivamente MeshCore.
+        - meshtastic_only: nodo A exclusivamente Meshtastic.
+        - meshtastic_a_meshcore_embedded_b / meshtastic_meshcore_embedded:
+          nodo A Meshtastic y nodo B MeshCore embebido.
+        - meshcore_a_meshtastic_embedded_b: nodo A MeshCore y nodo B
+          Meshtastic embebido.
+        - meshtastic_embedded: compatibilidad con doble Meshtastic histórico.
+        - legacy/auto: conserva las reglas históricas.
+
+    Esta función no aplica perfiles, no abre conexiones y no toca las colas.
+    """
+    runtime = globals().get("RADIO_PROFILE_RUNTIME")
+    runtime = dict(runtime) if isinstance(runtime, dict) else {}
+    raw_profile = str(os.getenv("RADIO_PROFILE") or runtime.get("requested_profile") or "").strip()
+    profile = str(runtime.get("profile") or _radio_profile() or "legacy").strip().lower().replace("-", "_")
+    if not profile:
+        profile = "legacy"
+
+    aliases = {
+        "auto": "legacy",
+        "meshcore": "meshcore_only",
+        "mc_only": "meshcore_only",
+        "meshtastic": "meshtastic_only",
+        "mt_only": "meshtastic_only",
+        "meshtastic_meshcore_embedded": "meshtastic_a_meshcore_embedded_b",
+        "meshcore_embedded": "meshtastic_a_meshcore_embedded_b",
+        "mixed": "meshtastic_a_meshcore_embedded_b",
+        "hybrid": "meshtastic_a_meshcore_embedded_b",
+        "dual": "meshtastic_a_meshcore_embedded_b",
+        "dual_meshtastic": "meshtastic_embedded",
+        "meshtastic_dual": "meshtastic_embedded",
+        "": "legacy",
+    }
+    profile = aliases.get(profile, profile)
+
+    meshcore_enabled = bool(runtime.get("meshcore_enabled")) if "meshcore_enabled" in runtime else _env_truthy("MESHCORE_ENABLE", "0")
+    meshtastic_enabled = bool(runtime.get("meshtastic_enabled")) if "meshtastic_enabled" in runtime else (profile != "meshcore_only")
+    bridge_enabled = _env_truthy("BRIDGE_ENABLED", "0")
+    direction_mode = str(os.getenv("BRIDGE_DIRECTION_MODE") or runtime.get("bridge_direction_mode") or "").strip().lower()
+
+    node_a_transport = str(runtime.get("node_a_transport") or "").strip().lower()
+    node_b_transport = str(runtime.get("node_b_transport") or "").strip().lower()
+    if not node_a_transport:
+        if profile in {"meshcore_only", "meshcore_a_meshtastic_embedded_b"}:
+            node_a_transport = "meshcore"
+        elif profile != "legacy":
+            node_a_transport = "meshtastic"
+    if not node_b_transport:
+        if profile == "meshtastic_a_meshcore_embedded_b":
+            node_b_transport = "meshcore"
+        elif profile in {"meshcore_a_meshtastic_embedded_b", "meshtastic_embedded"}:
+            node_b_transport = "meshtastic"
+
+    mgr = globals().get("BROKER_IFACE_MGR")
+    meshtastic_connected = bool(globals().get("_IS_CONNECTED", False))
+    try:
+        if mgr is not None:
+            iface = getattr(mgr, "iface", None)
+            if iface is None and hasattr(mgr, "get_iface"):
+                iface = mgr.get_iface()
+            meshtastic_connected = bool(iface is not None)
+    except Exception:
+        pass
+
+    engine = globals().get("MESHCORE_ENGINE")
+    try:
+        meshcore_status = engine.status() if engine is not None and hasattr(engine, "status") else {}
+    except Exception as exc:
+        meshcore_status = {"connected": False, "last_err": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(meshcore_status, dict):
+        meshcore_status = {}
+
+    try:
+        bridge_status = bridge_status_in_broker() or {}
+    except Exception as exc:
+        bridge_status = {"running": False, "error": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(bridge_status, dict):
+        bridge_status = {}
+
+    expects = {
+        "meshcore_primary": node_a_transport == "meshcore",
+        "meshtastic_primary": node_a_transport == "meshtastic",
+        "meshcore_embedded": node_b_transport == "meshcore",
+        "meshtastic_embedded": node_b_transport == "meshtastic",
+    }
+    if profile == "legacy":
+        expects = {
+            "meshcore_primary": False,
+            "meshtastic_primary": not _is_meshcore_only_profile(),
+            "meshcore_embedded": bool(meshcore_enabled and not bridge_enabled),
+            "meshtastic_embedded": bool(bridge_enabled),
+        }
+
+    inconsistencies: list[str] = []
+    for warning in runtime.get("warnings") or []:
+        if str(warning).strip():
+            inconsistencies.append(str(warning).strip())
+    if runtime.get("valid") is False:
+        inconsistencies.append("radio_profile_runtime_invalid")
+    if profile == "meshcore_only" and meshtastic_connected:
+        inconsistencies.append("meshcore_only_but_meshtastic_connected")
+    if expects["meshcore_embedded"] and not meshcore_enabled:
+        inconsistencies.append("meshcore_embedded_required_but_disabled")
+    if expects["meshtastic_embedded"] and not (bridge_enabled or profile == "meshcore_a_meshtastic_embedded_b"):
+        inconsistencies.append("meshtastic_embedded_required_but_bridge_disabled")
+    if profile == "meshtastic_only" and meshcore_enabled:
+        inconsistencies.append("meshtastic_only_with_meshcore_enabled")
+    if profile == "meshcore_only" and bridge_enabled:
+        inconsistencies.append("meshcore_only_with_bridge_enabled")
+    if meshcore_enabled and bridge_enabled and profile not in {"meshcore_a_meshtastic_embedded_b"}:
+        inconsistencies.append("both_embedded_backends_enabled")
+    inconsistencies = list(dict.fromkeys(inconsistencies))
+
+    return {
+        "profile_raw": raw_profile or "legacy",
+        "profile": profile,
+        "runtime_source": "RADIO_PROFILE_RUNTIME" if runtime else "environment_fallback",
+        "runtime": runtime,
+        "node_a_transport": node_a_transport or None,
+        "node_b_transport": node_b_transport or None,
+        "direction_mode": direction_mode or None,
+        "expects": expects,
+        "meshtastic": {
+            "required": bool(expects["meshtastic_primary"] or expects["meshtastic_embedded"]),
+            "role": "primary" if expects["meshtastic_primary"] else ("embedded" if expects["meshtastic_embedded"] else "not_applicable"),
+            "configured": bool(meshtastic_enabled or bridge_enabled),
+            # Para el perfil inverso A=MeshCore/B=Meshtastic, la conexión real
+            # pertenece al bridge embebido (running + iface_b), no a iface_mgr.
+            # En perfiles con Meshtastic principal se conserva el criterio
+            # histórico de BROKER_IFACE_MGR.
+            "connected": bool(
+                meshtastic_connected
+                if expects["meshtastic_primary"]
+                else (bridge_status.get("running") and bridge_status.get("iface_b"))
+                if expects["meshtastic_embedded"]
+                else False
+            ),
+            "host": (
+                globals().get("RUNTIME_MESH_HOST") or os.getenv("MESHTASTIC_HOST")
+                if expects["meshtastic_primary"]
+                else os.getenv("BRIDGE_B_HOST") or os.getenv("B_HOST")
+            ),
+            "port": (
+                globals().get("RUNTIME_MESH_PORT") or os.getenv("MESHTASTIC_PORT")
+                if expects["meshtastic_primary"]
+                else os.getenv("BRIDGE_B_PORT") or os.getenv("B_PORT")
+            ),
+            "paused": bool(getattr(mgr, "is_paused", lambda: False)()) if expects["meshtastic_primary"] and mgr is not None and hasattr(mgr, "is_paused") else False,
+        },
+        "meshcore": {
+            "required": bool(expects["meshcore_primary"] or expects["meshcore_embedded"]),
+            "role": "primary" if expects["meshcore_primary"] else ("embedded" if expects["meshcore_embedded"] else "not_applicable"),
+            "configured": bool(meshcore_enabled),
+            **meshcore_status,
+        },
+        "embedded_meshtastic": {
+            "required": bool(expects["meshtastic_embedded"]),
+            "configured": bool(bridge_enabled or profile == "meshcore_a_meshtastic_embedded_b"),
+            **bridge_status,
+        },
+        "cooldown": {
+            "active": bool(globals().get("COOLDOWN") and globals()["COOLDOWN"].is_active()),
+            "remaining": int(globals()["COOLDOWN"].remaining()) if globals().get("COOLDOWN") else 0,
+            "tx_blocked": bool(globals().get("TX_BLOCKED") and globals()["TX_BLOCKED"].is_set()),
+        },
+        "coherent": not inconsistencies,
+        "inconsistencies": inconsistencies,
+    }
+
+
+def _ops_queue_runtime_snapshot() -> dict:
+    """Resume las colas reales Meshtastic y MeshCore sin extraer mensajes."""
+    sendq = globals().get("SENDQ")
+    sendq_pending = _ops_safe_queue_size(sendq)
+    sendq_capacity = _ops_safe_queue_capacity(sendq)
+
+    engine = globals().get("MESHCORE_ENGINE")
+    spool_pending = None
+    spool_capacity = None
+    spool_drops = 0
+    session_pending = None
+    try:
+        if engine is not None:
+            lock = getattr(engine, "_retry_spool_lock", None)
+            if lock is not None:
+                with lock:
+                    spool = getattr(engine, "_retry_spool", None)
+                    spool_pending = len(spool) if spool is not None else 0
+                    spool_capacity = int(getattr(engine, "_retry_spool_max", 0) or 0) or None
+                    spool_drops = int(getattr(engine, "_retry_spool_drop_count", 0) or 0)
+            else:
+                spool = getattr(engine, "_retry_spool", None)
+                spool_pending = len(spool) if spool is not None else 0
+                spool_capacity = int(getattr(engine, "_retry_spool_max", 0) or 0) or None
+                spool_drops = int(getattr(engine, "_retry_spool_drop_count", 0) or 0)
+            session_pending = _ops_safe_queue_size(getattr(engine, "_tx_q", None))
+    except Exception:
+        pass
+
+    return {
+        "meshtastic_sendq": {
+            "pending": sendq_pending,
+            "capacity": sendq_capacity,
+            "utilization": round(sendq_pending / sendq_capacity, 4) if sendq_pending is not None and sendq_capacity else None,
+        },
+        "meshcore_retry_spool": {
+            "pending": spool_pending,
+            "capacity": spool_capacity,
+            "drops": spool_drops,
+            "session_pending": session_pending,
+            "utilization": round(spool_pending / spool_capacity, 4) if spool_pending is not None and spool_capacity else None,
+        },
+    }
+
+
+def _broker_operations_snapshot() -> dict:
+    """Devuelve el estado consolidado usado por el Centro operativo v7.0.20.
+
+    El comando es estrictamente de observación: no inicia radios, no fuerza
+    reconexiones, no consume colas y no escribe datos persistentes.
+    """
+    profile = _ops_profile_runtime_snapshot()
+    queues = _ops_queue_runtime_snapshot()
+    incidents: list[dict] = []
+
+    def add(code: str, level: str, component: str, title: str, detail: str) -> None:
+        incidents.append({
+            "code": code,
+            "level": level,
+            "component": component,
+            "title": title,
+            "detail": str(detail or "")[:500],
+        })
+
+    if not profile.get("coherent", True):
+        add("profile_inconsistent", "critical", "radio_profile", "Perfil de radio incoherente", ", ".join(profile.get("inconsistencies") or []))
+
+    mt = profile.get("meshtastic") or {}
+    mc = profile.get("meshcore") or {}
+    emb = profile.get("embedded_meshtastic") or {}
+    expects = profile.get("expects") or {}
+
+    if expects.get("meshtastic_primary") and not mt.get("connected"):
+        add("meshtastic_primary_disconnected", "critical", "meshtastic", "Meshtastic principal sin conexión", "El perfil activo exige el nodo Meshtastic principal.")
+    if expects.get("meshtastic_embedded") and not (emb.get("running") and emb.get("iface_b")):
+        add("meshtastic_embedded_unavailable", "critical", "bridge", "Meshtastic embebido no operativo", emb.get("error") or "bridge/iface B no disponible")
+    if (expects.get("meshcore_primary") or expects.get("meshcore_embedded")) and not mc.get("connected"):
+        add("meshcore_required_disconnected", "critical", "meshcore", "MeshCore requerido sin conexión", mc.get("last_err") or "sin conexión activa")
+
+    cooldown = profile.get("cooldown") or {}
+    if cooldown.get("active"):
+        add("meshtastic_cooldown", "warning", "meshtastic", "Broker Meshtastic en cooldown", f"quedan {cooldown.get('remaining', 0)} s")
+    if cooldown.get("tx_blocked"):
+        add("meshtastic_tx_blocked", "warning", "meshtastic", "Transmisión Meshtastic bloqueada", "TX_BLOCKED está activo")
+
+    for key, queue_data in queues.items():
+        util = queue_data.get("utilization")
+        if util is not None and util >= 0.90:
+            add(f"{key}_critical", "critical", "queue", "Cola casi llena", f"{key}: {queue_data.get('pending')}/{queue_data.get('capacity')}")
+        elif util is not None and util >= 0.70:
+            add(f"{key}_warning", "warning", "queue", "Presión de cola elevada", f"{key}: {queue_data.get('pending')}/{queue_data.get('capacity')}")
+        if int(queue_data.get("drops") or 0) > 0:
+            add(f"{key}_drops", "warning", "queue", "Mensajes descartados en cola", f"{key}: descartados={queue_data.get('drops')}")
+
+    order = {"critical": 0, "warning": 1, "info": 2}
+    incidents.sort(key=lambda item: (order.get(item.get("level"), 9), item.get("component", ""), item.get("code", "")))
+    status = "critical" if any(item["level"] == "critical" for item in incidents) else ("warning" if incidents else "ok")
+    return {
+        "ok": status != "critical",
+        "status": status,
+        "generated_at": int(time.time()),
+        "profile": profile,
+        "queues": queues,
+        "incidents": incidents,
+        "counts": {
+            "total": len(incidents),
+            "critical": sum(1 for item in incidents if item["level"] == "critical"),
+            "warning": sum(1 for item in incidents if item["level"] == "warning"),
+        },
+    }
+# ============================================================================
+
+
 class _BacklogServer(threading.Thread):
     """
     Servidor TCP ligero para dos propósitos:
@@ -6800,6 +7155,12 @@ class _BacklogServer(threading.Thread):
 
             cmd = (req.get("cmd") or "").upper()
             params = req.get("params") or {}
+
+            # --- v7.0.20: estado operativo y perfil de radio (solo lectura) ---
+            if cmd in {"OPS_STATUS", "RADIO_PROFILE_STATUS"}:
+                resp = _broker_operations_snapshot()
+                conn.sendall((json.dumps(resp, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
+                return
 
             # --- FETCH_BACKLOG (blindado para WebPanel / clientes antiguos) ---
             if cmd == "FETCH_BACKLOG":
