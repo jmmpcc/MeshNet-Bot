@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# v7.0.27
-# v7.0.27: unifica el versionado visible e interno del broker y WebPanel.
+# v7.0.28
+# v7.0.28: unifica el versionado visible e interno del broker y WebPanel.
 
 from __future__ import annotations
 """
-Meshtastic_Broker.py v7.0.27 — Broker MeshNet con servidor BBS y soporte de perfiles de radio.
+Meshtastic_Broker.py v7.0.28 — Broker MeshNet con servidor BBS y soporte de perfiles de radio.
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -1515,9 +1515,31 @@ class MeshCoreEmbeddedBridge:
             )
             discovery_payload = None
             if discover or not path_bytes:
+                send_discovery_sync = getattr(commands, "send_path_discovery_sync", None)
                 send_discovery = getattr(commands, "send_path_discovery", None)
                 wait_for_event = getattr(mc, "wait_for_event", None)
-                if callable(send_discovery):
+                event = None
+
+                # ``meshcore_py`` recomienda expresamente la variante síncrona.
+                # Esta API coordina internamente el envío y la recepción de
+                # PATH_RESPONSE, evita el warning deprecado y serializa la
+                # operación mediante el lock propio de peticiones MeshCore.
+                if callable(send_discovery_sync):
+                    event = await send_discovery_sync(
+                        contact,
+                        timeout=timeout,
+                        min_timeout=min(timeout, 5.0),
+                    )
+                    if event is None:
+                        raise RuntimeError("meshcore_path_discovery_no_response")
+                    if getattr(event, "type", None) == _MCEventType.ERROR:
+                        raise RuntimeError(
+                            f"meshcore_path_discovery_error: {getattr(event, 'payload', None)}"
+                        )
+
+                # Compatibilidad defensiva con versiones antiguas de
+                # ``meshcore_py`` que todavía no expongan la API síncrona.
+                elif callable(send_discovery):
                     if not callable(wait_for_event):
                         raise RuntimeError("meshcore_path_discovery_wait_unavailable")
 
@@ -1537,8 +1559,10 @@ class MeshCoreEmbeddedBridge:
                         if not wait_task.done():
                             wait_task.cancel()
                         raise
+                else:
+                    raise RuntimeError("meshcore_path_discovery_api_unavailable")
 
-                    if event is not None:
+                if event is not None:
                         discovery_payload = getattr(event, "payload", None)
                         if isinstance(discovery_payload, dict):
                             # ``meshcore_py`` publica PATH_RESPONSE con los
@@ -11395,9 +11419,9 @@ def main():
     init_broker_tasks()
 
     if meshcore_only:
-        print(f"🟢 Broker v7.0.27 listo en RADIO_PROFILE=meshcore_only; sirviendo en {args.bind}:{args.port}", flush=True)
+        print(f"🟢 Broker v7.0.28 listo en RADIO_PROFILE=meshcore_only; sirviendo en {args.bind}:{args.port}", flush=True)
     else:
-        print(f"🟢 Broker v7.0.27 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
+        print(f"🟢 Broker v7.0.28 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
     print("   Clientes pueden conectarse por TCP y leer líneas JSONL (una por evento).", flush=True)
 
     # === [NUEVO] Inicializar motor BBS (broker-side) ======================================
