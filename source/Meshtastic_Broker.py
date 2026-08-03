@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # v7.0.12
-# v7.0.24 WebPanel: corrige carrera de eventos y cálculo de saltos MeshCore.
+# v7.0.25 WebPanel: corrige el tipo de ruta y flags del traceroute MeshCore.
 
 from __future__ import annotations
 """
@@ -1579,8 +1579,23 @@ class MeshCoreEmbeddedBridge:
                     timeout=timeout,
                 )
             )
+            # ``meshcore_py.send_trace`` solo admite la ruta como ``str``,
+            # ``bytes`` o ``bytearray``. Pasar ``list(path_bytes)`` provoca el
+            # error ``unsupported_path_type`` observado desde el WebPanel.
+            #
+            # Los dos bits inferiores de ``flags`` codifican el ancho de hash
+            # usado por TRACE_DATA: 0=1 byte, 1=2 bytes, 2=4 bytes, 3=8 bytes.
+            trace_flag_by_width = {1: 0, 2: 1, 4: 2, 8: 3}
+            trace_flags = trace_flag_by_width.get(int(hash_width or 1))
+            if trace_flags is None:
+                if not wait_task.done():
+                    wait_task.cancel()
+                raise RuntimeError(
+                    f"meshcore_trace_unsupported_hash_width: {hash_width}"
+                )
+
             try:
-                sent = await send_trace(auth_code, tag, 0, list(path_bytes))
+                sent = await send_trace(auth_code, tag, trace_flags, bytes(path_bytes))
                 if getattr(sent, "type", None) == _MCEventType.ERROR:
                     raise RuntimeError(
                         f"meshcore_trace_send_error: {getattr(sent, 'payload', None)}"
