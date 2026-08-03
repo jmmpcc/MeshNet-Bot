@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # v7.0.12
-# v7.0.20 WebPanel: añadido OPS_STATUS de solo lectura sobre este broker actual.
+# v7.0.24 WebPanel: corrige carrera de eventos y cálculo de saltos MeshCore.
 
 from __future__ import annotations
 """
@@ -1338,6 +1338,290 @@ class MeshCoreEmbeddedBridge:
             "default_contact_ch": self.default_contact_ch,
         }
 
+    @staticmethod
+    def _meshcore_node_type(raw_type) -> tuple[int | None, str, str, bool | None]:
+        """Normaliza el tipo anunciado por MeshCore sin inferirlo por el alias.
+
+        Valores del protocolo Companion:
+            0 desconocido, 1 companion/chat, 2 repeater, 3 room, 4 sensor.
+
+        Devuelve ``(adv_type, node_type, node_type_label, can_repeat)``. Solo el
+        repetidor puro implica ``can_repeat=True`` de forma inequívoca. En room
+        o companion la capacidad de repetición depende de features del firmware
+        y se mantiene como desconocida si no viene declarada.
+        """
+        try:
+            value = int(raw_type)
+        except Exception:
+            value = None
+        mapping = {
+            0: ("unknown", "Desconocido", None),
+            1: ("companion", "Companion", None),
+            2: ("repeater", "Repetidor", True),
+            3: ("room", "Room Server", None),
+            4: ("sensor", "Sensor", False),
+        }
+        node_type, label, can_repeat = mapping.get(value, ("unknown", "Desconocido", None))
+        return value, node_type, label, can_repeat
+
+    @staticmethod
+    def _meshcore_path_bytes(value) -> bytes:
+        """Convierte ``out_path``/PATH_RESPONSE a bytes sin alterar su orden."""
+        if value is None:
+            return b""
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, bytearray):
+            return bytes(value)
+        if isinstance(value, (list, tuple)):
+            try:
+                return bytes(int(x) & 0xFF for x in value)
+            except Exception:
+                return b""
+        if isinstance(value, dict):
+            for key in ("path", "out_path", "path_hashes"):
+                if key in value:
+                    return MeshCoreEmbeddedBridge._meshcore_path_bytes(value.get(key))
+            return b""
+        text = str(value or "").strip()
+        if not text:
+            return b""
+        compact = re.sub(r"[^0-9a-fA-F]", "", text)
+        if compact and len(compact) % 2 == 0:
+            try:
+                return bytes.fromhex(compact)
+            except Exception:
+                pass
+        try:
+            return bytes(int(part.strip(), 0) & 0xFF for part in text.split(",") if part.strip())
+        except Exception:
+            return b""
+
+
+    @staticmethod
+    def _meshcore_path_geometry(path_value, hash_mode=None, path_len=None) -> tuple[bytes, int, int]:
+        """Normaliza una ruta MeshCore y calcula ancho de hash y número de saltos.
+
+        Parámetros:
+            path_value:
+                Ruta en bytes, hexadecimal, lista o estructura compatible.
+            hash_mode:
+                Modo MeshCore 0, 1 o 2; equivale a hashes de 1, 2 o 3 bytes.
+            path_len:
+                Número de saltos declarado por el firmware. Si es válido tiene
+                prioridad sobre el cálculo derivado del tamaño en bytes.
+
+        Devuelve:
+            ``(path_bytes, hash_width, hop_count)``.
+
+        Funcionalidad:
+            - Conserva exactamente los bytes de ruta.
+            - Normaliza el ancho a 1..3 bytes.
+            - Evita confundir bytes con saltos cuando faltan ``out_path_len``.
+        """
+        path_bytes = MeshCoreEmbeddedBridge._meshcore_path_bytes(path_value)
+        try:
+            mode = int(hash_mode) if hash_mode is not None else 0
+        except Exception:
+            mode = 0
+        hash_width = max(1, min(3, mode + 1))
+
+        try:
+            declared_len = int(path_len) if path_len is not None else -1
+        except Exception:
+            declared_len = -1
+
+        if declared_len >= 0:
+            hop_count = declared_len
+        else:
+            hop_count = len(path_bytes) // hash_width if path_bytes else 0
+
+        return path_bytes, hash_width, hop_count
+
+    def _meshcore_resolve_trace_hops(self, path_hashes, path_snrs, hash_width: int = 1) -> list[dict]:
+        """Resuelve hashes de ruta contra contactos conocidos sin elegir colisiones."""
+        raw_path = self._meshcore_path_bytes(path_hashes)
+        try:
+            hash_width = max(1, min(3, int(hash_width or 1)))
+        except Exception:
+            hash_width = 1
+        snrs = list(path_snrs or []) if isinstance(path_snrs, (list, tuple, bytes, bytearray)) else []
+        chunks = [raw_path[pos:pos + hash_width] for pos in range(0, len(raw_path), hash_width)]
+        hops = []
+        for idx, chunk_bytes in enumerate(chunks):
+            chunk = bytes(chunk_bytes).hex()
+            matches = self._mc_path_prefix_cache.get(chunk, [])
+            contact = matches[0] if len(matches) == 1 else None
+            hop = {
+                "index": idx + 1,
+                "hash": chunk,
+                "resolved": bool(contact),
+                "ambiguous": len(matches) > 1,
+                "name": self._meshcore_contact_display(contact, chunk) if contact else chunk,
+                "public_key": (contact or {}).get("public_key") if isinstance(contact, dict) else None,
+                "lat": (contact or {}).get("lat") if isinstance(contact, dict) else None,
+                "lon": (contact or {}).get("lon") if isinstance(contact, dict) else None,
+                "snr": snrs[idx] if idx < len(snrs) else None,
+            }
+            if len(matches) > 1:
+                hop["name"] = f"{chunk} (prefijo ambiguo: {len(matches)} contactos)"
+            hops.append(hop)
+        if len(snrs) > len(chunks):
+            hops.append({
+                "index": len(hops) + 1,
+                "hash": "destination",
+                "resolved": True,
+                "ambiguous": False,
+                "name": "Destino",
+                "public_key": None,
+                "lat": None,
+                "lon": None,
+                "snr": snrs[len(chunks)],
+                "destination": True,
+            })
+        return hops
+
+    def trace_contact(self, contact_prefix: str, *, discover: bool = False, timeout: float = 20.0) -> dict:
+        """Consulta/descubre la ruta y ejecuta TRACE_DATA en el loop MeshCore.
+
+        No abre otra conexión. El control del WebPanel llama a este método desde
+        otro hilo y la corrutina se ejecuta mediante ``run_coroutine_threadsafe``.
+        """
+        prefix = str(contact_prefix or "").strip()
+        if not prefix:
+            raise ValueError("missing_contact_prefix")
+        mc, loop = self._mc, self._loop
+        if mc is None or loop is None or not loop.is_running() or not self._connected:
+            raise RuntimeError("meshcore_not_connected")
+        timeout = max(5.0, min(float(timeout or 20.0), 60.0))
+
+        async def _run_trace():
+            contact = None
+            getter = getattr(mc, "get_contact_by_key_prefix", None)
+            if callable(getter):
+                contact = getter(prefix)
+            if not isinstance(contact, dict):
+                raise RuntimeError("meshcore_contact_not_found")
+            self._meshcore_remember_contact(contact)
+
+            commands = getattr(mc, "commands", None)
+            if commands is None:
+                raise RuntimeError("meshcore_commands_unavailable")
+
+            path_bytes, hash_width, _ = self._meshcore_path_geometry(
+                contact.get("out_path"),
+                contact.get("out_path_hash_mode"),
+                contact.get("out_path_len"),
+            )
+            discovery_payload = None
+            if discover or not path_bytes:
+                send_discovery = getattr(commands, "send_path_discovery", None)
+                wait_for_event = getattr(mc, "wait_for_event", None)
+                if callable(send_discovery):
+                    if not callable(wait_for_event):
+                        raise RuntimeError("meshcore_path_discovery_wait_unavailable")
+
+                    # Registrar la espera ANTES del envío evita perder una
+                    # PATH_RESPONSE que llegue inmediatamente desde el companion.
+                    wait_task = asyncio.create_task(
+                        wait_for_event(_MCEventType.PATH_RESPONSE, timeout=timeout)
+                    )
+                    try:
+                        sent = await send_discovery(contact)
+                        if getattr(sent, "type", None) == _MCEventType.ERROR:
+                            raise RuntimeError(
+                                f"meshcore_path_discovery_error: {getattr(sent, 'payload', None)}"
+                            )
+                        event = await wait_task
+                    except Exception:
+                        if not wait_task.done():
+                            wait_task.cancel()
+                        raise
+
+                    if event is not None:
+                        discovery_payload = getattr(event, "payload", None)
+                        if isinstance(discovery_payload, dict):
+                            candidate_value = (
+                                discovery_payload.get("path")
+                                if discovery_payload.get("path") is not None
+                                else discovery_payload
+                            )
+                            candidate, candidate_width, _ = self._meshcore_path_geometry(
+                                candidate_value,
+                                discovery_payload.get("path_hash_mode"),
+                                discovery_payload.get("path_len"),
+                            )
+                        else:
+                            candidate, candidate_width, _ = self._meshcore_path_geometry(
+                                discovery_payload
+                            )
+                        if candidate:
+                            path_bytes = candidate
+                            hash_width = candidate_width
+
+            if not path_bytes:
+                raise RuntimeError("meshcore_no_directed_path")
+
+            send_trace = getattr(commands, "send_trace", None)
+            wait_for_event = getattr(mc, "wait_for_event", None)
+            if not callable(send_trace) or not callable(wait_for_event):
+                raise RuntimeError("meshcore_trace_api_unavailable")
+
+            tag = int.from_bytes(os.urandom(4), "little", signed=False)
+            auth_code = int.from_bytes(os.urandom(4), "little", signed=False)
+
+            # Registrar la espera ANTES del envío evita perder TRACE_DATA si la
+            # respuesta se procesa durante el retorno de send_trace().
+            wait_task = asyncio.create_task(
+                wait_for_event(
+                    _MCEventType.TRACE_DATA,
+                    attribute_filters={"tag": tag},
+                    timeout=timeout,
+                )
+            )
+            try:
+                sent = await send_trace(auth_code, tag, 0, list(path_bytes))
+                if getattr(sent, "type", None) == _MCEventType.ERROR:
+                    raise RuntimeError(
+                        f"meshcore_trace_send_error: {getattr(sent, 'payload', None)}"
+                    )
+                event = await wait_task
+            except Exception:
+                if not wait_task.done():
+                    wait_task.cancel()
+                raise
+            if event is None:
+                raise TimeoutError("meshcore_trace_timeout")
+            payload = getattr(event, "payload", None) or {}
+            if not isinstance(payload, dict):
+                payload = {"raw": str(payload)}
+            path_hashes = payload.get("path_hashes", path_bytes)
+            path_snrs = payload.get("path_snrs") or []
+            return {
+                "ok": True,
+                "contact": {
+                    "name": contact.get("adv_name") or contact.get("name"),
+                    "public_key": contact.get("public_key"),
+                    "prefix": prefix,
+                },
+                "tag": tag,
+                "auth_code": auth_code,
+                "path_hex": self._meshcore_path_bytes(path_hashes).hex(),
+                "path_len": int(len(self._meshcore_path_bytes(path_hashes)) / max(1, hash_width)),
+                "path_hash_width": hash_width,
+                "path_snrs": list(path_snrs) if isinstance(path_snrs, (list, tuple, bytes, bytearray)) else [],
+                "hops": self._meshcore_resolve_trace_hops(path_hashes, path_snrs, hash_width=hash_width),
+                "discovery_used": bool(discover or discovery_payload is not None),
+                "payload": payload,
+                "ts": int(time.time()),
+            }
+
+        future = asyncio.run_coroutine_threadsafe(_run_trace(), loop)
+        try:
+            return future.result(timeout=timeout + 3.0)
+        except Exception as e:
+            raise RuntimeError(f"meshcore_trace_failed: {type(e).__name__}: {e}") from e
+
     def list_contacts(self, limit: int = 80) -> list[dict]:
         """
         Devuelve contactos conocidos por la sesión MeshCore embebida.
@@ -1408,12 +1692,26 @@ class MeshCoreEmbeddedBridge:
                     contact_id = c.get("id") or c.get("prefix")
                     name = c.get("name") or c.get("adv_name") or c.get("alias") or c.get("label")
                     last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("last_advert") or c.get("seen") or c.get("ts")
+                    adv_type_raw = c.get("adv_type") if c.get("adv_type") is not None else c.get("type")
+                    flags = c.get("flags")
+                    last_advert = c.get("last_advert")
+                    lastmod = c.get("lastmod")
+                    feat1 = c.get("feat1")
+                    feat2 = c.get("feat2")
                 else:
                     public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None)
                     display_prefix = getattr(c, "pubkey_prefix", None) or getattr(c, "key_prefix", None)
                     contact_id = getattr(c, "id", None) or getattr(c, "prefix", None)
                     name = getattr(c, "name", None) or getattr(c, "adv_name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
                     last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "last_advert", None) or getattr(c, "seen", None)
+                    adv_type_raw = getattr(c, "adv_type", None)
+                    if adv_type_raw is None:
+                        adv_type_raw = getattr(c, "type", None)
+                    flags = getattr(c, "flags", None)
+                    last_advert = getattr(c, "last_advert", None)
+                    lastmod = getattr(c, "lastmod", None)
+                    feat1 = getattr(c, "feat1", None)
+                    feat2 = getattr(c, "feat2", None)
 
                 display_id = (str(display_prefix).strip() if display_prefix is not None else "")
                 contact_id = (str(contact_id).strip() if contact_id is not None else "")
@@ -1426,6 +1724,15 @@ class MeshCoreEmbeddedBridge:
                     continue
                 seen.add(dm_key)
 
+                adv_type, node_type, node_type_label, can_repeat = self._meshcore_node_type(adv_type_raw)
+                out_path_value = c.get("out_path") if isinstance(c, dict) else getattr(c, "out_path", None)
+                out_path_mode = c.get("out_path_hash_mode") if isinstance(c, dict) else getattr(c, "out_path_hash_mode", None)
+                out_path_len = c.get("out_path_len") if isinstance(c, dict) else getattr(c, "out_path_len", None)
+                path_bytes, path_hash_width, path_hops = self._meshcore_path_geometry(
+                    out_path_value,
+                    out_path_mode,
+                    out_path_len,
+                )
                 contact_out = {
                     "prefix": display_id,
                     "contact_id": contact_id or None,
@@ -1433,6 +1740,20 @@ class MeshCoreEmbeddedBridge:
                     "public_key": public_key or dm_key,
                     "name": (str(name).strip() if name is not None else "") or None,
                     "last_seen": int(last_seen) if isinstance(last_seen, (int, float)) else None,
+                    "adv_type": adv_type,
+                    "node_type": node_type,
+                    "node_type_label": node_type_label,
+                    "can_repeat": can_repeat,
+                    "flags": flags,
+                    "last_advert": last_advert,
+                    "lastmod": lastmod,
+                    "feat1": feat1,
+                    "feat2": feat2,
+                    "out_path_hex": path_bytes.hex(),
+                    "out_path_hash_mode": out_path_mode,
+                    "out_path_hash_width": path_hash_width,
+                    "out_path_hops": path_hops,
+                    "has_directed_path": bool(path_bytes),
                 }
                 for key in ("adv_lat", "adv_lon", "lat", "lon", "out_path"):
                     if isinstance(c, dict) and c.get(key) is not None:
@@ -7491,6 +7812,22 @@ class _BacklogServer(threading.Thread):
                     resp = {"ok": False, "error": f"meshcore_send_failed: {type(e).__name__}: {e}"}
 
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                return
+
+            elif cmd == "MESHCORE_TRACE_PATH":
+                try:
+                    params = req.get("params") or {}
+                    contact_prefix = str(params.get("contact_prefix") or params.get("prefix") or "").strip()
+                    discover = bool(params.get("discover", False))
+                    timeout = float(params.get("timeout") or 20.0)
+                    eng = globals().get("MESHCORE_ENGINE")
+                    if not eng or not hasattr(eng, "trace_contact"):
+                        resp = {"ok": False, "error": "meshcore_trace_unavailable"}
+                    else:
+                        resp = eng.trace_contact(contact_prefix, discover=discover, timeout=timeout)
+                except Exception as e:
+                    resp = {"ok": False, "error": f"meshcore_trace_failed: {type(e).__name__}: {e}"}
+                conn.sendall((json.dumps(resp, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
                 return
 
             elif cmd == "MESHCORE_CONTACTS":
