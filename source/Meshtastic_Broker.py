@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# v7.0.12
-# v7.0.25 WebPanel: corrige el tipo de ruta y flags del traceroute MeshCore.
+# v7.0.27
+# v7.0.27: unifica el versionado visible e interno del broker y WebPanel.
 
 from __future__ import annotations
 """
-Meshtastic_Broker_v7.0.14_B.py Incluye servidor BBS Meshtastic server corregiso por DM
+Meshtastic_Broker.py v7.0.27 — Broker MeshNet con servidor BBS y soporte de perfiles de radio.
 Modo añadido: Meshcore embebido
 19/02/2026 Se añade notificacion de RX MESHCORE en nodo A y Alias de MESHCORE del emisor RX
     [MC:<CANAL_LOGICO>:<ALIAS>] y el alias se resuelve por trama (si llega) y por heurística (si no llega).
@@ -1541,16 +1541,40 @@ class MeshCoreEmbeddedBridge:
                     if event is not None:
                         discovery_payload = getattr(event, "payload", None)
                         if isinstance(discovery_payload, dict):
-                            candidate_value = (
-                                discovery_payload.get("path")
-                                if discovery_payload.get("path") is not None
-                                else discovery_payload
-                            )
-                            candidate, candidate_width, _ = self._meshcore_path_geometry(
-                                candidate_value,
-                                discovery_payload.get("path_hash_mode"),
-                                discovery_payload.get("path_len"),
-                            )
+                            # ``meshcore_py`` publica PATH_RESPONSE con los
+                            # nombres reales del protocolo: ``out_path``,
+                            # ``out_path_len`` y ``out_path_hash_len``. Las
+                            # versiones anteriores buscaban ``path`` y
+                            # ``path_hash_mode``, por lo que descartaban una
+                            # ruta descubierta válida y terminaban en
+                            # ``meshcore_no_directed_path``.
+                            candidate_value = discovery_payload.get("out_path")
+                            candidate_len = discovery_payload.get("out_path_len")
+                            hash_len_raw = discovery_payload.get("out_path_hash_len")
+
+                            # Compatibilidad defensiva con implementaciones
+                            # antiguas o forks que aún devuelvan ``path``.
+                            if candidate_value is None:
+                                candidate_value = discovery_payload.get("path")
+                            if candidate_len is None:
+                                candidate_len = discovery_payload.get("path_len")
+
+                            if hash_len_raw is not None:
+                                try:
+                                    candidate_width = max(1, int(hash_len_raw))
+                                except Exception:
+                                    candidate_width = 1
+                                candidate, _, _ = self._meshcore_path_geometry(
+                                    candidate_value,
+                                    candidate_width - 1,
+                                    candidate_len,
+                                )
+                            else:
+                                candidate, candidate_width, _ = self._meshcore_path_geometry(
+                                    candidate_value,
+                                    discovery_payload.get("path_hash_mode"),
+                                    candidate_len,
+                                )
                         else:
                             candidate, candidate_width, _ = self._meshcore_path_geometry(
                                 discovery_payload
@@ -1610,8 +1634,28 @@ class MeshCoreEmbeddedBridge:
             payload = getattr(event, "payload", None) or {}
             if not isinstance(payload, dict):
                 payload = {"raw": str(payload)}
-            path_hashes = payload.get("path_hashes", path_bytes)
-            path_snrs = payload.get("path_snrs") or []
+            # ``meshcore_py`` actual entrega TRACE_DATA en ``payload["path"]``
+            # como una lista de nodos ``{"hash": ..., "snr": ...}`` y un
+            # último elemento que contiene únicamente el SNR del destino. Se
+            # conserva compatibilidad con payloads antiguos que expongan
+            # ``path_hashes``/``path_snrs``.
+            trace_nodes = payload.get("path")
+            if isinstance(trace_nodes, list):
+                trace_hash_parts = []
+                trace_snr_values = []
+                for node in trace_nodes:
+                    if not isinstance(node, dict):
+                        continue
+                    node_hash = node.get("hash")
+                    if node_hash not in (None, ""):
+                        trace_hash_parts.append(str(node_hash))
+                    if node.get("snr") is not None:
+                        trace_snr_values.append(node.get("snr"))
+                path_hashes = "".join(trace_hash_parts) if trace_hash_parts else path_bytes
+                path_snrs = trace_snr_values
+            else:
+                path_hashes = payload.get("path_hashes", path_bytes)
+                path_snrs = payload.get("path_snrs") or []
             return {
                 "ok": True,
                 "contact": {
@@ -11351,9 +11395,9 @@ def main():
     init_broker_tasks()
 
     if meshcore_only:
-        print(f"🟢 Broker v7.0.0 listo en RADIO_PROFILE=meshcore_only; sirviendo en {args.bind}:{args.port}", flush=True)
+        print(f"🟢 Broker v7.0.27 listo en RADIO_PROFILE=meshcore_only; sirviendo en {args.bind}:{args.port}", flush=True)
     else:
-        print(f"🟢 Broker v7.0.0 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
+        print(f"🟢 Broker v7.0.27 listo. Conectando a nodo {args.host} y sirviendo en {args.bind}:{args.port}", flush=True)
     print("   Clientes pueden conectarse por TCP y leer líneas JSONL (una por evento).", flush=True)
 
     # === [NUEVO] Inicializar motor BBS (broker-side) ======================================
