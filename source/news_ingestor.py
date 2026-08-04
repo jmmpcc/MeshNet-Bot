@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# news_ingestor_v7.0.12.py  (host-side)
+# news_ingestor_v6.2.5.py  (host-side)
 
 import os
 import re
@@ -58,7 +58,7 @@ DEFAULT_RSS_SOURCES = [
     {"source": "linuxadictos", "url": "https://www.linuxadictos.com/feed", "tags": "linux"},
 
     # ⚙️ Astronomia
-    #{"source": "oan", "url": "https://www.oan.es/rss", "tags": "astronomia"},
+    {"source": "oan", "url": "https://www.oan.es/rss", "tags": "astronomia"},
     {"source": "iac", "url": "https://www.iac.es/es/rss.xml", "tags": "astronomia"},
     {"source": "eureka", "url": "https://danielmarin.naukas.com/feed/", "tags": "astronomia"},
     
@@ -235,6 +235,25 @@ def insert_news(con: sqlite3.Connection, item: dict) -> bool:
         )
         return True
     except sqlite3.IntegrityError:
+        # Migración transparente: si la misma noticia ya existe por content_hash
+        # pero su URL almacenada era una URL corta antigua, recupera la URL
+        # canónica original obtenida del RSS. No duplica registros.
+        try:
+            row = con.execute(
+                "SELECT id, url FROM news WHERE content_hash=? LIMIT 1",
+                (item["content_hash"],),
+            ).fetchone()
+            if row and str(row[1] or "").strip() != str(item["url"] or "").strip():
+                con.execute(
+                    "UPDATE news SET url=? WHERE id=?",
+                    (item["url"], int(row[0])),
+                )
+        except sqlite3.IntegrityError:
+            # Otra fila ya puede poseer esa URL original. Se conserva la base sin
+            # borrar ni fusionar noticias automáticamente.
+            pass
+        except Exception:
+            pass
         return False
 
 
@@ -393,7 +412,10 @@ def main(argv=None) -> int:
                     if not link_raw:
                         continue
 
-                    link = shorten_url(link_raw)
+                    # La tabla news conserva siempre la URL canónica original.
+                    # El acortamiento se realiza únicamente al preparar la salida
+                    # en el WebPanel/BBS, donde además se valida el destino.
+                    link = link_raw
 
 
                     summary = strip_html(getattr(e, "summary", "") or getattr(e, "description", "") or "")
