@@ -41,16 +41,17 @@ class EmergencyDispatcherTests(unittest.TestCase):
         self.assertEqual(result["aprsis_bulletin"]["reason"], "disabled")
         self.assertEqual(result["voice_rf"]["reason"], "disabled")
 
-    def test_voice_never_transmits_in_this_phase(self):
+    def test_voice_service_disabled_never_transmits(self):
         env = {
             "EMERGENCIAS_VOICE_RF_ENABLED": "1",
             "EMERGENCIAS_VOICE_RF_AUTOMATIC": "1",
             "EMERGENCIAS_VOICE_RF_MIN_LEVEL": "high",
+            "VOICE_RF_SERVICE_ENABLED": "0",
         }
         with patch.dict(os.environ, env, clear=True):
             result = dispatch_secondary_outputs(make_event(), "EMERG PRUEBA")
         self.assertFalse(result["voice_rf"]["sent"])
-        self.assertEqual(result["voice_rf"]["reason"], "voice_gateway_not_deployed")
+        self.assertEqual(result["voice_rf"]["reason"], "service_disabled")
 
     @patch("tools.emergencias_guardia.emergencias.emergency_dispatcher._send_aprsis_bulletin")
     def test_aprsis_failure_is_isolated(self, mocked):

@@ -1,0 +1,19 @@
+[Unit]
+Description=MeshNet-Bot Voice RF Gateway (sintesis segura, RF desactivada)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=meshnet
+Group=meshnet
+WorkingDirectory=/home/meshnet/MeshNet-Bot
+EnvironmentFile=/home/meshnet/MeshNet-Bot/.env
+ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/voice_rf_gateway/voice_rf_gateway.py serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import socket
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, asdict
 from typing import Any
 
@@ -53,21 +55,74 @@ def _aprsis_bulletin_enabled() -> bool:
     )
 
 
-def _voice_result(event: Event) -> dict[str, Any]:
-    """Devuelve el estado de voz RF sin realizar ninguna transmisión.
+def _voice_result(event: Event, message: str) -> dict[str, Any]:
+    """Solicita síntesis al servicio Voice RF cuando está autorizada.
 
-    La salida se deja preparada para la fase de voz, pero permanece bloqueada
-    por defecto. En esta fase no existe acceso a PTT, audio ni radio.
+    Esta función no controla audio, PTT ni radio. Envía un evento al servicio
+    local desplegado en v7.0.34, que únicamente genera/valida un WAV y devuelve
+    siempre `sent=false`. Las tres autorizaciones son independientes:
+
+    - EMERGENCIAS_VOICE_RF_ENABLED
+    - EMERGENCIAS_VOICE_RF_AUTOMATIC
+    - VOICE_RF_SERVICE_ENABLED
     """
     if not _enabled("EMERGENCIAS_VOICE_RF_ENABLED"):
-        return {"ok": True, "sent": False, "reason": "disabled"}
+        return {"ok": True, "generated": False, "sent": False, "reason": "disabled"}
     if not _enabled("EMERGENCIAS_VOICE_RF_AUTOMATIC"):
-        return {"ok": True, "sent": False, "reason": "automatic_disabled"}
+        return {
+            "ok": True,
+            "generated": False,
+            "sent": False,
+            "reason": "automatic_disabled",
+        }
     minimum = str(os.getenv("EMERGENCIAS_VOICE_RF_MIN_LEVEL", "high") or "high").strip().lower()
     if SEVERITY_RANK.get(event.severity, 0) < SEVERITY_RANK.get(minimum, SEVERITY_RANK["high"]):
-        return {"ok": True, "sent": False, "reason": "severity_below_threshold"}
-    # Defensa adicional: esta fase nunca transmite voz aunque una variable se active por error.
-    return {"ok": False, "sent": False, "reason": "voice_gateway_not_deployed"}
+        return {
+            "ok": True,
+            "generated": False,
+            "sent": False,
+            "reason": "severity_below_threshold",
+        }
+    if not _enabled("VOICE_RF_SERVICE_ENABLED"):
+        return {
+            "ok": True,
+            "generated": False,
+            "sent": False,
+            "reason": "service_disabled",
+        }
+
+    host = str(os.getenv("VOICE_RF_SERVICE_HOST", "127.0.0.1") or "127.0.0.1").strip()
+    port = int(os.getenv("VOICE_RF_SERVICE_PORT", "8790") or "8790")
+    timeout = max(0.5, float(os.getenv("VOICE_RF_SERVICE_TIMEOUT_SEC", "15") or "15"))
+    payload = {
+        "source": "emergencias",
+        "event_id": event.event_id,
+        "severity": event.severity,
+        "status": event.status,
+        "category": event.category,
+        "province": event.province,
+        "municipality": event.municipality,
+        "text": message,
+        "is_test": bool(event.metadata.get("is_test", False)),
+    }
+    request = urllib.request.Request(
+        f"http://{host}:{port}/dispatch",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = response.read(65536)
+    except urllib.error.HTTPError as exc:
+        data = exc.read(65536)
+    result = json.loads(data.decode("utf-8", errors="replace"))
+    return result if isinstance(result, dict) else {
+        "ok": False,
+        "generated": False,
+        "sent": False,
+        "reason": "invalid_response",
+    }
 
 
 def _send_aprsis_bulletin(event: Event, message: str) -> dict[str, Any]:
@@ -130,5 +185,5 @@ def dispatch_secondary_outputs(event: Event, message: str) -> dict[str, Any]:
         }
     return DispatchResult(
         aprsis_bulletin=aprsis,
-        voice_rf=_voice_result(event),
+        voice_rf=_voice_result(event, message),
     ).to_dict()

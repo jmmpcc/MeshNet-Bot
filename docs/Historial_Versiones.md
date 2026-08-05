@@ -582,3 +582,9 @@ Esto permite que la Raspberry/PC principal se conecte sin firewall local.
 - Resultado estructurado para APRS-IS y futura voz RF.
 - Voz RF bloqueada y sin acceso a PTT/audio.
 - Árbitro de fichero preparado para el único transmisor, todavía desactivado.
+
+## v7.0.34 — 2026-08-05
+
+Fase 2C: despliegue seguro del gateway de voz para emergencias. Incluye síntesis
+local, diagnóstico, API y validación WAV, permaneciendo desactivado y sin acceso
+al transmisor, PTT o reproducción de audio.
