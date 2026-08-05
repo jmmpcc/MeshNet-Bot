@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from .emergency_dispatcher import dispatch_secondary_outputs
 from .formatters import compact_messages
 from .models import Event, SEVERITY_RANK
 from .storage import load_state, save_state
@@ -196,26 +197,20 @@ def send_route(
         "event_ids": [event.event_id for event in selected],
     })
     save_state(state)
-    aprsis_bulletins = []
+    secondary_outputs = []
     if route == "emergencias":
         for event in selected:
-            try:
-                event_message = compact_messages(
-                    [event],
-                    max_bytes=int(notifications.get("max_bytes", 140)),
-                    prefix=ROUTE_PREFIXES[route],
-                )[0]
-                aprsis_bulletins.append(_send_aprsis_bulletin(event, event_message))
-            except Exception as exc:
-                aprsis_bulletins.append({
-                    "ok": False, "sent": False,
-                    "reason": "request_failed",
-                    "error": f"{type(exc).__name__}: {exc}",
-                })
+            event_message = compact_messages(
+                [event],
+                max_bytes=int(notifications.get("max_bytes", 140)),
+                prefix=ROUTE_PREFIXES[route],
+            )[0]
+            secondary_outputs.append(dispatch_secondary_outputs(event, event_message))
     return {
         "sent": True, "route": route, "target": target,
         "events": len(selected), "messages": len(messages), "results": results,
-        "aprsis_bulletins": aprsis_bulletins,
+        "secondary_outputs": secondary_outputs,
+        "aprsis_bulletins": [item["aprsis_bulletin"] for item in secondary_outputs],
     }
 
 
@@ -411,13 +406,12 @@ def _deliver_pending(
                 report["failed"] += 1
                 break
             if route == "emergencias":
-                try:
-                    _send_aprsis_bulletin(event, message)
-                except Exception as exc:
-                    # APRS-IS es una salida secundaria: no revierte un envío Mesh correcto.
+                secondary = dispatch_secondary_outputs(event, message)
+                aprsis_result = secondary.get("aprsis_bulletin", {})
+                if not aprsis_result.get("ok", True):
                     print(
                         f"[emergencias] APRS-IS bulletin WARN event={event.event_id}: "
-                        f"{type(exc).__name__}: {exc}",
+                        f"{aprsis_result}",
                         flush=True,
                     )
             pending.remove(item)
@@ -449,51 +443,6 @@ def _route_is_configured(config: dict[str, Any], route: str) -> bool:
     except (KeyError, TypeError, ValueError):
         return False
 
-
-
-def _aprsis_bulletin_enabled() -> bool:
-    """Autoriza boletines solo cuando la salida APRS de aplicaciones y APRS-IS están activas."""
-    truthy = {"1", "true", "yes", "on", "si", "sí", "y"}
-    enabled = lambda name: str(os.getenv(name, "0") or "0").strip().lower() in truthy
-    allowed = {
-        item.strip().lower()
-        for item in str(os.getenv("APPS_APRS_ALLOWED_SOURCES", "") or "").split(",")
-        if item.strip()
-    }
-    return (
-        enabled("APPS_APRS_ENABLED")
-        and "emergencias" in allowed
-        and enabled("EMERGENCIAS_APRS_ENABLED")
-        and enabled("APRSIS_PUSH_ENABLED")
-        and enabled("APRSIS_EMERGENCY_BULLETIN_ENABLED")
-    )
-
-
-def _send_aprsis_bulletin(event: Event, message: str) -> dict[str, Any]:
-    """Solicita al gateway APRS el boletín APRS-IS sin abrir otra conexión APRS-IS."""
-    if not _aprsis_bulletin_enabled():
-        return {"ok": True, "sent": False, "reason": "disabled"}
-    if SEVERITY_RANK.get(event.severity, 0) < SEVERITY_RANK["high"]:
-        return {"ok": True, "sent": False, "reason": "severity_below_threshold"}
-
-    host = str(os.getenv("APRS_CTRL_HOST", "127.0.0.1") or "127.0.0.1").strip()
-    port = int(os.getenv("APRS_CTRL_PORT", "9464") or "9464")
-    timeout = max(0.5, float(os.getenv("APRS_CTRL_ACK_TIMEOUT", "8") or "8"))
-    payload = {
-        "mode": "aprsis_emergency_bulletin",
-        "origin": "app_emergencias",
-        "event_id": event.event_id,
-        "severity": event.severity,
-        "status": event.status,
-        "text": message,
-    }
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
-        client.settimeout(timeout)
-        client.sendto(data, (host, port))
-        response, _ = client.recvfrom(65536)
-    result = json.loads(response.decode("utf-8", errors="replace"))
-    return result if isinstance(result, dict) else {"ok": False, "sent": False, "reason": "invalid_response"}
 
 
 def _send_message(

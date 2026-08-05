@@ -1,11 +1,3 @@
-
-## v7.0.32 — Boletines públicos APRS-IS para emergencias
-
-- Publicación opcional de emergencias de nivel alto o crítico mediante `BLN0`–`BLN9`.
-- Reutilización de la conexión APRS-IS persistente del gateway.
-- Estado persistente, deduplicación y control de intervalo.
-- Desactivado por defecto; no altera APRS RF ni el envío Mesh existente.
-
 ## 🧾 Historial de versiones
 
 ## v7.0.21 — Validación preventiva de perfiles de radio
@@ -582,3 +574,11 @@ Esto permite que la Raspberry/PC principal se conecte sin firewall local.
   Soundmodem/Direwolf	  PC remoto	          Escucha en 0.0.0.0:8100
 
 ```
+
+## v7.0.33 — Emergency Dispatcher y árbitro RF base
+
+- Centralización de las salidas secundarias de Emergencias.
+- Conservación del envío Mesh y del boletín APRS-IS v7.0.32.
+- Resultado estructurado para APRS-IS y futura voz RF.
+- Voz RF bloqueada y sin acceso a PTT/audio.
+- Árbitro de fichero preparado para el único transmisor, todavía desactivado.
