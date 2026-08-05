@@ -1,3 +1,11 @@
+
+## v7.0.32 — Boletines públicos APRS-IS para emergencias
+
+- Publicación opcional de emergencias de nivel alto o crítico mediante `BLN0`–`BLN9`.
+- Reutilización de la conexión APRS-IS persistente del gateway.
+- Estado persistente, deduplicación y control de intervalo.
+- Desactivado por defecto; no altera APRS RF ni el envío Mesh existente.
+
 ## 🧾 Historial de versiones
 
 ## v7.0.21 — Validación preventiva de perfiles de radio

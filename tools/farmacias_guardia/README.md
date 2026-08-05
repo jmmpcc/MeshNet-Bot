@@ -1060,3 +1060,40 @@ Para observarlo:
 ```bash
 journalctl -u meshnet-farmacias-api.service -f
 ```
+
+## Salida APRS opcional — v7.0.31
+
+Farmacias puede emitir un resumen compacto por la pasarela APRS existente sin
+acceder directamente a KISS, soundmodem ni Direwolf. El envío Mesh conserva su
+flujo actual y se completa antes de solicitar APRS.
+
+La aplicación reutiliza las variables existentes `APRS_CTRL_HOST`,
+`APRS_CTRL_PORT`, `APRS_MAX_LEN`, `APRS_CTRL_ACK_TIMEOUT` y `APRS_BOT_PATH`.
+Añada al `.env` propio de Farmacias:
+
+```dotenv
+APPS_APRS_ENABLED=0
+APPS_APRS_ALLOWED_SOURCES=farmacias
+APPS_APRS_DESTINATION=broadcast
+APPS_APRS_MAX_CHUNKS=2
+APPS_APRS_PATH=
+
+FARMACIAS_APRS_ENABLED=0
+FARMACIAS_APRS_AUTOMATIC=0
+FARMACIAS_APRS_DESTINATION=broadcast
+```
+
+Envío manual, una vez activados los dos interruptores:
+
+```bash
+python3 farmacias_guardia.py send --aprs
+```
+
+Para permitir APRS desde el servicio diario, configure además:
+
+```dotenv
+FARMACIAS_APRS_AUTOMATIC=1
+```
+
+Con los valores predeterminados no se abre ningún socket APRS ni se genera
+tráfico RF adicional.

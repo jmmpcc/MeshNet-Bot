@@ -445,5 +445,26 @@ class FarmaciasAppTests(unittest.TestCase):
                 os.environ["FARMACIAS_MESHCORE_CHANNEL"] = original_channel
 
 
+    def test_farmacias_aprs_disabled_does_not_call_dispatcher(self):
+        with (
+            mock.patch.dict(os.environ, {"FARMACIAS_APRS_ENABLED": "0"}, clear=False),
+            mock.patch.object(app, "send_application_aprs") as dispatcher,
+        ):
+            result = app.send_farmacias_aprs(requested=True)
+        self.assertTrue(result["skipped"])
+        dispatcher.assert_not_called()
+
+    def test_aprs_summary_is_compact(self):
+        pharmacies = [
+            app.Pharmacy("A", "Calle 1", "1", "Zaragoza", "Centro", "G", "2026-08-05", "1"),
+            app.Pharmacy("B", "Calle 2", "2", "Utebo", "Utebo", "G", "2026-08-05", "2"),
+        ]
+        summary = app.farmacias_aprs_summary(pharmacies)
+        self.assertIn("2 guardias", summary)
+        self.assertIn("Utebo", summary)
+        self.assertIn("Zaragoza", summary)
+        self.assertNotIn("Calle 1", summary)
+
+
 if __name__ == "__main__":
     unittest.main()

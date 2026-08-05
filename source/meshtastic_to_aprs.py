@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-meshtastic_to_aprs.py (v7.0.12)
+meshtastic_to_aprs.py (v7.0.32)
 Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
 - /aprs (bot) -> UDP local -> TX APRS (troceo automático).
@@ -14,7 +14,9 @@ Sin verificacion APRS-IS
 """
 
 from __future__ import annotations
-import asyncio, json, os, re, socket, threading
+import asyncio, hashlib, json, os, re, socket, threading
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, List, Tuple
 import aprslib
 
@@ -264,6 +266,21 @@ APRSIS_PUSH_CHANNELS_RAW = (os.getenv("APRSIS_PUSH_CHANNELS", "all") or "all").s
 APRSIS_PUSH_PREFIX = int(os.getenv("APRSIS_PUSH_PREFIX", "1") or "1")
 APRSIS_PUSH_MIN_GAP_S = float(os.getenv("APRSIS_PUSH_MIN_GAP_S", "1.0") or "1.0")
 
+# --- Boletines públicos APRS-IS para emergencias confirmadas ---
+# Esta salida reutiliza la misma conexión APRS-IS persistente del gateway.
+# Permanece desactivada salvo doble autorización: APRSIS_PUSH_ENABLED y
+# APRSIS_EMERGENCY_BULLETIN_ENABLED.
+APRSIS_EMERGENCY_BULLETIN_ENABLED = int(os.getenv("APRSIS_EMERGENCY_BULLETIN_ENABLED", "0") or "0")
+APRSIS_EMERGENCY_BULLETIN_MIN_LEVEL = (os.getenv("APRSIS_EMERGENCY_BULLETIN_MIN_LEVEL", "high") or "high").strip().lower()
+APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC = max(0.0, float(os.getenv("APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC", "300") or "300"))
+APRSIS_EMERGENCY_BULLETIN_DEDUP_SEC = max(0.0, float(os.getenv("APRSIS_EMERGENCY_BULLETIN_DEDUP_SEC", "1800") or "1800"))
+APRSIS_EMERGENCY_BULLETIN_STATE_PATH = Path(os.getenv(
+    "APRSIS_EMERGENCY_BULLETIN_STATE_PATH",
+    os.path.join(os.getenv("BOT_DATA_DIR", "/app/bot_data"), "aprsis_emergency_bulletins.json"),
+))
+_APRSIS_EMERGENCY_LOCK = asyncio.Lock()
+_APRSIS_EMERGENCY_LEVELS = {"low": 10, "medium": 20, "high": 30, "critical": 40}
+
 _APRSIS_PUSH_LAST_TS = 0.0
 
 # --- IDs de mensajes APRS-IS (para evitar dedupe y mejorar visibilidad en clientes) ---
@@ -355,6 +372,141 @@ def _parse_push_channel_list(raw: str) -> Optional[set[int]]:
 
 def _aprsis_push_is_enabled() -> bool:
     return bool(APRSIS_PUSH_ENABLED) and bool(APRSIS_PUSH_TO) and _aprsis_ready()
+
+
+def _aprsis_emergency_bulletin_is_enabled() -> bool:
+    """Comprueba la doble autorización y la disponibilidad de APRS-IS."""
+    return (
+        bool(APRSIS_PUSH_ENABLED)
+        and bool(APRSIS_EMERGENCY_BULLETIN_ENABLED)
+        and _aprsis_ready()
+    )
+
+
+def _load_aprsis_emergency_state() -> dict:
+    """Carga el estado persistente de boletines; un fichero corrupto no para el gateway."""
+    try:
+        data = json.loads(APRSIS_EMERGENCY_BULLETIN_STATE_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {"version": 1, "events": {}}
+    except FileNotFoundError:
+        return {"version": 1, "events": {}}
+    except Exception as exc:
+        print(f"[APRS-IS BLN] state load WARN: {type(exc).__name__}: {exc}")
+        return {"version": 1, "events": {}}
+
+
+def _save_aprsis_emergency_state(state: dict) -> None:
+    """Guarda el estado mediante sustitución atómica para evitar escrituras parciales."""
+    try:
+        APRSIS_EMERGENCY_BULLETIN_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = APRSIS_EMERGENCY_BULLETIN_STATE_PATH.with_suffix(
+            APRSIS_EMERGENCY_BULLETIN_STATE_PATH.suffix + ".tmp"
+        )
+        temporary.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, APRSIS_EMERGENCY_BULLETIN_STATE_PATH)
+    except Exception as exc:
+        print(f"[APRS-IS BLN] state save WARN: {type(exc).__name__}: {exc}")
+
+
+def _allocate_aprsis_bulletin_slot(state: dict, event_id: str) -> str:
+    """Asigna de forma estable una línea BLN0..BLN9 a cada emergencia activa."""
+    events = state.setdefault("events", {})
+    existing = events.get(event_id, {}) if isinstance(events.get(event_id), dict) else {}
+    slot = str(existing.get("bulletin", "")).strip().upper()
+    if re.fullmatch(r"BLN[0-9]", slot):
+        return slot
+
+    used = {
+        str(value.get("bulletin", "")).strip().upper()
+        for value in events.values()
+        if isinstance(value, dict) and not value.get("closed", False)
+    }
+    for number in range(10):
+        candidate = f"BLN{number}"
+        if candidate not in used:
+            return candidate
+
+    # Si las diez líneas están ocupadas, se reutiliza una de forma determinista.
+    return f"BLN{int(hashlib.sha256(event_id.encode('utf-8')).hexdigest(), 16) % 10}"
+
+
+async def send_aprsis_emergency_bulletin(
+    *, event_id: str, text: str, severity: str, status: str,
+) -> dict:
+    """Publica una emergencia grave como boletín público APRS-IS.
+
+    No transmite por RF, no usa APRSIS_PUSH_TO y no solicita ACK. La función
+    aplica nivel mínimo, deduplicación, intervalo mínimo y estado BLN estable.
+    """
+    event_id = str(event_id or "").strip()
+    severity = str(severity or "").strip().lower()
+    status = str(status or "active").strip().lower()
+    clean_text = _aprs_ascii(text)
+
+    if not APRSIS_PUSH_ENABLED:
+        return {"ok": False, "sent": False, "reason": "aprsis_push_disabled"}
+    if not APRSIS_EMERGENCY_BULLETIN_ENABLED:
+        return {"ok": False, "sent": False, "reason": "bulletin_disabled"}
+    if not _aprsis_ready():
+        return {"ok": False, "sent": False, "reason": "aprsis_not_configured"}
+    if not event_id or not clean_text:
+        return {"ok": False, "sent": False, "reason": "missing_event_or_text"}
+    minimum_rank = _APRSIS_EMERGENCY_LEVELS.get(APRSIS_EMERGENCY_BULLETIN_MIN_LEVEL, 30)
+    if _APRSIS_EMERGENCY_LEVELS.get(severity, 0) < minimum_rank:
+        return {"ok": False, "sent": False, "reason": "severity_below_threshold"}
+
+    now = time.time()
+    terminal = status in {"resolved", "cancelled", "expired", "closed"}
+    digest = hashlib.sha256(
+        f"{event_id}|{severity}|{status}|{clean_text}".encode("utf-8")
+    ).hexdigest()
+
+    async with _APRSIS_EMERGENCY_LOCK:
+        state = _load_aprsis_emergency_state()
+        events = state.setdefault("events", {})
+        previous = events.get(event_id, {}) if isinstance(events.get(event_id), dict) else {}
+        last_sent = float(previous.get("last_sent", 0.0) or 0.0)
+
+        if previous.get("digest") == digest and (now - last_sent) < APRSIS_EMERGENCY_BULLETIN_DEDUP_SEC:
+            return {
+                "ok": True, "sent": False, "duplicate": True,
+                "reason": "duplicate", "bulletin": previous.get("bulletin"),
+            }
+        if last_sent and (now - last_sent) < APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC and severity != "critical":
+            return {
+                "ok": True, "sent": False, "reason": "rate_limited",
+                "retry_after": max(1, int(APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC - (now - last_sent))),
+                "bulletin": previous.get("bulletin"),
+            }
+
+        bulletin = _allocate_aprsis_bulletin_slot(state, event_id)
+        body = clean_text
+        if terminal and not body.upper().startswith("FIN "):
+            body = f"FIN {body}"
+        line = _aprsis_tnc2_message_line(bulletin, body, with_msgid=False)
+        if not line:
+            return {"ok": False, "sent": False, "reason": "line_build_failed"}
+
+        sent = await _aprsis_send_line_safe(line)
+        if not sent:
+            return {"ok": False, "sent": False, "reason": "aprsis_send_failed", "bulletin": bulletin}
+
+        events[event_id] = {
+            "bulletin": bulletin,
+            "digest": digest,
+            "severity": severity,
+            "status": status,
+            "last_text": body,
+            "last_sent": now,
+            "closed": terminal,
+        }
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _save_aprsis_emergency_state(state)
+        print(f"[APRS-IS BLN] {bulletin} event={event_id} severity={severity} status={status} text={body[:80]}")
+        return {"ok": True, "sent": True, "bulletin": bulletin, "line": line}
 
 def _aprsis_tnc2_message_line(dst_call: str, text: str, *, with_msgid: bool = True) -> str:
     """
@@ -2446,7 +2598,25 @@ async def task_control_udp():
             print(f"[ctrl] gate → {'ON' if APRS_GATE_ENABLED else 'OFF'} (petición UDP)")
             continue
       
-        # --- NUEVO: control del mirror Mesh -> APRS-IS ---
+        # --- Boletín público APRS-IS para emergencias graves ---
+        if mode == "aprsis_emergency_bulletin":
+            try:
+                resp = await send_aprsis_emergency_bulletin(
+                    event_id=obj.get("event_id", ""),
+                    text=obj.get("text", ""),
+                    severity=obj.get("severity", ""),
+                    status=obj.get("status", "active"),
+                )
+            except Exception as exc:
+                resp = {"ok": False, "sent": False, "reason": "internal_error", "error": f"{type(exc).__name__}: {exc}"}
+                print(f"[APRS-IS BLN] ERROR {resp['error']}")
+            try:
+                sock.sendto(json.dumps(resp, ensure_ascii=False).encode("utf-8"), addr)
+            except Exception:
+                pass
+            continue
+
+        # --- Control del mirror Mesh -> APRS-IS ---
         if mode == "aprsis_push":
             global APRSIS_PUSH_ENABLED, APRSIS_PUSH_TO, APRSIS_PUSH_CHANNELS_RAW, APRSIS_PUSH_PREFIX, APRSIS_PUSH_MIN_GAP_S
 

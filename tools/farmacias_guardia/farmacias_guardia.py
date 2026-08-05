@@ -40,6 +40,26 @@ from zoneinfo import ZoneInfo
 BASE_DIR = Path(__file__).resolve().parent
 
 
+def _find_project_root() -> Path:
+    """Localiza la raíz del proyecto para importar helpers compartidos.
+
+    La aplicación continúa utilizando exclusivamente su propio ``.env``. Esta
+    búsqueda solo habilita la reutilización del despachador APRS común situado
+    en ``shared/`` y no carga configuración del proyecto principal.
+    """
+    for candidate in (BASE_DIR, *BASE_DIR.parents):
+        if (candidate / "shared" / "app_aprs_dispatcher.py").exists():
+            return candidate
+    return BASE_DIR.parent
+
+
+PROJECT_ROOT = _find_project_root()
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from shared.app_aprs_dispatcher import send_application_aprs
+
+
 def load_env(path: Path) -> None:
     if not path.exists():
         return
@@ -659,7 +679,69 @@ def _send_to_targets(pharmacies: list[Pharmacy] | None = None, header: str | Non
     return {"sent": True, **deliveries[0], "deliveries": deliveries}
 
 
-def send_current(force: bool = False, only_if_changed: bool = False) -> dict[str, Any]:
+def farmacias_aprs_summary(pharmacies: list[Pharmacy] | None = None) -> str:
+    """Construye un resumen APRS compacto del listado vigente.
+
+    Parámetros:
+      pharmacies: listado que se acaba de difundir. Si se omite, se carga la
+        instantánea actual.
+
+    El resumen evita direcciones y teléfonos para no ocupar varias tramas. El
+    detalle completo continúa disponible por la malla mediante
+    ``farma <localidad>``.
+    """
+    items = load_pharmacies() if pharmacies is None else pharmacies
+    localities = sorted(
+        {norm(item.locality) for item in items if norm(item.locality)},
+        key=key_text,
+    )
+    date_text = datetime.now(TZ).strftime("%d/%m")
+    locality_text = ",".join(localities[:3]) if localities else "sin localidad"
+    if len(localities) > 3:
+        locality_text += f" +{len(localities) - 3}"
+    return (
+        f"FARMA {date_text}: {len(items)} guardias en {locality_text}. "
+        "Detalle por malla: farma <localidad>"
+    )
+
+
+def send_farmacias_aprs(
+    *,
+    pharmacies: list[Pharmacy] | None = None,
+    requested: bool = False,
+) -> dict[str, Any]:
+    """Solicita al gateway existente el envío APRS del resumen.
+
+    ``requested=True`` corresponde a la orden explícita ``send --aprs``. Los
+    envíos lanzados por temporizadores solo pueden usar APRS cuando también se
+    configura ``FARMACIAS_APRS_AUTOMATIC=1``. Antes de llegar al gateway se
+    aplican además el interruptor global y la lista blanca del helper común.
+    """
+    if not env_bool("FARMACIAS_APRS_ENABLED", "0"):
+        return {"ok": True, "skipped": True, "error": "farmacias_aprs_disabled"}
+    if not requested and not env_bool("FARMACIAS_APRS_AUTOMATIC", "0"):
+        return {
+            "ok": True,
+            "skipped": True,
+            "error": "farmacias_aprs_automatic_disabled",
+        }
+    return send_application_aprs(
+        source="farmacias",
+        text=farmacias_aprs_summary(pharmacies),
+        dest=os.getenv(
+            "FARMACIAS_APRS_DESTINATION",
+            os.getenv("APPS_APRS_DESTINATION", "broadcast"),
+        ),
+        origin="app_farmacias",
+    )
+
+
+def send_current(
+    force: bool = False,
+    only_if_changed: bool = False,
+    *,
+    aprs_requested: bool = False,
+) -> dict[str, Any]:
     current = load_current()
     state = json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
     if only_if_changed and current.get("hash") == state.get("last_sent_hash") and not force:
@@ -673,6 +755,11 @@ def send_current(force: bool = False, only_if_changed: bool = False) -> dict[str
     })
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # APRS se solicita únicamente después de que todos los destinos Mesh hayan
+    # sido aceptados. Un fallo APRS no revierte, repite ni invalida el envío
+    # Mesh que ya funciona.
+    delivery["aprs"] = send_farmacias_aprs(requested=aprs_requested)
     return delivery
 
 
@@ -949,7 +1036,13 @@ def main() -> int:
     sub.add_parser("serve")
     sub.add_parser("fetch")
     sub.add_parser("preview")
-    send_p = sub.add_parser("send"); send_p.add_argument("--force", action="store_true")
+    send_p = sub.add_parser("send")
+    send_p.add_argument("--force", action="store_true")
+    send_p.add_argument(
+        "--aprs",
+        action="store_true",
+        help="solicita también el resumen APRS; requiere las autorizaciones del .env",
+    )
     check_p = sub.add_parser("check"); check_p.add_argument("--send", action="store_true")
     sub.add_parser("status")
     sub.add_parser("doctor")
@@ -985,7 +1078,7 @@ def main() -> int:
             print(f"--- {len(msg.encode('utf-8'))} bytes ---\n{msg}")
         print(f"Destino: {network} canal {channel}")
     elif args.command == "send":
-        save_current(fetch()); print(json.dumps(send_current(force=args.force), ensure_ascii=False))
+        save_current(fetch()); print(json.dumps(send_current(force=args.force, aprs_requested=args.aprs), ensure_ascii=False))
     elif args.command == "check":
         previous = load_pharmacies() if CURRENT_FILE.exists() else []
         had_previous = CURRENT_FILE.exists()
