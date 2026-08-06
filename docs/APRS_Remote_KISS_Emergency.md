@@ -1,228 +1,334 @@
-# 📄 APRS_Remote_KISS_Emergency_Deployment
+# Despliegue APRS con KISS remoto para emergencias — v7.0.36
 
-## Guía oficial de despliegue en emergencias MeshNet The Boss • Operación APRS + Mesh vía KISS Remoto
+Guía especializada para operar MeshNet-Bot con el TNC KISS TCP, Direwolf o Soundmodem instalado en otro equipo de la red local.
 
-# 1. Objetivo de este documento
+La referencia general de APRS, APRS-IS, perfiles, comandos y diagnóstico está en [`APRS_GATEWAY.md`](APRS_GATEWAY.md).
 
-En situaciones de emergencia (apagones, fallos de Internet, movilidad, inundaciones, incendios, rescates, etc.), esta guía permite levantar en pocos minutos una infraestructura de comunicaciones resiliente basada en:
+## 1. Objetivo
 
-    > Red Meshtastic (larga distancia, malla autónoma, sin Internet)
-    > Pasarela APRS ↔ MES
-    > Direwolf / Soundmodem en un PC remoto
-    > Broker + Bot + APRS Gateway en Raspberry u otro PC central
+Separar físicamente el puesto de radio APRS del equipo central:
 
-El resultado es un sistema capaz de:
+```text
+PC remoto / puesto de radio
+  ├── Direwolf o Soundmodem
+  ├── interfaz de audio/PTT
+  ├── transceptor APRS
+  └── servidor KISS TCP :8100
+             │ LAN
+             ▼
+Raspberry Pi / centro de coordinación
+  ├── meshnet-broker
+  ├── meshnet-aprs
+  ├── meshnet-bot, opcional
+  └── nodo MeshCore o Meshtastic
+```
 
-    > Recibir mensajes APRS RF y distribuirlos dentro de Mesh
-    > Enviar mensajes Mesh hacia APRS
-    > Mantener conectividad aun sin Internet
-    > Permitir supervisión desde Telegram si existe conexión eventual
+Este diseño permite mantener APRS RF y la malla sin Internet siempre que exista conectividad LAN entre ambos equipos.
 
-# 2. Arquitectura recomendada para emergencias
-             [PC Remoto / Puesto de radio]
-               └── Direwolf / Soundmodem (KISS TCP)
+## 2. Requisitos
 
-             [Unidad central / Centro de coordinación]
-               ├── Broker MeshNet The Boss
-               ├── Telegram Bot (opcional)
-               └── APRS Gateway (meshtastic-aprs)
+### Equipo central
 
+- Proyecto en `/home/meshnet/MeshNet-Bot`.
+- Docker Engine y `docker compose`.
+- Contenedores `meshnet-broker` y `meshnet-aprs`.
+- Nodo MeshCore o Meshtastic operativo.
 
-## Punto clave:
-> Solo el KISS-TCP (soundmodem/direwolf) está en remoto.
-> El APRS Gateway, broker y bot siempre permanecen juntos.
+### Equipo remoto
 
-Esto garantiza:
+- Direwolf, Soundmodem o TNC compatible con KISS TCP.
+- Audio, PTT y radio probados localmente.
+- Puerto TCP accesible desde la Raspberry.
+- Dirección IP estable o reserva DHCP.
 
-> Menos puntos de fallo
-> Un único sistema que almacena logs, posiciones y emergencias
-> Reconexiones automáticas si Internet “va y viene”
+## 3. Configuración del equipo central
 
-Funcionamiento completo sin red externa
+En `/home/meshnet/MeshNet-Bot/.env`:
 
-# 3. Requisitos mínimos
+```env
+APRS_CALL=EB2XXX-11
+APRS_PATH=WIDE1-1
 
-   ## En el equipo central (Raspberry o PC)
+KISS_HOST=192.168.1.30
+KISS_PORT=8100
 
-        > Docker + docker compose
-        > Carpeta del proyecto MeshNet The Boss
-        > .env correctamente configurado
-        > Broker, bot y aprs dentro del mismo compose
+APRS_CTRL_HOST=127.0.0.1
+APRS_CTRL_PORT=9464
+BROKER_HOST=127.0.0.1
+BROKER_PORT=8765
+BROKER_CTRL_HOST=127.0.0.1
+BROKER_CTRL_PORT=8766
 
-   ## En el PC remoto
+APRS_GATE_ENABLED=1
+```
 
-        > Direwolf o Soundmodem
-        > Audio configurado (entrada micro, salida altavoz si procede)
-        > Puerto TCP KISS abierto hacia la red local
+Solo `KISS_HOST` y `KISS_PORT` apuntan al equipo remoto. Los puertos del broker y del control APRS permanecen en `127.0.0.1` porque los contenedores comparten la red del servicio `broker`.
 
-        No se requiere instalar MeshNet ni contenedores adicionales.
+## 4. Configuración del equipo remoto
 
-# 4. Configuración para emergencias — Equipo Central (Raspberry/PC)
+### Soundmodem
 
-Abrir el .env y asegurar solo los ajustes siguientes:
+Active el servidor KISS TCP y configure:
 
-## === Conexión KISS a PC remoto ===
+```text
+Bind: 0.0.0.0
+Port: 8100
+```
 
-> KISS_HOST= IP_DEL_PC_REMOTO
-> 
-> KISS_PORT= 8100
+Reinicie Soundmodem después de guardar.
 
-Ejemplo real:
+### Direwolf
 
-> KISS_HOST=192.168.1.30
-> 
-> KISS_PORT=8100
+La directiva exacta depende de la versión. Debe quedar un servidor KISS TCP escuchando en el puerto 8100 y accesible desde la LAN. Verifique el resultado con:
 
-NO tocar:
+```bash
+ss -ltnp | grep ':8100'
+```
 
-> BROKER_HOST
-> 
-> BROKER_CTRL_HOST
-> 
-> APRS_CTRL_HOST
+No exponga el puerto KISS a Internet. Limítelo mediante firewall a la IP de la Raspberry.
 
-Nada del compose
+Ejemplo con UFW en el equipo remoto:
 
-Todo lo demás debe permanecer igual para garantizar estabilidad.
+```bash
+sudo ufw allow from 192.168.1.69 to any port 8100 proto tcp
+```
 
-# 5. Configuración del PC Remoto (Soundmodem / Direwolf)
+Sustituya la IP por la dirección real del equipo central.
 
-   ## 5.1. Soundmodem
+## 5. Comprobación previa
 
-    En menú Settings → KISS Server:
+Desde la Raspberry:
 
-    KISS over TCP → ✓ activado
+```bash
+ping -c 3 192.168.1.30
+nc -vz 192.168.1.30 8100
+```
 
-    Address: 0.0.0.0
+Prueba desde el mismo contenedor APRS:
 
-    Port: 8100
+```bash
+docker exec meshnet-aprs python3 -c '
+import os,socket
+h=os.getenv("KISS_HOST")
+p=int(os.getenv("KISS_PORT","8100"))
+s=socket.create_connection((h,p),5)
+print(f"KISS remoto OK {h}:{p}")
+s.close()
+'
+```
 
-    Guardar y reiniciar soundmodem.
+Esta segunda prueba es la decisiva porque reproduce la conectividad desde el proceso real.
 
-   ## 5.2 Direwolf
+## 6. Arranque
 
-    Comando de arranque típico:
+```bash
+cd /home/meshnet/MeshNet-Bot
+docker compose -f docker-compose.rpi.yml up -d broker aprs
+docker compose -f docker-compose.rpi.yml ps broker aprs
+docker logs --tail 200 meshnet-aprs
+```
 
-     direwolf -t 0 -p -r 48000 -D 1
+El nombre correcto del contenedor es:
 
-    Y en direwolf.conf:
+```text
+meshnet-aprs
+```
 
-    KISSHOST 0.0.0.0
-    KISSPORT 8100
+No utilizar nombres históricos como `meshtastic-aprs`.
 
-# 6. Comprobación de conectividad (muy importante)
+La cabecera debe mostrar valores equivalentes a:
 
-   ## En la Raspberry/PC central:
+```text
+[aprs] KISS=192.168.1.30:8100 CALL=EB2XXX-11 PATH=WIDE1-1
+[aprs] BROKER_CTRL=127.0.0.1:8766
+```
 
-    telnet IP_DEL_PC_REMOTO 8100
+## 7. Ejemplo con MeshCore
 
-    Si aparece:
+```env
+RADIO_PROFILE=meshcore_only
+APRS_TO_MESHCORE=1
+MESHCORE_CHANNEL_MAP=0:0,1:1,2:2
+```
 
-        Connected
+Flujo:
 
-    el enlace está operativo.
+```text
+APRS RF
+  -> radio y TNC remoto
+  -> KISS TCP por LAN
+  -> meshnet-aprs
+  -> broker
+  -> MeshCore
+```
 
-    Si falla:
+Ejemplo de mensaje APRS:
 
-        Revisar firewall del PC
-        Revisar soundmodem/direwolf en ejecución
-        Revisar que se use la IP correcta
-        Revisar que el puerto 8100 está libre
+```text
+[CH1] Puesto avanzado operativo
+```
 
-# 7. Arranque del sistema de emergencia
+El prefijo se utiliza para resolver el canal y se elimina antes de presentar el mensaje final en la malla.
 
-   ## En la máquina central:
+## 8. Ejemplo de envío desde Telegram
 
-    docker compose -f docker-compose.rpi.yml down
-    docker compose -f docker-compose.rpi.yml up -d
+```text
+/aprs canal 1 Prueba desde centro de coordinación
+```
 
-   ## Ó, para arrancar solo APRS:
+Flujo:
 
-    docker restart meshtastic-aprs
+```text
+Telegram
+  -> meshnet-bot
+  -> UDP 127.0.0.1:9464
+  -> meshnet-aprs
+  -> KISS TCP 192.168.1.30:8100
+  -> TNC remoto
+  -> APRS RF
+```
 
+## 9. Operación sin Internet
 
-   > El APRS Gateway se reconecta automáticamente al KISS remoto al arrancar.
+Sin Internet continúan disponibles:
 
-# 8. Qué debe aparecer si todo está bien
+- APRS RF mediante KISS remoto.
+- APRS RF hacia MeshCore/Meshtastic.
+- Mesh hacia APRS RF cuando se ordene localmente.
+- Broker y aplicaciones locales.
 
-   ## En los logs:
+No estarán disponibles:
 
-    docker logs -f meshtastic-aprs
+- Telegram.
+- APRS-IS.
+- Servicios externos de Internet.
 
-### Debe verse:
+La caída de APRS-IS no debe impedir el funcionamiento KISS RF.
 
-   > [aprs] KISS=192.168.1.30:8100 CALL=EB2XXX-11 PATH=WIDE1-1,WIDE2-1
-   > [aprs] Conectado a KISS TCP remoto
+## 10. Prueba operativa controlada
 
-### Y también:
+1. Verifique `nc -vz` al puerto KISS.
+2. Arranque `broker` y `aprs`.
+3. Abra logs:
 
-   > [broker→aprs] Conectado. Esperando líneas…
+```bash
+docker logs -f meshnet-aprs
+```
 
-El broker seguirá mostrando actividad normal de la red Mesh.
+4. Envíe una única trama APRS de prueba.
+5. Confirme recepción en Direwolf/Soundmodem.
+6. Confirme salida por RF mediante un receptor independiente.
+7. Confirme recepción en la malla.
+8. Repita en sentido Mesh → APRS RF.
 
-# 9. Flujo operativo en emergencia
+No genere ráfagas repetitivas durante la validación.
 
-  ## 9.1 Yo mando un mensaje APRS desde un walkie
+## 11. Recuperación
 
-    → Direwolf lo recibe
-    → KISS TCP lo pasa al APRS Gateway
-    → El APRS Gateway lo analiza
-    → El broker inyecta el mensaje en la malla Mesh
-    → El bot (si activo) lo reenvía a Telegram
+### Reiniciar solo APRS
 
-  ## 9.2 Un nodo Mesh envía emergencias
+```bash
+docker compose -f docker-compose.rpi.yml restart aprs
+docker logs --tail 200 meshnet-aprs
+```
 
-    → El APRS Gateway decide si debe publicarlo en APRS
-    → Lo entrega a direwolf vía KISS TCP
-    → Sale por RF APRS hacia estaciones externas
+### Recrear el contenedor
 
-  ## 9.3 Internet cae
+```bash
+docker compose -f docker-compose.rpi.yml up -d --force-recreate aprs
+```
 
-    → El bot se detiene parcialmente (no crítico)
-    → Broker + APRS siguen operativos
-    → Soundmodem remoto sigue enlazado por LAN
-    → Toda la red Mesh + APRS funciona offline
+### Recuperar después de `docker compose down`
 
-# 10. Ventajas operativas en entornos críticos
+```bash
+docker compose -f docker-compose.rpi.yml up -d broker aprs
+```
 
-    No requiere Internet
-    No requiere APRS remoto
-    Un solo punto de control (broker)
-    Permite operación desde múltiples PCS con soundmodem
-    Ideal en refugios, vehículos, Puestos Avanzados, Protección Civil
-    No hay puertos Docker expuestos hacia exterior
-    Facilita funcionamiento 24/7 con panel solar / batería
+### Reiniciar el TNC remoto
 
-# 11. Resumen táctico (para imprimir y pegar en la maleta)
+Después de reiniciar Direwolf o Soundmodem, compruebe de nuevo:
 
-   ## En la Raspberry / PC central:
-  
-    Editar .env:
-    KISS_HOST=IP_DEL_PC_REMOTO
-    KISS_PORT=8100
+```bash
+nc -vz 192.168.1.30 8100
+docker compose -f docker-compose.rpi.yml restart aprs
+```
 
-    docker compose up -d
+## 12. Diagnóstico
 
-  ## En el PC remoto:
-    
-    Soundmodem:
-    
-    Host: 0.0.0.0
-    Port: 8100
+### `Connection refused`
 
-    Direwolf:
-    
-    KISSHOST 0.0.0.0
-    KISSPORT 8100
+- El servidor KISS no está iniciado.
+- El puerto configurado no coincide.
+- El servicio escucha solo en `127.0.0.1`.
+- El firewall bloquea la Raspberry.
 
-  ## Prueba:
-    
-    telnet IP_DEL_PC_REMOTO 8100
+### `No route to host`
 
-  ## Logs:
-    
-    docker logs -f meshtastic-aprs
+- IP incorrecta.
+- Equipo remoto apagado.
+- Segmento o VLAN sin ruta.
+- Wi-Fi desconectado.
 
-# 12. Fin del documento — Versión Emergencias v1.0
+### KISS conecta, pero no hay RF
 
-Preparado para integrarse en el repositorio oficial MeshNet The Boss.
+- Revise PTT, audio y radio en el equipo remoto.
+- Confirme que Direwolf/Soundmodem recibe la trama.
+- Verifique frecuencia, squelch, ganancia y cableado.
+- Compruebe con un receptor independiente.
+
+### APRS RF funciona, pero no llega a la malla
+
+```bash
+docker logs --tail 300 meshnet-aprs
+docker logs --tail 300 meshnet-broker
+```
+
+Revise `APRS_GATE_ENABLED`, `RADIO_PROFILE`, `APRS_TO_MESHCORE` y mapas de canales.
+
+### Varias tramas visibles en SDR
+
+Determine primero si son:
+
+- múltiples `TX` locales;
+- repeticiones de digipeaters;
+- ecos recibidos por distintos caminos.
+
+Compare los logs de `meshnet-aprs` y del TNC antes de modificar el código.
+
+## 13. Lista de despliegue rápido
+
+Equipo central:
+
+```env
+KISS_HOST=192.168.1.30
+KISS_PORT=8100
+APRS_CALL=EB2XXX-11
+APRS_GATE_ENABLED=1
+```
+
+Comandos:
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+nc -vz 192.168.1.30 8100
+docker compose -f docker-compose.rpi.yml up -d broker aprs
+docker logs --tail 200 meshnet-aprs
+```
+
+Equipo remoto:
+
+```text
+KISS TCP: 0.0.0.0:8100
+Firewall: permitir solo la Raspberry
+Radio, audio y PTT: verificados
+```
+
+## 14. Seguridad operativa
+
+- No exponer KISS TCP a Internet.
+- Utilizar una LAN o VPN controlada.
+- Restringir el firewall por IP.
+- No usar rutas AX.25 innecesariamente amplias.
+- Respetar `NOGATE` y `RFONLY`.
+- Mantener indicativos, frecuencias y potencia dentro de la autorización aplicable.
+- Documentar qué estación transmite realmente por RF.

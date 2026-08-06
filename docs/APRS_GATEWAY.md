@@ -1,753 +1,616 @@
-# APRS → MeshNet – Documentación Completa
+# APRS y APRS-IS en MeshNet-Bot — v7.0.36
 
-## ⚙️ Descripción general
+Guía operativa completa del contenedor `meshnet-aprs`, servicio Compose `aprs`.
 
-    Cuando está **activado el modo `aprs_on`** (o `APRS_GATE_ENABLED=1` en `.env`),  
-    el sistema entra en **modo pasarela APRS bidireccional**, permitiendo que:
+El componente ejecuta `source/meshtastic_to_aprs.py` mediante `docker/entrypoint_aprs.sh`, conecta con un TNC KISS TCP para APRS por RF, puede mantener conexión con APRS-IS y se integra con el broker para intercambiar mensajes con MeshCore o Meshtastic según el perfil de radio.
 
-    > 🔄 Los mensajes enviados desde la red **Meshtastic** se publiquen en la red **APRS**,  
-    > y los mensajes recibidos en **APRS (RF o APRS-IS)** se reenvíen automáticamente a **Meshtastic**.
+## 1. Componentes y puertos
 
-    Este modo convierte tu nodo en un **gateway completo APRS↔Mesh**, compatible con **Direwolf**, **Soundmodem** o cualquier **TNC KISS TCP**.
+| Elemento | Valor habitual | Función |
+|---|---:|---|
+| Servicio Compose | `aprs` | Nombre usado por `docker compose` |
+| Contenedor | `meshnet-aprs` | Nombre visible en Docker |
+| Imagen | `ghcr.io/jmmpcc/meshnet-bot-aprs:latest` | Imagen publicada en GHCR |
+| Programa | `/app/source/meshtastic_to_aprs.py` | Gateway APRS |
+| Control UDP | `127.0.0.1:9464` | Peticiones del bot y otros componentes |
+| Broker JSONL | `127.0.0.1:8765` | Eventos y recepción del broker |
+| Control broker | `127.0.0.1:8766` | Envíos hacia la malla |
+| KISS TCP | `KISS_HOST:KISS_PORT` | Direwolf, Soundmodem o TNC compatible |
+| APRS-IS | `APRSIS_HOST:APRSIS_PORT` | Red APRS-IS, normalmente `rotate.aprs2.net:14580` |
 
-    Este sistema es el broker el que recibe la trama através de RF - no interviene internet - y lo reenvía a la malla. Si internet está caído, permite enviar las tramas envias por APRS a la malla MESH.
+En `docker-compose.rpi.yml`, `aprs` utiliza `network_mode: service:broker`. Por ello comparte la pila de red del broker y puede usar `127.0.0.1` para los puertos del broker y para el control UDP.
 
-### 1️⃣ Mensajes Meshtastic → APRS (uplink)
-       - El bot de Telegram usa el comando `/aprs` para enviar mensajes.
-       - Se comunica con el servicio `meshtastic_to_aprs.py` mediante **UDP (puerto 9464)**.
-       - Este gateway convierte el mensaje al formato **AX.25 (KISS)** y lo transmite por radio.
-       - Si hay configuradas credenciales APRS-IS (`APRSIS_USER`, `APRSIS_PASSCODE`), también se sube a **aprs. fi** automáticamente.
-  
-### 2️⃣ Mensajes APRS → Meshtastic (downlink)
-      - El gateway escucha todas las tramas APRS recibidas por el puerto KISS.
-      - Si el mensaje contiene un marcador `[CHx]` (por ejemplo `[CH1]`),  
-        el gateway lo reenvía automáticamente al **canal correspondiente** de Meshtastic.
-      - El reenvío se realiza hacia el **broker JSONL** (`BROKER_HOST:8765`).
+## 2. Flujos disponibles
 
-### 🔁 Mirror Mesh → APRS-IS (monitorización remota)
-Se incorpora un nuevo modo de funcionamiento que permite **reenviar mensajes de la malla Meshtastic a APRS-IS**, con el objetivo de **recibirlos en clientes APRS como APRSDroid cuando el usuario está fuera de la red Mesh**.
+Los flujos son independientes y pueden combinarse:
 
-- Los mensajes se envían como **mensajes APRS dirigidos** a un indicativo concreto (por ejemplo, `EB2EAS-7`).
-- Compatible con **recepción móvil vía APRSDroid / APRS-IS**.
-- No interfiere con el uso normal de APRS ni con el tráfico RF local.
+```text
+Telegram / control UDP
+        │
+        ▼
+meshnet-aprs ──KISS TCP──> TNC/Direwolf/Soundmodem ──> APRS RF
+        │
+        └────────────────────────────────────────────> APRS-IS
 
----
+APRS RF ──> TNC KISS ──> meshnet-aprs ──> broker ──> MeshCore/Meshtastic
 
-### 🎛️ Nuevo comando de control: `/aprsis_push`
-Se añade un nuevo comando al bot de Telegram para controlar dinámicamente el mirror Mesh → APRS-IS.
+APRS-IS ─────────────────> meshnet-aprs ──> broker ──> MeshCore/Meshtastic
 
-### Comandos disponibles:
+MeshCore/Meshtastic ──> broker ──> meshnet-aprs ──> APRS-IS dirigido
 ```
-/aprsis_push on <canal|all>
-/aprsis_push on meshtastic <canal|all> [meshcore <canal|all>]
-/aprsis_push on meshcore <canal|all>
+
+Funciones principales:
+
+- Envío manual desde Telegram hacia APRS RF y, cuando corresponda, APRS-IS.
+- Recepción APRS por RF a través de KISS.
+- iGate de tramas RF hacia APRS-IS cuando existen credenciales válidas.
+- Reenvío APRS hacia MeshCore o Meshtastic.
+- Mirror selectivo de mensajes Mesh hacia un destinatario APRS-IS.
+- Tratamiento de emergencias y boletines APRS/APRS-IS.
+- Fragmentación de textos largos y pausa entre partes.
+- Deduplicación y protección frente a bucles.
+
+## 3. Requisitos
+
+- Indicativo y SSID válidos para APRS.
+- TNC KISS TCP, Direwolf o Soundmodem accesible desde la Raspberry.
+- Equipo de radio y configuración legalmente autorizados.
+- Broker MeshNet operativo.
+- Credenciales APRS-IS cuando se quiera usar Internet.
+- Nodo MeshCore o Meshtastic configurado según `RADIO_PROFILE`.
+
+APRS-IS no sustituye la configuración RF. Son transportes distintos que el gateway puede utilizar simultáneamente.
+
+## 4. Configuración mínima de APRS RF
+
+En `/home/meshnet/MeshNet-Bot/.env`:
+
+```env
+APRS_CALL=EB2XXX-11
+APRS_PATH=WIDE1-1
+
+KISS_HOST=host.docker.internal
+KISS_PORT=8100
+
+APRS_CTRL_HOST=127.0.0.1
+APRS_CTRL_PORT=9464
+
+BROKER_HOST=127.0.0.1
+BROKER_PORT=8765
+BROKER_CTRL_HOST=127.0.0.1
+BROKER_CTRL_PORT=8766
+
+APRS_GATE_ENABLED=1
+APRS_DEBUG=0
+APRS_MAX_LEN=67
+APRS_RF_PART_DELAY_S=2.0
+APRS_RF_BAUD=1200
+```
+
+### Elección de `KISS_HOST`
+
+| Escenario | Valor recomendado |
+|---|---|
+| Direwolf/Soundmodem en la misma Raspberry, fuera de Docker | `host.docker.internal` |
+| TNC KISS en otro equipo de la LAN | IP del equipo, por ejemplo `192.168.1.30` |
+| TNC dentro del mismo espacio de red del broker | `127.0.0.1` solo cuando realmente escucha en esa pila de red |
+
+No utilizar `127.0.0.1` para un TNC ejecutado en el host si el proceso no comparte la red del contenedor. En el Compose RPi incluido, `host.docker.internal` resuelve la puerta de enlace del host.
+
+## 5. Configuración de APRS-IS
+
+```env
+APRSIS_USER=EB2XXX-11
+APRSIS_PASSCODE=12345
+APRSIS_HOST=rotate.aprs2.net
+APRSIS_PORT=14580
+APRSIS_FILTER=m/20
+```
+
+El entrypoint solo añade los argumentos APRS-IS cuando `APRSIS_USER` y `APRSIS_PASSCODE` contienen valores. Si falta uno de ellos, el contenedor arranca sin conexión APRS-IS.
+
+`APRSIS_FILTER=m/20` solicita tráfico situado aproximadamente dentro de 20 km. Debe adaptarse a la zona y al tráfico necesario para no descargar información irrelevante.
+
+## 6. Despliegue completo en Raspberry Pi
+
+### 6.1 Preparar el proyecto
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+cp .env_example .env
+nano .env
+python3 scripts/radio-profile-check
+```
+
+### 6.2 Comprobar el Compose efectivo
+
+```bash
+docker compose -f docker-compose.rpi.yml config --services
+docker compose -f docker-compose.rpi.yml config | sed -n '/aprs:/,/^[^ ]/p'
+```
+
+Debe aparecer el servicio `aprs`.
+
+### 6.3 Descargar y arrancar
+
+```bash
+docker compose -f docker-compose.rpi.yml pull broker aprs
+docker compose -f docker-compose.rpi.yml up -d broker aprs
+docker compose -f docker-compose.rpi.yml ps broker aprs
+```
+
+### 6.4 Verificar el arranque
+
+```bash
+docker logs --tail 200 meshnet-aprs
+```
+
+La cabecera del entrypoint muestra valores equivalentes a:
+
+```text
+[aprs] KISS=host.docker.internal:8100 CALL=EB2XXX-11 PATH=WIDE1-1
+[aprs] BROKER_CTRL=127.0.0.1:8766
+```
+
+No debe aparecer `CALL=NOCALL` en una instalación operativa.
+
+## 7. Ejemplos de despliegue
+
+### 7.1 Raspberry Pi con Direwolf local y MeshCore
+
+```env
+RADIO_PROFILE=meshcore_only
+APRS_CALL=EB2XXX-11
+APRS_PATH=WIDE1-1
+KISS_HOST=host.docker.internal
+KISS_PORT=8100
+APRS_GATE_ENABLED=1
+APRS_TO_MESHCORE=1
+MESHCORE_CHANNEL_MAP=0:0,1:1,2:2
+APRSIS_USER=EB2XXX-11
+APRSIS_PASSCODE=12345
+APRSIS_FILTER=m/30
+```
+
+Resultado:
+
+- APRS RF entra por Direwolf/KISS.
+- Los mensajes `[CH1]` se envían al `channel_idx` MeshCore resuelto.
+- Las tramas válidas pueden subirse a APRS-IS.
+- Los envíos manuales del bot salen por RF mediante el mismo TNC.
+
+### 7.2 Raspberry Pi con TNC remoto en otro ordenador
+
+```env
+APRS_CALL=EB2XXX-11
+KISS_HOST=192.168.1.30
+KISS_PORT=8100
+APRS_GATE_ENABLED=1
+```
+
+Comprobación desde la Raspberry:
+
+```bash
+nc -vz 192.168.1.30 8100
+```
+
+El firewall del equipo remoto debe permitir TCP 8100 únicamente desde la Raspberry o la LAN necesaria.
+
+### 7.3 APRS RF sin APRS-IS
+
+```env
+APRS_CALL=EB2XXX-11
+KISS_HOST=host.docker.internal
+KISS_PORT=8100
+APRSIS_USER=
+APRSIS_PASSCODE=
+```
+
+El gateway puede trabajar con KISS y malla sin abrir sesión APRS-IS.
+
+### 7.4 Mirror MeshCore hacia APRSDroid
+
+```env
+RADIO_PROFILE=meshcore_only
+APRSIS_USER=EB2XXX-11
+APRSIS_PASSCODE=12345
+APRSIS_PUSH_ENABLED=1
+APRSIS_PUSH_TO=EB2XXX-7
+APRSIS_PUSH_CHANNELS=meshcore 1
+APRSIS_PUSH_PREFIX=1
+APRSIS_PUSH_MIN_GAP_S=2.0
+```
+
+También puede activarse temporalmente desde Telegram:
+
+```text
+/aprsis_push on meshcore 1
 /aprsis_push off
 ```
 
-### ⚙️ NUEVAS VARIABLES DE ENTORNO (.env)
-Se añaden variables para control estático (arranque) del mirror Mesh → APRS-IS
+## 8. Integración con perfiles de radio
+
+### `meshcore_only`
+
+```env
+RADIO_PROFILE=meshcore_only
+APRS_TO_MESHCORE=1
 ```
 
-  --- Mirror Mesh -> APRS-IS (recepción en APRSDroid) ---
-  APRSIS_PUSH_ENABLED=0
-  APRSIS_PUSH_TO=EB2EAS-7
-  APRSIS_PUSH_CHANNELS=all
-  # También admite prefijos: "meshtastic 0,1 meshcore 2" o "meshcore all".
-  # Los números tras "meshcore" son channel_idx reales de MeshCore, no canales lógicos Meshtastic.
-  # En mensajes desde APRSdroid/APRS-IS también se aceptan etiquetas [MC1] o [MC1/ZARAGOZA]
-  # para enviar directamente al channel_idx MeshCore 1 en RADIO_PROFILE=meshcore_only.
-  APRSIS_PUSH_PREFIX=1
-  APRSIS_PUSH_MIN_GAP_S=1.0
+Los mensajes APRS destinados a la malla deben resolverse hacia MeshCore. Los índices `[CHx]` se traducen mediante `MESHCORE_CHANNEL_MAP`; si no existe mapa, se utiliza el índice nativo equivalente cuando la implementación lo permite.
 
-Descripción:
+### Perfil Meshtastic
 
-  APRSIS_PUSH_ENABLED
-  Activa/desactiva el mirror al arrancar el sistema.
-
-  APRSIS_PUSH_TO
-  Indicativo APRS destino (usuario móvil).
-
-  APRSIS_PUSH_CHANNELS
-  Canales Mesh a reenviar (all o lista 0,1,2).
-
-  APRSIS_PUSH_PREFIX
-  Añade [CHx] al texto enviado a APRS-IS.
-
-  APRSIS_PUSH_MIN_GAP_S
-  Rate limit para evitar saturar APRS-IS.
-
+```env
+RADIO_PROFILE=
+APRS_TO_MESHCORE=0
+MESHTASTIC_CH=0
 ```
 
-### 🔄 NUEVA TAREA ASÍNCRONA
-  task_mesh_channels_to_aprsis()
+Los mensajes APRS se entregan mediante el transporte Meshtastic del broker.
 
-```
-Nueva tarea que:
+### Perfil mixto
 
-    . Escucha el stream JSONL del broker.
+No se debe asumir que el mismo número representa el mismo canal en ambas redes. Configure explícitamente mapas y destinos, y compruebe el resultado en los logs del broker.
 
-    Detecta mensajes TEXT_MESSAGE_APP normales (no /aprs).
+## 9. Comandos funcionales desde Telegram
 
-    . Filtra por canal configurado.
+### Activar o desactivar el gate
 
-    Evita ecos y bucles APRS↔Mesh.
-
-    . Publica mensajes a APRS-IS como mensajes dirigidos.
-
-    Incluye:
-
-      Reconexión automática.
-      Backoff progresivo.
-      Rate limit configurable.
-      Totalmente independiente del gate APRS→Mesh.
-```
-### 🧭 ARQUITECTURA DE FLUJOS (ACTUALIZADA)
-    
-    APRS RF
-
-    RF → APRS-IS
-    iGate RX clásico (si APRS-IS está configurado).
-
-    RF → Mesh
-    Solo si el gate APRS→Mesh está activo (/aprs_on).
-
-    Mesh
-
-    Mesh → APRS (manual)
-    Mediante /aprs.
-
-    Mesh → APRS-IS (automático, nuevo)
-    Mediante /aprsis_push.
-
-    Todos los flujos son independientes y combinables.
-
-### 🔐 SEGURIDAD Y CONTROL
-
-    El mirror Mesh → APRS-IS está desactivado por defecto.
-
-    Requiere activación explícita por:
-
-    .env (modo permanente), o
-
-    comando /aprsis_push (modo recomendado).
-
-    No afecta a emergencias APRS.
-
-    No modifica el comportamiento RF estándar.
-
-### 🧩 COMPATIBILIDAD
-
-Compatible con:
-
-    APRSDroid
-
-    aprs.fi
-
-    Cualquier cliente APRS-IS
-
-    No rompe:
-
-    /aprs_on
-
-    /aprs
-
-    Gate APRS RF
-
-    Emergencias
-
-    Broker
-
-    Bridges Mesh
-
-### Ejemplos:
-
-  Recibir solo el canal 1 en APRSDroid:
-
-    /aprsis_push on 1
-
-Recibir todos los canales:
-
-    /aprsis_push on all
-
-Desactivar el envío a APRS-IS:
-
-    /aprsis_push off
-
-
-### 📤 **Ejemplo de flujo:**
-
-       Telegram → Bot → UDP 9464 → meshtastic_to_aprs.py → Soundmodem/Direwolf → RF (APRS)
-                                                        ↳ opcional: APRS-IS (aprs.fi)
-
-      1.- APRS RF → APRS-IS
-           Cualquier trama recibida por RF se sube a APRS-IS si el iGate está activo.
-
-      2.- APRS RF → Mesh (Broker)
-           La misma trama, en paralelo, se reinyecta a Mesh si la pasarela está habilitada.
-
-      3.- Mesh → APRS-IS
-            Mensajes originados en Mesh (bot, nodos) también se publican en APRS-IS según reglas.
-
-          En términos prácticos:
-
-            Una transmisión desde un walkie:
-
-                Aparece en APRSDroid / aprs.fi
-
-                Aparece en la red Mesh (canal correspondiente o emergencia)
-
-          Esto convierte el sistema en un doble gateway simultáneo:
-
-                iGate APRS clásico (RF ↔ Internet)
-
-      4.-Pasarela APRS ↔ Mesh
-
-          No hay exclusión automática entre ambos caminos.
-          Mientras la pasarela esté activa, una trama APRS vive en los dos mundos a la vez.
-
-    Usuario de viaje, fuera de cobertura Mesh, solo con APRSDroid.
-
-        Envía mensajes a la malla mediante APRS.
-        Recibe en tiempo real los mensajes de uno o varios canales Mesh en el móvil.
-        Control total desde Telegram.
-        Sin exponer innecesariamente toda la red a APRS-IS.
-    
-
-## Extensiones del Gateway APRS en MeshNet “The Boss”
-
-Este documento reúne **todo lo implementado recientemente** en el gateway APRS, incluyendo:  
-- Envío inmediato desde APRS a Meshtastic  
-- Programación vía APRS  
-- Comandos de control vía RF  
-- Conversión de posiciones APRS a enlaces de mapa  
-- Limpieza de prefijos  
-- Heurísticas nuevas  
-- Cambios internos  
-- Ejemplos  
-- Compatibilidad total  
-
----
-
-# 1. Envío inmediato a la malla desde APRS
-
-Para enviar un mensaje directamente a un canal Mesh desde APRS, usa uno de estos formatos:
-
-```
-[CH n] texto
-[CHn] texto
-[CH n ] texto
-[CANAL n] texto
-[CANALn] texto
+```text
+/aprs_on
+/aprs_off
 ```
 
-**Ejemplos:**
+### Enviar a APRS
 
-```
-[CH1] Hola a todos
-[CH 4] Revisión del enlace
-[CANAL7] Prueba de cobertura
+```text
+/aprs canal 1 Muy buenas tardes
 ```
 
-El mensaje se envía **inmediatamente** al canal lógico `n`.
+Ejemplo de respuesta esperada:
 
----
-
-# 2. Envío programado desde APRS
-
-Permite programar un envío para que ocurra dentro de `M` minutos, sin necesidad de bot ni Internet.
-
-
-**Formato:**
-
-```
-[CH n+M] texto
+```text
+APRS enviado a pasarela y malla.
+Destino APRS: broadcast
+Canal Mesh: 1
+Chunks APRS: 1
+Pasarela APRS: OK
 ```
 
-- `n` → canal Mesh  
-- `M` → minutos de retraso
+### Mirror Mesh hacia APRS-IS
 
-**Ejemplos:**
-
-```
-[CH3+10] Aviso en 10 minutos
-[CANAL 1+5] Recordatorio en 5 min
-[CH7+30] Activación en 30 minutos
+```text
+/aprsis_push on all
+/aprsis_push on meshtastic 0,1 meshcore 2
+/aprsis_push off
 ```
 
-El gateway APRS programa el envío localmente y cuando pasan los minutos lo reenvía.
+Los comandos exactos disponibles dependen de la versión instalada del bot. Compruébelos con `/help` y los logs del contenedor.
 
----
+## 10. Envío APRS hacia la malla
 
-# 2.1 Compatibilidad con tramas APRS colapsadas
+Formatos aceptados habituales:
 
-Muchos clientes APRS eliminan el signo `+` y agrupan todo en una sola cifra:
-
-```
-[CH4+2]  →  [CH42]
-```
-
-El sistema implementa una heurística:
-
-```
-Si XY > 15   → canal = X, delay = Y
+```text
+[CH1] Mensaje al canal 1
+[CH 1] Mensaje al canal 1
+[CANAL1] Mensaje al canal 1
 ```
 
-Ejemplos:
+Para MeshCore también se admiten etiquetas específicas cuando están implementadas y configuradas:
 
-| Entrada | Interpretación |
-|--------|----------------|
-| `[CH42]` | canal 4 – delay 2 |
-| `[CH415]` | canal 4 – delay 15 |
-| `[CH10]` | canal 10 – sin delay |
-| `[CH7]` | canal 7 – sin delay |
-
----
-
-# 3. Control del Gateway APRS → Mesh desde RF
-
-Estas órdenes sólo se aceptan si el indicativo está incluido en:
-
-```
-APRS_ALLOWED_SOURCES=EA2XXX-7,EA2YYY-9
+```text
+[MC1] Mensaje al channel_idx 1
+[MC1/ZARAGOZA] Mensaje regional
 ```
 
-Comandos:
+El prefijo de encaminamiento se elimina antes de mostrar el texto final en la malla.
 
-```
-[CH0] APRS ON
-[CH0] APRS OFF
-```
+### Programación diferida
 
-- `APRS ON` → habilita toda la pasarela RF → Mesh  
-- `APRS OFF` → bloquea temporalmente el reenvío
-
----
-
-# 4. Conversión de posiciones APRS a enlaces de mapa
-
-Si una trama APRS incluye posición, se genera un enlace clicable compatible con Google Maps:
-
-**Entrada APRS:**
-
-```
-!4138.31N/00054.23W qrv R70
+```text
+[CH3+10] Aviso dentro de 10 minutos
 ```
 
-**Salida en la malla:**
+La programación se procesa localmente por el gateway. Antes de utilizarla en servicio real, valide el formato con una prueba controlada y compruebe el log.
 
-```
-qrv R70 https://maps.google.com/?q=41.638500,-0.903833
-```
+## 11. Ejemplos de prueba funcional
 
-- Extrae coordenadas con `aprslib`
-- Limpia el comentario
-- Añade el enlace al mapa
-- Si no hay comentario: solo el enlace
-
----
-
-# 5. Limpieza automática del prefijo `[CH…]`
-
-Para evitar que la malla se llene de comandos internos, el prefijo nunca aparece en el mensaje final.
-
-Ejemplo recibido APRS:
-
-```
-[CH4+2] qrv R70-R72 sdr:...
-```
-
-Ejemplo mostrado en Mesh:
-
-```
-qrv R70-R72 sdr:... https://maps.google.com/?q=41.638000,-0.906167
-```
-
----
-
-# 6. Prevención de bucles y duplicados
-
-El sistema mantiene una **caché de mensajes recientes** (`_recent_aprs_keys`)  
-para evitar que los mismos paquetes circulen en bucle entre la red APRS e Internet o la red Mesh.
-
-> 🔁 TTL típico: 20 segundos  
-> Evita que un mensaje reenviado vuelva a entrar al origen.
-
----
-
-### 4️⃣ Mensajes especiales: `NOGATE` y `RFONLY`
-Si un mensaje incluye cualquiera de estos términos:
-- `NOGATE`
-- `RFONLY`
-
-Entonces el gateway **no lo reenvía a APRS-IS** ni a la red Mesh.  
-Se respeta la intención original del usuario APRS (solo RF local).
-
----
-
-# 7. Modo APRS-IS (Internet uplink)
-
-Si se configuran las credenciales de usuario y passcode, el gateway se conecta a la red APRS-IS global:
+### 11.1 Verificar conectividad KISS desde el contenedor
 
 ```bash
-APRSIS_USER=EB2XXX-10
-APRSIS_PASSCODE=12345
+docker exec meshnet-aprs python3 -c '
+import os, socket
+host=os.getenv("KISS_HOST", "127.0.0.1")
+port=int(os.getenv("KISS_PORT", "8100"))
+s=socket.create_connection((host, port), timeout=5)
+print(f"KISS OK {host}:{port}")
+s.close()
+'
 ```
 
-Esto crea una conexión persistente a:
-```
-rotate.aprs2.net:14580
-```
+### 11.2 Verificar resolución del host
 
-Y sube automáticamente los mensajes válidos en formato *third-party frame*, como:
-
-```
-IGATE>APRS,TCPIP*,qAR,IGATE:}SRC>DEST,PATH:payload
+```bash
+docker exec meshnet-aprs getent hosts host.docker.internal
 ```
 
----
+### 11.3 Enviar una petición de prueba al control UDP
 
-# 7. Novedades v6.2 — Sistema de Emergencias APRS
-
--------------------------------------
-## 7.1. Detección automática de emergencias
-
-El sistema identifica emergencias mediante:
-
-### Palabras clave:
+```bash
+docker exec -i meshnet-aprs python3 -c '
+import json, socket
+request={
+  "mode":"aprsis_emergency_bulletin",
+  "event_id":"TEST-DOC-001",
+  "severity":"high",
+  "status":"resolved",
+  "text":"PRUEBA TECNICA finalizada."
+}
+s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(10)
+s.sendto(json.dumps(request).encode(), ("127.0.0.1", 9464))
+data,_=s.recvfrom(65535)
+print(json.dumps(json.loads(data.decode()), indent=2))
+s.close()
+'
 ```
-EMERGENCIA, EMERGENCY, SOS, MAYDAY, AYUDA, …
+
+La respuesta puede indicar `sent: true` o una razón operativa como `rate_limited`. Un resultado limitado confirma que el endpoint respondió, pero no que se haya transmitido una nueva trama.
+
+### 11.4 Observar transmisiones y deduplicación
+
+```bash
+docker logs -f meshnet-aprs 2>&1 | grep --line-buffered -E \
+'\[ctrl→aprs\] TX|RF TX|APRS-IS|duplicado|DEDUP|rate_limited'
 ```
 
-Configurable:
+### 11.5 Comprobar APRS-IS
 
+```bash
+docker logs --tail 300 meshnet-aprs | grep -iE 'aprs-is|login|rotate\.aprs2\.net|passcode|filter'
 ```
+
+La confirmación definitiva debe realizarse también en un cliente APRS-IS o servicio de monitorización, teniendo en cuenta retardos, filtros y políticas de la red.
+
+## 12. Fragmentación y rutas AX.25
+
+```env
+APRS_MAX_LEN=67
+APRS_RF_PART_DELAY_S=2.0
+APRS_RF_BAUD=1200
+APRS_PATH=WIDE1-1
+APRS_BOT_PATH=
+```
+
+- `APRS_MAX_LEN`: tamaño máximo de texto antes de dividirlo.
+- `APRS_RF_PART_DELAY_S`: pausa entre partes consecutivas.
+- `APRS_RF_BAUD`: utilizado para estimar el tiempo de aire.
+- `APRS_PATH`: ruta general del gateway.
+- `APRS_BOT_PATH`: ruta específica de envíos inmediatos del bot.
+
+Para transmisión RF local sin repetidores:
+
+```env
+APRS_BOT_PATH=none
+```
+
+No aumente rutas ni repita tramas para compensar problemas de cobertura. Primero revise TNC, audio, PTT, potencia, antena, temporización y duplicados.
+
+## 13. Emergencias APRS y APRS-IS
+
+La lógica de emergencias puede:
+
+- detectar palabras clave y destinos especiales;
+- clasificar eventos por posición y distancia;
+- reenviar a canales Mesh dedicados;
+- emitir boletines APRS-IS;
+- aplicar rate limit y deduplicación;
+- mantener flujos incluso cuando el gate general está desactivado, según configuración.
+
+Variables habituales:
+
+```env
 APRS_EMERGENCY_KEYWORDS=EMERGENCIA,EMERGENCY,MAYDAY,SOS,AYUDA
-```
-
-### Destinos APRS especiales:
-```
 APRS_EMERGENCY_DESTS=EMERGENCY,EMERG,SOS
-```
-
-Ejemplos:
-
-```
-[CH1] EMERGENCIA accidente grave
-SOS senderista caída
-```
-
--------------------------------------
-## 7.2. Bypass total del gateway
-
-Aunque el sistema esté desactivado mediante:
-
-```
-APRS_GATE_ENABLED=0
-```
-o
-```
-[CH0] APRS OFF
-```
-
-→ **Los mensajes de emergencia SIEMPRE se procesan.**
-
--------------------------------------
-## 7.3. Reenvío redundante en Mesh
-
-Configurable:
-
-```
+HOME_LAT=41.638
+HOME_LON=-0.903
+APRS_EMERGENCY_MAX_KM=50
 MESH_EMERGENCY_CHANNELS=1,2,4
 ```
 
-Reglas:
+La operación KISS remota de emergencias se documenta además en [`APRS_Remote_KISS_Emergency.md`](APRS_Remote_KISS_Emergency.md).
 
-- Emergencia **local** → enviar a `[CHx]` + canales dedicados.
-- Emergencia **remota** → solo al canal `[CHx]`.
-- Si no hay lista de emergencia → solo al canal `[CHx]`.
+## 14. NOGATE, RFONLY, bucles y duplicados
 
--------------------------------------
-## 7.4. Geo‑fencing: LOCAL / REMOTA
+Las marcas `NOGATE` y `RFONLY` deben respetarse para evitar que tráfico definido como local se propague hacia Internet u otros sistemas.
 
-Variables:
+El gateway mantiene cachés y claves recientes para impedir bucles entre:
 
-```
-HOME_LAT=41.638
-HOME_LON=-0.902
-APRS_EMERGENCY_MAX_KM=50
-```
+- APRS RF;
+- APRS-IS;
+- broker;
+- MeshCore;
+- Meshtastic.
 
-Clasificación:
+Si se observan varias tramas RF aparentemente iguales:
 
-- Dentro del radio → **LOCAL**
-- Fuera del radio → **REMOTA**
-- Sin posición → **DESCONOCIDA**
+1. Compruebe cuántos `TX` aparecen en `meshnet-aprs`.
+2. Compruebe el log de Direwolf/Soundmodem.
+3. Determine si son transmisiones locales o repeticiones de digipeaters.
+4. Revise `APRS_PATH` y `APRS_BOT_PATH`.
+5. No atribuya automáticamente cada trama recibida por SDR a un envío múltiple del gateway.
 
-Ejemplo en Mesh:
+## 15. Operación Docker
 
-```
-[EMERG APRS][LOCAL] src=EA2ABC-7 gate=ON
-incendio forestal
-https://maps.google.com/?q=41.6385,-0.9038
-```
-
--------------------------------------
-## 7.5. Notificación inmediata a Telegram
-
-Cada emergencia se envía automáticamente a:
-
-```
-TELEGRAM_EMERG_CHAT_IDS=
-```
-
-O a:
-
-```
-ADMIN_IDS
-```
-
-Incluye:
-
-- Indicativo
-- PATH
-- LOCAL / REMOTA
-- Distancia
-- Enlace a mapa
-- Texto original
-- Canales Mesh utilizados
-
--------------------------------------
-## 7.6. Heartbeat (estado de red)
-
-Cada mensaje de emergencia enviado a Mesh incluye un encabezado:
-
-```
-[EMERG APRS][LOCAL] src=EA2XYZ-9 gate=ON
-```
-
-Actúa como:
-
-- Confirmación del gateway
-- Registro útil para auditoría
-- Diferenciación clara de tráfico crítico
-
--------------------------------------
-# 8. Ejemplos prácticos
-
--------------------------------------
-## 8.1. Accidente múltiple
-
-Entrada APRS:
-
-```
-[CH3] EMERGENCIA varios heridos
-```
-
-Salida Mesh:
-
-```
-[EMERG APRS][LOCAL] src=EA2ABC-7 gate=ON
-varios heridos
-```
-
--------------------------------------
-## 8.2. Senderista perdida con posición
-
-Entrada:
-
-```
-!4138.31N/00054.23W AYUDA no encuentro el camino
-```
-
-Salida:
-
-```
-[EMERG APRS][LOCAL] src=EA2XYZ-9 gate=ON
-no encuentro el camino
-https://maps.google.com/?q=41.6385,-0.9038
-```
-
--------------------------------------
-## 8.3. Corte de comunicaciones
-
-Incluso con el gateway apagado:
-
-```
-[CH0] APRS OFF
-```
-
-Una trama APRS como:
-
-```
-SOS municipio sin comunicaciones
-```
-
-→ Sí se reenvía.
-
--------------------------------------
-# 9. Variables completas (incluidas las nuevas)
-
-```
-APRS_GATE_ENABLED=1
-APRS_ALLOWED_SOURCES=
-APRS_EMERGENCY_KEYWORDS=EMERGENCIA,EMERGENCY,MAYDAY,SOS,AYUDA
-APRS_EMERGENCY_DESTS=EMERGENCY,EMERG,SOS
-MESH_EMERGENCY_CHANNELS=1,2
-APRS_EMERGENCY_MAX_KM=50
-HOME_LAT=
-HOME_LON=
-TELEGRAM_EMERG_CHAT_IDS=
-APRSIS_USER=
-APRSIS_PASSCODE=
-APRSIS_FILTER=
-```
-
--------------------------------------
-# 10. Changelog
-
-## v6.2 — Extensión de emergencias
-✓ Detección automática  
-✓ Bypass completo  
-✓ Geo‑fencing  
-✓ Notificación Telegram  
-✓ Rutas redundantes Mesh  
-✓ Heartbeat de emergencia  
-
-## v6.1.3 — Funciones anteriores  
-✓ Envío `[CHx]` y `[CHx+M]`  
-✓ Limpieza de prefijos  
-✓ Control RF `[CH0]`  
-✓ Uplink APRS‑IS  
-✓ Prevención loops  
-✓ Conversión de posiciones a mapa  
-✓ Heurística canales/delay  
-
--------------------------------------
-# 11. Conclusión
-
-La pasarela APRS ↔ MeshNet se convierte así en un **sistema robusto de comunicaciones resilientes**, útil para:
-
-- Rescate en montaña  
-- Protección Civil  
-- Catástrofes naturales  
-- Zonas sin infraestructura  
-- Operaciones tácticas y humanitarias  
-
-Si puede emitirse APRS, **MeshNet lo recibe, lo distribuye y alerta a los responsables**, incluso sin internet ni bot.
-
--------------------------------------
-
-# 12. Registro y depuración
-
-Activa el modo de depuración añadiendo en `.env`:
+### Estado
 
 ```bash
-APRS_DEBUG=1
+cd /home/meshnet/MeshNet-Bot
+docker compose -f docker-compose.rpi.yml ps aprs
+docker inspect meshnet-aprs --format '{{.State.Status}} {{.State.ExitCode}} {{.RestartCount}}'
 ```
 
-📜 Ejemplo de salida:
-```
-[aprs→IS] Enviando: EB2EAS>APRS,TCPIP*,qAR,EB2EAS:}EA2XXX>APRS:Hola mundo [CH0]
-[aprs→mesh] Reenviando desde APRS a Mesh canal 0: "Hola mundo"
-```
+### Reinicio
 
-> Desactívalo con `APRS_DEBUG=0` para un funcionamiento silencioso.
-
-# 13. Resumen técnico interno
-
-Flujo completo en `task_aprs_to_meshtastic`:
-
-1. Recepción de trama KISS  
-2. Parseo AX.25  
-3. Filtro por indicativo (`APRS_ALLOWED_SOURCES`)  
-4. Extracción de canal + delay  
-5. Limpieza del comentario  
-6. Control de gateway cuando canal = 0  
-7. Si delay: `_schedule_aprs_to_mesh`  
-8. Si no delay: `_broker_send_text`  
-9. Si es posición: conversión a enlace mapa  
-10. Reenvío opcional APRS→APRS-IS  
-
----
-
-# 14. Resumen rápido
-
-```
-[CH n] texto       → envío inmediato
-[CH n+M] texto     → envío programado
-[CH0] APRS ON      → activar gateway
-[CH0] APRS OFF     → desactivar gateway
-posiciones APRS    → enlace Google Maps
-[CHXY]             → interpretado como CH X + delay Y si XY > 15
+```bash
+docker compose -f docker-compose.rpi.yml restart aprs
 ```
 
----
+### Parada y arranque
 
-# 15. Formatos válidos
-
-```
-[CH4]
-[CH 4]
-[CH4+10]
-[CH 4 + 10]
-[CANAL4]
-[CANAL 4+5]
-[CH42]      → canal=4 delay=2 (heurística)
+```bash
+docker compose -f docker-compose.rpi.yml stop aprs
+docker compose -f docker-compose.rpi.yml start aprs
 ```
 
----
+### Recreación
 
-# 16. Variables requeridas
-
+```bash
+docker compose -f docker-compose.rpi.yml up -d --force-recreate aprs
 ```
+
+### Actualización individual
+
+```bash
+docker compose -f docker-compose.rpi.yml pull aprs
+docker compose -f docker-compose.rpi.yml up -d --force-recreate aprs
+```
+
+### Logs
+
+```bash
+docker logs --tail 300 meshnet-aprs
+docker logs -f meshnet-aprs
+```
+
+## 16. Recuperación tras reinstalación
+
+Antes de reinstalar:
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+cp -a .env "$HOME/meshnet-aprs.env.backup"
+cp -a bot_data "$HOME/meshnet-bot_data.backup"
+```
+
+Después de restaurar el repositorio:
+
+```bash
+cp "$HOME/meshnet-aprs.env.backup" /home/meshnet/MeshNet-Bot/.env
+cd /home/meshnet/MeshNet-Bot
+docker compose -f docker-compose.rpi.yml pull broker aprs
+docker compose -f docker-compose.rpi.yml up -d broker aprs
+docker logs --tail 200 meshnet-aprs
+```
+
+Compruebe de nuevo la conectividad KISS y APRS-IS. Restaurar el `.env` no garantiza que Direwolf, Soundmodem, audio o firewall sigan configurados en el host remoto.
+
+## 17. Diagnóstico por síntomas
+
+### `Connection refused` hacia KISS
+
+```bash
+nc -vz "$KISS_HOST" "$KISS_PORT"
+sudo ss -ltnp | grep ':8100'
+docker logs --tail 200 meshnet-aprs
+```
+
+Causas habituales:
+
+- TNC no arrancado.
+- Dirección incorrecta.
+- Servicio ligado solo a `127.0.0.1` en otro equipo.
+- Firewall.
+- Puerto distinto.
+
+### No conecta a APRS-IS
+
+Revise:
+
+- `APRSIS_USER` con SSID correcto.
+- Passcode correspondiente al indicativo base.
+- DNS y salida TCP 14580.
+- Host y filtro.
+- Reloj del sistema.
+
+```bash
+docker exec meshnet-aprs getent hosts rotate.aprs2.net
+docker exec meshnet-aprs python3 -c 'import socket; socket.create_connection(("rotate.aprs2.net",14580),5).close(); print("TCP APRS-IS OK")'
+```
+
+### APRS llega por RF pero no entra en la malla
+
+Revise:
+
+```env
 APRS_GATE_ENABLED=1
-APRS_ALLOWED_SOURCES=EA2XXX-7,EA2YYY-9
-MESHTASTIC_CHANNEL=0
-
-A tener en cuenta las otras variables expuestas anteriormente.
+APRS_ALLOWED_SOURCES=
+APRS_TO_MESHCORE=
 ```
 
-`APRS_ALLOWED_SOURCES` puede estar vacío para permitir cualquier indicativo.
+Después:
 
----
+```bash
+docker logs --tail 300 meshnet-aprs
+docker logs --tail 300 meshnet-broker
+```
 
-# 17. Ejemplos completos
+Confirme también el perfil y el mapa de canales.
 
-    ### Inmediato:
-    ```
-    [CH1] Hola red Mesh
-    ```
+### El bot responde pero no hay RF
 
-    ### Programado:
-    ```
-    [CH4+15] Aviso en 15 minutos
-    ```
+- Compruebe el `TX` en `meshnet-aprs`.
+- Compruebe que el TNC recibió la trama.
+- Revise PTT, audio, VOX, puerto, cableado y radio.
+- Verifique que la ruta no se ha establecido en `none` por error.
 
-    ### Programado colapsado:
-    ```
-    [CH415] mensaje  → canal=4 delay=15
-    [CH42] aviso     → canal=4 delay=2
-    ```
+### Solo se transmite la primera parte
 
-    ### Control:
-    ```
-    [CH0] APRS ON
-    [CH0] APRS OFF
-    ```
+Aumente de forma moderada:
 
-    ### Posición:
-    Entrada RF:
-    ```
-    !4138.31N/00054.23W qrv
-    ```
+```env
+APRS_RF_PART_DELAY_S=3.0
+```
 
-    Salida Mesh:
-    ```
-    qrv https://maps.google.com/?q=41.638500,-0.903833
-    ```
+Recree el contenedor y repita una prueba controlada.
 
-    ---
+### `rate_limited`
 
----
+No es un fallo de conexión. El gateway ha rechazado temporalmente una repetición o un boletín por protección antiabuso. Respete `retry_after` y no fuerce reintentos rápidos.
 
-Fin del documento.
+## 18. Lista de validación final
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+
+docker compose -f docker-compose.rpi.yml config --services | grep -Fx aprs
+docker compose -f docker-compose.rpi.yml ps broker aprs
+docker logs --tail 100 meshnet-aprs
+docker exec meshnet-aprs getent hosts host.docker.internal
+```
+
+Validar además:
+
+- Indicativo distinto de `NOCALL`.
+- KISS accesible.
+- Broker operativo.
+- Perfil de radio correcto.
+- Mapa de canales comprobado.
+- APRS-IS autenticado cuando esté habilitado.
+- Una prueba RF controlada.
+- Una prueba APRS-IS controlada.
+- Ausencia de duplicados locales en los logs.
+- Rutas AX.25 conformes con la política de la red local.
+
+## 19. Documentación relacionada
+
+- [`OPERATIONS.md`](OPERATIONS.md)
+- [`RADIO_PROFILES.md`](RADIO_PROFILES.md)
+- [`APRS_Remote_KISS_Emergency.md`](APRS_Remote_KISS_Emergency.md)
+- [`BOT_README.md`](BOT_README.md)
+- [`BROKER_README.md`](BROKER_README.md)
+- [`../docker/README.MD/README.md`](../docker/README.MD/README.md)
+
+Los documentos `APRS_GATEWAY_FULL_v6.2.md` y `APRS_GATEWAY_old.md` son históricos. Esta guía es la referencia operativa vigente.
