@@ -2,7 +2,7 @@
 
 MeshNet-Bot es una plataforma de comunicaciones para radioaficionados que integra **MeshCore**, **Meshtastic**, **APRS**, Telegram, correo electrónico, BBS, panel web y aplicaciones auxiliares independientes.
 
-La arquitectura mantiene separados los componentes críticos: el broker administra interfaces y colas; el bot ofrece control por Telegram; la pasarela APRS gestiona KISS/APRS-IS; y las aplicaciones independientes consultan y publican información sin introducir dependencias dentro del núcleo.
+La arquitectura mantiene separados los componentes críticos: el broker administra interfaces y colas; el bot ofrece control por Telegram; la pasarela APRS gestiona KISS/APRS-IS; `email-to-mesh` conecta IMAP/SMTP con la malla; y las aplicaciones independientes consultan y publican información sin introducir dependencias dentro del núcleo.
 
 ## Documentación
 
@@ -14,7 +14,7 @@ La arquitectura mantiene separados los componentes críticos: el broker administ
 | [`docs/BROKER_README.md`](docs/BROKER_README.md) | Arquitectura y operación del broker. |
 | [`docs/BOT_README.md`](docs/BOT_README.md) | Configuración y funciones del bot Telegram. |
 | [`docs/APRS_GATEWAY.md`](docs/APRS_GATEWAY.md) | Pasarela APRS RF/APRS-IS. |
-| [`docs/EMAIL_TO_MESH.md`](docs/EMAIL_TO_MESH.md) | Correo hacia MeshCore/Meshtastic. |
+| [`docs/EMAIL_TO_MESH.md`](docs/EMAIL_TO_MESH.md) | Contenedor `email-to-mesh`: IMAP, SMTP, contactos, operación y diagnóstico. |
 | [`tools/ControlPanel/README.md`](tools/ControlPanel/README.md) | Panel de control independiente. |
 | [`tools/farmacias_guardia/README.md`](tools/farmacias_guardia/README.md) | Aplicación de farmacias de guardia. |
 | [`tools/emergencias_guardia/README.md`](tools/emergencias_guardia/README.md) | Aplicación de emergencias. |
@@ -27,11 +27,14 @@ La arquitectura mantiene separados los componentes críticos: el broker administ
 | `meshnet-broker` | Docker | Interfaces MeshCore/Meshtastic, colas, control JSONL, comandos de malla y puentes. |
 | `meshnet-bot` | Docker | Telegram, programación, consultas, escucha y administración. |
 | `meshnet-aprs` | Docker | APRS RF por KISS, APRS-IS, pasarela Mesh/APRS y boletines. |
+| `meshnet-email-to-mesh` | Docker | Lectura IMAP, correo hacia la malla, SMTP desde malla/Telegram/CLI y contactos persistentes. |
 | `meshnet-bridge-bc` | Docker opcional | Puentes externos adicionales. |
 | ControlPanel | systemd, host | Administración web de aplicaciones y servicios. |
 | Farmacias | systemd, host | Consulta, API local y publicación programada. |
 | Emergencias | systemd, host | Agregación de fuentes, API local y avisos incrementales. |
 | Voice RF Gateway | systemd, host | Preparación y síntesis WAV; sin PTT ni emisión RF en v7.0.35. |
+
+El nombre del servicio Compose es `email-to-mesh`; el nombre del contenedor creado es `meshnet-email-to-mesh`.
 
 ## Requisitos
 
@@ -40,6 +43,7 @@ La arquitectura mantiene separados los componentes críticos: el broker administ
 - Python 3.10 o posterior para aplicaciones independientes.
 - Nodo MeshCore o Meshtastic accesible según `RADIO_PROFILE`.
 - Credenciales y claves únicamente en archivos `.env` locales, nunca en Git.
+- Para correo, cuenta IMAP y, cuando se use malla hacia correo, cuenta SMTP o contraseña de aplicación.
 
 ## Instalación base en Raspberry Pi
 
@@ -75,6 +79,7 @@ Comprobación:
 docker logs --tail 100 meshnet-broker
 docker logs --tail 100 meshnet-bot
 docker logs --tail 100 meshnet-aprs
+docker logs --tail 100 meshnet-email-to-mesh
 ```
 
 ## Perfiles de radio
@@ -86,6 +91,26 @@ RADIO_PROFILE=meshcore_only
 ```
 
 Los perfiles mixtos deben ajustarse siguiendo [`docs/RADIO_PROFILES.md`](docs/RADIO_PROFILES.md). El broker es la autoridad: una aplicación auxiliar no debe forzar una interfaz deshabilitada por el perfil.
+
+## Contenedor email-to-mesh
+
+El servicio está incluido en `docker-compose.rpi.yml` y se inicia junto con el resto del núcleo:
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+docker compose -f docker-compose.rpi.yml up -d email-to-mesh
+docker compose -f docker-compose.rpi.yml ps email-to-mesh
+docker logs --tail 100 meshnet-email-to-mesh
+```
+
+Reinicio y recreación:
+
+```bash
+docker compose -f docker-compose.rpi.yml restart email-to-mesh
+docker compose -f docker-compose.rpi.yml up -d --force-recreate email-to-mesh
+```
+
+La configuración IMAP/SMTP se lee del `.env` principal. Los contactos y el estado de deduplicación se conservan en `bot_data/`, montado como `/app/bot_data` dentro del contenedor. La guía completa está en [`docs/EMAIL_TO_MESH.md`](docs/EMAIL_TO_MESH.md).
 
 ## Actualización segura
 
@@ -113,11 +138,13 @@ Las aplicaciones del host pueden requerir volver a copiar sus unidades systemd; 
 # Estado Docker
 docker compose -f docker-compose.rpi.yml ps
 
-# Reiniciar solo un componente
+# Reiniciar componentes concretos
 docker compose -f docker-compose.rpi.yml restart broker
+docker compose -f docker-compose.rpi.yml restart email-to-mesh
 
 # Logs continuos
 docker logs -f meshnet-broker
+docker logs -f meshnet-email-to-mesh
 
 # Estado de aplicaciones independientes
 systemctl status meshnet-control-panel.service --no-pager
@@ -147,10 +174,14 @@ Rutas operativas oficiales:
 
 Cada aplicación mantiene su configuración local y sus servicios systemd. Sus README contienen instalación desde cero, reinstalación, comprobaciones y diagnóstico.
 
+`email-to-mesh` no pertenece a este grupo: es un contenedor del núcleo Docker y utiliza el `.env` principal.
+
 ## Seguridad
 
 - No subir `.env`, `.web_env`, contraseñas, tokens, claves API ni datos operativos.
 - No publicar el puerto de control del broker fuera del host sin filtrado de red.
+- Restringir `EMAIL_ALLOWED_SENDERS`; no permitir remitentes arbitrarios para inyectar mensajes en radio.
+- Utilizar contraseñas de aplicación cuando el proveedor de correo lo exija.
 - Las API auxiliares enlazadas a `0.0.0.0` deben quedar limitadas por firewall a la red Docker/LAN necesaria.
 - Realizar pruebas APRS con indicativos, rutas y límites de emisión legalmente válidos.
 
