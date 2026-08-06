@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-meshtastic_to_aprs.py (v7.0.32)
+meshtastic_to_aprs.py (v7.0.38)
 Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
 - /aprs (bot) -> UDP local -> TX APRS (troceo automático).
@@ -274,6 +274,16 @@ APRSIS_EMERGENCY_BULLETIN_ENABLED = int(os.getenv("APRSIS_EMERGENCY_BULLETIN_ENA
 APRSIS_EMERGENCY_BULLETIN_MIN_LEVEL = (os.getenv("APRSIS_EMERGENCY_BULLETIN_MIN_LEVEL", "high") or "high").strip().lower()
 APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC = max(0.0, float(os.getenv("APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC", "300") or "300"))
 APRSIS_EMERGENCY_BULLETIN_DEDUP_SEC = max(0.0, float(os.getenv("APRSIS_EMERGENCY_BULLETIN_DEDUP_SEC", "1800") or "1800"))
+APRSIS_EMERGENCY_BULLETIN_GROUP = (os.getenv("APRSIS_EMERGENCY_BULLETIN_GROUP", "") or "").strip()
+
+# Catálogo central de grupos APRS-IS reservados para futuras salidas.
+# Solo Emergencias está conectada actualmente a publicación automática; el
+# resto queda preparado y documentado, sin provocar tráfico por sí mismo.
+APRSIS_AEMET_BULLETIN_GROUP = (os.getenv("APRSIS_AEMET_BULLETIN_GROUP", "AEMET") or "AEMET").strip()
+APRSIS_FARMACIAS_BULLETIN_GROUP = (os.getenv("APRSIS_FARMACIAS_BULLETIN_GROUP", "FARMA") or "FARMA").strip()
+APRSIS_NEWS_BULLETIN_GROUP = (os.getenv("APRSIS_NEWS_BULLETIN_GROUP", "NEWS") or "NEWS").strip()
+APRSIS_SYSTEM_BULLETIN_GROUP = (os.getenv("APRSIS_SYSTEM_BULLETIN_GROUP", "MESH") or "MESH").strip()
+APRSIS_TEST_BULLETIN_GROUP = (os.getenv("APRSIS_TEST_BULLETIN_GROUP", "TEST") or "TEST").strip()
 APRSIS_EMERGENCY_BULLETIN_STATE_PATH = Path(os.getenv(
     "APRSIS_EMERGENCY_BULLETIN_STATE_PATH",
     os.path.join(os.getenv("BOT_DATA_DIR", "/app/bot_data"), "aprsis_emergency_bulletins.json"),
@@ -411,13 +421,90 @@ def _save_aprsis_emergency_state(state: dict) -> None:
         print(f"[APRS-IS BLN] state save WARN: {type(exc).__name__}: {exc}")
 
 
+def _normalize_aprsis_bulletin_group(raw_group: str) -> str:
+    """Normaliza el grupo APRS a 0..5 caracteres alfanuméricos ASCII.
+
+    Uso interno:
+      group = _normalize_aprsis_bulletin_group(APRSIS_EMERGENCY_BULLETIN_GROUP)
+
+    Parámetros:
+      raw_group: nombre configurado por el operador.
+
+    Funcionalidad:
+      - Convierte a mayúsculas y ASCII seguro.
+      - Elimina espacios, guiones y signos no válidos.
+      - Limita a cinco caracteres para que BLNx+grupo ocupe como máximo
+        los nueve caracteres del addressee APRS.
+      - Una cadena vacía conserva el formato histórico BLN0..BLN9.
+    """
+    ascii_group = _aprs_ascii(raw_group).upper()
+    return "".join(ch for ch in ascii_group if ch.isalnum())[:5]
+
+
+
+
+def _aprsis_bulletin_group_for(source: str) -> str:
+    """Devuelve el grupo APRS-IS reservado para una fuente del sistema.
+
+    Uso interno:
+      group = _aprsis_bulletin_group_for("emergencias")
+
+    Parámetros:
+      source: nombre lógico de la aplicación o familia de avisos.
+
+    Funcionalidad:
+      - Centraliza los grupos propuestos EMERG, AEMET, FARMA, NEWS, MESH y TEST.
+      - Admite alias habituales en español e inglés.
+      - Normaliza siempre a un máximo de cinco caracteres APRS válidos.
+      - Devuelve cadena vacía para fuentes desconocidas, evitando publicaciones
+        accidentales en un grupo no definido.
+      - No activa ninguna salida ni transmite por sí misma.
+    """
+    key = (source or "").strip().lower().replace("-", "_")
+    groups = {
+        "emergencias": APRSIS_EMERGENCY_BULLETIN_GROUP,
+        "emergency": APRSIS_EMERGENCY_BULLETIN_GROUP,
+        "aemet": APRSIS_AEMET_BULLETIN_GROUP,
+        "meteorologia": APRSIS_AEMET_BULLETIN_GROUP,
+        "weather": APRSIS_AEMET_BULLETIN_GROUP,
+        "farmacias": APRSIS_FARMACIAS_BULLETIN_GROUP,
+        "farmacia": APRSIS_FARMACIAS_BULLETIN_GROUP,
+        "pharmacy": APRSIS_FARMACIAS_BULLETIN_GROUP,
+        "news": APRSIS_NEWS_BULLETIN_GROUP,
+        "noticias": APRSIS_NEWS_BULLETIN_GROUP,
+        "mesh": APRSIS_SYSTEM_BULLETIN_GROUP,
+        "meshnet": APRSIS_SYSTEM_BULLETIN_GROUP,
+        "sistema": APRSIS_SYSTEM_BULLETIN_GROUP,
+        "system": APRSIS_SYSTEM_BULLETIN_GROUP,
+        "test": APRSIS_TEST_BULLETIN_GROUP,
+        "pruebas": APRSIS_TEST_BULLETIN_GROUP,
+    }
+    return _normalize_aprsis_bulletin_group(groups.get(key, ""))
+
+
+def _aprsis_bulletin_name(number: int, group: str | None = None) -> str:
+    """Construye BLN0..BLN9 o BLN0GRUPO..BLN9GRUPO."""
+    safe_number = max(0, min(9, int(number)))
+    safe_group = _normalize_aprsis_bulletin_group(
+        _aprsis_bulletin_group_for("emergencias") if group is None else group
+    )
+    return f"BLN{safe_number}{safe_group}"
+
+
 def _allocate_aprsis_bulletin_slot(state: dict, event_id: str) -> str:
-    """Asigna de forma estable una línea BLN0..BLN9 a cada emergencia activa."""
+    """Asigna de forma estable una línea BLN a cada emergencia activa.
+
+    Mantiene el número de una asignación histórica BLN0..BLN9 cuando se activa
+    posteriormente un grupo, migrándola de forma natural a BLN0GRUPO.
+    """
     events = state.setdefault("events", {})
     existing = events.get(event_id, {}) if isinstance(events.get(event_id), dict) else {}
     slot = str(existing.get("bulletin", "")).strip().upper()
-    if re.fullmatch(r"BLN[0-9]", slot):
-        return slot
+    current_group = _aprsis_bulletin_group_for("emergencias")
+
+    match = re.fullmatch(r"BLN([0-9])([A-Z0-9]{0,5})", slot)
+    if match:
+        return _aprsis_bulletin_name(int(match.group(1)), current_group)
 
     used = {
         str(value.get("bulletin", "")).strip().upper()
@@ -425,12 +512,13 @@ def _allocate_aprsis_bulletin_slot(state: dict, event_id: str) -> str:
         if isinstance(value, dict) and not value.get("closed", False)
     }
     for number in range(10):
-        candidate = f"BLN{number}"
+        candidate = _aprsis_bulletin_name(number, current_group)
         if candidate not in used:
             return candidate
 
     # Si las diez líneas están ocupadas, se reutiliza una de forma determinista.
-    return f"BLN{int(hashlib.sha256(event_id.encode('utf-8')).hexdigest(), 16) % 10}"
+    number = int(hashlib.sha256(event_id.encode("utf-8")).hexdigest(), 16) % 10
+    return _aprsis_bulletin_name(number, current_group)
 
 
 async def send_aprsis_emergency_bulletin(
@@ -460,29 +548,40 @@ async def send_aprsis_emergency_bulletin(
 
     now = time.time()
     terminal = status in {"resolved", "cancelled", "expired", "closed"}
-    digest = hashlib.sha256(
-        f"{event_id}|{severity}|{status}|{clean_text}".encode("utf-8")
-    ).hexdigest()
 
     async with _APRSIS_EMERGENCY_LOCK:
         state = _load_aprsis_emergency_state()
         events = state.setdefault("events", {})
         previous = events.get(event_id, {}) if isinstance(events.get(event_id), dict) else {}
+        bulletin = _allocate_aprsis_bulletin_slot(state, event_id)
+        previous_bulletin = str(previous.get("bulletin", "")).strip().upper()
+        bulletin_changed = bool(previous_bulletin and previous_bulletin != bulletin)
+        digest = hashlib.sha256(
+            f"{event_id}|{severity}|{status}|{bulletin}|{clean_text}".encode("utf-8")
+        ).hexdigest()
         last_sent = float(previous.get("last_sent", 0.0) or 0.0)
 
-        if previous.get("digest") == digest and (now - last_sent) < APRSIS_EMERGENCY_BULLETIN_DEDUP_SEC:
+        if (
+            not bulletin_changed
+            and previous.get("digest") == digest
+            and (now - last_sent) < APRSIS_EMERGENCY_BULLETIN_DEDUP_SEC
+        ):
             return {
                 "ok": True, "sent": False, "duplicate": True,
                 "reason": "duplicate", "bulletin": previous.get("bulletin"),
             }
-        if last_sent and (now - last_sent) < APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC and severity != "critical":
+        if (
+            not bulletin_changed
+            and last_sent
+            and (now - last_sent) < APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC
+            and severity != "critical"
+        ):
             return {
                 "ok": True, "sent": False, "reason": "rate_limited",
                 "retry_after": max(1, int(APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC - (now - last_sent))),
                 "bulletin": previous.get("bulletin"),
             }
 
-        bulletin = _allocate_aprsis_bulletin_slot(state, event_id)
         body = clean_text
         if terminal and not body.upper().startswith("FIN "):
             body = f"FIN {body}"
@@ -502,6 +601,7 @@ async def send_aprsis_emergency_bulletin(
             "last_text": body,
             "last_sent": now,
             "closed": terminal,
+            "group": _aprsis_bulletin_group_for("emergencias"),
         }
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         _save_aprsis_emergency_state(state)

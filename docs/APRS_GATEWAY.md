@@ -1,4 +1,4 @@
-# APRS y APRS-IS en MeshNet-Bot — v7.0.36
+# APRS y APRS-IS en MeshNet-Bot — v7.0.38
 
 Guía operativa completa del contenedor `meshnet-aprs`, servicio Compose `aprs`.
 
@@ -418,6 +418,49 @@ HOME_LAT=41.638
 HOME_LON=-0.903
 APRS_EMERGENCY_MAX_KM=50
 MESH_EMERGENCY_CHANNELS=1,2,4
+
+# Boletines públicos APRS-IS de Emergencias
+APRSIS_PUSH_ENABLED=1
+APRSIS_EMERGENCY_BULLETIN_ENABLED=1
+APRSIS_EMERGENCY_BULLETIN_MIN_LEVEL=high
+APRSIS_EMERGENCY_BULLETIN_GROUP=EMERG
+```
+
+### Grupos de boletines APRS-IS
+
+`APRSIS_EMERGENCY_BULLETIN_GROUP` admite hasta cinco caracteres alfanuméricos.
+El gateway normaliza el valor a mayúsculas y elimina espacios, guiones y otros
+signos para respetar el addressee APRS de nueve caracteres.
+
+| Configuración | Boletines generados |
+|---|---|
+| Variable vacía | `BLN0` ... `BLN9` |
+| `EMERG` | `BLN0EMERG` ... `BLN9EMERG` |
+| `AEMET` | `BLN0AEMET` ... `BLN9AEMET` |
+
+### Catálogo reservado de MeshNet-Bot
+
+| Fuente | Variable | Grupo recomendado | Estado v7.0.38 |
+|---|---|---|---|
+| Emergencias | `APRSIS_EMERGENCY_BULLETIN_GROUP` | `EMERG` | Activo cuando se autoriza la salida |
+| AEMET | `APRSIS_AEMET_BULLETIN_GROUP` | `AEMET` | Reservado, sin publicación automática |
+| Farmacias | `APRSIS_FARMACIAS_BULLETIN_GROUP` | `FARMA` | Reservado, sin publicación automática |
+| Noticias | `APRSIS_NEWS_BULLETIN_GROUP` | `NEWS` | Reservado, sin publicación automática |
+| Sistema MeshNet | `APRSIS_SYSTEM_BULLETIN_GROUP` | `MESH` | Reservado, sin publicación automática |
+| Pruebas | `APRSIS_TEST_BULLETIN_GROUP` | `TEST` | Reservado, sin publicación automática |
+
+Las variables reservadas únicamente establecen nombres. No habilitan servicios, no abren sockets y no publican boletines. Cada aplicación futura deberá disponer de su propio interruptor, filtro, deduplicación y rate limit antes de conectarse al gateway.
+
+El grupo no necesita registro previo en MeshNet-Bot. Debe elegirse un nombre
+claro y estable. Cambiar de grupo conserva el número asignado al evento activo:
+por ejemplo, un evento almacenado como `BLN4` pasa a `BLN4EMERG`. El cambio de
+grupo fuerza una publicación nueva y no queda bloqueado por la deduplicación o
+el intervalo mínimo de la asignación anterior.
+
+Para mantener exactamente el comportamiento anterior:
+
+```env
+APRSIS_EMERGENCY_BULLETIN_GROUP=
 ```
 
 La operación KISS remota de emergencias se documenta además en [`APRS_Remote_KISS_Emergency.md`](APRS_Remote_KISS_Emergency.md).

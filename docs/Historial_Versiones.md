@@ -1,5 +1,14 @@
 ## 🧾 Historial de versiones
 
+## v7.0.38 — Catálogo reservado de grupos APRS-IS
+
+- Centraliza los grupos `EMERG`, `AEMET`, `FARMA`, `NEWS`, `MESH` y `TEST`.
+- Emergencias continúa siendo la única fuente conectada a publicación automática.
+- Los grupos restantes quedan preparados y documentados, sin generar tráfico.
+- Mantiene el fallback histórico `BLN0..BLN9` cuando el grupo de Emergencias está vacío.
+- Añade pruebas del catálogo, alias y fuente desconocida segura.
+
+
 ## v7.0.21 — Validación preventiva de perfiles de radio
 
 - Añadido `scripts/radio-profile-check` para validar `.env` sin abrir conexiones de radio.
@@ -593,3 +602,11 @@ al transmisor, PTT o reproducción de audio.
 ## v7.0.35
 
 Emergency Dispatcher conectado opcionalmente al APRS RF existente para emergencias de nivel alto o crítico, desactivado por defecto.
+
+## v7.0.37 — 2026-08-06
+
+Grupos APRS-IS configurables para boletines de Emergencias. Mantiene el formato
+histórico `BLN0..BLN9` cuando el grupo está vacío y permite, por ejemplo,
+`BLN0EMERG..BLN9EMERG` con migración estable de slots y sin alterar APRS RF,
+Mesh, mirror `/aprsis_push` ni Voice RF.
+

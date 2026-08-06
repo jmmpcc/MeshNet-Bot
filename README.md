@@ -1,4 +1,4 @@
-# MeshNet-Bot “The Boss” — v7.0.36
+# MeshNet-Bot “The Boss” — v7.0.38
 
 MeshNet-Bot es una plataforma de comunicaciones para radioaficionados que integra **MeshCore**, **Meshtastic**, **APRS RF**, **APRS-IS**, Telegram, correo electrónico, BBS, panel web y aplicaciones auxiliares independientes.
 
@@ -160,6 +160,10 @@ APRS_GATE_ENABLED=1
 ```
 
 Un mensaje APRS con `[CH1]` se resolverá hacia el canal MeshCore configurado. La guía completa, incluidos mirror Mesh → APRS-IS, emergencias, boletines y pruebas UDP, está en [`docs/APRS_GATEWAY.md`](docs/APRS_GATEWAY.md).
+
+Los boletines de Emergencias pueden publicarse en un grupo APRS configurable. Con `APRSIS_EMERGENCY_BULLETIN_GROUP=EMERG`, las líneas serán `BLN0EMERG` a `BLN9EMERG`; dejando la variable vacía se conserva el formato histórico `BLN0` a `BLN9`.
+
+El catálogo reservado del proyecto define `EMERG` para emergencias, `AEMET` para avisos meteorológicos oficiales, `FARMA` para farmacias de guardia, `NEWS` para noticias relevantes, `MESH` para avisos del sistema y `TEST` para pruebas controladas. En v7.0.38 solo `EMERG` está conectado a publicación automática; los demás grupos quedan preparados y no generan tráfico hasta que su aplicación se habilite expresamente.
 
 ## Contenedor email-to-mesh
 
