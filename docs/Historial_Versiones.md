@@ -588,3 +588,8 @@ Esto permite que la Raspberry/PC principal se conecte sin firewall local.
 Fase 2C: despliegue seguro del gateway de voz para emergencias. Incluye síntesis
 local, diagnóstico, API y validación WAV, permaneciendo desactivado y sin acceso
 al transmisor, PTT o reproducción de audio.
+
+
+## v7.0.35
+
+Emergency Dispatcher conectado opcionalmente al APRS RF existente para emergencias de nivel alto o crítico, desactivado por defecto.

@@ -37,6 +37,7 @@ class DispatchResult:
     APRS-IS o voz nunca revierta ni repita una entrega Mesh correcta.
     """
 
+    aprs_rf: dict[str, Any]
     aprsis_bulletin: dict[str, Any]
     voice_rf: dict[str, Any]
 
@@ -54,6 +55,74 @@ def _aprsis_bulletin_enabled() -> bool:
         and _enabled("APRSIS_EMERGENCY_BULLETIN_ENABLED")
     )
 
+
+
+def _aprs_rf_enabled() -> bool:
+    """Comprueba la autorización explícita de APRS RF para Emergencias.
+
+    Se mantiene separada de APRS-IS. Instalar esta fase no provoca emisiones
+    RF mientras EMERGENCIAS_APRS_RF_ENABLED permanezca a 0.
+    """
+    return (
+        _enabled("APPS_APRS_ENABLED")
+        and "emergencias" in _allowed_sources()
+        and _enabled("EMERGENCIAS_APRS_ENABLED")
+        and _enabled("EMERGENCIAS_APRS_RF_ENABLED")
+    )
+
+
+def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
+    """Solicita una transmisión APRS RF al gateway APRS ya existente.
+
+    La función no abre KISS ni controla la radio. Reutiliza el canal UDP de
+    control del gateway, que conserva deduplicación, troceado, pausas multipart
+    y la conexión actual con soundmodem/Direwolf.
+    """
+    if not _aprs_rf_enabled():
+        return {"ok": True, "sent": False, "reason": "disabled"}
+
+    minimum = str(os.getenv("EMERGENCIAS_APRS_RF_MIN_LEVEL", "high") or "high").strip().lower()
+    if SEVERITY_RANK.get(event.severity, 0) < SEVERITY_RANK.get(minimum, SEVERITY_RANK["high"]):
+        return {"ok": True, "sent": False, "reason": "severity_below_threshold"}
+
+    host = str(os.getenv("APRS_CTRL_HOST", "127.0.0.1") or "127.0.0.1").strip()
+    port = int(os.getenv("APRS_CTRL_PORT", "9464") or "9464")
+    timeout = max(0.5, float(os.getenv("APRS_CTRL_ACK_TIMEOUT", "8") or "8"))
+    max_len = max(1, int(os.getenv("APRS_MAX_LEN", "67") or "67"))
+    max_chunks = max(1, int(os.getenv("APPS_APRS_MAX_CHUNKS", "2") or "2"))
+    estimated_chunks = max(1, (len(message.encode("utf-8")) + max_len - 1) // max_len)
+    if estimated_chunks > max_chunks:
+        return {
+            "ok": False,
+            "sent": False,
+            "reason": "chunk_limit_exceeded",
+            "estimated_chunks": estimated_chunks,
+            "max_chunks": max_chunks,
+        }
+
+    destination = str(os.getenv("APRS_EMERG_DEST", "broadcast") or "broadcast").strip()
+    path = str(os.getenv("APRS_BOT_PATH", os.getenv("APRS_PATH", "")) or "").strip()
+    if path.lower() in {"none", "off", "direct", "-"}:
+        path = ""
+
+    payload = {
+        "mode": "aprs",
+        "origin": "app_emergencias",
+        "dest": destination,
+        "text": message,
+        "path": path,
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+        client.settimeout(timeout)
+        client.sendto(data, (host, port))
+        response, _ = client.recvfrom(65536)
+    result = json.loads(response.decode("utf-8", errors="replace"))
+    if not isinstance(result, dict):
+        return {"ok": False, "sent": False, "reason": "invalid_response"}
+    if result.get("duplicate"):
+        return {**result, "ok": True, "sent": False, "reason": "duplicate"}
+    return result
 
 def _voice_result(event: Event, message: str) -> dict[str, Any]:
     """Solicita síntesis al servicio Voice RF cuando está autorizada.
@@ -175,6 +244,15 @@ def dispatch_secondary_outputs(event: Event, message: str) -> dict[str, Any]:
     resultado y nunca se propaga hacia el flujo principal.
     """
     try:
+        aprs_rf = _send_aprs_rf(event, message)
+    except Exception as exc:  # noqa: BLE001 - aislamiento deliberado de salida secundaria
+        aprs_rf = {
+            "ok": False,
+            "sent": False,
+            "reason": "request_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    try:
         aprsis = _send_aprsis_bulletin(event, message)
     except Exception as exc:  # noqa: BLE001 - aislamiento deliberado de salida secundaria
         aprsis = {
@@ -184,6 +262,7 @@ def dispatch_secondary_outputs(event: Event, message: str) -> dict[str, Any]:
             "error": f"{type(exc).__name__}: {exc}",
         }
     return DispatchResult(
+        aprs_rf=aprs_rf,
         aprsis_bulletin=aprsis,
         voice_rf=_voice_result(event, message),
     ).to_dict()

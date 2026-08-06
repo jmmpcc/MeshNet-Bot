@@ -210,6 +210,7 @@ def send_route(
         "sent": True, "route": route, "target": target,
         "events": len(selected), "messages": len(messages), "results": results,
         "secondary_outputs": secondary_outputs,
+        "aprs_rf": [item["aprs_rf"] for item in secondary_outputs],
         "aprsis_bulletins": [item["aprsis_bulletin"] for item in secondary_outputs],
     }
 
@@ -407,6 +408,13 @@ def _deliver_pending(
                 break
             if route == "emergencias":
                 secondary = dispatch_secondary_outputs(event, message)
+                aprs_rf_result = secondary.get("aprs_rf", {})
+                if not aprs_rf_result.get("ok", True):
+                    print(
+                        f"[emergencias] APRS RF WARN event={event.event_id}: "
+                        f"{aprs_rf_result}",
+                        flush=True,
+                    )
                 aprsis_result = secondary.get("aprsis_bulletin", {})
                 if not aprsis_result.get("ok", True):
                     print(
