@@ -12,10 +12,20 @@ Este directorio contiene la documentación del núcleo. Los README situados dent
 | Bot Telegram | [`BOT_README.md`](BOT_README.md) |
 | APRS | [`APRS_GATEWAY.md`](APRS_GATEWAY.md) |
 | KISS remoto para emergencias | [`APRS_Remote_KISS_Emergency.md`](APRS_Remote_KISS_Emergency.md) |
-| Correo hacia la malla | [`EMAIL_TO_MESH.md`](EMAIL_TO_MESH.md) |
+| Contenedor correo ↔ malla (`email-to-mesh`) | [`EMAIL_TO_MESH.md`](EMAIL_TO_MESH.md) |
 | Auditorías | [`AUDITORIAS.md`](AUDITORIAS.md) |
 | Instalación Raspberry Pi | [`Manual_Instalacion_MeshNet_RaspberryPi.md`](Manual_Instalacion_MeshNet_RaspberryPi.md) |
 | Historial | [`Historial_Versiones.md`](Historial_Versiones.md) y `CHANGELOG_v*.md` |
+
+## Componentes Docker documentados
+
+- `meshnet-broker`
+- `meshnet-bot`
+- `meshnet-aprs`
+- `meshnet-email-to-mesh` — servicio Compose `email-to-mesh`
+- `meshnet-bridge-bc`, cuando se habilita
+
+`email-to-mesh` forma parte del núcleo Docker. No es una aplicación systemd independiente. Su configuración se obtiene del `.env` principal y sus datos persistentes se guardan en `bot_data/`.
 
 ## Aplicaciones independientes
 
