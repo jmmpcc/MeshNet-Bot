@@ -625,3 +625,13 @@ Mesh, mirror `/aprsis_push` ni Voice RF.
 - Se garantiza que las autorizaciones APRS/APRS-IS y el endpoint UDP lleguen al dispatcher ejecutado por systemd.
 - El `.env` local mantiene prioridad y puede sobrescribir valores compartidos.
 - Se conserva la exposición UDP exclusiva en `127.0.0.1:9464`.
+
+
+## v7.0.41 — 2026-08-07
+
+- APRS RF de Emergencias usa una previsualización del gateway para conocer las partes reales antes de transmitir.
+- Se elimina la estimación local divergente basada únicamente en bytes/`APRS_MAX_LEN`.
+- Nuevo máximo específico `EMERGENCIAS_APRS_RF_MAX_CHUNKS=3`, sin cambiar el límite global de Farmacias u otras aplicaciones.
+- Si el texto supera el máximo, se reutiliza `compact_messages()` y se valida de nuevo; si sigue excediéndolo no se transmite.
+- `aprs_preview` no emite RF ni altera deduplicación.
+- APRS-IS, MeshCore, Meshtastic, Voice RF y las demás salidas mantienen su comportamiento.

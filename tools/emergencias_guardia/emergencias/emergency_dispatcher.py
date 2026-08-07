@@ -8,6 +8,7 @@ import urllib.request
 from dataclasses import dataclass, asdict
 from typing import Any
 
+from .formatters import compact_messages
 from .models import Event, SEVERITY_RANK
 
 
@@ -72,11 +73,26 @@ def _aprs_rf_enabled() -> bool:
 
 
 def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
-    """Solicita una transmisión APRS RF al gateway APRS ya existente.
+    """Solicita APRS RF reutilizando el troceado real del gateway.
 
-    La función no abre KISS ni controla la radio. Reutiliza el canal UDP de
-    control del gateway, que conserva deduplicación, troceado, pausas multipart
-    y la conexión actual con soundmodem/Direwolf.
+    Flujo de llamada:
+      ``dispatch_secondary_outputs(event, message)`` llama a esta función después
+      de una entrega Mesh correcta. Primero solicita ``aprs_preview`` al gateway,
+      que calcula las partes con las mismas funciones usadas para RF y sin
+      transmitir ni afectar a la deduplicación.
+
+    Si el texto supera ``EMERGENCIAS_APRS_RF_MAX_CHUNKS`` (3 por defecto), se
+    reutiliza ``compact_messages`` para generar una versión APRS más corta del
+    mismo evento, conservando el prefijo del mensaje original (por ejemplo
+    ``FINALIZADA · EMERG``). La versión compacta vuelve a previsualizarse y solo
+    se transmite si respeta el límite.
+
+    Parámetros:
+      event: emergencia normalizada que determina severidad y datos compactos.
+      message: texto ya construido por el notifier para el flujo Mesh.
+
+    La función no abre KISS ni controla PTT/radio: el envío efectivo sigue
+    perteneciendo exclusivamente a ``meshtastic_to_aprs.py``.
     """
     if not _aprs_rf_enabled():
         return {"ok": True, "sent": False, "reason": "disabled"}
@@ -88,41 +104,94 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
     host = str(os.getenv("APRS_CTRL_HOST", "127.0.0.1") or "127.0.0.1").strip()
     port = int(os.getenv("APRS_CTRL_PORT", "9464") or "9464")
     timeout = max(0.5, float(os.getenv("APRS_CTRL_ACK_TIMEOUT", "8") or "8"))
-    max_len = max(1, int(os.getenv("APRS_MAX_LEN", "67") or "67"))
-    max_chunks = max(1, int(os.getenv("APPS_APRS_MAX_CHUNKS", "2") or "2"))
-    estimated_chunks = max(1, (len(message.encode("utf-8")) + max_len - 1) // max_len)
-    if estimated_chunks > max_chunks:
-        return {
-            "ok": False,
-            "sent": False,
-            "reason": "chunk_limit_exceeded",
-            "estimated_chunks": estimated_chunks,
-            "max_chunks": max_chunks,
-        }
+    max_chunks = max(1, int(os.getenv("EMERGENCIAS_APRS_RF_MAX_CHUNKS", "3") or "3"))
+    compact_max_bytes = max(60, int(os.getenv("EMERGENCIAS_APRS_RF_COMPACT_MAX_BYTES", "140") or "140"))
 
     destination = str(os.getenv("APRS_EMERG_DEST", "broadcast") or "broadcast").strip()
     path = str(os.getenv("APRS_BOT_PATH", os.getenv("APRS_PATH", "")) or "").strip()
     if path.lower() in {"none", "off", "direct", "-"}:
         path = ""
 
-    payload = {
-        "mode": "aprs",
-        "origin": "app_emergencias",
-        "dest": destination,
-        "text": message,
-        "path": path,
-    }
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
-        client.settimeout(timeout)
-        client.sendto(data, (host, port))
-        response, _ = client.recvfrom(65536)
-    result = json.loads(response.decode("utf-8", errors="replace"))
-    if not isinstance(result, dict):
-        return {"ok": False, "sent": False, "reason": "invalid_response"}
+    def gateway_request(mode: str, text: str) -> dict[str, Any]:
+        """Envía una petición UDP al gateway y valida que responda con JSON objeto."""
+        payload = {
+            "mode": mode,
+            "origin": "app_emergencias",
+            "dest": destination,
+            "text": text,
+        }
+        if mode == "aprs":
+            payload["path"] = path
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            client.settimeout(timeout)
+            client.sendto(data, (host, port))
+            response, _ = client.recvfrom(65536)
+        result = json.loads(response.decode("utf-8", errors="replace"))
+        if not isinstance(result, dict):
+            return {"ok": False, "sent": False, "reason": "invalid_response"}
+        return result
+
+    original_preview = gateway_request("aprs_preview", message)
+    if not original_preview.get("ok"):
+        return {
+            "ok": False,
+            "sent": False,
+            "reason": "preview_failed",
+            "preview": original_preview,
+        }
+
+    original_parts = max(0, int(original_preview.get("parts", 0) or 0))
+    rf_message = message
+    compacted = False
+    compact_parts = original_parts
+
+    if original_parts > max_chunks:
+        # El notifier ya genera mensajes compactos. Este segundo nivel solo se
+        # activa cuando una configuración más amplia o datos excepcionales
+        # superan el máximo RF. Conservamos el prefijo funcional (ALTA,
+        # ACTUALIZADA, FINALIZADA...) para no perder semántica operativa.
+        prefix = next((line.strip() for line in message.splitlines() if line.strip()), "EMERG")
+        rf_message = compact_messages(
+            [event],
+            max_bytes=compact_max_bytes,
+            prefix=prefix,
+        )[0]
+        compacted = rf_message != message
+        compact_preview = gateway_request("aprs_preview", rf_message)
+        if not compact_preview.get("ok"):
+            return {
+                "ok": False,
+                "sent": False,
+                "reason": "compact_preview_failed",
+                "preview": compact_preview,
+                "original_parts": original_parts,
+                "max_chunks": max_chunks,
+            }
+        compact_parts = max(0, int(compact_preview.get("parts", 0) or 0))
+        if compact_parts > max_chunks:
+            return {
+                "ok": False,
+                "sent": False,
+                "reason": "chunk_limit_exceeded",
+                "original_parts": original_parts,
+                "compact_parts": compact_parts,
+                "max_chunks": max_chunks,
+            }
+
+    result = gateway_request("aprs", rf_message)
     if result.get("duplicate"):
-        return {**result, "ok": True, "sent": False, "reason": "duplicate"}
-    return result
+        result = {**result, "ok": True, "sent": False, "reason": "duplicate"}
+
+    # Metadatos diagnósticos añadidos sin alterar las claves históricas que ya
+    # consumen notifier/tests. Permiten saber si hubo compactación automática.
+    return {
+        **result,
+        "original_parts": original_parts,
+        "rf_parts": compact_parts,
+        "max_chunks": max_chunks,
+        "compacted": compacted,
+    }
 
 def _voice_result(event: Event, message: str) -> dict[str, Any]:
     """Solicita síntesis al servicio Voice RF cuando está autorizada.
