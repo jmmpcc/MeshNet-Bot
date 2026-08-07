@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-meshtastic_to_aprs.py (v7.0.40)
+meshtastic_to_aprs.py (v7.0.41)
 Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
 - /aprs (bot) -> UDP local -> TX APRS (troceo automático).
@@ -1502,6 +1502,34 @@ def build_aprs_message_chunks(dest_call: str, text: str, max_len: int | None = N
     return [f":{dest9}:{p} ({i}/{n})".encode("ascii", "ignore") for i, p in enumerate(parts, 1)]
 
 
+
+
+def _build_control_aprs_payloads(dest: str, text: str) -> tuple[str, str, list[bytes], str]:
+    """Prepara exactamente los payloads que usaría el control UDP APRS.
+
+    Esta función centraliza la normalización del destino, el saneamiento ASCII y
+    el troceado RF. La usan tanto el modo de previsualización como el envío real,
+    de forma que el dispatcher de aplicaciones nunca tenga que estimar las
+    partes con un algoritmo distinto al gateway.
+
+    Parámetros:
+      dest: destino solicitado (``broadcast``/``all`` o indicativo APRS).
+      text: texto original que se desea transmitir.
+
+    Retorna ``(dest_norm, text_clean, payloads, dest_hdr)``. ``payloads`` es la
+    misma lista de campos INFO que posteriormente se entrega a KISS.
+    """
+    dest_clean = _aprs_ascii(dest)
+    text_clean = _aprs_ascii(text)
+    dest_norm = "broadcast" if dest_clean.lower() in ("broadcast", "all") else dest_clean.upper()
+    if dest_norm == "broadcast":
+        payloads = build_aprs_status_chunks(text_clean)
+        dest_hdr = "APRS"
+    else:
+        payloads = build_aprs_message_chunks(dest_norm, text_clean)
+        dest_hdr = dest_norm
+    return dest_norm, text_clean, payloads, dest_hdr
+
 # =========================
 # === Parse APRS ===========
 # =========================
@@ -2656,6 +2684,7 @@ async def task_control_udp():
     """
     Escucha UDP local:
       {"mode":"aprs","dest":"EA2ABC|broadcast","text":"...","path":"WIDE1-1,WIDE2-1"}
+      {"mode":"aprs_preview","dest":"EA2ABC|broadcast","text":"..."}
       {"mode":"aprs_gate","enable":1|0}
       {"mode":"aprs_status"}
     """
@@ -2771,15 +2800,35 @@ async def task_control_udp():
 
 
 
+        # --- Previsualización APRS sin RF ni deduplicación ---
+        # Permite a aplicaciones externas conocer el número REAL de partes que
+        # generaría este mismo gateway antes de solicitar una transmisión.
+        if mode == "aprs_preview":
+            dest = (obj.get("dest") or "").strip()
+            text = (obj.get("text") or "").strip()
+            if not dest or not text:
+                resp = {"ok": False, "sent": False, "reason": "missing_dest_or_text", "parts": 0}
+            else:
+                dest_norm, _text_clean, payloads, _dest_hdr = _build_control_aprs_payloads(dest, text)
+                resp = {
+                    "ok": True,
+                    "sent": False,
+                    "preview": True,
+                    "dest": dest_norm,
+                    "parts": len(payloads),
+                }
+            try:
+                sock.sendto(json.dumps(resp).encode("utf-8"), addr)
+            except Exception:
+                pass
+            continue
+
         # --- TX APRS normal ---
         if mode != "aprs":
             continue
 
         dest = (obj.get("dest") or "").strip()
         text = (obj.get("text") or "").strip()
-        # [NUEVO] Sanear a ASCII APRS
-        text = _aprs_ascii(text)
-        dest = _aprs_ascii(dest)
 
         path_obj = obj.get("path", None)
         if isinstance(path_obj, list):
@@ -2796,8 +2845,10 @@ async def task_control_udp():
                 pass
             continue
 
+        # Preparar exactamente los mismos payloads que usa ``aprs_preview``.
+        dest_norm, text, payloads, dest_hdr = _build_control_aprs_payloads(dest, text)
+
         # DEDUP
-        dest_norm = "broadcast" if dest.lower() in ("broadcast", "all") else dest.upper()
         origin = str(obj.get("origin") or obj.get("src") or "").strip().lower()
         force_tx = str(obj.get("force_tx") or obj.get("force") or "").strip().lower() in ("1", "true", "yes", "on")
         # Los envíos interactivos del bot deben poder repetirse aunque sean
@@ -2815,13 +2866,6 @@ async def task_control_udp():
         # si entra el mismo payload por otra ruta (p.ej. eco broker) mientras
         # aún estamos enviando partes RF, debe quedar suprimido.
         _dedup_mark(dest_norm, text)
-
-        if dest_norm == "broadcast":
-            payloads = build_aprs_status_chunks(text)
-            dest_hdr = "APRS"
-        else:
-            payloads = build_aprs_message_chunks(dest_norm, text)
-            dest_hdr = dest_norm
 
         ok_all = True
         sent_count = 0

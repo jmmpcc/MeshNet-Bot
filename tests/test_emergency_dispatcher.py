@@ -55,12 +55,13 @@ class EmergencyDispatcherTests(unittest.TestCase):
         self.assertEqual(result["voice_rf"]["reason"], "service_disabled")
 
     @patch("tools.emergencias_guardia.emergencias.emergency_dispatcher.socket.socket")
-    def test_aprs_rf_high_uses_existing_udp_gateway(self, socket_factory):
+    def test_aprs_rf_high_uses_gateway_preview_then_existing_udp_gateway(self, socket_factory):
+        """El dispatcher consulta partes reales y después transmite sin cambiar el path."""
         client = socket_factory.return_value.__enter__.return_value
-        client.recvfrom.return_value = (
-            b'{"ok": true, "dest": "broadcast", "parts": 1, "sent": 1, "rf": true}',
-            ("127.0.0.1", 9464),
-        )
+        client.recvfrom.side_effect = [
+            (b'{"ok": true, "preview": true, "dest": "broadcast", "parts": 1}', ("127.0.0.1", 9464)),
+            (b'{"ok": true, "dest": "broadcast", "parts": 1, "sent": 1, "rf": true}', ("127.0.0.1", 9464)),
+        ]
         env = {
             "APPS_APRS_ENABLED": "1",
             "APPS_APRS_ALLOWED_SOURCES": "emergencias,farmacias",
@@ -76,10 +77,13 @@ class EmergencyDispatcherTests(unittest.TestCase):
             result = dispatch_secondary_outputs(make_event("high"), "EMERG PRUEBA")
         self.assertTrue(result["aprs_rf"]["ok"])
         self.assertEqual(result["aprs_rf"]["sent"], 1)
-        payload = client.sendto.call_args.args[0].decode("utf-8")
-        self.assertIn('"mode": "aprs"', payload)
-        self.assertIn('"origin": "app_emergencias"', payload)
-        self.assertIn('"path": ""', payload)
+        self.assertEqual(result["aprs_rf"]["original_parts"], 1)
+        self.assertFalse(result["aprs_rf"]["compacted"])
+        payloads = [call.args[0].decode("utf-8") for call in client.sendto.call_args_list]
+        self.assertIn('"mode": "aprs_preview"', payloads[0])
+        self.assertIn('"mode": "aprs"', payloads[1])
+        self.assertIn('"origin": "app_emergencias"', payloads[1])
+        self.assertIn('"path": ""', payloads[1])
 
     @patch("tools.emergencias_guardia.emergencias.emergency_dispatcher.socket.socket")
     def test_aprs_rf_medium_is_not_sent(self, socket_factory):
@@ -96,21 +100,83 @@ class EmergencyDispatcherTests(unittest.TestCase):
         socket_factory.assert_not_called()
 
     @patch("tools.emergencias_guardia.emergencias.emergency_dispatcher.socket.socket")
-    def test_aprs_rf_respects_application_chunk_limit(self, socket_factory):
+    def test_aprs_rf_accepts_three_real_gateway_parts(self, socket_factory):
+        """Emergencias permite tres tramas RF aunque el límite global de apps siga en dos."""
+        client = socket_factory.return_value.__enter__.return_value
+        client.recvfrom.side_effect = [
+            (b'{"ok": true, "preview": true, "dest": "broadcast", "parts": 3}', ("127.0.0.1", 9464)),
+            (b'{"ok": true, "dest": "broadcast", "parts": 3, "sent": 3, "rf": true}', ("127.0.0.1", 9464)),
+        ]
         env = {
             "APPS_APRS_ENABLED": "1",
             "APPS_APRS_ALLOWED_SOURCES": "emergencias",
-            "APPS_APRS_MAX_CHUNKS": "1",
-            "APRS_MAX_LEN": "20",
+            "APPS_APRS_MAX_CHUNKS": "2",
+            "EMERGENCIAS_APRS_RF_MAX_CHUNKS": "3",
             "EMERGENCIAS_APRS_ENABLED": "1",
             "EMERGENCIAS_APRS_RF_ENABLED": "1",
             "EMERGENCIAS_APRS_RF_MIN_LEVEL": "high",
         }
         with patch.dict(os.environ, env, clear=True):
-            result = dispatch_secondary_outputs(make_event("high"), "X" * 41)
+            result = dispatch_secondary_outputs(make_event("high"), "X" * 130)
+        self.assertTrue(result["aprs_rf"]["ok"])
+        self.assertEqual(result["aprs_rf"]["sent"], 3)
+        self.assertEqual(result["aprs_rf"]["original_parts"], 3)
+        self.assertEqual(result["aprs_rf"]["max_chunks"], 3)
+        self.assertFalse(result["aprs_rf"]["compacted"])
+
+    @patch("tools.emergencias_guardia.emergencias.emergency_dispatcher.socket.socket")
+    def test_aprs_rf_compacts_only_when_gateway_reports_too_many_parts(self, socket_factory):
+        """Un texto de más de tres partes se compacta y se vuelve a validar antes de RF."""
+        client = socket_factory.return_value.__enter__.return_value
+        client.recvfrom.side_effect = [
+            (b'{"ok": true, "preview": true, "dest": "broadcast", "parts": 4}', ("127.0.0.1", 9464)),
+            (b'{"ok": true, "preview": true, "dest": "broadcast", "parts": 2}', ("127.0.0.1", 9464)),
+            (b'{"ok": true, "dest": "broadcast", "parts": 2, "sent": 2, "rf": true}', ("127.0.0.1", 9464)),
+        ]
+        env = {
+            "APPS_APRS_ENABLED": "1",
+            "APPS_APRS_ALLOWED_SOURCES": "emergencias",
+            "EMERGENCIAS_APRS_RF_MAX_CHUNKS": "3",
+            "EMERGENCIAS_APRS_RF_COMPACT_MAX_BYTES": "100",
+            "EMERGENCIAS_APRS_ENABLED": "1",
+            "EMERGENCIAS_APRS_RF_ENABLED": "1",
+            "EMERGENCIAS_APRS_RF_MIN_LEVEL": "high",
+        }
+        original = "FINALIZADA · EMERG\n" + ("detalle muy largo " * 20)
+        with patch.dict(os.environ, env, clear=True):
+            result = dispatch_secondary_outputs(make_event("high"), original)
+        self.assertTrue(result["aprs_rf"]["ok"])
+        self.assertTrue(result["aprs_rf"]["compacted"])
+        self.assertEqual(result["aprs_rf"]["original_parts"], 4)
+        self.assertEqual(result["aprs_rf"]["rf_parts"], 2)
+        payloads = [call.args[0].decode("utf-8") for call in client.sendto.call_args_list]
+        self.assertEqual(len(payloads), 3)
+        self.assertIn("FINALIZADA · EMERG", payloads[1])
+        self.assertIn('"mode": "aprs"', payloads[2])
+
+    @patch("tools.emergencias_guardia.emergencias.emergency_dispatcher.socket.socket")
+    def test_aprs_rf_never_transmits_if_compact_text_still_exceeds_limit(self, socket_factory):
+        """El límite sigue siendo una barrera dura si ni el resumen cabe en tres partes."""
+        client = socket_factory.return_value.__enter__.return_value
+        client.recvfrom.side_effect = [
+            (b'{"ok": true, "preview": true, "dest": "broadcast", "parts": 5}', ("127.0.0.1", 9464)),
+            (b'{"ok": true, "preview": true, "dest": "broadcast", "parts": 4}', ("127.0.0.1", 9464)),
+        ]
+        env = {
+            "APPS_APRS_ENABLED": "1",
+            "APPS_APRS_ALLOWED_SOURCES": "emergencias",
+            "EMERGENCIAS_APRS_RF_MAX_CHUNKS": "3",
+            "EMERGENCIAS_APRS_ENABLED": "1",
+            "EMERGENCIAS_APRS_RF_ENABLED": "1",
+            "EMERGENCIAS_APRS_RF_MIN_LEVEL": "high",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            result = dispatch_secondary_outputs(make_event("high"), "X" * 500)
+        self.assertFalse(result["aprs_rf"]["ok"])
         self.assertEqual(result["aprs_rf"]["reason"], "chunk_limit_exceeded")
-        self.assertEqual(result["aprs_rf"]["estimated_chunks"], 3)
-        socket_factory.assert_not_called()
+        self.assertEqual(result["aprs_rf"]["original_parts"], 5)
+        self.assertEqual(result["aprs_rf"]["compact_parts"], 4)
+        self.assertEqual(len(client.sendto.call_args_list), 2)
 
     @patch("tools.emergencias_guardia.emergencias.emergency_dispatcher._send_aprs_rf")
     def test_aprs_rf_failure_is_isolated(self, mocked):

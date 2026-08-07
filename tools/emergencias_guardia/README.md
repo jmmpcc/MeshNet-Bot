@@ -749,3 +749,15 @@ python3 -m unittest tests.test_emergencias_commands -v
 NASA FIRMS, cuando se incorpore, deberá clasificarse siempre como
 `satellite_detection` y describirse como foco térmico no confirmado, salvo
 corroboración oficial.
+
+
+## APRS RF: cálculo real de partes · v7.0.41
+
+Para emergencias `high`/`critical`, el dispatcher ya no calcula los fragmentos APRS mediante una división aproximada. Solicita `aprs_preview` al gateway de APRS, que reutiliza el mismo troceado del envío real sin producir RF. El máximo específico recomendado es:
+
+```env
+EMERGENCIAS_APRS_RF_MAX_CHUNKS=3
+EMERGENCIAS_APRS_RF_COMPACT_MAX_BYTES=140
+```
+
+Si el texto original requiere más de tres partes, se reutiliza `compact_messages()` de esta aplicación para generar un texto más corto y se vuelve a consultar el gateway. Solo se transmite si el resumen queda dentro del límite. Los prefijos de cambio (`NUEVA`, `ACTUALIZADA`, `FINALIZADA`) se conservan y APRS-IS no se modifica.

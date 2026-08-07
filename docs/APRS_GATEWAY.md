@@ -1,4 +1,4 @@
-# APRS y APRS-IS en MeshNet-Bot — v7.0.40
+# APRS y APRS-IS en MeshNet-Bot — v7.0.41
 
 Guía operativa completa del contenedor `meshnet-aprs`, servicio Compose `aprs`.
 
@@ -682,3 +682,33 @@ docker logs --tail 200 meshnet-aprs | grep 'UDP escuchando'
 ```
 
 Resultado esperado en el host: `127.0.0.1:9464`. Dentro del contenedor, el log debe indicar escucha en `0.0.0.0:9464`.
+
+
+## 16. Previsualización y límite RF de Emergencias — v7.0.41
+
+El control UDP admite `mode=aprs_preview`. Este modo normaliza destino y texto y construye las partes con las mismas funciones del envío APRS real, pero **no transmite por KISS, no marca deduplicación y no genera RF**. Se utiliza internamente por `emergencias_guardia` para eliminar discrepancias entre estimaciones externas y el troceado efectivo del gateway.
+
+Variables específicas:
+
+```env
+EMERGENCIAS_APRS_RF_MAX_CHUNKS=3
+EMERGENCIAS_APRS_RF_COMPACT_MAX_BYTES=140
+```
+
+- Hasta 3 partes reales: se transmite el texto original.
+- Más de 3: Emergencias reutiliza su `compact_messages()` existente y conserva el prefijo operativo del mensaje.
+- El resumen se previsualiza de nuevo; si aún supera el máximo, **no se transmite por RF** y se devuelve `chunk_limit_exceeded`.
+- El límite global `APPS_APRS_MAX_CHUNKS` de otras aplicaciones no se modifica.
+- APRS-IS permanece independiente y recibe el texto normal de la emergencia; esta compactación solo afecta a APRS RF.
+
+Ejemplo de consulta sin emisión:
+
+```json
+{"mode":"aprs_preview","dest":"broadcast","text":"FINALIZADA · EMERG ..."}
+```
+
+Respuesta típica:
+
+```json
+{"ok":true,"sent":false,"preview":true,"dest":"broadcast","parts":3}
+```

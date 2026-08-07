@@ -45,6 +45,37 @@ class AprsControlBindTests(unittest.TestCase):
         self.assertEqual(gateway.CONTROL_UDP_BIND, "0.0.0.0")
         self.assertEqual(gateway.CONTROL_UDP_PORT, 9464)
 
+    def test_control_payload_builder_is_single_source_for_preview_and_tx(self):
+        """El helper devuelve exactamente los mismos chunks usados por RF."""
+        gateway = load_gateway({
+            "APRS_STATUS_MAX": "67",
+            "APRS_MSG_MAX": "67",
+        })
+        dest, clean, payloads, header = gateway._build_control_aprs_payloads(
+            "broadcast",
+            "EMERG " + ("X" * 120),
+        )
+        self.assertEqual(dest, "broadcast")
+        self.assertEqual(header, "APRS")
+        self.assertEqual(payloads, gateway.build_aprs_status_chunks(clean))
+        self.assertGreaterEqual(len(payloads), 2)
+        self.assertTrue(all(len(part) <= 67 for part in payloads))
+
+    def test_control_payload_builder_directed_uses_message_chunking(self):
+        """Los destinos dirigidos conservan el troceado APRS de mensajes."""
+        gateway = load_gateway({
+            "APRS_STATUS_MAX": "67",
+            "APRS_MSG_MAX": "67",
+        })
+        dest, clean, payloads, header = gateway._build_control_aprs_payloads(
+            "EA2ABC-7",
+            "PRUEBA " + ("Y" * 100),
+        )
+        self.assertEqual(dest, "EA2ABC-7")
+        self.assertEqual(header, "EA2ABC-7")
+        self.assertEqual(payloads, gateway.build_aprs_message_chunks(dest, clean))
+        self.assertGreaterEqual(len(payloads), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

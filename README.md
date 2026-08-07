@@ -1,4 +1,4 @@
-# MeshNet-Bot “The Boss” — v7.0.38
+# MeshNet-Bot “The Boss” — v7.0.41
 
 MeshNet-Bot es una plataforma de comunicaciones para radioaficionados que integra **MeshCore**, **Meshtastic**, **APRS RF**, **APRS-IS**, Telegram, correo electrónico, BBS, panel web y aplicaciones auxiliares independientes.
 
@@ -165,6 +165,21 @@ Los boletines de Emergencias pueden publicarse en un grupo APRS configurable. Co
 
 El catálogo reservado del proyecto define `EMERG` para emergencias, `AEMET` para avisos meteorológicos oficiales, `FARMA` para farmacias de guardia, `NEWS` para noticias relevantes, `MESH` para avisos del sistema y `TEST` para pruebas controladas. En v7.0.38 solo `EMERG` está conectado a publicación automática; los demás grupos quedan preparados y no generan tráfico hasta que su aplicación se habilite expresamente.
 
+### Control APRS desde aplicaciones systemd del host
+
+En Raspberry Pi, `meshnet-aprs` comparte el namespace de red del broker. Para que aplicaciones independientes como Emergencias puedan solicitar APRS RF y boletines APRS-IS, el Compose publica el control UDP exclusivamente en el loopback del host:
+
+```env
+APRS_CTRL_HOST=127.0.0.1
+APRS_CTRL_PORT=9464
+APRS_CTRL_BIND=0.0.0.0
+APRS_CTRL_PORT_HOST=9464
+```
+
+En `docker-compose.rpi.yml`, el servicio APRS monta el gateway local `./source/meshtastic_to_aprs.py` sobre `/app/source/meshtastic_to_aprs.py`. De este modo, la recreación usa el código instalado aunque la imagen `latest` aún no haya sido republicada.
+
+La publicación efectiva es `127.0.0.1:9464/udp`; no queda accesible desde la LAN.
+
 ## Contenedor email-to-mesh
 
 El servicio está incluido en `docker-compose.rpi.yml` y se inicia junto con el resto del núcleo:
@@ -270,3 +285,12 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 ## Licencia y atribución
 
 Consulte [`LICENSE`](LICENSE). Los forks y trabajos derivados deben conservar la atribución requerida por el proyecto.
+
+## Variables compartidas de Emergencias · v7.0.40
+
+El servicio `meshnet-emergencias-check.service` carga primero `/home/meshnet/MeshNet-Bot/.env` y después `tools/emergencias_guardia/.env`. Esto permite que el dispatcher reciba `APPS_APRS_ENABLED`, `EMERGENCIAS_APRS_ENABLED`, `EMERGENCIAS_APRS_RF_ENABLED`, `APRS_CTRL_HOST` y `APRS_CTRL_PORT`. El archivo local de Emergencias conserva prioridad para sobrescrituras específicas. Tras instalar la unidad debe ejecutarse `sudo systemctl daemon-reload`.
+
+
+## APRS RF de Emergencias · v7.0.41
+
+El dispatcher deja de estimar localmente la fragmentación APRS. Antes de RF consulta al propio gateway mediante `aprs_preview`, que usa exactamente el mismo saneamiento y troceado que el envío real y no transmite ni altera la deduplicación. Emergencias admite hasta 3 tramas por defecto (`EMERGENCIAS_APRS_RF_MAX_CHUNKS=3`). Si un texto excepcional supera ese máximo, reutiliza `compact_messages()` para crear una versión APRS reducida, conserva el prefijo operativo (`FINALIZADA`, `ACTUALIZADA`, etc.), vuelve a previsualizarla y solo transmite si queda dentro del límite. APRS-IS continúa recibiendo el texto original y el resto de aplicaciones conserva sus límites actuales.
