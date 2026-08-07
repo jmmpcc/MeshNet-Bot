@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-meshtastic_to_aprs.py (v7.0.38)
+meshtastic_to_aprs.py (v7.0.40)
 Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
 - /aprs (bot) -> UDP local -> TX APRS (troceo automático).
@@ -242,6 +242,16 @@ MESHTASTIC_CHANNEL = int(os.getenv("MESHTASTIC_CH", "0"))  # canal por defecto M
 # Control UDP local (bot -> APRS)
 CONTROL_UDP_HOST = os.getenv("APRS_CTRL_HOST", "127.0.0.1").strip()
 CONTROL_UDP_PORT = int(os.getenv("APRS_CTRL_PORT", "9464"))
+# Dirección de escucha del gateway. Se separa de APRS_CTRL_HOST porque:
+# - APRS_CTRL_HOST es la dirección que usan los clientes para enviar peticiones.
+# - APRS_CTRL_BIND es la interfaz donde este proceso abre el socket UDP.
+#
+# Compatibilidad: si APRS_CTRL_BIND no existe, conserva el comportamiento
+# histórico y escucha en APRS_CTRL_HOST. En Raspberry/Docker se recomienda
+# APRS_CTRL_BIND=0.0.0.0 junto con una publicación Compose limitada a
+# 127.0.0.1 del host, permitiendo el acceso a aplicaciones systemd locales sin
+# exponer el control APRS a la LAN.
+CONTROL_UDP_BIND = os.getenv("APRS_CTRL_BIND", CONTROL_UDP_HOST).strip() or CONTROL_UDP_HOST
 
 # BacklogServer del broker (para APRS -> Mesh)
 BROKER_CTRL_HOST = os.getenv("BROKER_CTRL_HOST", BROKER_HOST)
@@ -2652,9 +2662,9 @@ async def task_control_udp():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
-    sock.bind((CONTROL_UDP_HOST, CONTROL_UDP_PORT))
+    sock.bind((CONTROL_UDP_BIND, CONTROL_UDP_PORT))
     sock.setblocking(False)
-    print(f"[ctrl] UDP escuchando en {CONTROL_UDP_HOST}:{CONTROL_UDP_PORT}")
+    print(f"[ctrl] UDP escuchando en {CONTROL_UDP_BIND}:{CONTROL_UDP_PORT} (clientes={CONTROL_UDP_HOST}:{CONTROL_UDP_PORT})")
 
     loop = asyncio.get_running_loop()
     global APRS_GATE_ENABLED

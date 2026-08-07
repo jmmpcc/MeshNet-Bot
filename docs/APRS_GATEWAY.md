@@ -1,4 +1,4 @@
-# APRS y APRS-IS en MeshNet-Bot — v7.0.38
+# APRS y APRS-IS en MeshNet-Bot — v7.0.40
 
 Guía operativa completa del contenedor `meshnet-aprs`, servicio Compose `aprs`.
 
@@ -657,3 +657,28 @@ Validar además:
 - [`../docker/README.MD/README.md`](../docker/README.MD/README.md)
 
 Los documentos `APRS_GATEWAY_FULL_v6.2.md` y `APRS_GATEWAY_old.md` son históricos. Esta guía es la referencia operativa vigente.
+## Control UDP desde aplicaciones del host — v7.0.40
+
+El contenedor APRS utiliza `network_mode: service:broker`; por ello el listener pertenece al namespace de red del broker. Las aplicaciones independientes ejecutadas por systemd en la Raspberry no comparten ese loopback.
+
+Configuración recomendada:
+
+```env
+APRS_CTRL_HOST=127.0.0.1
+APRS_CTRL_PORT=9464
+APRS_CTRL_BIND=0.0.0.0
+APRS_CTRL_PORT_HOST=9464
+```
+
+`APRS_CTRL_HOST` sigue siendo la dirección de destino usada por clientes internos. `APRS_CTRL_BIND` define únicamente la interfaz donde escucha el gateway. El Compose RPi publica `127.0.0.1:9464/udp`, de modo que Emergencias y otras aplicaciones locales pueden acceder sin exponer el puerto a la LAN.
+
+El servicio `aprs` monta `./source/meshtastic_to_aprs.py` en `/app/source/meshtastic_to_aprs.py` como solo lectura. Esto garantiza que el código de la versión instalada se ejecute aunque la etiqueta GHCR `latest` todavía contenga una revisión anterior. Tras actualizar este archivo debe recrearse el contenedor `aprs`.
+
+Comprobación:
+
+```bash
+sudo ss -lunp | grep ':9464'
+docker logs --tail 200 meshnet-aprs | grep 'UDP escuchando'
+```
+
+Resultado esperado en el host: `127.0.0.1:9464`. Dentro del contenedor, el log debe indicar escucha en `0.0.0.0:9464`.

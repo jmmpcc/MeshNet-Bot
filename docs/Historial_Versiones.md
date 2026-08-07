@@ -1,3 +1,11 @@
+## v7.0.40 — Control UDP APRS accesible desde aplicaciones systemd
+
+- Se separa `APRS_CTRL_BIND` de `APRS_CTRL_HOST`.
+- El gateway puede escuchar en `0.0.0.0` dentro del namespace broker/APRS sin cambiar los clientes internos.
+- `docker-compose.rpi.yml` publica `9464/udp` únicamente en `127.0.0.1` del host.
+- Emergencias puede solicitar APRS RF y boletines APRS-IS desde el servicio systemd.
+- Se conserva el comportamiento anterior cuando `APRS_CTRL_BIND` no está definido.
+
 ## 🧾 Historial de versiones
 
 ## v7.0.38 — Catálogo reservado de grupos APRS-IS
@@ -610,3 +618,10 @@ histórico `BLN0..BLN9` cuando el grupo está vacío y permite, por ejemplo,
 `BLN0EMERG..BLN9EMERG` con migración estable de slots y sin alterar APRS RF,
 Mesh, mirror `/aprsis_push` ni Voice RF.
 
+
+## v7.0.40 — Variables APRS compartidas con Emergencias
+
+- El servicio `meshnet-emergencias-check.service` carga el `.env` principal antes del `.env` local de Emergencias.
+- Se garantiza que las autorizaciones APRS/APRS-IS y el endpoint UDP lleguen al dispatcher ejecutado por systemd.
+- El `.env` local mantiene prioridad y puede sobrescribir valores compartidos.
+- Se conserva la exposición UDP exclusiva en `127.0.0.1:9464`.

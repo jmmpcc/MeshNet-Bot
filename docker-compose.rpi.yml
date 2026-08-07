@@ -29,6 +29,9 @@ services:
       - "${BROKER_PORT_HOST:-8765}:${BROKER_PORT:-8765}"
       - "${BACKLOG_PORT_HOST:-8766}:${BACKLOG_PORT:-8766}"
       - "${WEB_PORT_HOST:-8080}:${WEB_PORT:-8080}"
+      # Control UDP APRS accesible únicamente desde el propio host.
+      # El servicio aprs comparte el namespace de red del broker.
+      - "127.0.0.1:${APRS_CTRL_PORT_HOST:-9464}:${APRS_CTRL_PORT:-9464}/udp"
 
     # Datos persistentes de bot/broker (backlogs, mapas, auditorías, etc.)
     volumes:
@@ -79,6 +82,11 @@ services:
 
     volumes:
       - ./bot_data:/app/bot_data:rw
+      # Monta el gateway entregado con esta versión sobre el contenido de la
+      # imagen GHCR. Así los cambios locales de APRS_CTRL_BIND y boletines se
+      # aplican al recrear el contenedor sin depender de que :latest se haya
+      # reconstruido y publicado previamente.
+      - ./source/meshtastic_to_aprs.py:/app/source/meshtastic_to_aprs.py:ro
 
     stop_grace_period: 10s
  
