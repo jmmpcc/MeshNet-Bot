@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-meshtastic_to_aprs.py (v7.0.46)
+meshtastic_to_aprs.py (v7.0.47)
 Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
 - /aprs (bot) -> UDP local -> TX APRS (troceo automático).
@@ -289,6 +289,7 @@ APRSIS_EMERGENCY_BULLETIN_GROUP = (os.getenv("APRSIS_EMERGENCY_BULLETIN_GROUP", 
 # Diagnóstico manual v7.0.46. No lo usa ninguna salida automática.
 APRSIS_LONG_TEST_ENABLED = int(os.getenv("APRSIS_LONG_TEST_ENABLED", "0") or "0")
 APRSIS_LONG_TEST_MAX_CHARS = max(80, min(450, int(os.getenv("APRSIS_LONG_TEST_MAX_CHARS", "400") or "400")))
+APRSIS_LONG_BULLETIN_TEST_ENABLED = int(os.getenv("APRSIS_LONG_BULLETIN_TEST_ENABLED", "0") or "0")
 
 # Catálogo central de grupos APRS-IS reservados para futuras salidas.
 # Solo Emergencias está conectada actualmente a publicación automática; el
@@ -646,6 +647,30 @@ async def send_aprsis_long_test(text: str) -> dict:
         "reason": "sent" if sent else "send_failed",
         "chars": len(clean), "text": clean, "line": line,
     }
+
+
+async def send_aprsis_long_bulletin_test(text: str, bulletin_number: int = 0) -> dict:
+    """Envía manualmente un BLNx largo solo a APRS-IS, sin tocar RF ni estado automático."""
+    if not bool(APRSIS_LONG_BULLETIN_TEST_ENABLED):
+        return {"ok": True, "sent": False, "reason": "disabled"}
+    if not _aprsis_ready():
+        return {"ok": False, "sent": False, "reason": "aprsis_unavailable"}
+    clean = _aprs_ascii(text).strip()
+    if not clean:
+        return {"ok": False, "sent": False, "reason": "empty_text"}
+    clean = clean[:APRSIS_LONG_TEST_MAX_CHARS]
+    try:
+        number = max(0, min(9, int(bulletin_number)))
+    except Exception:
+        number = 0
+    bulletin = _aprsis_bulletin_name(number)
+    src = (APRSIS_USER or MY_CALL or "").strip().upper()
+    if not src:
+        return {"ok": False, "sent": False, "reason": "missing_source"}
+    dst9 = bulletin[:9].ljust(9, " ")
+    line = f"{src}>APRS,TCPIP*::{dst9}:{clean}"
+    sent = bool(await _aprsis_send_line_safe(line))
+    return {"ok": sent, "sent": sent, "reason": "sent" if sent else "send_failed", "bulletin": bulletin, "chars": len(clean), "text": clean, "line": line}
 
 def _aprsis_tnc2_message_line(dst_call: str, text: str, *, with_msgid: bool = True) -> str:
     """
@@ -2766,6 +2791,18 @@ async def task_control_udp():
             print(f"[ctrl] gate → {'ON' if APRS_GATE_ENABLED else 'OFF'} (petición UDP)")
             continue
       
+        # --- v7.0.47: diagnóstico BLNx largo, exclusivamente APRS-IS ---
+        if mode == "aprsis_long_bulletin_test":
+            try:
+                resp = await send_aprsis_long_bulletin_test(obj.get("text", ""), obj.get("bulletin_number", 0))
+            except Exception as exc:
+                resp = {"ok": False, "sent": False, "reason": "internal_error", "error": f"{type(exc).__name__}: {exc}"}
+            try:
+                sock.sendto(json.dumps(resp, ensure_ascii=False).encode("utf-8"), addr)
+            except Exception:
+                pass
+            continue
+
         # --- v7.0.46: diagnóstico manual largo, solo APRS-IS ---
         if mode == "aprsis_long_test":
             try:
