@@ -1,3 +1,10 @@
+## v7.0.48 — Journal común de mensajes emitidos
+
+- SQLite común best-effort para auditoría de entregas de aplicaciones independientes.
+- ControlPanel añade vista visual de operaciones, transportes, fuentes y resultados.
+- Emergencias y Farmacias registran resultados sin alterar sus rutas ni mecanismos de envío.
+- Filtros, detalle por transporte, retención y exportación CSV.
+
 ## v7.0.46 — Integridad de URL y diagnóstico APRS-IS largo
 
 - Las URL de mapa en mensajes compactos se incluyen completas o se eliminan completas.

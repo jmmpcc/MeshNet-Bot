@@ -124,3 +124,15 @@ cd tools/ControlPanel
 sudo ./install_control_panel_service.sh
 sudo systemctl restart meshnet-control-panel.service
 ```
+
+
+## Mensajes emitidos — v7.0.48
+
+El ControlPanel incorpora un journal común de entregas en `bot_data/delivery_audit.db`.
+La pantalla **Mensajes emitidos** agrupa por operación lógica y muestra fecha/hora,
+aplicación, fuente, mensaje, transportes y resultado. Al desplegar una fila se ve
+el detalle de cada entrega física. Los filtros permiten seleccionar aplicación,
+fuente, medio, resultado y periodo, con exportación CSV.
+
+La auditoría es estrictamente best-effort: una avería, bloqueo o falta de permisos
+en SQLite nunca invalida ni retrasa el envío original de la aplicación.

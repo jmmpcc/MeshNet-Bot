@@ -10,6 +10,7 @@ from typing import Any
 
 from .formatters import aprs_emergency_text
 from .models import Event, SEVERITY_RANK
+from shared.delivery_audit import audit_delivery, new_operation_id, result_from_response
 
 
 _TRUTHY = {"1", "true", "yes", "on", "si", "sí", "y"}
@@ -318,13 +319,21 @@ def _send_aprsis_bulletin(event: Event, message: str) -> dict[str, Any]:
     }
 
 
-def dispatch_secondary_outputs(event: Event, message: str) -> dict[str, Any]:
+def dispatch_secondary_outputs(
+    event: Event,
+    message: str,
+    operation_id: str | None = None,
+) -> dict[str, Any]:
     """Distribuye una emergencia por las salidas secundarias configuradas.
 
     Debe llamarse únicamente después de una entrega Mesh correcta. Cada salida
     se evalúa de forma independiente. Una excepción APRS-IS se encapsula en el
     resultado y nunca se propaga hacia el flujo principal.
+
+    ``operation_id`` es opcional y solo enlaza observabilidad. Si se omite se
+    crea uno nuevo; no interviene en deduplicación, MIN_INTERVAL ni transporte.
     """
+    op_id = operation_id or new_operation_id("emergencias")
     try:
         aprs_rf = _send_aprs_rf(event, message)
     except Exception as exc:  # noqa: BLE001 - aislamiento deliberado de salida secundaria
@@ -343,8 +352,38 @@ def dispatch_secondary_outputs(event: Event, message: str) -> dict[str, Any]:
             "reason": "request_failed",
             "error": f"{type(exc).__name__}: {exc}",
         }
-    return DispatchResult(
+
+    # Se conserva la llamada histórica fuera de un try propio: la auditoría no
+    # cambia el comportamiento previo de Voice RF ante una excepción inesperada.
+    voice_rf = _voice_result(event, message)
+    result = DispatchResult(
         aprs_rf=aprs_rf,
         aprsis_bulletin=aprsis,
-        voice_rf=_voice_result(event, message),
+        voice_rf=voice_rf,
     ).to_dict()
+
+    audit_items = (
+        ("aprs_rf", aprs_rf, str(aprs_rf.get("dest") or os.getenv("APRS_EMERG_DEST", "broadcast"))),
+        ("aprsis", aprsis, str(aprsis.get("bulletin") or "boletin")),
+        ("voice_rf", voice_rf, "servicio-voz"),
+    )
+    for transport, response, destination in audit_items:
+        detail = str(response.get("reason") or response.get("error") or "")
+        parts = response.get("rf_parts", response.get("parts", response.get("chunks")))
+        audit_delivery(
+            app="emergencias",
+            source=event.source,
+            event_id=event.event_id,
+            operation_id=op_id,
+            category=event.category,
+            severity=event.severity,
+            status=event.status,
+            transport=transport,
+            destination=destination,
+            message=str(response.get("aprs_text") or response.get("text") or message),
+            result=result_from_response(response),
+            result_detail=detail,
+            parts=parts if isinstance(parts, int) else None,
+            metadata={"response": response, "secondary": True},
+        )
+    return result
