@@ -6508,7 +6508,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("canales", "Ver canales configurados en el nodo"),
         BotCommand("aprs", "/aprs [en] [min1,min2,..] | [canal N] texto | /aprs N texto | /aprs CALL: texto"),
         BotCommand("aprs_on", "Activa el gate APRS→Mesh (tráfico recibido en APRS SE reenviará a la malla)"),
-        BotCommand("aprsis_push","[Ch/all] ó aprsis_push off ] Activa/Descativa tráfico Mesh->APRS-IS)"),
+        BotCommand("aprsis_push", "Mirror Mesh→APRS-IS: on por transporte | off | status"),
         BotCommand("aprs_off", "Desactiva el gate APRS→Mesh (tráfico recibido en APRS No se reenviará a la malla)"),
         BotCommand("reconectar", "Forzar reconexión del broker [/reconectar [seg]]"),
         BotCommand("notificaciones", "Activar/Desactivar avisos de tareas"),
@@ -6887,7 +6887,12 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <code>/aprs en &lt;min|m1,m2,...&gt; canal N &lt;texto&gt;</code> — Programa salida APRS diferida.\n"
         "• <code>/aprs_on</code> — Activa gateway APRS→Mesh.\n"
         "• <code>/aprs_off</code> — Desactiva gateway APRS→Mesh.\n"
-        "• <code>/aprsis_push on|off|status</code> — Controla mirror/push APRS-IS si está configurado. Admite prefijos <code>meshtastic</code>/<code>meshcore</code> para separar canales.\n"
+        "• <code>/aprsis_push status</code> — Estado actual del mirror Mesh→APRS-IS.\n"
+        "• <code>/aprsis_push on meshtastic 0,1</code> — Publica canales Meshtastic 0 y 1.\n"
+        "• <code>/aprsis_push on meshcore 2,3</code> — Publica canales MeshCore 2 y 3.\n"
+        "• <code>/aprsis_push on meshtastic 0,1 meshcore 2</code> — Combina ambos transportes.\n"
+        "• <code>/aprsis_push off</code> — Desactiva el mirror APRS-IS.\n"
+        "  Sin prefijo (<code>all</code> o <code>0,1</code>) = Meshtastic legacy; en <code>meshcore_only</code> usa <code>meshcore</code>/<code>mc</code>.\n"
         "• <code>/aprs_status</code> — Estado de APRS/gateway.\n"
         "Ej.: <code>/aprs broadcast: Saludos desde MeshNet</code>\n"
         "Ej.: <code>/aprs EB2ABC-10: Hola desde la malla</code>\n"
@@ -8735,34 +8740,114 @@ async def aprs_off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def aprsis_push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Activa o desactiva el envío de mensajes Mesh → APRS-IS
-    para poder recibirlos en APRSDroid (via APRS-IS).
+    Gestiona el mirror de mensajes Mesh hacia APRS-IS.
 
     Uso:
-      /aprsis_push on <canal|all>
-      /aprsis_push on meshtastic <canal|all> [meshcore <canal|all>]
-      /aprsis_push on meshcore <canal|all>
+      /aprsis_push
+      /aprsis_push status
       /aprsis_push off
+      /aprsis_push on all
+      /aprsis_push on 0,1,2
+      /aprsis_push on meshtastic all
+      /aprsis_push on meshtastic 0,1
+      /aprsis_push on meshcore all
+      /aprsis_push on meshcore 1,2
+      /aprsis_push on meshtastic 0,1 meshcore 2,3
+
+    El gateway acepta además los alias ``mesh``/``malla`` para Meshtastic y
+    ``mc`` para MeshCore. Los canales válidos son 0..15. En
+    ``RADIO_PROFILE=meshcore_only`` debe indicarse explícitamente ``meshcore``
+    o ``mc``; la sintaxis legacy sin prefijo pertenece a Meshtastic.
+
+    El comando mantiene intactos los payloads históricos de ``on`` y ``off``.
+    ``status`` utiliza la consulta de solo lectura que ya soporta el listener
+    UDP de ``meshtastic_to_aprs.py``.
     """
     bump_stat(update.effective_user.id, update.effective_user.username or "", "aprsis_push")
 
     args = context.args or []
+    help_text = (
+        "<b>APRS-IS PUSH — Mirror Mesh → APRS-IS</b>\n\n"
+        "<b>Estado:</b>\n"
+        "<code>/aprsis_push status</code>\n\n"
+        "<b>Desactivar:</b>\n"
+        "<code>/aprsis_push off</code>\n\n"
+        "<b>Meshtastic — sintaxis legacy:</b>\n"
+        "<code>/aprsis_push on all</code>\n"
+        "<code>/aprsis_push on 0,1,2</code>\n\n"
+        "<b>Meshtastic explícito:</b>\n"
+        "<code>/aprsis_push on meshtastic all</code>\n"
+        "<code>/aprsis_push on meshtastic 0,1</code>\n\n"
+        "<b>MeshCore:</b>\n"
+        "<code>/aprsis_push on meshcore all</code>\n"
+        "<code>/aprsis_push on meshcore 1,2</code>\n\n"
+        "<b>Meshtastic + MeshCore:</b>\n"
+        "<code>/aprsis_push on meshtastic 0,1 meshcore 2,3</code>\n\n"
+        "<b>Alias:</b> <code>mesh</code>/<code>malla</code> = Meshtastic; "
+        "<code>mc</code> = MeshCore.\n"
+        "Canales válidos: <b>0–15</b>.\n\n"
+        "<b>IMPORTANTE:</b> con <code>RADIO_PROFILE=meshcore_only</code> usa "
+        "explícitamente <code>meshcore</code> o <code>mc</code>.\n"
+        "Ejemplo: <code>/aprsis_push on meshcore 3</code>"
+    )
 
     if not args:
-        await update.effective_message.reply_text(
-            "Uso:\n"
-            "/aprsis_push on <canal|all>\n"
-            "/aprsis_push on meshtastic <canal|all> [meshcore <canal|all>]\n"
-            "/aprsis_push on meshcore <canal|all>\n"
-            "/aprsis_push off"
-        )
+        await update.effective_message.reply_text(help_text, parse_mode="HTML")
         return
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(1.0)
 
     try:
-        sub = args[0].lower()
+        sub = str(args[0] or "").strip().lower()
+
+        if sub == "status":
+            # El listener APRS interpreta este payload sin campos de cambio
+            # como una consulta de solo lectura y devuelve la configuración.
+            msg = {"mode": "aprsis_push"}
+            s.sendto(json.dumps(msg).encode("utf-8"), (APRS_CTRL_HOST, APRS_CTRL_PORT))
+            try:
+                data, _ = s.recvfrom(4096)
+                ack = json.loads(data.decode("utf-8", "ignore"))
+                st = "ON" if ack.get("enabled") else "OFF"
+                channels = html.escape(str(ack.get("channels") or "all"))
+                target = html.escape(str(ack.get("to") or "").strip())
+                prefix = "ON" if ack.get("prefix") else "OFF"
+                min_gap = html.escape(str(ack.get("min_gap_s", "?")))
+                channel_config = ack.get("channel_config")
+                cfg_text = ""
+                if isinstance(channel_config, dict) and channel_config:
+                    parts = []
+                    for transport in ("meshtastic", "meshcore"):
+                        if transport not in channel_config:
+                            continue
+                        value = channel_config.get(transport)
+                        if value is None:
+                            value_text = "all"
+                        elif isinstance(value, (list, tuple, set)):
+                            value_text = ",".join(str(x) for x in value)
+                        else:
+                            value_text = str(value)
+                        parts.append(f"{transport}={value_text}")
+                    if parts:
+                        cfg_text = "\nPor transporte: <code>" + html.escape(" ".join(parts)) + "</code>"
+                target_line = f"\nDestino APRS-IS: <code>{target}</code>" if target else ""
+                await update.effective_message.reply_text(
+                    "<b>APRS-IS push</b>\n\n"
+                    f"Estado: <b>{st}</b>"
+                    f"{target_line}\n"
+                    f"Canales: <code>{channels}</code>"
+                    f"{cfg_text}\n"
+                    f"Prefijo: <b>{prefix}</b>\n"
+                    f"Intervalo mínimo: <b>{min_gap} s</b>",
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                await update.effective_message.reply_text(
+                    "No se pudo consultar el estado de APRS-IS push.\n"
+                    f"{type(exc).__name__}: {exc}"
+                )
+            return
 
         if sub == "off":
             msg = {
@@ -8770,13 +8855,21 @@ async def aprsis_push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "enabled": 0
             }
             s.sendto(json.dumps(msg).encode("utf-8"), (APRS_CTRL_HOST, APRS_CTRL_PORT))
+            try:
+                data, _ = s.recvfrom(4096)
+                ack = json.loads(data.decode("utf-8", "ignore"))
+                st = "ON" if ack.get("enabled") else "OFF"
+            except Exception:
+                st = "OFF"
             await update.effective_message.reply_text(
-                "📡 APRS-IS push: <b>OFF</b>",
+                f"📡 APRS-IS push: <b>{st}</b>",
                 parse_mode="HTML"
             )
             return
 
         if sub == "on":
+            # Conserva exactamente la semántica histórica: sin argumento se
+            # envía ``all``; el gateway decide el transporte según el perfil.
             channels = " ".join(args[1:]).strip() if len(args) > 1 else "all"
             msg = {
                 "mode": "aprsis_push",
@@ -8789,26 +8882,29 @@ async def aprsis_push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 data, _ = s.recvfrom(4096)
                 ack = json.loads(data.decode("utf-8", "ignore"))
                 st = "ON" if ack.get("enabled") else "OFF"
-                ch = ack.get("channels", channels)
+                ch = html.escape(str(ack.get("channels", channels)))
                 await update.effective_message.reply_text(
-                    f"📡 APRS-IS push: <b>{st}</b>\nCanales: <b>{ch}</b>",
+                    f"📡 APRS-IS push: <b>{st}</b>\nCanales: <code>{ch}</code>",
                     parse_mode="HTML"
                 )
             except Exception:
                 await update.effective_message.reply_text(
-                    f"📡 APRS-IS push: <b>ON</b>\nCanales: <b>{channels}</b>",
+                    "📡 APRS-IS push: <b>ON</b>\n"
+                    f"Canales: <code>{html.escape(channels)}</code>",
                     parse_mode="HTML"
                 )
             return
 
-        await update.effective_message.reply_text("Parámetro no válido. Usa on/off.")
+        await update.effective_message.reply_text(
+            "Parámetro no válido.\n\n" + help_text,
+            parse_mode="HTML",
+        )
 
     finally:
         try:
             s.close()
         except Exception:
             pass
-
 
 
 # (Opcional) estado rápido
