@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-meshtastic_to_aprs.py (v7.0.42)
+meshtastic_to_aprs.py (v7.0.46)
 Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
 - /aprs (bot) -> UDP local -> TX APRS (troceo automático).
@@ -285,6 +285,10 @@ APRSIS_EMERGENCY_BULLETIN_MIN_LEVEL = (os.getenv("APRSIS_EMERGENCY_BULLETIN_MIN_
 APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC = max(0.0, float(os.getenv("APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC", "300") or "300"))
 APRSIS_EMERGENCY_BULLETIN_DEDUP_SEC = max(0.0, float(os.getenv("APRSIS_EMERGENCY_BULLETIN_DEDUP_SEC", "1800") or "1800"))
 APRSIS_EMERGENCY_BULLETIN_GROUP = (os.getenv("APRSIS_EMERGENCY_BULLETIN_GROUP", "") or "").strip()
+
+# Diagnóstico manual v7.0.46. No lo usa ninguna salida automática.
+APRSIS_LONG_TEST_ENABLED = int(os.getenv("APRSIS_LONG_TEST_ENABLED", "0") or "0")
+APRSIS_LONG_TEST_MAX_CHARS = max(80, min(450, int(os.getenv("APRSIS_LONG_TEST_MAX_CHARS", "400") or "400")))
 
 # Catálogo central de grupos APRS-IS reservados para futuras salidas.
 # Solo Emergencias está conectada actualmente a publicación automática; el
@@ -618,6 +622,30 @@ async def send_aprsis_emergency_bulletin(
         _save_aprsis_emergency_state(state)
         print(f"[APRS-IS BLN] {bulletin} event={event_id} severity={severity} status={status} text={body[:80]}")
         return {"ok": True, "sent": True, "bulletin": bulletin, "line": line}
+
+
+async def send_aprsis_long_test(text: str) -> dict:
+    """Envía una prueba larga exclusivamente a APRS-IS.
+
+    Requiere APRSIS_LONG_TEST_ENABLED=1, reutiliza la conexión APRS-IS
+    existente y nunca transmite por KISS/RF. No modifica boletines,
+    deduplicación ni MIN_INTERVAL de emergencias.
+    """
+    if not bool(APRSIS_LONG_TEST_ENABLED):
+        return {"ok": True, "sent": False, "reason": "disabled"}
+    if not _aprsis_ready():
+        return {"ok": False, "sent": False, "reason": "aprsis_unavailable"}
+    clean = _aprs_ascii(text).strip()
+    if not clean:
+        return {"ok": False, "sent": False, "reason": "empty_text"}
+    clean = clean[:APRSIS_LONG_TEST_MAX_CHARS]
+    line = f"{APRSIS_USER}>APRS,TCPIP*:>{clean}"
+    sent = bool(await _aprsis_send_line_safe(line))
+    return {
+        "ok": sent, "sent": sent,
+        "reason": "sent" if sent else "send_failed",
+        "chars": len(clean), "text": clean, "line": line,
+    }
 
 def _aprsis_tnc2_message_line(dst_call: str, text: str, *, with_msgid: bool = True) -> str:
     """
@@ -2738,6 +2766,22 @@ async def task_control_udp():
             print(f"[ctrl] gate → {'ON' if APRS_GATE_ENABLED else 'OFF'} (petición UDP)")
             continue
       
+        # --- v7.0.46: diagnóstico manual largo, solo APRS-IS ---
+        if mode == "aprsis_long_test":
+            try:
+                resp = await send_aprsis_long_test(obj.get("text", ""))
+            except Exception as exc:
+                resp = {
+                    "ok": False, "sent": False, "reason": "internal_error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                print(f"[APRS-IS LONG TEST] ERROR {resp['error']}")
+            try:
+                sock.sendto(json.dumps(resp, ensure_ascii=False).encode("utf-8"), addr)
+            except Exception:
+                pass
+            continue
+
         # --- Boletín público APRS-IS para emergencias graves ---
         if mode == "aprsis_emergency_bulletin":
             try:

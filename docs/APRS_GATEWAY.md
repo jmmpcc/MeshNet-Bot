@@ -465,6 +465,22 @@ APRSIS_EMERGENCY_BULLETIN_GROUP=
 
 La operación KISS remota de emergencias se documenta además en [`APRS_Remote_KISS_Emergency.md`](APRS_Remote_KISS_Emergency.md).
 
+### 13.1 Diagnóstico APRS-IS largo (v7.0.46)
+
+La v7.0.46 mantiene intactos los boletines `BLNx` y APRS RF. Añade el modo
+manual `aprsis_long_test`, desactivado por defecto, para comprobar qué texto
+conservan APRS-IS y aprs.fi por encima de 67 caracteres. No se utiliza en
+ninguna emergencia automática.
+
+```env
+APRSIS_LONG_TEST_ENABLED=0
+APRSIS_LONG_TEST_MAX_CHARS=400
+```
+
+Los mensajes compactos con mapa aplican además una regla estricta: la URL se
+incluye completa si cabe o se elimina completa antes del recorte por bytes.
+Nunca se genera deliberadamente un enlace parcial.
+
 ## 14. NOGATE, RFONLY, bucles y duplicados
 
 Las marcas `NOGATE` y `RFONLY` deben respetarse para evitar que tráfico definido como local se propague hacia Internet u otros sistemas.

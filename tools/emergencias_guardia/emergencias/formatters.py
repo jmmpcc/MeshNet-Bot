@@ -239,6 +239,22 @@ def byte_chunks(events: list[Event], max_bytes: int = 140) -> list[str]:
 
 
 def _compact_event(event: Event, header: str, max_bytes: int) -> str:
+    """Construye un mensaje compacto sin generar nunca URLs parciales.
+
+    Uso:
+        message = _compact_event(event, "NUEVA · EMERG", 140)
+
+    Parámetros:
+        event: emergencia normalizada.
+        header: cabecera lógica del mensaje.
+        max_bytes: presupuesto UTF-8 máximo del transporte Mesh.
+
+    Funcionalidad:
+        Conserva el comportamiento histórico de prioridad y recorte,
+        con una única garantía adicional desde v7.0.46: la URL del mapa
+        es atómica. Si no cabe completa, se elimina antes de recortar
+        ubicación o texto. Nunca se devuelve una URL truncada.
+    """
     severity = SEVERITY_LABELS.get(event.severity, event.severity.upper())
     category = CATEGORY_LABELS.get(event.category, "INCIDENCIA")
     place = _compact_place(event)
@@ -248,8 +264,6 @@ def _compact_event(event: Event, header: str, max_bytes: int) -> str:
     map_url = google_maps_url(event)
 
     required = [header, f"{severity} · {category}", _trim_text(place or event.title, 55)]
-    if map_url:
-        required.append(map_url)
     footer = " · ".join(part for part in (
         f"Hasta {end}" if end else "",
         source,
@@ -260,21 +274,36 @@ def _compact_event(event: Event, header: str, max_bytes: int) -> str:
     if detail and detail.casefold() != event.title.casefold():
         optional.append(detail)
 
-    lines = required + optional + ([footer] if footer else [])
+    include_map = bool(map_url)
+
+    def build_lines() -> list[str]:
+        return (
+required
++ ([map_url] if include_map else [])
++ optional
++ ([footer] if footer else [])
+        )
+
+    lines = build_lines()
     while len("\n".join(lines).encode("utf-8")) > max_bytes and optional:
         optional.pop()
-        lines = required + optional + ([footer] if footer else [])
+        lines = build_lines()
+
+    # La URL pierde prioridad antes de cualquier recorte destructivo.
+    if len("\n".join(lines).encode("utf-8")) > max_bytes and include_map:
+        include_map = False
+        lines = build_lines()
+
     message = "\n".join(lines)
     if len(message.encode("utf-8")) <= max_bytes:
         return message
 
-    fixed_lines = required[:2] + ([map_url] if map_url else []) + ([footer] if footer else [])
+    fixed_lines = required[:2] + ([footer] if footer else [])
     fixed = "\n".join(fixed_lines)
     allowance = max(12, max_bytes - len(fixed.encode("utf-8")) - 1)
     required[2] = _trim_utf8(required[2], allowance)
     message = "\n".join(required + ([footer] if footer else []))
     return _trim_utf8(message, max_bytes)
-
 
 def _compact_place(event: Event) -> str:
     road = event.road
