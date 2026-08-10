@@ -96,6 +96,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "bbox": [-9.4, 35.8, 4.4, 43.9], "days": 1,
             "verification": "satellite_detection", "require_areas": True,
         },
+        "aemet_cap": {
+            "type": "aemet_cap", "enabled": False,
+            "url": "https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/esp",
+            "api_key_env": "AEMET_API_KEY", "verification": "official",
+            "require_areas": False,
+            "source_url": "https://www.aemet.es/es/eltiempo/prediccion/avisos",
+        },
+        "che_saih": {
+            "type": "che_rss", "enabled": False,
+            "url": "https://isatap.dt.chebro.es/notas-de-prensa-rss",
+            "verification": "official", "require_areas": True,
+        },
     },
 }
 
