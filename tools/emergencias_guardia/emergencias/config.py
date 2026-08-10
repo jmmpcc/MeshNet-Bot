@@ -101,6 +101,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "url": "https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/esp",
             "api_key_env": "AEMET_API_KEY", "verification": "official",
             "require_areas": True,
+            "disabled_if_env_enabled": "AEMET_ALERTS_ENABLED",
+            "disabled_if_env_default": True,
             "source_url": "https://www.aemet.es/es/eltiempo/prediccion/avisos",
         },
         "che_saih": {
@@ -138,13 +140,13 @@ def atomic_write_json(path: Path, data: Any) -> None:
 
 
 def load_config(create: bool = True) -> dict[str, Any]:
-    if not CONFIG_FILE.exists():
-        if create:
-            atomic_write_json(CONFIG_FILE, DEFAULT_CONFIG)
-        return json.loads(json.dumps(DEFAULT_CONFIG))
-    supplied = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    return _merge(DEFAULT_CONFIG, supplied)
-
-
-def save_config(config: dict[str, Any]) -> None:
-    atomic_write_json(CONFIG_FILE, config)
+    try:
+        supplied = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        supplied = {}
+    except (json.JSONDecodeError, OSError):
+        supplied = {}
+    config = _merge(DEFAULT_CONFIG, supplied)
+    if create and not CONFIG_FILE.exists():
+        atomic_write_json(CONFIG_FILE, config)
+    return config
