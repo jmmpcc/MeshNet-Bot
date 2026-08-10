@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/build-v7048-delivery-audit.yml
       - scripts/integrate_v7048_temp.py
+      - scripts/integrate_v7048_fix_temp.py
 
 permissions:
   contents: write
@@ -21,7 +22,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply v7.0.48
-        run: python3 scripts/integrate_v7048_temp.py
+        run: |
+          python3 scripts/integrate_v7048_temp.py
+          python3 scripts/integrate_v7048_fix_temp.py
 
       - name: Compile modified Python
         run: |
@@ -43,10 +46,11 @@ jobs:
             tests/test_emergency_dispatcher.py \
             tests/test_emergency_sources_v7043.py \
             tests/test_emergency_province_resolution_v7045.py \
-            tests/test_aprsis_url_integrity_v7046.py \
-            tests/test_aprsis_long_bulletin_v7047.py \
             tools/farmacias_guardia/tests/test_farmacias_guardia.py \
             tools/ControlPanel/tests/test_web_admin.py -v
+          python3 -m pytest \
+            tests/test_aprsis_url_integrity_v7046.py \
+            tests/test_aprsis_long_bulletin_v7047.py -v
 
       - name: Diff validation
         run: |
