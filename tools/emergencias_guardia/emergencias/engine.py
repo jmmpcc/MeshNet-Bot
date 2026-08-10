@@ -40,9 +40,32 @@ def event_matches(event: Event, config: dict[str, Any], query: dict[str, Any] | 
 
 
 def _area_matches(event: Event, area: dict[str, Any]) -> bool:
+    """Comprueba el ámbito de un evento sin cambiar los filtros existentes.
+
+    Los conectores históricos siguen usando ``Event.province`` y coordenadas.
+    Las fuentes multizona de v7.0.43 pueden añadir ``metadata['provinces']`` o
+    ``metadata['cap_area']``; ambos campos se consultan únicamente como respaldo
+    cuando el dato provincial simple no es suficiente.
+    """
     kind = area.get("type")
     if kind == "province":
-        return fold_text(event.province) == fold_text(area.get("name"))
+        wanted = fold_text(area.get("name"))
+        if fold_text(event.province) == wanted:
+            return True
+        metadata_provinces = event.metadata.get("provinces", [])
+        if isinstance(metadata_provinces, (list, tuple, set)) and any(
+            fold_text(value) == wanted for value in metadata_provinces
+        ):
+            return True
+        cap_area = fold_text(event.metadata.get("cap_area", ""))
+        if wanted and wanted in cap_area:
+            return True
+        cap_parameters = event.metadata.get("cap_parameters", {})
+        if isinstance(cap_parameters, dict):
+            parameter_text = fold_text(" ".join(str(value) for value in cap_parameters.values()))
+            if wanted and wanted in parameter_text:
+                return True
+        return False
     if kind == "municipality":
         return fold_text(event.municipality) == fold_text(area.get("name"))
     if kind == "radius" and event.latitude is not None and event.longitude is not None:
