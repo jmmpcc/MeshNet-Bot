@@ -79,6 +79,8 @@ class EmergencyDispatcherTests(unittest.TestCase):
         self.assertEqual(result["aprs_rf"]["sent"], 1)
         self.assertEqual(result["aprs_rf"]["original_parts"], 1)
         self.assertFalse(result["aprs_rf"]["compacted"])
+        self.assertTrue(result["aprs_rf"]["aprs_formatted"])
+        self.assertIn("EMERG INCENDIO", result["aprs_rf"]["aprs_text"])
         payloads = [call.args[0].decode("utf-8") for call in client.sendto.call_args_list]
         self.assertIn('"mode": "aprs_preview"', payloads[0])
         self.assertIn('"mode": "aprs"', payloads[1])
@@ -123,6 +125,7 @@ class EmergencyDispatcherTests(unittest.TestCase):
         self.assertEqual(result["aprs_rf"]["original_parts"], 3)
         self.assertEqual(result["aprs_rf"]["max_chunks"], 3)
         self.assertFalse(result["aprs_rf"]["compacted"])
+        self.assertIn("EMERG INCENDIO", result["aprs_rf"]["aprs_text"])
 
     @patch("tools.emergencias_guardia.emergencias.emergency_dispatcher.socket.socket")
     def test_aprs_rf_compacts_only_when_gateway_reports_too_many_parts(self, socket_factory):
@@ -151,7 +154,7 @@ class EmergencyDispatcherTests(unittest.TestCase):
         self.assertEqual(result["aprs_rf"]["rf_parts"], 2)
         payloads = [call.args[0].decode("utf-8") for call in client.sendto.call_args_list]
         self.assertEqual(len(payloads), 3)
-        self.assertIn("FINALIZADA · EMERG", payloads[1])
+        self.assertIn("EMERG INCENDIO", payloads[1])
         self.assertIn('"mode": "aprs"', payloads[2])
 
     @patch("tools.emergencias_guardia.emergencias.emergency_dispatcher.socket.socket")
@@ -177,6 +180,30 @@ class EmergencyDispatcherTests(unittest.TestCase):
         self.assertEqual(result["aprs_rf"]["original_parts"], 5)
         self.assertEqual(result["aprs_rf"]["compact_parts"], 4)
         self.assertEqual(len(client.sendto.call_args_list), 2)
+
+    @patch("tools.emergencias_guardia.emergencias.emergency_dispatcher.socket.socket")
+    def test_aprsis_uses_single_line_human_readable_emergency_type(self, socket_factory):
+        client = socket_factory.return_value.__enter__.return_value
+        client.recvfrom.return_value = (
+            b'{"ok": true, "sent": true, "bulletin": "BLN3"}',
+            ("127.0.0.1", 9464),
+        )
+        env = {
+            "APPS_APRS_ENABLED": "1",
+            "APPS_APRS_ALLOWED_SOURCES": "emergencias",
+            "EMERGENCIAS_APRS_ENABLED": "1",
+            "APRSIS_PUSH_ENABLED": "1",
+            "APRSIS_EMERGENCY_BULLETIN_ENABLED": "1",
+            "APRSIS_EMERGENCY_BULLETIN_MIN_LEVEL": "high",
+        }
+        event = make_event("high")
+        event.road = "A-23"
+        event.kilometre = 312
+        with patch.dict(os.environ, env, clear=True):
+            result = dispatch_secondary_outputs(event, "mensaje mesh deliberadamente largo " * 8)
+        self.assertTrue(result["aprsis_bulletin"]["sent"])
+        payload = client.sendto.call_args.args[0].decode("utf-8")
+        self.assertIn('"text": "EMERG INCENDIO | A-23 km 312 | Zuera | Prueba"', payload)
 
     @patch("tools.emergencias_guardia.emergencias.emergency_dispatcher._send_aprs_rf")
     def test_aprs_rf_failure_is_isolated(self, mocked):

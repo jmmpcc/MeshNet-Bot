@@ -1,4 +1,4 @@
-# APRS y APRS-IS en MeshNet-Bot — v7.0.41
+# APRS y APRS-IS en MeshNet-Bot — v7.0.42
 
 Guía operativa completa del contenedor `meshnet-aprs`, servicio Compose `aprs`.
 
@@ -423,7 +423,7 @@ MESH_EMERGENCY_CHANNELS=1,2,4
 APRSIS_PUSH_ENABLED=1
 APRSIS_EMERGENCY_BULLETIN_ENABLED=1
 APRSIS_EMERGENCY_BULLETIN_MIN_LEVEL=high
-APRSIS_EMERGENCY_BULLETIN_GROUP=EMERG
+APRSIS_EMERGENCY_BULLETIN_GROUP=
 ```
 
 ### Grupos de boletines APRS-IS
@@ -684,7 +684,7 @@ docker logs --tail 200 meshnet-aprs | grep 'UDP escuchando'
 Resultado esperado en el host: `127.0.0.1:9464`. Dentro del contenedor, el log debe indicar escucha en `0.0.0.0:9464`.
 
 
-## 16. Previsualización y límite RF de Emergencias — v7.0.41
+## 16. Previsualización y resumen APRS de Emergencias — v7.0.42
 
 El control UDP admite `mode=aprs_preview`. Este modo normaliza destino y texto y construye las partes con las mismas funciones del envío APRS real, pero **no transmite por KISS, no marca deduplicación y no genera RF**. Se utiliza internamente por `emergencias_guardia` para eliminar discrepancias entre estimaciones externas y el troceado efectivo del gateway.
 
@@ -712,3 +712,45 @@ Respuesta típica:
 ```json
 {"ok":true,"sent":false,"preview":true,"dest":"broadcast","parts":3}
 ```
+
+## 17. Cierre inmediato y texto APRS compacto — v7.0.42
+
+Los estados terminales `resolved`, `cancelled`, `expired` y `closed` conservan
+la línea BLN asignada y pueden publicarse inmediatamente después del alta.
+Estos estados omiten **solo** `APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC`.
+La deduplicación `APRSIS_EMERGENCY_BULLETIN_DEDUP_SEC` sigue evaluándose antes,
+por lo que repetir exactamente el mismo cierre continúa bloqueado.
+
+El nombre del boletín sigue dependiendo exclusivamente de la variable de grupo:
+
+```env
+# Boletín estándar/local
+APRSIS_EMERGENCY_BULLETIN_GROUP=
+
+# Alternativa: boletín de grupo
+# APRSIS_EMERGENCY_BULLETIN_GROUP=EMERG
+```
+
+Así, el mismo evento puede producir `BLN3:...`/`BLN3:FIN ...` con la variable
+vacía o `BLN3EMERG:...`/`BLN3EMERG:FIN ...` si se configura `EMERG`.
+
+Para APRS RF y APRS-IS, Emergencias genera un texto específico, ASCII y de una
+sola línea, limitado por defecto a 67 caracteres:
+
+```env
+EMERGENCIAS_APRS_TEXT_MAX_CHARS=67
+```
+
+Prioridad del contenido: **estado → tipo de emergencia → carretera/km →
+municipio → título si cabe**. Ejemplos:
+
+```text
+EMERG INCENDIO | A-23 km 312 | Zuera
+CRIT COLISION | A-2 km 315 | La Muela
+FIN CORTE VIA | N-330 km 22 | Carinena
+```
+
+Este resumen no sustituye ni modifica el mensaje Mesh. Solo se aplica a las
+salidas APRS, reduciendo airtime RF y evitando que un truncado elimine el tipo
+de emergencia.
+

@@ -751,7 +751,7 @@ NASA FIRMS, cuando se incorpore, deberá clasificarse siempre como
 corroboración oficial.
 
 
-## APRS RF: cálculo real de partes · v7.0.41
+## APRS RF/APRS-IS: resumen operativo · v7.0.42
 
 Para emergencias `high`/`critical`, el dispatcher ya no calcula los fragmentos APRS mediante una división aproximada. Solicita `aprs_preview` al gateway de APRS, que reutiliza el mismo troceado del envío real sin producir RF. El máximo específico recomendado es:
 
@@ -761,3 +761,16 @@ EMERGENCIAS_APRS_RF_COMPACT_MAX_BYTES=140
 ```
 
 Si el texto original requiere más de tres partes, se reutiliza `compact_messages()` de esta aplicación para generar un texto más corto y se vuelve a consultar el gateway. Solo se transmite si el resumen queda dentro del límite. Los prefijos de cambio (`NUEVA`, `ACTUALIZADA`, `FINALIZADA`) se conservan y APRS-IS no se modifica.
+
+### Texto específico APRS en v7.0.42
+
+Las salidas APRS RF y APRS-IS ya no reutilizan literalmente el texto Mesh. Se
+genera un resumen APRS de una sola línea, configurable mediante
+`EMERGENCIAS_APRS_TEXT_MAX_CHARS=67`, que conserva siempre el estado y la
+categoría antes de añadir ubicación. Los cierres usan `FIN`, las emergencias
+críticas `CRIT` y el resto de avisos graves `EMERG`.
+
+Los cierres `resolved`, `cancelled`, `expired` y `closed` saltan exclusivamente
+el intervalo mínimo de boletines APRS-IS para que un alta seguida de resolución
+pueda notificarse inmediatamente. La deduplicación permanece activa.
+

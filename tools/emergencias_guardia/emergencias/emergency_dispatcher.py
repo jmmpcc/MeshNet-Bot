@@ -8,7 +8,7 @@ import urllib.request
 from dataclasses import dataclass, asdict
 from typing import Any
 
-from .formatters import compact_messages
+from .formatters import aprs_emergency_text
 from .models import Event, SEVERITY_RANK
 
 
@@ -81,11 +81,11 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
       que calcula las partes con las mismas funciones usadas para RF y sin
       transmitir ni afectar a la deduplicación.
 
-    Si el texto supera ``EMERGENCIAS_APRS_RF_MAX_CHUNKS`` (3 por defecto), se
-    reutiliza ``compact_messages`` para generar una versión APRS más corta del
-    mismo evento, conservando el prefijo del mensaje original (por ejemplo
-    ``FINALIZADA · EMERG``). La versión compacta vuelve a previsualizarse y solo
-    se transmite si respeta el límite.
+    Antes de consultar el gateway se genera un resumen APRS específico de hasta
+    67 caracteres mediante ``aprs_emergency_text``. El resumen conserva primero
+    estado y tipo de emergencia y después ubicación. Si aun así el gateway
+    informa más partes que ``EMERGENCIAS_APRS_RF_MAX_CHUNKS``, se aplica un
+    segundo límite y se vuelve a previsualizar antes de transmitir.
 
     Parámetros:
       event: emergencia normalizada que determina severidad y datos compactos.
@@ -132,7 +132,15 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
             return {"ok": False, "sent": False, "reason": "invalid_response"}
         return result
 
-    original_preview = gateway_request("aprs_preview", message)
+    # APRS v7.0.42: generamos desde el Event una línea específica para APRS.
+    # De este modo el estado y el tipo de emergencia quedan al principio y no
+    # dependen de cómo se haya formateado el mensaje Mesh. 67 caracteres es el
+    # límite estándar del cuerpo APRS; puede reducirse, pero nunca ampliarse por
+    # encima del valor configurado en APRS_MSG_MAX del gateway.
+    aprs_text_max = max(24, min(67, int(os.getenv("EMERGENCIAS_APRS_TEXT_MAX_CHARS", "67") or "67")))
+    aprs_message = aprs_emergency_text(event, max_chars=aprs_text_max)
+
+    original_preview = gateway_request("aprs_preview", aprs_message)
     if not original_preview.get("ok"):
         return {
             "ok": False,
@@ -142,21 +150,22 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
         }
 
     original_parts = max(0, int(original_preview.get("parts", 0) or 0))
-    rf_message = message
+    rf_message = aprs_message
+    # ``compacted`` conserva su semántica histórica: solo indica que se activó
+    # el segundo nivel de reducción por exceso de partes. El nuevo formateo APRS
+    # específico se informa aparte mediante ``aprs_formatted``.
     compacted = False
     compact_parts = original_parts
 
     if original_parts > max_chunks:
         # El notifier ya genera mensajes compactos. Este segundo nivel solo se
-        # activa cuando una configuración más amplia o datos excepcionales
-        # superan el máximo RF. Conservamos el prefijo funcional (ALTA,
-        # ACTUALIZADA, FINALIZADA...) para no perder semántica operativa.
-        prefix = next((line.strip() for line in message.splitlines() if line.strip()), "EMERG")
-        rf_message = compact_messages(
-            [event],
-            max_bytes=compact_max_bytes,
-            prefix=prefix,
-        )[0]
+        # activa cuando una configuración más restrictiva o datos excepcionales
+        # superan el máximo RF. El segundo resumen mantiene la misma regla:
+        # estado y tipo de emergencia nunca se desplazan al final del mensaje.
+        rf_message = aprs_emergency_text(
+            event,
+            max_chars=max(24, min(67, compact_max_bytes)),
+        )
         compacted = rf_message != message
         compact_preview = gateway_request("aprs_preview", rf_message)
         if not compact_preview.get("ok"):
@@ -191,6 +200,8 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
         "rf_parts": compact_parts,
         "max_chunks": max_chunks,
         "compacted": compacted,
+        "aprs_formatted": True,
+        "aprs_text": rf_message,
     }
 
 def _voice_result(event: Event, message: str) -> dict[str, Any]:
@@ -284,13 +295,15 @@ def _send_aprsis_bulletin(event: Event, message: str) -> dict[str, Any]:
     host = str(os.getenv("APRS_CTRL_HOST", "127.0.0.1") or "127.0.0.1").strip()
     port = int(os.getenv("APRS_CTRL_PORT", "9464") or "9464")
     timeout = max(0.5, float(os.getenv("APRS_CTRL_ACK_TIMEOUT", "8") or "8"))
+    aprs_text_max = max(24, min(67, int(os.getenv("EMERGENCIAS_APRS_TEXT_MAX_CHARS", "67") or "67")))
+    bulletin_text = aprs_emergency_text(event, max_chars=aprs_text_max)
     payload = {
         "mode": "aprsis_emergency_bulletin",
         "origin": "app_emergencias",
         "event_id": event.event_id,
         "severity": event.severity,
         "status": event.status,
-        "text": message,
+        "text": bulletin_text,
     }
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
