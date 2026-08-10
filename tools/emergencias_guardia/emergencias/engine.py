@@ -58,6 +58,43 @@ def _source_disabled_by_external_owner(source_config: dict[str, Any]) -> str:
     return ""
 
 
+def _source_disabled_by_configuration(source_config: dict[str, Any]) -> str:
+    """Devuelve el motivo por el que una fuente está declarada no operativa.
+
+    Uso:
+        reason = _source_disabled_by_configuration(source_config)
+
+    Funcionalidad:
+        Permite mantener una fuente visible y documentada sin intentar usar un
+        endpoint que se haya comprobado que no es apto para consumo automático.
+        Se evita así convertir silenciosamente una página HTML en un supuesto
+        feed/API operativo.
+    """
+    if source_config.get("operational", True) is not False:
+        return ""
+    return str(source_config.get("disabled_reason") or "fuente no operativa").strip()
+
+
+def _failure_state(previous: Any, now: str, error: str) -> dict[str, Any]:
+    """Construye un estado de fallo sin arrastrar flags incompatibles previos.
+
+    Uso:
+        state = _failure_state(previous, now, str(exc))
+
+    Funcionalidad:
+        Conserva únicamente datos históricos útiles de una ejecución correcta
+        anterior y elimina campos transitorios como ``skipped`` y ``reason``.
+        Así un fallo actual no puede mostrarse simultáneamente como bloqueado por
+        una condición de una ejecución anterior.
+    """
+    keep = {}
+    if isinstance(previous, dict):
+        for key in ("last_success", "records", "accepted", "not_modified"):
+            if key in previous:
+                keep[key] = previous[key]
+    return keep | {"ok": False, "last_error": now, "error": error}
+
+
 def event_matches(event: Event, config: dict[str, Any], query: dict[str, Any] | None = None) -> bool:
     query = query or {}
     categories = set(config["filters"].get("categories", []))
@@ -152,7 +189,15 @@ def fetch_sources(config: dict[str, Any], only: str | None = None) -> dict[str, 
         if only and source_id != only:
             continue
         if not source_config.get("enabled", False):
-            report["sources"][source_id] = {"ok": False, "skipped": "disabled"}
+            skipped = {"ok": False, "skipped": "disabled"}
+            source_states[source_id] = skipped
+            report["sources"][source_id] = skipped
+            continue
+        configuration_reason = _source_disabled_by_configuration(source_config)
+        if configuration_reason:
+            skipped = {"ok": False, "skipped": "not_operational", "reason": configuration_reason}
+            source_states[source_id] = skipped
+            report["sources"][source_id] = skipped
             continue
         external_reason = _source_disabled_by_external_owner(source_config)
         if external_reason:
@@ -163,14 +208,15 @@ def fetch_sources(config: dict[str, Any], only: str | None = None) -> dict[str, 
         if source_config.get("require_areas") and not any(
             area.get("enabled", True) for area in config.get("areas", [])
         ):
-            report["sources"][source_id] = {
-                "ok": False,
-                "error": "la fuente requiere al menos un área geográfica habilitada",
-            }
+            failed = {"ok": False, "error": "la fuente requiere al menos un área geográfica habilitada"}
+            source_states[source_id] = failed
+            report["sources"][source_id] = failed
             continue
         source_type = SOURCE_TYPES.get(source_config.get("type"))
         if source_type is None:
-            report["sources"][source_id] = {"ok": False, "error": "tipo de fuente desconocido"}
+            failed = {"ok": False, "error": "tipo de fuente desconocido"}
+            source_states[source_id] = failed
+            report["sources"][source_id] = failed
             continue
         try:
             events, not_modified = source_type(source_id, source_config, config).fetch()
@@ -182,8 +228,7 @@ def fetch_sources(config: dict[str, Any], only: str | None = None) -> dict[str, 
             }
             report["sources"][source_id] = source_states[source_id]
         except (SourceError, ValueError, TypeError) as exc:
-            previous = source_states.get(source_id, {})
-            source_states[source_id] = previous | {"ok": False, "last_error": now, "error": str(exc)}
+            source_states[source_id] = _failure_state(source_states.get(source_id), now, str(exc))
             report["sources"][source_id] = source_states[source_id]
     save_current(current)
     save_state(state)
