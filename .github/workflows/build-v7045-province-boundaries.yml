@@ -1,0 +1,94 @@
+name: Build v7.0.45 province boundaries
+
+on:
+  push:
+    branches:
+      - agent/v7.0.45-province-georesolution
+    paths:
+      - .github/workflows/build-v7045-province-boundaries.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v7.0.45-province-georesolution
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Generate reduced GeoJSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          cd "$tmp"
+          npm init -y >/dev/null 2>&1
+          npm install topojson-client@3 >/dev/null 2>&1
+          curl --fail --silent --show-error --location \
+            'https://unpkg.com/es-atlas@0.6.0/es/provinces.json' \
+            -o provinces.topo.json
+          cat > convert.js <<'JS'
+          const fs = require('fs');
+          const topojson = require('topojson-client');
+          const topology = JSON.parse(fs.readFileSync('provinces.topo.json', 'utf8'));
+          const fc = topojson.feature(topology, topology.objects.provinces);
+          const aliases = {
+            'Alacant/Alicante': 'Alicante',
+            'Castelló/Castellón': 'Castellón',
+            'València/Valencia': 'Valencia',
+            'Araba/Álava': 'Álava'
+          };
+          fc.features = fc.features
+            .filter(f => String(f.id) !== '54')
+            .map(f => ({
+              type: 'Feature',
+              properties: {
+                code: String(f.id).padStart(2, '0'),
+                name: aliases[f.properties.name] || f.properties.name
+              },
+              geometry: f.geometry
+            }));
+          const out = {
+            type: 'FeatureCollection',
+            metadata: {
+              source: 'IGN/CNIG NGBE via es-atlas 0.6.0',
+              source_url: 'https://www.ign.es/',
+              generator_url: 'https://github.com/martgnz/es-atlas',
+              license: 'CC-BY-4.0 (source data)',
+              purpose: 'MeshNet-Bot emergency province resolution'
+            },
+            features: fc.features
+          };
+          fs.writeFileSync('provincias_espana.geojson', JSON.stringify(out) + '\n');
+          JS
+          node convert.js
+          mkdir -p "$GITHUB_WORKSPACE/tools/emergencias_guardia/data"
+          cp provincias_espana.geojson "$GITHUB_WORKSPACE/tools/emergencias_guardia/data/provincias_espana.geojson"
+          cd "$GITHUB_WORKSPACE"
+          python3 - <<'PY'
+          import json
+          p='tools/emergencias_guardia/data/provincias_espana.geojson'
+          data=json.load(open(p,encoding='utf-8'))
+          assert data['type']=='FeatureCollection'
+          assert len(data['features']) == 52, len(data['features'])
+          names={f['properties']['name'] for f in data['features']}
+          for required in ('Zaragoza','Huesca','Teruel','Navarra','Madrid'):
+              assert required in names, required
+          print('province features:', len(data['features']))
+          PY
+      - name: Commit generated data
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tools/emergencias_guardia/data/provincias_espana.geojson
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'v7.0.45: add local province boundary data'
+          git push origin HEAD:agent/v7.0.45-province-georesolution
