@@ -2,6 +2,8 @@ import json
 from unittest.mock import patch
 
 from tools.emergencias_guardia.emergencias.engine import (
+    _failure_state,
+    _source_disabled_by_configuration,
     _source_disabled_by_external_owner,
     event_matches,
 )
@@ -121,7 +123,33 @@ def test_aemet_cap_yields_to_existing_broker_subsystem(monkeypatch):
     assert _source_disabled_by_external_owner(source_config) == ""
 
 
-def test_che_rss_filters_non_hydrological_items_and_keeps_all_provinces():
+def test_failure_state_drops_previous_skip_reason():
+    previous = {
+        "ok": False,
+        "skipped": "external_owner",
+        "reason": "gestionada por subsistema existente",
+        "last_success": "2026-08-09T10:00:00+00:00",
+        "records": 4,
+    }
+    state = _failure_state(previous, "2026-08-10T09:00:00+00:00", "AEMET_API_KEY no configurada")
+    assert state["ok"] is False
+    assert state["error"] == "AEMET_API_KEY no configurada"
+    assert state["last_success"] == "2026-08-09T10:00:00+00:00"
+    assert state["records"] == 4
+    assert "skipped" not in state
+    assert "reason" not in state
+
+
+def test_che_is_blocked_until_structured_endpoint_exists():
+    source_config = {
+        "operational": False,
+        "disabled_reason": "CHE/SAIH pendiente de endpoint público estructurado",
+    }
+    reason = _source_disabled_by_configuration(source_config)
+    assert "endpoint público estructurado" in reason
+
+
+def test_che_rss_parser_kept_for_future_structured_feed():
     body = b'''<rss><channel>
       <item><guid>1</guid><title>Informe semanal de embalses</title><description>Reservas semanales.</description></item>
       <item><guid>2</guid><title>Posibilidad de crecidas s\xc3\xbabitas en barrancos de Zaragoza, Huesca y Lleida</title>
