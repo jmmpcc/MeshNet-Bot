@@ -91,9 +91,10 @@ geometría `Point`.
 
 El conector `ign_earthquakes` extrae GeoRSS, magnitud y fecha. La magnitud se
 normaliza a severidad: `low` < 3,5; `medium` < 5; `high` < 6; `critical` >= 6.
-Como normalmente aporta coordenadas pero no provincia, se recomienda un radio:
+Desde v7.0.45, si hay provincias seleccionadas, la provincia se resuelve localmente a partir de las coordenadas antes de aplicar el filtro. El radio sigue disponible como cobertura geográfica adicional:
 
 ```bash
+python3 emergencias_guardia.py area add province Zaragoza
 python3 emergencias_guardia.py area add radius entorno-zaragoza \
   --lat 41.6488 --lon -0.8891 --km 150
 python3 emergencias_guardia.py source test ign_earthquakes
