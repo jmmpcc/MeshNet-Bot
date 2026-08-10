@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import tools.emergencias_guardia.emergencias.engine as engine_module
 from tools.emergencias_guardia.emergencias.engine import event_matches
 from tools.emergencias_guardia.emergencias.geo_admin import (
     enrich_event_province,
@@ -96,3 +97,73 @@ def test_province_and_radius_keep_existing_or_semantics() -> None:
         },
     )
     assert event_matches(event, config) is True
+
+
+def test_fetch_sources_enriches_before_province_filter(monkeypatch) -> None:
+    """El pipeline real debe enriquecer provincia antes de llamar a event_matches().
+
+    Esta prueba evita una regresión en la integración: un conector tipo IGN/FIRMS
+    entrega únicamente coordenadas de Zaragoza y el único ámbito habilitado es la
+    provincia Zaragoza. Si el enriquecimiento no ocurre entre ``fetch()`` y el
+    filtro geográfico, ``accepted`` sería 0.
+    """
+
+    class FakeCoordinateSource:
+        """Conector mínimo que emula una fuente con coordenadas y sin provincia."""
+
+        def __init__(self, source_id: str, source_config: dict, config: dict) -> None:
+            self.source_id = source_id
+
+        def fetch(self) -> tuple[list[Event], bool]:
+            return [
+                Event(
+                    event_id="fake_geo:zaragoza",
+                    source=self.source_id,
+                    source_event_id="zaragoza",
+                    category="earthquake",
+                    severity="medium",
+                    title="Evento con coordenadas",
+                    latitude=41.6488,
+                    longitude=-0.8891,
+                )
+            ], False
+
+    captured_current: dict[str, Event] = {}
+
+    def capture_current(current: dict[str, Event]) -> None:
+        """Captura el estado que fetch_sources() habría persistido en disco."""
+        captured_current.update(current)
+
+    monkeypatch.setitem(engine_module.SOURCE_TYPES, "fake_coordinate", FakeCoordinateSource)
+    monkeypatch.setattr(engine_module, "load_current", lambda: {})
+    monkeypatch.setattr(engine_module, "load_state", lambda: {})
+    monkeypatch.setattr(engine_module, "save_current", capture_current)
+    monkeypatch.setattr(engine_module, "save_state", lambda state: None)
+    monkeypatch.setattr(engine_module, "append_history", lambda change, event: None)
+
+    config = {
+        "fetch": {"resolve_after_missing_fetches": 2},
+        "filters": {
+            "minimum_severity": "low",
+            "categories": sorted(VALID_CATEGORIES),
+        },
+        "areas": [
+            {"type": "province", "name": "Zaragoza", "enabled": True},
+        ],
+        "sources": {
+            "fake_geo": {
+                "type": "fake_coordinate",
+                "enabled": True,
+                "require_areas": True,
+            }
+        },
+    }
+
+    report = engine_module.fetch_sources(config, only="fake_geo")
+
+    assert report["sources"]["fake_geo"]["records"] == 1
+    assert report["sources"]["fake_geo"]["accepted"] == 1
+    assert report["changes"]["new"] == 1
+    stored = captured_current["fake_geo:zaragoza"]
+    assert stored.province == "Zaragoza"
+    assert stored.metadata["province_resolved_from_coordinates"] is True
