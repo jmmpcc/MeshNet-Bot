@@ -158,6 +158,53 @@ class AprsIsEmergencyBulletinTests(unittest.TestCase):
         self.assertTrue(second["duplicate"])
         self.assertEqual(send.await_count, 1)
 
+    def test_terminal_states_bypass_only_min_interval(self):
+        """Los cierres salen inmediatamente aunque el alta haya salido segundos antes."""
+        self.gateway.APRSIS_EMERGENCY_BULLETIN_GROUP = "EMERG"
+        self.gateway.APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC = 300
+        for index, terminal_status in enumerate(("resolved", "cancelled", "expired", "closed")):
+            with self.subTest(status=terminal_status):
+                event_id = f"evt-terminal-{index}"
+                with mock.patch.object(
+                    self.gateway, "_aprsis_send_line_safe", new=mock.AsyncMock(return_value=True)
+                ) as send:
+                    first = self.run_async(self.gateway.send_aprsis_emergency_bulletin(
+                        event_id=event_id, text="EMERG INCENDIO | Zuera",
+                        severity="high", status="active",
+                    ))
+                    closed = self.run_async(self.gateway.send_aprsis_emergency_bulletin(
+                        event_id=event_id, text="FIN INCENDIO | Zuera",
+                        severity="high", status=terminal_status,
+                    ))
+                self.assertTrue(first["sent"])
+                self.assertTrue(closed["sent"])
+                self.assertEqual(closed["bulletin"], "BLN0EMERG")
+                self.assertIn("::BLN0EMERG:FIN INCENDIO", send.await_args.args[0])
+                self.assertEqual(send.await_count, 2)
+
+    def test_terminal_duplicate_still_uses_dedup_window(self):
+        """Saltar MIN_INTERVAL no desactiva la deduplicación del mismo cierre."""
+        self.gateway.APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC = 300
+        with mock.patch.object(
+            self.gateway, "_aprsis_send_line_safe", new=mock.AsyncMock(return_value=True)
+        ) as send:
+            self.run_async(self.gateway.send_aprsis_emergency_bulletin(
+                event_id="evt-terminal-dup", text="EMERG COLISION | A-2 km 20",
+                severity="high", status="active",
+            ))
+            first_close = self.run_async(self.gateway.send_aprsis_emergency_bulletin(
+                event_id="evt-terminal-dup", text="FIN COLISION | A-2 km 20",
+                severity="high", status="resolved",
+            ))
+            duplicate_close = self.run_async(self.gateway.send_aprsis_emergency_bulletin(
+                event_id="evt-terminal-dup", text="FIN COLISION | A-2 km 20",
+                severity="high", status="resolved",
+            ))
+        self.assertTrue(first_close["sent"])
+        self.assertTrue(duplicate_close["duplicate"])
+        self.assertEqual(duplicate_close["reason"], "duplicate")
+        self.assertEqual(send.await_count, 2)
+
     def test_resolved_event_keeps_slot_and_adds_fin(self):
         with mock.patch.object(
             self.gateway, "_aprsis_send_line_safe", new=mock.AsyncMock(return_value=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import math
+import unicodedata
 
 from .models import Event
 
@@ -34,6 +35,128 @@ SOURCE_LABELS = {
     "infoar": "INFOAR",
     "ign_earthquakes": "IGN",
 }
+
+
+# Etiquetas APRS deliberadamente breves y sin ambigüedad. El objetivo no es
+# codificar la emergencia con siglas opacas, sino garantizar que el tipo de
+# incidente aparezca completo al principio de una trama APRS de 67 caracteres.
+APRS_CATEGORY_LABELS = {
+    "wildfire": "INCENDIO",
+    "urban_fire": "INCENDIO URB",
+    "industrial_fire": "INCENDIO IND",
+    "traffic_collision": "COLISION",
+    "road_closed": "CORTE VIA",
+    "lane_closed": "CARRIL CERRADO",
+    "traffic_obstruction": "AFECCION VIAL",
+    "flood": "INUNDACION",
+    "storm": "TORMENTA",
+    "snow": "NIEVE",
+    "strong_wind": "VIENTO",
+    "extreme_temperature": "TEMP EXTREMA",
+    "chemical": "RIESGO QUIMICO",
+    "power_outage": "CORTE ELECTRICO",
+    "water_outage": "CORTE AGUA",
+    "gas_outage": "CORTE GAS",
+    "public_safety": "SEGURIDAD",
+    "civil_protection": "PROT CIVIL",
+    "earthquake": "TERREMOTO",
+    "tsunami": "TSUNAMI",
+    "volcanic": "VOLCAN",
+    "landslide": "DESLIZAMIENTO",
+    "other": "INCIDENCIA",
+}
+
+APRS_TERMINAL_STATUSES = {"resolved", "cancelled", "expired", "closed"}
+
+
+def aprs_emergency_text(event: Event, max_chars: int = 67) -> str:
+    """Construye el texto APRS compacto de una emergencia.
+
+    Uso:
+      ``text = aprs_emergency_text(event, max_chars=67)``
+
+    Parámetros:
+      event: evento normalizado de ``emergencias_guardia``.
+      max_chars: longitud máxima del cuerpo APRS. El valor recomendado y por
+        defecto es 67, límite del campo de texto de un mensaje APRS clásico.
+
+    Funcionalidad:
+      - Conserva SIEMPRE al comienzo el estado operativo y el tipo de emergencia.
+      - Usa ``FIN`` para estados terminales y ``CRIT`` para severidad crítica;
+        el resto de emergencias publicables utiliza ``EMERG``.
+      - Prioriza carretera/km, municipio y provincia sobre detalles narrativos.
+      - Solo añade el título cuando aporta información distinta del tipo/lugar.
+      - Convierte a ASCII seguro para APRS y nunca corta el tipo de emergencia.
+      - Intenta producir una única trama APRS, reduciendo airtime RF y evitando
+        que APRS-IS trunque precisamente la parte que identifica la incidencia.
+    """
+    limit = max(24, int(max_chars or 67))
+    status = str(event.status or "active").strip().lower()
+    if status in APRS_TERMINAL_STATUSES:
+        prefix = "FIN"
+    elif str(event.severity or "").strip().lower() == "critical":
+        prefix = "CRIT"
+    else:
+        prefix = "EMERG"
+
+    category = APRS_CATEGORY_LABELS.get(event.category, "INCIDENCIA")
+    mandatory = _aprs_ascii_text(f"{prefix} {category}")
+    if len(mandatory) >= limit:
+        return mandatory[:limit].rstrip()
+
+    road = _aprs_ascii_text(event.road)
+    if road and event.kilometre is not None:
+        road = f"{road} km {event.kilometre:g}"
+    municipality = _aprs_ascii_text(event.municipality)
+    province = _aprs_ascii_text(event.province)
+
+    # Orden de prioridad: ubicación operativa primero. La provincia solo se
+    # añade si no duplica el municipio.
+    candidates: list[str] = []
+    if road:
+        candidates.append(road)
+    if municipality:
+        candidates.append(municipality)
+    elif province:
+        candidates.append(province)
+
+    title = _aprs_ascii_text(event.title)
+    normalized_category = category.casefold()
+    normalized_location = " ".join(candidates).casefold()
+    if (
+        title
+        and title.casefold() not in {"incidencia", normalized_category}
+        and title.casefold() not in normalized_location
+        and normalized_category not in title.casefold()
+    ):
+        candidates.append(title)
+
+    result = mandatory
+    for candidate in candidates:
+        candidate = " ".join(candidate.split())
+        if not candidate:
+            continue
+        separator = " | "
+        remaining = limit - len(result) - len(separator)
+        if remaining <= 0:
+            break
+        if len(candidate) <= remaining:
+            result += separator + candidate
+            continue
+        # Si es el primer dato de ubicación, usamos el espacio restante en vez
+        # de descartarlo por completo. El tipo ya está asegurado en ``mandatory``.
+        if result == mandatory and remaining >= 6:
+            result += separator + candidate[:remaining].rstrip(" ,.;:-")
+        break
+    return result[:limit].rstrip(" ,.;:-")
+
+
+def _aprs_ascii_text(value: str) -> str:
+    """Normaliza texto a ASCII imprimible y compacta espacios para APRS."""
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = text.encode("ascii", "ignore").decode("ascii", "ignore")
+    text = "".join(ch if 32 <= ord(ch) <= 126 and ch not in "|~{" else " " for ch in text)
+    return " ".join(text.split())
 
 
 def format_event(event: Event) -> list[str]:

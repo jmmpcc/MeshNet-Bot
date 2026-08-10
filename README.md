@@ -1,4 +1,4 @@
-# MeshNet-Bot “The Boss” — v7.0.41
+# MeshNet-Bot “The Boss” — v7.0.42
 
 MeshNet-Bot es una plataforma de comunicaciones para radioaficionados que integra **MeshCore**, **Meshtastic**, **APRS RF**, **APRS-IS**, Telegram, correo electrónico, BBS, panel web y aplicaciones auxiliares independientes.
 
@@ -163,6 +163,10 @@ Un mensaje APRS con `[CH1]` se resolverá hacia el canal MeshCore configurado. L
 
 Los boletines de Emergencias pueden publicarse en un grupo APRS configurable. Con `APRSIS_EMERGENCY_BULLETIN_GROUP=EMERG`, las líneas serán `BLN0EMERG` a `BLN9EMERG`; dejando la variable vacía se conserva el formato histórico `BLN0` a `BLN9`.
 
+En v7.0.42 la configuración recomendada deja `APRSIS_EMERGENCY_BULLETIN_GROUP=` vacío para que los avisos se publiquen como boletines estándar `BLN0..BLN9`. El soporte de grupos permanece intacto: si el operador asigna un valor, por ejemplo `EMERG`, el mismo código genera `BLN0EMERG..BLN9EMERG`.
+
+Los estados terminales `resolved`, `cancelled`, `expired` y `closed` omiten exclusivamente `APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC`; la deduplicación continúa activa. APRS RF y APRS-IS usan además un resumen específico de hasta 67 caracteres (`EMERGENCIAS_APRS_TEXT_MAX_CHARS`) que conserva primero estado y tipo de emergencia y después carretera/km y municipio.
+
 El catálogo reservado del proyecto define `EMERG` para emergencias, `AEMET` para avisos meteorológicos oficiales, `FARMA` para farmacias de guardia, `NEWS` para noticias relevantes, `MESH` para avisos del sistema y `TEST` para pruebas controladas. En v7.0.38 solo `EMERG` está conectado a publicación automática; los demás grupos quedan preparados y no generan tráfico hasta que su aplicación se habilite expresamente.
 
 ### Control APRS desde aplicaciones systemd del host
@@ -291,6 +295,6 @@ Consulte [`LICENSE`](LICENSE). Los forks y trabajos derivados deben conservar la
 El servicio `meshnet-emergencias-check.service` carga primero `/home/meshnet/MeshNet-Bot/.env` y después `tools/emergencias_guardia/.env`. Esto permite que el dispatcher reciba `APPS_APRS_ENABLED`, `EMERGENCIAS_APRS_ENABLED`, `EMERGENCIAS_APRS_RF_ENABLED`, `APRS_CTRL_HOST` y `APRS_CTRL_PORT`. El archivo local de Emergencias conserva prioridad para sobrescrituras específicas. Tras instalar la unidad debe ejecutarse `sudo systemctl daemon-reload`.
 
 
-## APRS RF de Emergencias · v7.0.41
+## APRS RF y APRS-IS de Emergencias · v7.0.42
 
-El dispatcher deja de estimar localmente la fragmentación APRS. Antes de RF consulta al propio gateway mediante `aprs_preview`, que usa exactamente el mismo saneamiento y troceado que el envío real y no transmite ni altera la deduplicación. Emergencias admite hasta 3 tramas por defecto (`EMERGENCIAS_APRS_RF_MAX_CHUNKS=3`). Si un texto excepcional supera ese máximo, reutiliza `compact_messages()` para crear una versión APRS reducida, conserva el prefijo operativo (`FINALIZADA`, `ACTUALIZADA`, etc.), vuelve a previsualizarla y solo transmite si queda dentro del límite. APRS-IS continúa recibiendo el texto original y el resto de aplicaciones conserva sus límites actuales.
+El dispatcher deja de estimar localmente la fragmentación APRS. APRS RF y APRS-IS generan primero un resumen específico de hasta 67 caracteres (`EMERGENCIAS_APRS_TEXT_MAX_CHARS=67`) que conserva estado y tipo de emergencia al principio. Para RF, `aprs_preview` usa exactamente el mismo saneamiento y troceado que el envío real y no transmite ni altera la deduplicación. Emergencias mantiene además el máximo de 3 tramas (`EMERGENCIAS_APRS_RF_MAX_CHUNKS=3`) como barrera de seguridad. El mensaje Meshtastic/MeshCore no se modifica.

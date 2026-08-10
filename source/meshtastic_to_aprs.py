@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-meshtastic_to_aprs.py (v7.0.41)
+meshtastic_to_aprs.py (v7.0.42)
 Puente Meshtastic ⇄ APRS vía Soundmodem (KISS TCP 8100) + Control UDP local.
 
 - /aprs (bot) -> UDP local -> TX APRS (troceo automático).
@@ -585,6 +585,7 @@ async def send_aprsis_emergency_bulletin(
             and last_sent
             and (now - last_sent) < APRSIS_EMERGENCY_BULLETIN_MIN_INTERVAL_SEC
             and severity != "critical"
+            and not terminal
         ):
             return {
                 "ok": True, "sent": False, "reason": "rate_limited",

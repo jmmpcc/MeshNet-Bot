@@ -12,7 +12,7 @@ sys.path.insert(0, str(APP_DIR))
 from emergencias import engine, storage
 from emergencias.api import query_from_text
 from emergencias.config import DEFAULT_CONFIG
-from emergencias.formatters import byte_chunks, compact_messages, google_maps_url
+from emergencias.formatters import aprs_emergency_text, byte_chunks, compact_messages, google_maps_url
 from emergencias.models import Event
 from emergencias import notifier
 from emergencias.sources.base import FetchResult, HttpSource, SourceError
@@ -395,6 +395,31 @@ class ApiAndFormattingTests(unittest.TestCase):
         )
         self.assertEqual(google_maps_url(missing), "")
         self.assertEqual(google_maps_url(invalid), "")
+
+    def test_aprs_emergency_text_preserves_type_location_and_limit(self):
+        event = Event(
+            event_id="aprs-1", source="test", source_event_id="1",
+            category="traffic_collision", severity="high", status="active",
+            title="Colisión con retenciones importantes en ambos sentidos",
+            road="A-2", kilometre=315, municipality="La Muela", province="Zaragoza",
+        )
+        text = aprs_emergency_text(event)
+        self.assertTrue(text.startswith("EMERG COLISION"))
+        self.assertIn("A-2 km 315", text)
+        self.assertIn("La Muela", text)
+        self.assertLessEqual(len(text), 67)
+        self.assertTrue(text.isascii())
+
+    def test_aprs_emergency_text_terminal_starts_with_fin_and_type(self):
+        event = Event(
+            event_id="aprs-2", source="test", source_event_id="2",
+            category="wildfire", severity="high", status="resolved",
+            title="Incendio forestal controlado", municipality="Zuera", province="Zaragoza",
+        )
+        text = aprs_emergency_text(event)
+        self.assertTrue(text.startswith("FIN INCENDIO"))
+        self.assertIn("Zuera", text)
+        self.assertLessEqual(len(text), 67)
 
     def test_each_compact_message_is_a_complete_event(self):
         events = [

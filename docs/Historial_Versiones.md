@@ -635,3 +635,14 @@ Mesh, mirror `/aprsis_push` ni Voice RF.
 - Si el texto supera el máximo, se reutiliza `compact_messages()` y se valida de nuevo; si sigue excediéndolo no se transmite.
 - `aprs_preview` no emite RF ni altera deduplicación.
 - APRS-IS, MeshCore, Meshtastic, Voice RF y las demás salidas mantienen su comportamiento.
+
+## v7.0.42 — 2026-08-10
+
+- Los estados terminales `resolved`, `cancelled`, `expired` y `closed` omiten exclusivamente el `MIN_INTERVAL` de boletines APRS-IS.
+- La deduplicación permanece intacta y sigue bloqueando retransmisiones idénticas del mismo cierre.
+- `APRSIS_EMERGENCY_BULLETIN_GROUP` conserva ambos comportamientos: vacío genera `BLN0..BLN9`; con valor genera boletines de grupo como `BLN0EMERG..BLN9EMERG`.
+- La configuración de ejemplo deja vacío el grupo de Emergencias para usar boletines estándar por defecto.
+- Nuevo resumen específico APRS para RF y APRS-IS, limitado por defecto a 67 caracteres y priorizando estado, tipo de emergencia, carretera/km y municipio.
+- El mensaje Mesh existente no se modifica.
+- Se añaden pruebas de los cuatro estados terminales, deduplicación de cierres, grupos APRS y formato compacto APRS.
+
