@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 from .models import Event, SEVERITY_RANK, fold_text, utc_now
@@ -12,6 +13,49 @@ from .storage import (
 
 
 TERMINAL_STATUSES = {"resolved", "cancelled", "expired"}
+
+
+def _env_enabled(name: str, default: bool = False) -> bool:
+    """Devuelve una variable booleana de entorno con semántica tolerante.
+
+    Uso:
+        active = _env_enabled("AEMET_ALERTS_ENABLED", True)
+
+    Parámetros:
+        name: nombre de la variable de entorno.
+        default: valor usado cuando la variable no existe.
+
+    Funcionalidad:
+        Reconoce 1/true/yes/on/si/sí como verdadero. Se usa para impedir que
+        una fuente auxiliar de Emergencias duplique un subsistema ya activo en
+        el broker, sin modificar ni depender del código de dicho subsistema.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().casefold() in {"1", "true", "yes", "y", "on", "si", "sí"}
+
+
+def _source_disabled_by_external_owner(source_config: dict[str, Any]) -> str:
+    """Indica si una fuente debe ceder la autoridad a otro subsistema activo.
+
+    Uso:
+        reason = _source_disabled_by_external_owner(source_config)
+
+    Funcionalidad:
+        Algunas fuentes pueden existir como fallback o futura migración, pero
+        no deben ejecutarse en paralelo con un recolector histórico que ya
+        gestiona deduplicación y transmisión. La configuración declara la
+        variable mediante ``disabled_if_env_enabled`` y opcionalmente su valor
+        por defecto mediante ``disabled_if_env_default``.
+    """
+    env_name = str(source_config.get("disabled_if_env_enabled") or "").strip()
+    if not env_name:
+        return ""
+    default = bool(source_config.get("disabled_if_env_default", False))
+    if _env_enabled(env_name, default):
+        return f"gestionada por subsistema existente ({env_name}=1)"
+    return ""
 
 
 def event_matches(event: Event, config: dict[str, Any], query: dict[str, Any] | None = None) -> bool:
@@ -40,9 +84,32 @@ def event_matches(event: Event, config: dict[str, Any], query: dict[str, Any] | 
 
 
 def _area_matches(event: Event, area: dict[str, Any]) -> bool:
+    """Comprueba el ámbito de un evento sin cambiar los filtros existentes.
+
+    Los conectores históricos siguen usando ``Event.province`` y coordenadas.
+    Las fuentes multizona de v7.0.43 pueden añadir ``metadata['provinces']`` o
+    ``metadata['cap_area']``; ambos campos se consultan únicamente como respaldo
+    cuando el dato provincial simple no es suficiente.
+    """
     kind = area.get("type")
     if kind == "province":
-        return fold_text(event.province) == fold_text(area.get("name"))
+        wanted = fold_text(area.get("name"))
+        if fold_text(event.province) == wanted:
+            return True
+        metadata_provinces = event.metadata.get("provinces", [])
+        if isinstance(metadata_provinces, (list, tuple, set)) and any(
+            fold_text(value) == wanted for value in metadata_provinces
+        ):
+            return True
+        cap_area = fold_text(event.metadata.get("cap_area", ""))
+        if wanted and wanted in cap_area:
+            return True
+        cap_parameters = event.metadata.get("cap_parameters", {})
+        if isinstance(cap_parameters, dict):
+            parameter_text = fold_text(" ".join(str(value) for value in cap_parameters.values()))
+            if wanted and wanted in parameter_text:
+                return True
+        return False
     if kind == "municipality":
         return fold_text(event.municipality) == fold_text(area.get("name"))
     if kind == "radius" and event.latitude is not None and event.longitude is not None:
@@ -86,6 +153,12 @@ def fetch_sources(config: dict[str, Any], only: str | None = None) -> dict[str, 
             continue
         if not source_config.get("enabled", False):
             report["sources"][source_id] = {"ok": False, "skipped": "disabled"}
+            continue
+        external_reason = _source_disabled_by_external_owner(source_config)
+        if external_reason:
+            skipped = {"ok": False, "skipped": "external_owner", "reason": external_reason}
+            source_states[source_id] = skipped
+            report["sources"][source_id] = skipped
             continue
         if source_config.get("require_areas") and not any(
             area.get("enabled", True) for area in config.get("areas", [])

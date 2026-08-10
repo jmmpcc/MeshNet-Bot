@@ -96,6 +96,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "bbox": [-9.4, 35.8, 4.4, 43.9], "days": 1,
             "verification": "satellite_detection", "require_areas": True,
         },
+        "aemet_cap": {
+            "type": "aemet_cap", "enabled": False,
+            "url": "https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/esp",
+            "api_key_env": "AEMET_API_KEY", "verification": "official",
+            "require_areas": True,
+            "disabled_if_env_enabled": "AEMET_ALERTS_ENABLED",
+            "disabled_if_env_default": True,
+            "source_url": "https://www.aemet.es/es/eltiempo/prediccion/avisos",
+        },
+        "che_saih": {
+            "type": "che_rss", "enabled": False,
+            "url": "https://cph.chebro.es/es/notas-de-prensa-rss",
+            "verification": "official", "require_areas": True,
+        },
     },
 }
 
@@ -126,13 +140,13 @@ def atomic_write_json(path: Path, data: Any) -> None:
 
 
 def load_config(create: bool = True) -> dict[str, Any]:
-    if not CONFIG_FILE.exists():
-        if create:
-            atomic_write_json(CONFIG_FILE, DEFAULT_CONFIG)
-        return json.loads(json.dumps(DEFAULT_CONFIG))
-    supplied = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    return _merge(DEFAULT_CONFIG, supplied)
-
-
-def save_config(config: dict[str, Any]) -> None:
-    atomic_write_json(CONFIG_FILE, config)
+    try:
+        supplied = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        supplied = {}
+    except (json.JSONDecodeError, OSError):
+        supplied = {}
+    config = _merge(DEFAULT_CONFIG, supplied)
+    if create and not CONFIG_FILE.exists():
+        atomic_write_json(CONFIG_FILE, config)
+    return config

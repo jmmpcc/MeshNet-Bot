@@ -1,4 +1,4 @@
-# MeshNet-Bot “The Boss” — v7.0.42
+# MeshNet-Bot “The Boss” — v7.0.43
 
 MeshNet-Bot es una plataforma de comunicaciones para radioaficionados que integra **MeshCore**, **Meshtastic**, **APRS RF**, **APRS-IS**, Telegram, correo electrónico, BBS, panel web y aplicaciones auxiliares independientes.
 
@@ -298,3 +298,12 @@ El servicio `meshnet-emergencias-check.service` carga primero `/home/meshnet/Mes
 ## APRS RF y APRS-IS de Emergencias · v7.0.42
 
 El dispatcher deja de estimar localmente la fragmentación APRS. APRS RF y APRS-IS generan primero un resumen específico de hasta 67 caracteres (`EMERGENCIAS_APRS_TEXT_MAX_CHARS=67`) que conserva estado y tipo de emergencia al principio. Para RF, `aprs_preview` usa exactamente el mismo saneamiento y troceado que el envío real y no transmite ni altera la deduplicación. Emergencias mantiene además el máximo de 3 tramas (`EMERGENCIAS_APRS_RF_MAX_CHUNKS=3`) como barrera de seguridad. El mensaje Meshtastic/MeshCore no se modifica.
+
+## Fuentes de Emergencias · v7.0.43
+
+`emergencias_guardia` conserva DGT DATEX II, Ayuntamiento de Zaragoza, IGN y NASA FIRMS e incorpora dos orígenes oficiales adicionales, desactivados por defecto:
+
+- **AEMET CAP 1.2** para avisos meteorológicos adversos. El conector utiliza AEMET OpenData, resuelve la URL temporal de datos y normaliza fenómeno, severidad, vigencia y área al modelo `Event` existente. Requiere `AEMET_API_KEY` cuando se activa esta modalidad.
+- **CHE / SAIH Ebro** para comunicaciones hidrológicas oficiales. El conector filtra el canal de comunicaciones de la CHE y conserva únicamente contenidos operativos relativos a crecidas, avenidas, cauces, barrancos e inundaciones.
+
+Las nuevas fuentes aparecen en **ControlPanel → Emergencias → Fuentes y cobertura**. RAN/Protección Civil y 112 Aragón quedan pendientes de una interfaz pública estructurada y estable; no se incorporan mediante scraping HTML.
