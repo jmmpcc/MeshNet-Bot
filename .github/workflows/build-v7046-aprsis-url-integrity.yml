@@ -26,14 +26,37 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # ------------------------------------------------------------------
-          # 1) compact_messages(): URL completa o ausente.
-          # ------------------------------------------------------------------
+          # 1) Sustituir únicamente _compact_event(), dejando intacto el resto.
           path = Path('tools/emergencias_guardia/emergencias/formatters.py')
           text = path.read_text(encoding='utf-8')
-          old = '''    required = [header, f"{severity} · {category}", _trim_text(place or event.title, 55)]
-              if map_url:
-                  required.append(map_url)
+          start = text.index('def _compact_event(')
+          end = text.index('\ndef _compact_place(', start)
+          replacement = '''def _compact_event(event: Event, header: str, max_bytes: int) -> str:
+              """Construye un mensaje compacto sin generar nunca URLs parciales.
+
+              Uso:
+                  message = _compact_event(event, "NUEVA · EMERG", 140)
+
+              Parámetros:
+                  event: emergencia normalizada.
+                  header: cabecera lógica del mensaje.
+                  max_bytes: presupuesto UTF-8 máximo del transporte Mesh.
+
+              Funcionalidad:
+                  Conserva el comportamiento histórico de prioridad y recorte,
+                  con una única garantía adicional desde v7.0.46: la URL del mapa
+                  es atómica. Si no cabe completa, se elimina antes de recortar
+                  ubicación o texto. Nunca se devuelve una URL truncada.
+              """
+              severity = SEVERITY_LABELS.get(event.severity, event.severity.upper())
+              category = CATEGORY_LABELS.get(event.category, "INCIDENCIA")
+              place = _compact_place(event)
+              detail = _sentence(event.description, 72)
+              end = short_date(event.expected_end)
+              source = source_label(event.source)
+              map_url = google_maps_url(event)
+
+              required = [header, f"{severity} · {category}", _trim_text(place or event.title, 55)]
               footer = " · ".join(part for part in (
                   f"Hasta {end}" if end else "",
                   source,
@@ -44,36 +67,6 @@ jobs:
               if detail and detail.casefold() != event.title.casefold():
                   optional.append(detail)
 
-              lines = required + optional + ([footer] if footer else [])
-              while len("\\n".join(lines).encode("utf-8")) > max_bytes and optional:
-                  optional.pop()
-                  lines = required + optional + ([footer] if footer else [])
-              message = "\\n".join(lines)
-              if len(message.encode("utf-8")) <= max_bytes:
-                  return message
-
-              fixed_lines = required[:2] + ([map_url] if map_url else []) + ([footer] if footer else [])
-              fixed = "\\n".join(fixed_lines)
-              allowance = max(12, max_bytes - len(fixed.encode("utf-8")) - 1)
-              required[2] = _trim_utf8(required[2], allowance)
-              message = "\\n".join(required + ([footer] if footer else []))
-              return _trim_utf8(message, max_bytes)
-          '''
-          old = '\n'.join(line[4:] if line.startswith('    ') else line for line in old.splitlines()) + '\n'
-          new = '''    required = [header, f"{severity} · {category}", _trim_text(place or event.title, 55)]
-              footer = " · ".join(part for part in (
-                  f"Hasta {end}" if end else "",
-                  source,
-              ) if part)
-              optional = []
-              if place and event.title and event.title.casefold() not in place.casefold():
-                  optional.append(_trim_text(event.title, 52))
-              if detail and detail.casefold() != event.title.casefold():
-                  optional.append(detail)
-
-              # v7.0.46: las URL son atómicas. Se incluyen completas o se eliminan
-              # antes de cualquier recorte por bytes. Nunca se entrega "https://maps."
-              # ni otro enlace parcial a MeshCore/Meshtastic/APRS-IS mirror.
               include_map = bool(map_url)
 
               def build_lines() -> list[str]:
@@ -89,6 +82,7 @@ jobs:
                   optional.pop()
                   lines = build_lines()
 
+              # La URL pierde prioridad antes de cualquier recorte destructivo.
               if len("\\n".join(lines).encode("utf-8")) > max_bytes and include_map:
                   include_map = False
                   lines = build_lines()
@@ -104,58 +98,48 @@ jobs:
               message = "\\n".join(required + ([footer] if footer else []))
               return _trim_utf8(message, max_bytes)
           '''
-          new = '\n'.join(line[4:] if line.startswith('    ') else line for line in new.splitlines()) + '\n'
-          if new not in text:
-              assert text.count(old) == 1, 'No se localiza _compact_event exacto'
-              text = text.replace(old, new, 1)
+          replacement = '\n'.join(line[12:] if line.startswith('            ') else line for line in replacement.splitlines())
+          text = text[:start] + replacement.rstrip() + '\n' + text[end:]
           path.write_text(text, encoding='utf-8', newline='\n')
 
-          # ------------------------------------------------------------------
-          # 2) Gateway: diagnóstico largo APRS-IS, aislado y OFF por defecto.
-          # ------------------------------------------------------------------
+          # 2) Gateway: modo diagnóstico largo, OFF por defecto y solo APRS-IS.
           path = Path('source/meshtastic_to_aprs.py')
           text = path.read_text(encoding='utf-8')
           text = text.replace('meshtastic_to_aprs.py (v7.0.42)', 'meshtastic_to_aprs.py (v7.0.46)', 1)
 
-          config_marker = 'APRSIS_EMERGENCY_BULLETIN_GROUP = (os.getenv("APRSIS_EMERGENCY_BULLETIN_GROUP", "") or "").strip()\n'
-          config_add = config_marker + '''\n# v7.0.46: diagnóstico exclusivamente APRS-IS para comprobar en producción\n# cómo conserva la red/cliente textos superiores al límite clásico de 67 chars.\n# No se usa por ninguna salida automática y permanece OFF por defecto.\nAPRSIS_LONG_TEST_ENABLED = int(os.getenv("APRSIS_LONG_TEST_ENABLED", "0") or "0")\nAPRSIS_LONG_TEST_MAX_CHARS = max(80, min(450, int(os.getenv("APRSIS_LONG_TEST_MAX_CHARS", "400") or "400")))\n'''
+          marker = 'APRSIS_EMERGENCY_BULLETIN_GROUP = (os.getenv("APRSIS_EMERGENCY_BULLETIN_GROUP", "") or "").strip()\n'
           if 'APRSIS_LONG_TEST_ENABLED =' not in text:
-              assert text.count(config_marker) == 1
-              text = text.replace(config_marker, config_add, 1)
+              assert text.count(marker) == 1
+              text = text.replace(marker, marker + '''\n# Diagnóstico manual v7.0.46. No lo usa ninguna salida automática.\nAPRSIS_LONG_TEST_ENABLED = int(os.getenv("APRSIS_LONG_TEST_ENABLED", "0") or "0")\nAPRSIS_LONG_TEST_MAX_CHARS = max(80, min(450, int(os.getenv("APRSIS_LONG_TEST_MAX_CHARS", "400") or "400")))\n''', 1)
 
-          function_marker = '\ndef _aprsis_tnc2_message_line(dst_call: str, text: str, *, with_msgid: bool = True) -> str:\n'
-          function_add = '''\n\nasync def send_aprsis_long_test(text: str) -> dict:\n    """Envía una trama de diagnóstico larga exclusivamente a APRS-IS.\n\n    Uso:\n        await send_aprsis_long_test("PRUEBA ... URL completa")\n\n    Parámetros:\n        text: texto de prueba que se desea observar en APRS-IS/aprs.fi.\n\n    Funcionalidad:\n        - Requiere APRSIS_LONG_TEST_ENABLED=1.\n        - Nunca transmite por KISS/RF.\n        - Reutiliza la conexión APRS-IS persistente existente.\n        - No modifica bulletin, deduplicación ni MIN_INTERVAL de emergencias.\n        - Limita únicamente al máximo de diagnóstico configurado (<=450 chars).\n        - Está pensado para una prueba manual; ninguna emergencia lo llama.\n    """\n    if not bool(APRSIS_LONG_TEST_ENABLED):\n        return {"ok": True, "sent": False, "reason": "disabled"}\n    if not _aprsis_ready():\n        return {"ok": False, "sent": False, "reason": "aprsis_unavailable"}\n    clean = _aprs_ascii(text).strip()\n    if not clean:\n        return {"ok": False, "sent": False, "reason": "empty_text"}\n    clean = clean[:APRSIS_LONG_TEST_MAX_CHARS]\n    line = f"{APRSIS_USER}>APRS,TCPIP*:>{clean}"\n    sent = bool(await _aprsis_send_line_safe(line))\n    return {\n        "ok": sent,\n        "sent": sent,\n        "reason": "sent" if sent else "send_failed",\n        "chars": len(clean),\n        "text": clean,\n        "line": line,\n    }\n'''
+          fn_marker = '\ndef _aprsis_tnc2_message_line(dst_call: str, text: str, *, with_msgid: bool = True) -> str:\n'
           if 'async def send_aprsis_long_test(' not in text:
-              assert text.count(function_marker) == 1
-              text = text.replace(function_marker, function_add + function_marker, 1)
+              assert text.count(fn_marker) == 1
+              fn = '''\n\nasync def send_aprsis_long_test(text: str) -> dict:\n    """Envía una prueba larga exclusivamente a APRS-IS.\n\n    Requiere APRSIS_LONG_TEST_ENABLED=1, reutiliza la conexión APRS-IS\n    existente y nunca transmite por KISS/RF. No modifica boletines,\n    deduplicación ni MIN_INTERVAL de emergencias.\n    """\n    if not bool(APRSIS_LONG_TEST_ENABLED):\n        return {"ok": True, "sent": False, "reason": "disabled"}\n    if not _aprsis_ready():\n        return {"ok": False, "sent": False, "reason": "aprsis_unavailable"}\n    clean = _aprs_ascii(text).strip()\n    if not clean:\n        return {"ok": False, "sent": False, "reason": "empty_text"}\n    clean = clean[:APRSIS_LONG_TEST_MAX_CHARS]\n    line = f"{APRSIS_USER}>APRS,TCPIP*:>{clean}"\n    sent = bool(await _aprsis_send_line_safe(line))\n    return {\n        "ok": sent, "sent": sent,\n        "reason": "sent" if sent else "send_failed",\n        "chars": len(clean), "text": clean, "line": line,\n    }\n'''
+              text = text.replace(fn_marker, fn + fn_marker, 1)
 
-          control_marker = '''        # --- Boletín público APRS-IS para emergencias graves ---\n        if mode == "aprsis_emergency_bulletin":\n'''
-          control_add = '''        # --- v7.0.46: diagnóstico manual largo, solo APRS-IS ---\n        if mode == "aprsis_long_test":\n            try:\n                resp = await send_aprsis_long_test(obj.get("text", ""))\n            except Exception as exc:\n                resp = {\n                    "ok": False, "sent": False, "reason": "internal_error",\n                    "error": f"{type(exc).__name__}: {exc}",\n                }\n                print(f"[APRS-IS LONG TEST] ERROR {resp['error']}")\n            try:\n                sock.sendto(json.dumps(resp, ensure_ascii=False).encode("utf-8"), addr)\n            except Exception:\n                pass\n            continue\n\n''' + control_marker
+          ctrl_marker = '        # --- Boletín público APRS-IS para emergencias graves ---\n        if mode == "aprsis_emergency_bulletin":\n'
           if 'if mode == "aprsis_long_test":' not in text:
-              assert text.count(control_marker) == 1
-              text = text.replace(control_marker, control_add, 1)
+              assert text.count(ctrl_marker) == 1
+              ctrl = '''        # --- v7.0.46: diagnóstico manual largo, solo APRS-IS ---\n        if mode == "aprsis_long_test":\n            try:\n                resp = await send_aprsis_long_test(obj.get("text", ""))\n            except Exception as exc:\n                resp = {\n                    "ok": False, "sent": False, "reason": "internal_error",\n                    "error": f"{type(exc).__name__}: {exc}",\n                }\n                print(f"[APRS-IS LONG TEST] ERROR {resp['error']}")\n            try:\n                sock.sendto(json.dumps(resp, ensure_ascii=False).encode("utf-8"), addr)\n            except Exception:\n                pass\n            continue\n\n'''
+              text = text.replace(ctrl_marker, ctrl + ctrl_marker, 1)
           path.write_text(text, encoding='utf-8', newline='\n')
 
-          # ------------------------------------------------------------------
-          # 3) Configuración/documentación/versionado visible.
-          # ------------------------------------------------------------------
+          # 3) Variables, documentación y versión visible.
           env_path = Path('.env_example')
           env = env_path.read_text(encoding='utf-8')
           env_marker = 'APRSIS_EMERGENCY_BULLETIN_GROUP=\n'
-          env_add = env_marker + '''\n# Diagnóstico manual APRS-IS largo (v7.0.46). OFF por defecto.\n# No afecta a emergencias automáticas ni transmite por RF.\nAPRSIS_LONG_TEST_ENABLED=0\nAPRSIS_LONG_TEST_MAX_CHARS=400\n'''
           if 'APRSIS_LONG_TEST_ENABLED=' not in env:
-              assert env.count(env_marker) >= 1
-              env = env.replace(env_marker, env_add, 1)
+              assert env_marker in env
+              env = env.replace(env_marker, env_marker + '''\n# Diagnóstico manual APRS-IS largo (v7.0.46). OFF por defecto.\nAPRSIS_LONG_TEST_ENABLED=0\nAPRSIS_LONG_TEST_MAX_CHARS=400\n''', 1)
           env_path.write_text(env, encoding='utf-8', newline='\n')
 
           readme = Path('README.md')
-          data = readme.read_text(encoding='utf-8')
-          data = data.replace('v7.0.45', 'v7.0.46', 1)
+          data = readme.read_text(encoding='utf-8').replace('v7.0.45', 'v7.0.46', 1)
           readme.write_text(data, encoding='utf-8', newline='\n')
 
           panel = Path('tools/ControlPanel/web_admin.py')
-          data = panel.read_text(encoding='utf-8')
-          data = data.replace('UI 2 · v7.0.45', 'UI 2 · v7.0.46', 1)
+          data = panel.read_text(encoding='utf-8').replace('UI 2 · v7.0.45', 'UI 2 · v7.0.46', 1)
           panel.write_text(data, encoding='utf-8', newline='\n')
 
           docs = Path('docs/APRS_GATEWAY.md')
@@ -163,7 +147,7 @@ jobs:
           if '### 13.1 Diagnóstico APRS-IS largo (v7.0.46)' not in data:
               anchor = '## 14. NOGATE, RFONLY, bucles y duplicados\n'
               assert anchor in data
-              section = '''### 13.1 Diagnóstico APRS-IS largo (v7.0.46)\n\nLa v7.0.46 no cambia los boletines `BLNx` ni el envío RF. Añade una prueba\nmanual, desactivada por defecto, para verificar qué longitud conserva APRS-IS\ny el cliente de visualización.\n\n```env\nAPRSIS_LONG_TEST_ENABLED=0\nAPRSIS_LONG_TEST_MAX_CHARS=400\n```\n\nEl modo UDP es `aprsis_long_test`; solo reutiliza la conexión APRS-IS y no abre\nKISS ni transmite RF. Debe activarse temporalmente para una prueba controlada y\nvolver a `0` después. La salida automática ampliada no se habilita hasta validar\nel comportamiento real en APRS-IS/aprs.fi.\n\nAdemás, los mensajes compactos con mapa aplican una regla estricta: el enlace se\nincluye completo si cabe; si no cabe, se elimina completo antes del recorte.\nNunca se genera deliberadamente una URL parcial.\n\n'''
+              section = '''### 13.1 Diagnóstico APRS-IS largo (v7.0.46)\n\nLa v7.0.46 mantiene intactos los boletines `BLNx` y APRS RF. Añade el modo\nmanual `aprsis_long_test`, desactivado por defecto, para comprobar qué texto\nconservan APRS-IS y aprs.fi por encima de 67 caracteres. No se utiliza en\nninguna emergencia automática.\n\n```env\nAPRSIS_LONG_TEST_ENABLED=0\nAPRSIS_LONG_TEST_MAX_CHARS=400\n```\n\nLos mensajes compactos con mapa aplican además una regla estricta: la URL se\nincluye completa si cabe o se elimina completa antes del recorte por bytes.\nNunca se genera deliberadamente un enlace parcial.\n\n'''
               data = data.replace(anchor, section + anchor, 1)
           docs.write_text(data, encoding='utf-8', newline='\n')
           PY
@@ -195,12 +179,7 @@ jobs:
           git add \
             tools/emergencias_guardia/emergencias/formatters.py \
             source/meshtastic_to_aprs.py \
-            .env_example \
-            README.md \
-            tools/ControlPanel/web_admin.py \
-            docs/APRS_GATEWAY.md
-          if git diff --cached --quiet; then
-            exit 0
-          fi
+            .env_example README.md tools/ControlPanel/web_admin.py docs/APRS_GATEWAY.md
+          if git diff --cached --quiet; then exit 0; fi
           git commit -m 'v7.0.46: preserve APRS-IS URL integrity'
           git push origin HEAD:agent/v7.0.46-aprsis-url-integrity
