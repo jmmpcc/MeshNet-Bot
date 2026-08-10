@@ -145,6 +145,25 @@ def atomic_write_json(path: Path, data: Any) -> None:
             pass
 
 
+def save_config(config: dict[str, Any]) -> None:
+    """
+    Guarda de forma segura la configuración completa de emergencias.
+
+    Parámetros:
+        config:
+            Diccionario de configuración que se escribirá en CONFIG_FILE.
+
+    Funcionamiento:
+        Reutiliza atomic_write_json() para conservar la escritura atómica ya
+        empleada por la aplicación. Esto evita dejar config.json parcialmente
+        escrito si el proceso se interrumpe durante el guardado.
+
+    Uso:
+        save_config(config)
+    """
+    atomic_write_json(CONFIG_FILE, config)
+
+
 def load_config(create: bool = True) -> dict[str, Any]:
     try:
         supplied = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
