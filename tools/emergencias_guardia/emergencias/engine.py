@@ -247,6 +247,7 @@ def fetch_sources(config: dict[str, Any], only: str | None = None) -> dict[str, 
             continue
         try:
             events, not_modified = source_type(source_id, source_config, config).fetch()
+            _enrich_events_for_province_areas(events, config)
             filtered = {event.event_id: event for event in events if event_matches(event, config)}
             _merge_source(current, filtered, source_id, now, threshold, report)
             source_states[source_id] = {
