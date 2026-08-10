@@ -107,8 +107,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "che_saih": {
             "type": "che_rss", "enabled": False,
-            "url": "https://cph.chebro.es/es/notas-de-prensa-rss",
+            "url": "",
             "verification": "official", "require_areas": True,
+            "operational": False,
+            "disabled_reason": (
+                "CHE/SAIH pendiente de endpoint público estructurado; "
+                "la URL 'notas-de-prensa-rss' devuelve HTML y no se procesa por scraping"
+            ),
+            "reference_url": "https://cph.chebro.es/es/notas-de-prensa-rss",
         },
     },
 }
