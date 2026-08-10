@@ -1,0 +1,52 @@
+name: Validate v7.0.48.1 ControlPanel import fix
+
+on:
+  push:
+    branches:
+      - agent/v7.0.48.1-controlpanel-import-fix
+    paths:
+      - .github/workflows/validate-v70481-controlpanel-import.yml
+      - scripts/fix_v70481_controlpanel_import_temp.py
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v7.0.48.1-controlpanel-import-fix
+          fetch-depth: 0
+
+      - name: Apply hotfix
+        run: python3 scripts/fix_v70481_controlpanel_import_temp.py
+
+      - name: Install dependencies
+        run: python3 -m pip install -q fastapi pydantic httpx pytest
+
+      - name: Validate compile and direct script import context
+        run: |
+          python3 -m py_compile tools/ControlPanel/web_admin.py shared/delivery_audit.py
+          cd tools/ControlPanel
+          python3 - <<'PY'
+import runpy
+ns = runpy.run_path('web_admin.py', run_name='controlpanel_import_test')
+assert 'create_app' in ns
+print('Direct ControlPanel execution context: OK')
+PY
+
+      - name: Regression tests
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          python3 -m pytest tests/test_delivery_audit_v7048.py tools/ControlPanel/tests/test_web_admin.py -v
+          git diff --check
+
+      - name: Commit validated hotfix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tools/ControlPanel/web_admin.py
+          git commit -m 'v7.0.48.1: fix ControlPanel shared import on direct startup'
+          git push origin HEAD:agent/v7.0.48.1-controlpanel-import-fix
