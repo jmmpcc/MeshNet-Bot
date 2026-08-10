@@ -1,7 +1,10 @@
 import json
 from unittest.mock import patch
 
-from tools.emergencias_guardia.emergencias.engine import event_matches
+from tools.emergencias_guardia.emergencias.engine import (
+    _source_disabled_by_external_owner,
+    event_matches,
+)
 from tools.emergencias_guardia.emergencias.sources.aemet_cap import AemetCapSource
 from tools.emergencias_guardia.emergencias.sources.che_rss import CheRssSource
 
@@ -100,6 +103,22 @@ def test_aemet_area_desc_matches_selected_province():
         "areas": [{"id": "panel-province-zaragoza", "type": "province", "name": "Zaragoza", "enabled": True}]
     }
     assert event_matches(event, config)
+
+
+def test_aemet_cap_yields_to_existing_broker_subsystem(monkeypatch):
+    source_config = {
+        "disabled_if_env_enabled": "AEMET_ALERTS_ENABLED",
+        "disabled_if_env_default": True,
+    }
+
+    monkeypatch.delenv("AEMET_ALERTS_ENABLED", raising=False)
+    assert "AEMET_ALERTS_ENABLED=1" in _source_disabled_by_external_owner(source_config)
+
+    monkeypatch.setenv("AEMET_ALERTS_ENABLED", "1")
+    assert _source_disabled_by_external_owner(source_config)
+
+    monkeypatch.setenv("AEMET_ALERTS_ENABLED", "0")
+    assert _source_disabled_by_external_owner(source_config) == ""
 
 
 def test_che_rss_filters_non_hydrological_items_and_keeps_all_provinces():
