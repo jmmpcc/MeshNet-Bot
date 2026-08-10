@@ -60,15 +60,19 @@ def _severity(text: str) -> str:
     return "medium"
 
 
-def _province(text: str) -> str:
+def _provinces(text: str) -> list[str]:
+    """Devuelve todas las provincias identificables en el aviso CHE.
+
+    Se conserva la primera también en ``Event.province`` por compatibilidad con
+    el modelo actual, mientras la lista completa se guarda en metadata para que
+    los filtros geográficos no pierdan avisos que afecten a varias provincias.
+    """
     folded = fold_text(text)
-    for province in (
+    candidates = (
         "Zaragoza", "Huesca", "Teruel", "Navarra", "La Rioja", "Burgos", "Cantabria",
         "Lleida", "Tarragona", "Castellón", "Soria", "Álava",
-    ):
-        if fold_text(province) in folded:
-            return province
-    return ""
+    )
+    return [province for province in candidates if fold_text(province) in folded]
 
 
 class CheRssSource(HttpSource):
@@ -106,6 +110,7 @@ class CheRssSource(HttpSource):
         source_id = _text(entry, "guid", "id") or link
         if not source_id:
             source_id = hashlib.sha256(f"{title}|{published}|{index}".encode()).hexdigest()[:20]
+        provinces = _provinces(combined)
         return Event(
             event_id=f"{self.source_id}:{source_id}",
             source=self.source_id,
@@ -115,9 +120,13 @@ class CheRssSource(HttpSource):
             severity=_severity(combined),
             title=title or "Aviso hidrológico CHE / SAIH Ebro",
             description=description,
-            province=_province(combined),
+            province=provinces[0] if provinces else "",
             started_at=published,
             updated_at=published,
             source_url=link or self.config.get("url", ""),
-            metadata={"feed_profile": "che_saih", "hydrological_warning": True},
+            metadata={
+                "feed_profile": "che_saih",
+                "hydrological_warning": True,
+                "provinces": provinces,
+            },
         )
