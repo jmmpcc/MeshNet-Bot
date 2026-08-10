@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 from .models import Event, SEVERITY_RANK, fold_text, utc_now
+from .geo_admin import enrich_event_province
 from .sources import SOURCE_TYPES
 from .sources.base import SourceError
 from .storage import (
@@ -93,6 +94,32 @@ def _failure_state(previous: Any, now: str, error: str) -> dict[str, Any]:
             if key in previous:
                 keep[key] = previous[key]
     return keep | {"ok": False, "last_error": now, "error": error}
+
+
+def _enrich_events_for_province_areas(events: list[Event], config: dict[str, Any]) -> int:
+    """Enriquece provincia solo cuando el usuario filtra por provincias.
+
+    Uso:
+        enriched = _enrich_events_for_province_areas(events, config)
+
+    Parámetros:
+        events: eventos ya normalizados por el conector.
+        config: configuración completa de emergencias.
+
+    Funcionalidad:
+        Conserva el flujo histórico si no hay áreas provinciales activas. Si las
+        hay, intenta resolver mediante cartografía local únicamente los eventos
+        que todavía no traen provincia. ``enrich_event_province`` es tolerante a
+        ausencia/corrupción del fichero, por lo que el radio geográfico existente
+        continúa siendo el fallback y no se bloquea la fuente.
+    """
+    has_province_area = any(
+        area.get("enabled", True) and area.get("type") == "province"
+        for area in config.get("areas", [])
+    )
+    if not has_province_area:
+        return 0
+    return sum(1 for event in events if enrich_event_province(event))
 
 
 def event_matches(event: Event, config: dict[str, Any], query: dict[str, Any] | None = None) -> bool:

@@ -1,4 +1,4 @@
-# MeshNet-Bot “The Boss” — v7.0.43
+# MeshNet-Bot “The Boss” — v7.0.45
 
 MeshNet-Bot es una plataforma de comunicaciones para radioaficionados que integra **MeshCore**, **Meshtastic**, **APRS RF**, **APRS-IS**, Telegram, correo electrónico, BBS, panel web y aplicaciones auxiliares independientes.
 
