@@ -1,4 +1,4 @@
-name: Build v7.0.45 province boundaries
+name: Integrate v7.0.45 province resolution
 
 on:
   push:
@@ -11,84 +11,107 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  integrate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/v7.0.45-province-georesolution
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Generate reduced GeoJSON
+      - name: Apply minimal integration patch
         shell: bash
         run: |
           set -euo pipefail
-          tmp="$(mktemp -d)"
-          cd "$tmp"
-          npm init -y >/dev/null 2>&1
-          npm install topojson-client@3 >/dev/null 2>&1
-          curl --fail --silent --show-error --location \
-            'https://unpkg.com/es-atlas@0.6.0/es/provinces.json' \
-            -o provinces.topo.json
-          cat > convert.js <<'JS'
-          const fs = require('fs');
-          const topojson = require('topojson-client');
-          const topology = JSON.parse(fs.readFileSync('provinces.topo.json', 'utf8'));
-          const fc = topojson.feature(topology, topology.objects.provinces);
-          const aliases = {
-            'Alacant/Alicante': 'Alicante',
-            'Castelló/Castellón': 'Castellón',
-            'València/Valencia': 'Valencia',
-            'Araba/Álava': 'Álava'
-          };
-          fc.features = fc.features
-            .filter(f => String(f.id) !== '54')
-            .map(f => ({
-              type: 'Feature',
-              properties: {
-                code: String(f.id).padStart(2, '0'),
-                name: aliases[f.properties.name] || f.properties.name
-              },
-              geometry: f.geometry
-            }));
-          const out = {
-            type: 'FeatureCollection',
-            metadata: {
-              source: 'IGN/CNIG NGBE via es-atlas 0.6.0',
-              source_url: 'https://www.ign.es/',
-              generator_url: 'https://github.com/martgnz/es-atlas',
-              license: 'CC-BY-4.0 (source data)',
-              purpose: 'MeshNet-Bot emergency province resolution'
-            },
-            features: fc.features
-          };
-          fs.writeFileSync('provincias_espana.geojson', JSON.stringify(out) + '\n');
-          JS
-          node convert.js
-          mkdir -p "$GITHUB_WORKSPACE/tools/emergencias_guardia/data"
-          cp provincias_espana.geojson "$GITHUB_WORKSPACE/tools/emergencias_guardia/data/provincias_espana.geojson"
-          cd "$GITHUB_WORKSPACE"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          engine_path = Path('tools/emergencias_guardia/emergencias/engine.py')
+          engine = engine_path.read_text(encoding='utf-8')
+          import_old = 'from .models import Event, SEVERITY_RANK, fold_text, utc_now\n'
+          import_new = import_old + 'from .geo_admin import enrich_event_province\n'
+          if 'from .geo_admin import enrich_event_province' not in engine:
+              assert engine.count(import_old) == 1
+              engine = engine.replace(import_old, import_new, 1)
+
+          helper = '''\n\ndef _enrich_events_for_province_areas(events: list[Event], config: dict[str, Any]) -> int:\n    \"\"\"Enriquece provincia solo cuando el usuario filtra por provincias.\n\n    Uso:\n        enriched = _enrich_events_for_province_areas(events, config)\n\n    Parámetros:\n        events: eventos ya normalizados por el conector.\n        config: configuración completa de emergencias.\n\n    Funcionalidad:\n        Conserva el flujo histórico si no hay áreas provinciales activas. Si las\n        hay, intenta resolver mediante cartografía local únicamente los eventos\n        que todavía no traen provincia. ``enrich_event_province`` es tolerante a\n        ausencia/corrupción del fichero, por lo que el radio geográfico existente\n        continúa siendo el fallback y no se bloquea la fuente.\n    \"\"\"\n    has_province_area = any(\n        area.get(\"enabled\", True) and area.get(\"type\") == \"province\"\n        for area in config.get(\"areas\", [])\n    )\n    if not has_province_area:\n        return 0\n    return sum(1 for event in events if enrich_event_province(event))\n'''
+          marker = '\n\ndef event_matches(event: Event, config: dict[str, Any], query: dict[str, Any] | None = None) -> bool:\n'
+          if 'def _enrich_events_for_province_areas(' not in engine:
+              assert engine.count(marker) == 1
+              engine = engine.replace(marker, helper + marker, 1)
+
+          fetch_old = '            events, not_modified = source_type(source_id, source_config, config).fetch()\n            filtered = {event.event_id: event for event in events if event_matches(event, config)}\n'
+          fetch_new = '            events, not_modified = source_type(source_id, source_config, config).fetch()\n            _enrich_events_for_province_areas(events, config)\n            filtered = {event.event_id: event for event in events if event_matches(event, config)}\n'
+          if '_enrich_events_for_province_areas(events, config)' not in engine:
+              assert engine.count(fetch_old) == 1
+              engine = engine.replace(fetch_old, fetch_new, 1)
+          engine_path.write_text(engine, encoding='utf-8', newline='\n')
+
+          panel_path = Path('tools/ControlPanel/web_admin.py')
+          panel = panel_path.read_text(encoding='utf-8')
+          old_help = 'Necesario para IGN y FIRMS, que proporcionan coordenadas pero no siempre provincia.'
+          new_help = ('Radio geográfico adicional: añade también eventos dentro de esta distancia aunque '
+                      'pertenezcan a provincias no seleccionadas. IGN y FIRMS resuelven automáticamente '
+                      'la provincia desde sus coordenadas cuando es posible.')
+          if old_help in panel:
+              panel = panel.replace(old_help, new_help, 1)
+          assert new_help in panel
+          panel_path.write_text(panel, encoding='utf-8', newline='\n')
+
+          readme_path = Path('README.md')
+          readme = readme_path.read_text(encoding='utf-8')
+          readme = readme.replace('# MeshNet-Bot “The Boss” — v7.0.43', '# MeshNet-Bot “The Boss” — v7.0.45', 1)
+          readme_path.write_text(readme, encoding='utf-8', newline='\n')
+
+          app_readme_path = Path('tools/emergencias_guardia/README.md')
+          app_readme = app_readme_path.read_text(encoding='utf-8')
+          old_ign = ('Como normalmente aporta coordenadas pero no provincia, se recomienda un radio:\n\n'
+                     '```bash\n'
+                     'python3 emergencias_guardia.py area add radius entorno-zaragoza \\\n'
+                     '  --lat 41.6488 --lon -0.8891 --km 150\n')
+          new_ign = ('Desde v7.0.45, si hay provincias seleccionadas, la provincia se resuelve localmente '
+                     'a partir de las coordenadas antes de aplicar el filtro. El radio sigue disponible '
+                     'como cobertura geográfica adicional:\n\n'
+                     '```bash\n'
+                     'python3 emergencias_guardia.py area add province Zaragoza\n'
+                     'python3 emergencias_guardia.py area add radius entorno-zaragoza \\\n'
+                     '  --lat 41.6488 --lon -0.8891 --km 150\n')
+          if old_ign in app_readme:
+              app_readme = app_readme.replace(old_ign, new_ign, 1)
+          else:
+              # El texto funcional es obligatorio; si el bloque cambió, no hacemos una sustitución ciega.
+              assert 'Desde v7.0.45, si hay provincias seleccionadas' in app_readme
+          app_readme_path.write_text(app_readme, encoding='utf-8', newline='\n')
+          PY
+      - name: Validate v7.0.45
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            tools/emergencias_guardia/emergencias/geo_admin.py \
+            tools/emergencias_guardia/emergencias/engine.py \
+            tools/ControlPanel/web_admin.py
+          python3 -m pip install -q pytest
+          python3 -m pytest \
+            tests/test_emergency_province_resolution_v7045.py \
+            tests/test_emergency_sources_v7043.py -v
+          git diff --check
           python3 - <<'PY'
           import json
-          p='tools/emergencias_guardia/data/provincias_espana.geojson'
-          data=json.load(open(p,encoding='utf-8'))
-          assert data['type']=='FeatureCollection'
-          assert len(data['features']) == 52, len(data['features'])
-          names={f['properties']['name'] for f in data['features']}
-          for required in ('Zaragoza','Huesca','Teruel','Navarra','Madrid'):
-              assert required in names, required
-          print('province features:', len(data['features']))
+          data=json.load(open('tools/emergencias_guardia/data/provincias_espana.geojson',encoding='utf-8'))
+          assert len(data['features']) == 52
           PY
-      - name: Commit generated data
+      - name: Commit integrated phase
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -f tools/emergencias_guardia/data/provincias_espana.geojson
+          git add \
+            tools/emergencias_guardia/emergencias/engine.py \
+            tools/ControlPanel/web_admin.py \
+            tools/emergencias_guardia/README.md \
+            README.md
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m 'v7.0.45: add local province boundary data'
+          git commit -m 'v7.0.45: integrate province georesolution'
           git push origin HEAD:agent/v7.0.45-province-georesolution
