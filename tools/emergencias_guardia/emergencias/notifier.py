@@ -11,6 +11,7 @@ from .emergency_dispatcher import dispatch_secondary_outputs
 from .formatters import compact_messages
 from .models import Event, SEVERITY_RANK
 from .storage import load_state, save_state
+from shared.delivery_audit import audit_delivery, new_operation_id, result_from_response
 
 
 ROUTE_PREFIXES = {
@@ -176,10 +177,18 @@ def send_route(
         return {"sent": False, "reason": "unchanged", "route": route, "target": target}
 
     results = []
+    operation_id = new_operation_id("emergencias")
     delay = max(0.0, float(notifications.get("inter_message_delay_seconds", 8)))
+    audit_event = selected[0] if len(selected) == 1 else None
     for destination in targets:
         for index, message in enumerate(messages):
-            response = _send_message(config, destination, message)
+            try:
+                response = _send_message(config, destination, message)
+            except Exception as exc:
+                response = {"ok": False, "sent": False, "reason": "request_failed", "error": f"{type(exc).__name__}: {exc}"}
+                _audit_mesh_delivery(operation_id=operation_id, event=audit_event, target=destination, message=message, response=response, route=route)
+                raise
+            _audit_mesh_delivery(operation_id=operation_id, event=audit_event, target=destination, message=message, response=response, route=route)
             if not response.get("ok"):
                 raise RuntimeError(
                     f"broker rechazó mensaje {index + 1} ({destination['network']}): {response}"
@@ -205,7 +214,7 @@ def send_route(
                 max_bytes=int(notifications.get("max_bytes", 140)),
                 prefix=ROUTE_PREFIXES[route],
             )[0]
-            secondary_outputs.append(dispatch_secondary_outputs(event, event_message))
+            secondary_outputs.append(dispatch_secondary_outputs(event, event_message, operation_id=operation_id))
     return {
         "sent": True, "route": route, "target": target,
         "events": len(selected), "messages": len(messages), "results": results,
@@ -387,9 +396,16 @@ def _deliver_pending(
             for event in events
         ]
         for index, (item, event, message) in enumerate(zip(batch, events, messages)):
+            operation_id = new_operation_id("emergencias")
             try:
                 for destination in targets:
-                    response = _send_message(config, destination, message)
+                    try:
+                        response = _send_message(config, destination, message)
+                    except Exception as exc:
+                        response = {"ok": False, "sent": False, "reason": "request_failed", "error": f"{type(exc).__name__}: {exc}"}
+                        _audit_mesh_delivery(operation_id=operation_id, event=event, target=destination, message=message, response=response, route=route, change=change)
+                        raise
+                    _audit_mesh_delivery(operation_id=operation_id, event=event, target=destination, message=message, response=response, route=route, change=change)
                     if not response.get("ok"):
                         raise RuntimeError(
                             f"broker rechazó el mensaje ({destination['network']}): {response}"
@@ -407,7 +423,7 @@ def _deliver_pending(
                 report["failed"] += 1
                 break
             if route == "emergencias":
-                secondary = dispatch_secondary_outputs(event, message)
+                secondary = dispatch_secondary_outputs(event, message, operation_id=operation_id)
                 aprs_rf_result = secondary.get("aprs_rf", {})
                 if not aprs_rf_result.get("ok", True):
                     print(
@@ -452,6 +468,40 @@ def _route_is_configured(config: dict[str, Any], route: str) -> bool:
         return False
 
 
+
+
+def _audit_mesh_delivery(
+    *,
+    operation_id: str,
+    event: Event | None,
+    target: dict[str, Any],
+    message: str,
+    response: dict[str, Any],
+    route: str,
+    change: str = "",
+) -> None:
+    """Registra una entrega Mesh ya resuelta sin intervenir en el envío.
+
+    ``event`` puede ser ``None`` en una difusión agrupada con varios eventos.
+    El helper común absorbe cualquier error SQLite, por lo que esta llamada es
+    siempre best-effort.
+    """
+    audit_delivery(
+        app="emergencias",
+        source=event.source if event else "multiple",
+        event_id=event.event_id if event else "",
+        operation_id=operation_id,
+        category=event.category if event else route,
+        severity=event.severity if event else "",
+        status=event.status if event else "",
+        transport=str(target.get("network") or "mesh"),
+        destination=f"channel:{target.get('channel')}",
+        channel=target.get("channel"),
+        message=message,
+        result=result_from_response(response),
+        result_detail=str(response.get("reason") or response.get("error") or ""),
+        metadata={"response": response, "route": route, "change": change},
+    )
 
 def _send_message(
     config: dict[str, Any],

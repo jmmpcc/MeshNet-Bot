@@ -58,6 +58,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from shared.app_aprs_dispatcher import send_application_aprs
+from shared.delivery_audit import audit_delivery, new_operation_id, result_from_response
 
 
 def load_env(path: Path) -> None:
@@ -627,6 +628,32 @@ def broadcast_messages(
     return byte_chunks(lines, title, max_bytes)
 
 
+
+def _farmacias_source_label() -> str:
+    """Etiqueta legible de la fuente para el journal de entregas."""
+    return str(os.getenv("FARMACIAS_SOURCE_LABEL", "Ayuntamiento de Zaragoza") or "Ayuntamiento de Zaragoza").strip()
+
+
+def _audit_farmacias_delivery(
+    *, operation_id: str, transport: str, destination: str, message: str,
+    response: dict[str, Any], channel: int | str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Registra el resultado sin permitir que la auditoría altere Farmacias."""
+    audit_delivery(
+        app="farmacias",
+        source=_farmacias_source_label(),
+        operation_id=operation_id,
+        transport=transport,
+        destination=destination,
+        channel=channel,
+        message=message,
+        result=result_from_response(response),
+        result_detail=str(response.get("reason") or response.get("error") or ""),
+        parts=response.get("chunks") if isinstance(response.get("chunks"), int) else None,
+        metadata={"response": response, **(metadata or {})},
+    )
+
 def send_broadcast_message(network: str, channel: int, message: str) -> tuple[dict[str, Any], str, int]:
     """Envía un fragmento y corrige el destino usando la respuesta real del broker."""
     if network == "meshcore":
@@ -661,23 +688,40 @@ def send_pharmacies(pharmacies: list[Pharmacy], header: str) -> dict[str, Any]:
 
 
 def _send_to_targets(pharmacies: list[Pharmacy] | None = None, header: str | None = None) -> dict[str, Any]:
+    """Difunde a los destinos existentes y audita cada fragmento aceptado/rechazado."""
     delay = max(0, int(os.getenv("FARMACIAS_INTER_MESSAGE_DELAY_SECONDS", "8")))
     deliveries = []
+    operation_id = new_operation_id("farmacias")
     for network, channel in broadcast_targets():
         if channel < 0:
             raise RuntimeError(f"canal FARMACIAS no configurado para {network}")
         messages, results = broadcast_messages(network, pharmacies, header), []
         actual_network, actual_channel = network, channel
         for index, message in enumerate(messages):
-            response, actual_network, actual_channel = send_broadcast_message(network, channel, message)
+            try:
+                response, actual_network, actual_channel = send_broadcast_message(network, channel, message)
+            except Exception as exc:
+                response = {"ok": False, "sent": False, "reason": "request_failed", "error": f"{type(exc).__name__}: {exc}"}
+                _audit_farmacias_delivery(
+                    operation_id=operation_id, transport=network,
+                    destination=f"channel:{channel}", channel=channel,
+                    message=message, response=response,
+                    metadata={"fragment": index + 1, "broadcast": True},
+                )
+                raise
+            _audit_farmacias_delivery(
+                operation_id=operation_id, transport=actual_network,
+                destination=f"channel:{actual_channel}", channel=actual_channel,
+                message=message, response=response,
+                metadata={"fragment": index + 1, "broadcast": True, "requested_network": network},
+            )
             if not response.get("ok"):
                 raise RuntimeError(f"broker rechazó fragmento {index + 1} ({network}): {response}")
             results.append(response)
             if index + 1 < len(messages) and delay:
                 time.sleep(delay)
         deliveries.append({"network": actual_network, "channel": actual_channel, "messages": len(messages), "results": results})
-    return {"sent": True, **deliveries[0], "deliveries": deliveries}
-
+    return {"sent": True, **deliveries[0], "deliveries": deliveries, "operation_id": operation_id}
 
 def farmacias_aprs_summary(pharmacies: list[Pharmacy] | None = None) -> str:
     """Construye un resumen APRS compacto del listado vigente.
@@ -709,32 +753,45 @@ def send_farmacias_aprs(
     *,
     pharmacies: list[Pharmacy] | None = None,
     requested: bool = False,
+    operation_id: str | None = None,
 ) -> dict[str, Any]:
-    """Solicita al gateway existente el envío APRS del resumen.
+    """Solicita APRS y registra su resultado sin alterar sus autorizaciones.
 
-    ``requested=True`` corresponde a la orden explícita ``send --aprs``. Los
-    envíos lanzados por temporizadores solo pueden usar APRS cuando también se
-    configura ``FARMACIAS_APRS_AUTOMATIC=1``. Antes de llegar al gateway se
-    aplican además el interruptor global y la lista blanca del helper común.
+    Se conserva estrictamente el orden histórico: las autorizaciones se
+    comprueban antes de cargar/formatear datos locales. Así, con APRS
+    desactivado, la función sigue sin necesitar ``current.json`` ni llamar al
+    dispatcher.
     """
+    op_id = operation_id or new_operation_id("farmacias")
+    text = ""
     if not env_bool("FARMACIAS_APRS_ENABLED", "0"):
-        return {"ok": True, "skipped": True, "error": "farmacias_aprs_disabled"}
-    if not requested and not env_bool("FARMACIAS_APRS_AUTOMATIC", "0"):
-        return {
+        result = {"ok": True, "skipped": True, "error": "farmacias_aprs_disabled"}
+    elif not requested and not env_bool("FARMACIAS_APRS_AUTOMATIC", "0"):
+        result = {
             "ok": True,
             "skipped": True,
             "error": "farmacias_aprs_automatic_disabled",
         }
-    return send_application_aprs(
-        source="farmacias",
-        text=farmacias_aprs_summary(pharmacies),
-        dest=os.getenv(
-            "FARMACIAS_APRS_DESTINATION",
-            os.getenv("APPS_APRS_DESTINATION", "broadcast"),
-        ),
-        origin="app_farmacias",
+    else:
+        text = farmacias_aprs_summary(pharmacies)
+        result = send_application_aprs(
+            source="farmacias",
+            text=text,
+            dest=os.getenv(
+                "FARMACIAS_APRS_DESTINATION",
+                os.getenv("APPS_APRS_DESTINATION", "broadcast"),
+            ),
+            origin="app_farmacias",
+        )
+    _audit_farmacias_delivery(
+        operation_id=op_id,
+        transport="aprs",
+        destination=str(result.get("dest") or os.getenv("FARMACIAS_APRS_DESTINATION", "broadcast")),
+        message=text,
+        response=result,
+        metadata={"requested": requested},
     )
-
+    return result
 
 def send_current(
     force: bool = False,
@@ -759,7 +816,7 @@ def send_current(
     # APRS se solicita únicamente después de que todos los destinos Mesh hayan
     # sido aceptados. Un fallo APRS no revierte, repite ni invalida el envío
     # Mesh que ya funciona.
-    delivery["aprs"] = send_farmacias_aprs(requested=aprs_requested)
+    delivery["aprs"] = send_farmacias_aprs(requested=aprs_requested, operation_id=delivery.get("operation_id"))
     return delivery
 
 
@@ -847,11 +904,7 @@ def _event_seen_recently(source: str, text: str, rx_time: Any) -> bool:
 
 
 def _send_meshcore_dm(contact_prefix: str, messages: list[str], *, send_all: bool = False) -> int:
-    """Envía por el puerto de control del broker una respuesta DM MeshCore.
-
-    La aplicación no importa código del broker: utiliza exclusivamente el contrato
-    JSONL público ``MESHCORE_SEND`` sobre ``BROKER_CTRL_HOST:BROKER_CTRL_PORT``.
-    """
+    """Envía respuesta DM MeshCore y registra cada fragmento best-effort."""
     prefix = norm(contact_prefix)
     if not prefix:
         raise RuntimeError("evento MeshCore sin pubkey_prefix; no se puede responder por DM")
@@ -859,17 +912,31 @@ def _send_meshcore_dm(contact_prefix: str, messages: list[str], *, send_all: boo
     delay = max(0.0, float(os.getenv("FARMACIAS_DM_INTER_MESSAGE_DELAY_SECONDS", "1.0")))
     max_messages = max(1, int(os.getenv("FARMACIAS_DM_MAX_MESSAGES_PER_RESPONSE", "6")))
     selected_messages = messages if send_all else messages[:max_messages]
+    operation_id = new_operation_id("farmacias-dm")
     for index, message in enumerate(selected_messages):
-        response = broker_request(
-            "MESHCORE_SEND",
-            {"kind": "contact", "contact_prefix": prefix, "text": str(message)},
+        try:
+            response = broker_request(
+                "MESHCORE_SEND",
+                {"kind": "contact", "contact_prefix": prefix, "text": str(message)},
+            )
+        except Exception as exc:
+            response = {"ok": False, "sent": False, "reason": "request_failed", "error": f"{type(exc).__name__}: {exc}"}
+            _audit_farmacias_delivery(
+                operation_id=operation_id, transport="meshcore",
+                destination=f"contact:{prefix}", message=str(message), response=response,
+                metadata={"direct_reply": True, "fragment": index + 1},
+            )
+            raise
+        _audit_farmacias_delivery(
+            operation_id=operation_id, transport="meshcore",
+            destination=f"contact:{prefix}", message=str(message), response=response,
+            metadata={"direct_reply": True, "fragment": index + 1},
         )
         if not response.get("ok"):
             raise RuntimeError(f"broker rechazó respuesta DM {index + 1}: {response}")
         if index + 1 < len(selected_messages) and delay:
             time.sleep(delay)
     return len(selected_messages)
-
 
 def _handle_broker_event(event: dict[str, Any]) -> None:
     """Procesa un evento JSONL del broker y atiende comandos ``farma`` MeshCore.
