@@ -1,3 +1,11 @@
+## v7.0.46 — Integridad de URL y diagnóstico APRS-IS largo
+
+- Las URL de mapa en mensajes compactos se incluyen completas o se eliminan completas.
+- Se evita cualquier enlace parcial como `https://maps.`.
+- Se añade `aprsis_long_test`, exclusivamente APRS-IS y desactivado por defecto.
+- `BLNx`, APRS RF, deduplicación y `MIN_INTERVAL` permanecen sin cambios.
+- La salida APRS-IS automática ampliada queda pendiente de validación real en aprs.fi.
+
 ## v7.0.40 — Control UDP APRS accesible desde aplicaciones systemd
 
 - Se separa `APRS_CTRL_BIND` de `APRS_CTRL_HOST`.
