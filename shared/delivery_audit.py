@@ -273,7 +273,16 @@ def query_operations(
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """Consulta y agrupa el journal para consumo directo del ControlPanel."""
+    """Consulta y agrupa el journal para consumo directo del ControlPanel.
+
+    ``transports`` contiene exclusivamente transportes cuya entrega quedó
+    registrada como ``sent``. Es el campo que consume la columna "Medios" del
+    ControlPanel y, por tanto, representa emisiones/entregas reales.
+
+    ``attempted_transports`` conserva todos los transportes evaluados o
+    intentados, incluidos ``skipped``, ``duplicate``, ``rate_limited`` y
+    ``failed``. El detalle físico de ``deliveries`` permanece intacto.
+    """
     limit = max(1, min(int(limit), 500))
     offset = max(0, int(offset))
     try:
@@ -329,9 +338,15 @@ def query_operations(
 
     all_operations = [grouped[key] for key in order]
     for operation in all_operations:
-        operation["result"] = _aggregate_status(operation["deliveries"])
+        deliveries = operation["deliveries"]
+        operation["result"] = _aggregate_status(deliveries)
+        operation["attempted_transports"] = list(dict.fromkeys(
+            item["transport"] for item in deliveries if item.get("transport")
+        ))
         operation["transports"] = list(dict.fromkeys(
-            item["transport"] for item in operation["deliveries"] if item.get("transport")
+            item["transport"]
+            for item in deliveries
+            if item.get("transport") and str(item.get("result") or "").casefold() == "sent"
         ))
     visible = all_operations[offset:offset + limit]
     summary = {"total": len(all_operations), "ok": 0, "partial": 0, "error": 0, "other": 0}
