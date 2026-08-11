@@ -29,8 +29,42 @@ def test_groups_same_operation_and_reports_partial(monkeypatch, tmp_path):
     data = audit.query_operations(hours=0)
     assert data["ok"] is True
     assert len(data["operations"]) == 1
-    assert data["operations"][0]["result"] == "partial"
-    assert set(data["operations"][0]["transports"]) == {"meshcore", "aprsis"}
+    operation = data["operations"][0]
+    assert operation["result"] == "partial"
+    # La fila principal del ControlPanel debe mostrar exclusivamente medios
+    # realmente entregados. El APRS-IS fallido sigue visible en el detalle.
+    assert operation["transports"] == ["meshcore"]
+    assert set(operation["attempted_transports"]) == {"meshcore", "aprsis"}
+    assert {item["transport"] for item in operation["deliveries"]} == {"meshcore", "aprsis"}
+
+
+def test_skipped_secondary_outputs_do_not_appear_as_sent_transports(monkeypatch, tmp_path):
+    """Un medio omitido por configuración/nivel no debe figurar como enviado."""
+    configure(monkeypatch, tmp_path)
+    op = "op-skipped"
+    assert audit.audit_delivery(
+        app="emergencias", source="DGT", operation_id=op, event_id="E2",
+        transport="meshcore", destination="channel:3", message="Colisión AP-2",
+        result="sent",
+    )
+    for transport, reason in (
+        ("aprs_rf", "severity_below_threshold"),
+        ("aprsis", "severity_below_threshold"),
+        ("voice_rf", "disabled"),
+    ):
+        assert audit.audit_delivery(
+            app="emergencias", source="DGT", operation_id=op, event_id="E2",
+            transport=transport, destination="test", message="Colisión AP-2",
+            result="skipped", result_detail=reason,
+        )
+
+    operation = audit.query_operations(hours=0)["operations"][0]
+    assert operation["result"] == "ok"
+    assert operation["transports"] == ["meshcore"]
+    assert set(operation["attempted_transports"]) == {
+        "meshcore", "aprs_rf", "aprsis", "voice_rf",
+    }
+    assert len(operation["deliveries"]) == 4
 
 
 def test_filters_and_facets_are_generic(monkeypatch, tmp_path):
