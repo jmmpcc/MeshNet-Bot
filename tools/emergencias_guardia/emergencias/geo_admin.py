@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -13,6 +17,13 @@ from .models import Event
 # conectores para que cualquier fuente futura con coordenadas pueda reutilizarla.
 PROVINCE_BOUNDARIES_FILE = (
     Path(__file__).resolve().parents[1] / "data" / "provincias_espana.geojson"
+)
+
+# v7.0.52: resolución municipal oficial mediante OGC API-Features del IGN.
+# Se usa únicamente como enriquecimiento best-effort. Nunca sustituye las
+# coordenadas ni se convierte en requisito para aceptar o enviar una emergencia.
+IGN_ADMINISTRATIVE_UNIT_API = (
+    "https://api-features.ign.es/collections/administrativeunit/items"
 )
 
 
@@ -183,6 +194,20 @@ def _load_province_boundaries_cached(path_text: str) -> tuple[dict[str, Any], ..
     return tuple(prepared)
 
 
+def _valid_coordinates(latitude: float, longitude: float) -> tuple[float, float] | None:
+    """Valida y normaliza un par latitud/longitud WGS84."""
+    try:
+        lat = float(latitude)
+        lon = float(longitude)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    return lat, lon
+
+
 def resolve_province(
     latitude: float,
     longitude: float,
@@ -202,15 +227,10 @@ def resolve_province(
         después point-in-polygon. Si no puede resolver la coordenada devuelve
         None; nunca realiza peticiones de red ni impide el filtrado por radio.
     """
-    try:
-        lat = float(latitude)
-        lon = float(longitude)
-    except (TypeError, ValueError):
+    coordinates = _valid_coordinates(latitude, longitude)
+    if coordinates is None:
         return None
-    if not (math.isfinite(lat) and math.isfinite(lon)):
-        return None
-    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-        return None
+    lat, lon = coordinates
 
     path = Path(boundaries_file) if boundaries_file is not None else PROVINCE_BOUNDARIES_FILE
     for boundary in _load_province_boundaries_cached(str(path.resolve())):
@@ -220,6 +240,120 @@ def resolve_province(
         if _geometry_contains(lon, lat, boundary["geometry"]):
             return str(boundary["name"])
     return None
+
+
+@lru_cache(maxsize=256)
+def _resolve_municipality_ign_cached(
+    latitude_key: float,
+    longitude_key: float,
+    endpoint: str,
+    timeout_seconds: float,
+) -> str | None:
+    """Consulta el IGN y devuelve el municipio que contiene una coordenada.
+
+    La caché usa coordenadas redondeadas a cuatro decimales (~11 m en latitud),
+    suficiente para evitar repetir consultas dentro del mismo proceso sin
+    degradar de forma significativa la precisión administrativa.
+    """
+    epsilon = 0.0001
+    bbox = (
+        longitude_key - epsilon,
+        latitude_key - epsilon,
+        longitude_key + epsilon,
+        latitude_key + epsilon,
+    )
+    query = urllib.parse.urlencode({
+        "f": "json",
+        "bbox": ",".join(f"{value:.6f}" for value in bbox),
+        "limit": "50",
+    })
+    request = urllib.request.Request(
+        f"{endpoint}?{query}",
+        headers={
+            "Accept": "application/geo+json, application/json",
+            "User-Agent": "MeshNet-Bot/7.0.52 (+https://github.com/jmmpcc/MeshNet-Bot)",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read(2_000_000)
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
+        return None
+
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    for feature in payload.get("features", []):
+        if not isinstance(feature, dict):
+            continue
+        properties = feature.get("properties") or {}
+        level_name = str(properties.get("nationallevelname") or "").strip().casefold()
+        if level_name != "municipio":
+            continue
+        name = str(properties.get("nameunit") or properties.get("name") or "").strip()
+        geometry = feature.get("geometry") or {}
+        if name and _geometry_contains(longitude_key, latitude_key, geometry):
+            return name
+    return None
+
+
+def resolve_municipality(
+    latitude: float,
+    longitude: float,
+    *,
+    endpoint: str | None = None,
+    timeout_seconds: float | None = None,
+) -> str | None:
+    """Resuelve el municipio mediante la API oficial de unidades administrativas IGN.
+
+    Uso:
+        municipality = resolve_municipality(42.4407, -0.7678)
+
+    Parámetros:
+        latitude, longitude: coordenadas WGS84.
+        endpoint: endpoint alternativo, principalmente para pruebas.
+        timeout_seconds: timeout máximo de la consulta HTTP.
+
+    Funcionalidad y seguridad:
+        - Es exclusivamente best-effort y devuelve ``None`` ante cualquier fallo.
+        - No altera filtros, deduplicación, severidad ni estado del evento.
+        - No sustituye las coordenadas; únicamente añade una etiqueta humana.
+        - Usa el servicio oficial OGC API-Features del IGN, que devuelve las
+          unidades administrativas que intersectan un pequeño bbox alrededor del
+          punto; después se confirma localmente point-in-polygon.
+        - Puede desactivarse completamente con ``EMERGENCIAS_GEO_MUNICIPALITY_ENABLED=0``.
+    """
+    enabled = str(os.getenv("EMERGENCIAS_GEO_MUNICIPALITY_ENABLED", "1") or "1").strip().casefold()
+    if enabled not in {"1", "true", "yes", "on", "si", "sí", "y"}:
+        return None
+
+    coordinates = _valid_coordinates(latitude, longitude)
+    if coordinates is None:
+        return None
+    lat, lon = coordinates
+    service = str(endpoint or os.getenv("EMERGENCIAS_GEO_MUNICIPALITY_ENDPOINT", IGN_ADMINISTRATIVE_UNIT_API)).strip()
+    if not service.lower().startswith("https://"):
+        return None
+    try:
+        timeout = float(
+            timeout_seconds
+            if timeout_seconds is not None
+            else os.getenv("EMERGENCIAS_GEO_MUNICIPALITY_TIMEOUT_SEC", "2.5")
+        )
+    except (TypeError, ValueError):
+        timeout = 2.5
+    timeout = max(0.25, min(10.0, timeout))
+
+    return _resolve_municipality_ign_cached(
+        round(lat, 4),
+        round(lon, 4),
+        service,
+        timeout,
+    )
 
 
 def enrich_event_province(
@@ -253,4 +387,30 @@ def enrich_event_province(
     event.province = province
     event.metadata["province_resolved_from_coordinates"] = True
     event.metadata["province_resolution_method"] = "local_ign_boundaries"
+    return True
+
+
+def enrich_event_municipality(event: Event) -> bool:
+    """Añade municipio a un Event ya aceptado que dispone de coordenadas.
+
+    Uso:
+        changed = enrich_event_municipality(event)
+
+    Parámetros:
+        event: evento ya normalizado y, en v7.0.52, normalmente ya filtrado.
+
+    Funcionalidad:
+        - No toca eventos que ya aportan municipio.
+        - Nunca cambia coordenadas, ``raw_hash`` ni campos de clasificación.
+        - Si el IGN no responde, devuelve False y el evento queda intacto.
+        - Registra en metadata que el municipio fue derivado de coordenadas.
+    """
+    if event.municipality or event.latitude is None or event.longitude is None:
+        return False
+    municipality = resolve_municipality(event.latitude, event.longitude)
+    if not municipality:
+        return False
+    event.municipality = municipality
+    event.metadata["municipality_resolved_from_coordinates"] = True
+    event.metadata["municipality_resolution_method"] = "ign_api_features_administrativeunit"
     return True
