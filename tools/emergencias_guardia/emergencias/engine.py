@@ -123,7 +123,7 @@ def _enrich_events_for_province_areas(events: list[Event], config: dict[str, Any
 
 
 def _enrich_accepted_firms_locations(events: dict[str, Event], source_id: str) -> int:
-    """Añade municipio únicamente a eventos FIRMS que ya superaron los filtros.
+    """Añade referencia de población cercana a FIRMS ya aceptados.
 
     Uso:
         enriched = _enrich_accepted_firms_locations(filtered, source_id)
@@ -136,8 +136,11 @@ def _enrich_accepted_firms_locations(events: dict[str, Event], source_id: str) -
         - Solo actúa para ``nasa_firms``.
         - Se ejecuta DESPUÉS del filtrado, por lo que la disponibilidad del IGN
           nunca decide si una emergencia entra o sale del sistema.
-        - Si la consulta municipal falla, ``enrich_event_municipality`` deja el
-          evento intacto y las coordenadas continúan siendo el dato operativo.
+        - ``enrich_event_municipality`` conserva su nombre únicamente por
+          compatibilidad con la primera iteración v7.0.52; actualmente añade
+          ``nearest_population*`` a metadata y NO modifica ``Event.municipality``.
+        - Si la consulta de núcleos falla, el evento queda intacto y las
+          coordenadas continúan siendo el dato operativo.
         - No toca DGT, IGN terremotos, AEMET ni ninguna otra fuente.
     """
     if source_id != "nasa_firms":
