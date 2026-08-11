@@ -84,13 +84,17 @@ def aprs_emergency_text(event: Event, max_chars: int = 67) -> str:
       - Conserva SIEMPRE al comienzo el estado operativo y el tipo de emergencia.
       - Usa ``FIN`` para estados terminales y ``CRIT`` para severidad crítica;
         el resto de emergencias publicables utiliza ``EMERG``.
-      - Prioriza carretera/km, municipio y provincia sobre detalles narrativos.
-      - Solo añade el título cuando aporta información distinta del tipo/lugar.
+      - Para NASA FIRMS prioriza las coordenadas porque son el dato operativo
+        esencial de una detección satelital y añade número de detecciones, FRP y
+        confianza cuando caben.
+      - Prioriza carretera/km, municipio y provincia para el resto de fuentes.
       - Convierte a ASCII seguro para APRS y nunca corta el tipo de emergencia.
-      - Intenta producir una única trama APRS, reduciendo airtime RF y evitando
-        que APRS-IS trunque precisamente la parte que identifica la incidencia.
     """
     limit = max(24, int(max_chars or 67))
+
+    if event.source == "nasa_firms" and event.category == "wildfire":
+        return _aprs_firms_text(event, limit)
+
     status = str(event.status or "active").strip().lower()
     if status in APRS_TERMINAL_STATUSES:
         prefix = "FIN"
@@ -110,8 +114,6 @@ def aprs_emergency_text(event: Event, max_chars: int = 67) -> str:
     municipality = _aprs_ascii_text(event.municipality)
     province = _aprs_ascii_text(event.province)
 
-    # Orden de prioridad: ubicación operativa primero. La provincia solo se
-    # añade si no duplica el municipio.
     candidates: list[str] = []
     if road:
         candidates.append(road)
@@ -131,24 +133,118 @@ def aprs_emergency_text(event: Event, max_chars: int = 67) -> str:
     ):
         candidates.append(title)
 
+    return _aprs_join_candidates(mandatory, candidates, limit, separator=" | ")
+
+
+def _aprs_firms_text(event: Event, limit: int) -> str:
+    """Formatea una detección FIRMS priorizando coordenadas en la primera trama.
+
+    Cómo se llama:
+        ``aprs_emergency_text()`` delega aquí únicamente para
+        ``source=nasa_firms`` y ``category=wildfire``.
+
+    Parámetros:
+        event: evento FIRMS, individual o agrupado.
+        limit: presupuesto de caracteres solicitado por el transporte.
+
+    Funcionalidad:
+        El orden está diseñado para que un boletín APRS-IS clásico de 67
+        caracteres conserve siempre ``estado + INCENDIO SAT + coordenadas``.
+        Los campos secundarios se añaden si hay espacio. Si RF solicita un
+        presupuesto mayor en una fase de transporte, la misma función puede
+        incorporar más detalle sin cambiar el primer tramo operativo.
+    """
+    status = str(event.status or "active").strip().lower()
+    if status in APRS_TERMINAL_STATUSES:
+        prefix = "FIN"
+    elif str(event.severity or "").strip().lower() == "critical":
+        prefix = "CRIT"
+    else:
+        prefix = "EMERG"
+
+    mandatory = _aprs_ascii_text(f"{prefix} INCENDIO SAT")
+    candidates: list[str] = []
+
+    if event.latitude is not None and event.longitude is not None:
+        try:
+            latitude = float(event.latitude)
+            longitude = float(event.longitude)
+            if math.isfinite(latitude) and math.isfinite(longitude):
+                # Cuatro decimales son muy superiores a la resolución nominal
+                # VIIRS de 375 m y ahorran espacio en la trama APRS.
+                candidates.append(f"{latitude:.4f},{longitude:.4f}")
+        except (TypeError, ValueError):
+            pass
+
+    count = _metadata_int(event, "detection_count")
+    if count > 0:
+        candidates.append(f"DET {count}")
+
+    frp_max = _metadata_float(event, "frp_max_mw")
+    if frp_max is None:
+        frp_max = _metadata_float(event, "frp_mw")
+    if frp_max is not None:
+        candidates.append(f"FRP {frp_max:g}MW")
+
+    confidence = _aprs_ascii_text(event.metadata.get("confidence_label") or event.metadata.get("confidence"))
+    if confidence:
+        confidence_alias = {
+            "low": "L",
+            "l": "L",
+            "nominal": "N",
+            "n": "N",
+            "high": "H",
+            "h": "H",
+        }.get(confidence.casefold(), confidence[:1].upper())
+        candidates.append(f"CONF {confidence_alias}")
+
+    satellite = _aprs_ascii_text(event.metadata.get("satellite"))
+    if satellite:
+        candidates.append(satellite)
+
+    frp_total = _metadata_float(event, "frp_total_mw")
+    if frp_total is not None and count > 1:
+        candidates.append(f"FRP TOT {frp_total:g}MW")
+
+    # Separador de un carácter: permite conservar más telemetría dentro de los
+    # 67 caracteres sin sacrificar legibilidad en equipos APRS.
+    return _aprs_join_candidates(mandatory, candidates, limit, separator=" ")
+
+
+def _aprs_join_candidates(mandatory: str, candidates: list[str], limit: int, *, separator: str) -> str:
+    """Añade campos APRS por prioridad respetando estrictamente ``limit``."""
     result = mandatory
     for candidate in candidates:
-        candidate = " ".join(candidate.split())
+        candidate = " ".join(str(candidate or "").split())
         if not candidate:
             continue
-        separator = " | "
         remaining = limit - len(result) - len(separator)
         if remaining <= 0:
             break
         if len(candidate) <= remaining:
             result += separator + candidate
             continue
-        # Si es el primer dato de ubicación, usamos el espacio restante en vez
-        # de descartarlo por completo. El tipo ya está asegurado en ``mandatory``.
         if result == mandatory and remaining >= 6:
             result += separator + candidate[:remaining].rstrip(" ,.;:-")
         break
     return result[:limit].rstrip(" ,.;:-")
+
+
+def _metadata_float(event: Event, key: str) -> float | None:
+    """Obtiene un metadato numérico sin propagar datos defectuosos al formato."""
+    try:
+        value = event.metadata.get(key)
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _metadata_int(event: Event, key: str) -> int:
+    """Obtiene un entero positivo de los metadatos del evento."""
+    try:
+        return max(0, int(event.metadata.get(key) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _aprs_ascii_text(value: str) -> str:
@@ -278,10 +374,10 @@ def _compact_event(event: Event, header: str, max_bytes: int) -> str:
 
     def build_lines() -> list[str]:
         return (
-required
-+ ([map_url] if include_map else [])
-+ optional
-+ ([footer] if footer else [])
+            required
+            + ([map_url] if include_map else [])
+            + optional
+            + ([footer] if footer else [])
         )
 
     lines = build_lines()
@@ -289,7 +385,6 @@ required
         optional.pop()
         lines = build_lines()
 
-    # La URL pierde prioridad antes de cualquier recorte destructivo.
     if len("\n".join(lines).encode("utf-8")) > max_bytes and include_map:
         include_map = False
         lines = build_lines()
@@ -304,6 +399,7 @@ required
     required[2] = _trim_utf8(required[2], allowance)
     message = "\n".join(required + ([footer] if footer else []))
     return _trim_utf8(message, max_bytes)
+
 
 def _compact_place(event: Event) -> str:
     road = event.road
