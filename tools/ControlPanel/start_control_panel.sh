@@ -9,11 +9,11 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 
 cd "${SCRIPT_DIR}"
 
-CONFLICT_FILES=("web_admin.py" "control_panel.py")
+CONFLICT_FILES=("web_admin.py" "control_panel.py" "aprs_category_matrix.py")
 if grep -nE '^(<<<<<<<|=======|>>>>>>>)' "${CONFLICT_FILES[@]}"; then
     echo >&2 "[control-panel] ERROR: hay marcadores de conflicto Git sin resolver."
     echo >&2 "[control-panel] Restaura o resuelve los archivos indicados antes de iniciar el panel."
-    echo >&2 "[control-panel] Si no tienes cambios locales: git restore tools/ControlPanel/web_admin.py tools/ControlPanel/control_panel.py && git pull"
+    echo >&2 "[control-panel] Si no tienes cambios locales: git restore tools/ControlPanel/web_admin.py tools/ControlPanel/control_panel.py tools/ControlPanel/aprs_category_matrix.py && git pull"
     exit 2
 fi
 
@@ -27,7 +27,7 @@ if ! "${VENV_DIR}/bin/python" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
     "${VENV_DIR}/bin/pip" install -r requirements.txt
 fi
 
-if ! "${VENV_DIR}/bin/python" -m py_compile web_admin.py control_panel.py; then
+if ! "${VENV_DIR}/bin/python" -m py_compile web_admin.py aprs_category_matrix.py control_panel.py; then
     echo >&2 "[control-panel] ERROR: el código del panel no supera la comprobación de sintaxis."
     exit 2
 fi
