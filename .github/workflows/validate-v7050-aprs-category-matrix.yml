@@ -1,0 +1,53 @@
+name: Validate v7.0.50 APRS category matrix
+
+on:
+  push:
+    branches:
+      - feature/v7.0.50-aprs-category-matrix
+  pull_request:
+    paths:
+      - tools/ControlPanel/aprs_category_matrix.py
+      - tools/ControlPanel/control_panel.py
+      - tools/ControlPanel/start_control_panel.sh
+      - tools/emergencias_guardia/emergencias/emergency_dispatcher.py
+      - tests/test_emergency_aprs_category_matrix_v7050.py
+      - .github/workflows/validate-v7050-aprs-category-matrix.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: python3 -m pip install -q fastapi pydantic httpx uvicorn pytest
+
+      - name: Compile modified Python modules
+        run: |
+          python3 -m py_compile \
+            tools/ControlPanel/web_admin.py \
+            tools/ControlPanel/aprs_category_matrix.py \
+            tools/ControlPanel/control_panel.py \
+            tools/emergencias_guardia/emergencias/emergency_dispatcher.py
+          bash -n tools/ControlPanel/start_control_panel.sh
+
+      - name: v7.0.50 targeted regressions
+        run: |
+          python3 -m pytest tests/test_emergency_aprs_category_matrix_v7050.py -v
+
+      - name: ControlPanel and delivery-audit regressions
+        run: |
+          python3 -m pytest \
+            tools/ControlPanel/tests/test_web_admin.py \
+            tests/test_delivery_audit_v7048.py \
+            -v
+
+      - name: Diff hygiene
+        run: git diff --check HEAD^ HEAD
