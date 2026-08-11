@@ -5,7 +5,7 @@ import os
 from typing import Any
 
 from .models import Event, SEVERITY_RANK, fold_text, utc_now
-from .geo_admin import enrich_event_province
+from .geo_admin import enrich_event_municipality, enrich_event_province
 from .sources import SOURCE_TYPES
 from .sources.base import SourceError
 from .storage import (
@@ -120,6 +120,29 @@ def _enrich_events_for_province_areas(events: list[Event], config: dict[str, Any
     if not has_province_area:
         return 0
     return sum(1 for event in events if enrich_event_province(event))
+
+
+def _enrich_accepted_firms_locations(events: dict[str, Event], source_id: str) -> int:
+    """Añade municipio únicamente a eventos FIRMS que ya superaron los filtros.
+
+    Uso:
+        enriched = _enrich_accepted_firms_locations(filtered, source_id)
+
+    Parámetros:
+        events: diccionario de eventos ya aceptados por ``event_matches``.
+        source_id: identificador de la fuente que se está procesando.
+
+    Funcionalidad:
+        - Solo actúa para ``nasa_firms``.
+        - Se ejecuta DESPUÉS del filtrado, por lo que la disponibilidad del IGN
+          nunca decide si una emergencia entra o sale del sistema.
+        - Si la consulta municipal falla, ``enrich_event_municipality`` deja el
+          evento intacto y las coordenadas continúan siendo el dato operativo.
+        - No toca DGT, IGN terremotos, AEMET ni ninguna otra fuente.
+    """
+    if source_id != "nasa_firms":
+        return 0
+    return sum(1 for event in events.values() if enrich_event_municipality(event))
 
 
 def event_matches(event: Event, config: dict[str, Any], query: dict[str, Any] | None = None) -> bool:
@@ -249,6 +272,7 @@ def fetch_sources(config: dict[str, Any], only: str | None = None) -> dict[str, 
             events, not_modified = source_type(source_id, source_config, config).fetch()
             _enrich_events_for_province_areas(events, config)
             filtered = {event.event_id: event for event in events if event_matches(event, config)}
+            _enrich_accepted_firms_locations(filtered, source_id)
             _merge_source(current, filtered, source_id, now, threshold, report)
             source_states[source_id] = {
                 "ok": True, "last_success": now, "records": len(events),

@@ -37,9 +37,6 @@ SOURCE_LABELS = {
 }
 
 
-# Etiquetas APRS deliberadamente breves y sin ambigüedad. El objetivo no es
-# codificar la emergencia con siglas opacas, sino garantizar que el tipo de
-# incidente aparezca completo al principio de una trama APRS de 67 caracteres.
 APRS_CATEGORY_LABELS = {
     "wildfire": "INCENDIO",
     "urban_fire": "INCENDIO URB",
@@ -84,9 +81,8 @@ def aprs_emergency_text(event: Event, max_chars: int = 67) -> str:
       - Conserva SIEMPRE al comienzo el estado operativo y el tipo de emergencia.
       - Usa ``FIN`` para estados terminales y ``CRIT`` para severidad crítica;
         el resto de emergencias publicables utiliza ``EMERG``.
-      - Para NASA FIRMS prioriza las coordenadas porque son el dato operativo
-        esencial de una detección satelital y añade número de detecciones, FRP y
-        confianza cuando caben.
+      - Para NASA FIRMS prioriza coordenadas y, desde v7.0.52, añade el municipio
+        resuelto por IGN cuando está disponible, sin sacrificar las coordenadas.
       - Prioriza carretera/km, municipio y provincia para el resto de fuentes.
       - Convierte a ASCII seguro para APRS y nunca corta el tipo de emergencia.
     """
@@ -137,7 +133,7 @@ def aprs_emergency_text(event: Event, max_chars: int = 67) -> str:
 
 
 def _aprs_firms_text(event: Event, limit: int) -> str:
-    """Formatea una detección FIRMS priorizando coordenadas en la primera trama.
+    """Formatea una detección FIRMS con coordenadas y municipio prioritarios.
 
     Cómo se llama:
         ``aprs_emergency_text()`` delega aquí únicamente para
@@ -148,11 +144,14 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
         limit: presupuesto de caracteres solicitado por el transporte.
 
     Funcionalidad:
-        El orden está diseñado para que un boletín APRS-IS clásico de 67
-        caracteres conserve siempre ``estado + INCENDIO SAT + coordenadas``.
-        Los campos secundarios se añaden si hay espacio. Si RF solicita un
-        presupuesto mayor en una fase de transporte, la misma función puede
-        incorporar más detalle sin cambiar el primer tramo operativo.
+        - Conserva siempre ``estado + INCENDIO SAT + coordenadas``.
+        - Si ``event.municipality`` existe, lo añade inmediatamente después de
+          las coordenadas. En 67 caracteres limita el nombre a 12 caracteres
+          para no desplazar toda la telemetría; en RF ampliado usa el nombre
+          completo y añade provincia cuando es distinta.
+        - Después incorpora DET, FRP, confianza, satélite y FRP total según el
+          espacio disponible.
+        - Si no hay municipio, el resultado es compatible con v7.0.51.
     """
     status = str(event.status or "active").strip().lower()
     if status in APRS_TERMINAL_STATUSES:
@@ -170,11 +169,22 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
             latitude = float(event.latitude)
             longitude = float(event.longitude)
             if math.isfinite(latitude) and math.isfinite(longitude):
-                # Cuatro decimales son muy superiores a la resolución nominal
-                # VIIRS de 375 m y ahorran espacio en la trama APRS.
                 candidates.append(f"{latitude:.4f},{longitude:.4f}")
         except (TypeError, ValueError):
             pass
+
+    municipality = _aprs_ascii_text(event.municipality)
+    province = _aprs_ascii_text(event.province)
+    if municipality:
+        if limit <= 67:
+            candidates.append(municipality[:12].rstrip(" ,.;:-"))
+        else:
+            place = municipality
+            if province and province.casefold() != municipality.casefold():
+                place = f"{municipality},{province}"
+            candidates.append(place)
+    elif province and limit > 67:
+        candidates.append(province)
 
     count = _metadata_int(event, "detection_count")
     if count > 0:
@@ -206,8 +216,6 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
     if frp_total is not None and count > 1:
         candidates.append(f"FRP TOT {frp_total:g}MW")
 
-    # Separador de un carácter: permite conservar más telemetría dentro de los
-    # 67 caracteres sin sacrificar legibilidad en equipos APRS.
     return _aprs_join_candidates(mandatory, candidates, limit, separator=" ")
 
 
