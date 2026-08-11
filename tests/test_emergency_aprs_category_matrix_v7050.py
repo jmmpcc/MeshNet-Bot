@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+from tools.ControlPanel import aprs_category_matrix as matrix
 from tools.ControlPanel import web_admin
 from tools.emergencias_guardia.emergencias import emergency_dispatcher as dispatcher
 from tools.emergencias_guardia.emergencias.models import Event
@@ -108,14 +112,92 @@ def test_minimum_level_remains_an_independent_safety_barrier(monkeypatch):
     }
 
 
-def test_controlpanel_exposes_two_secondary_matrix_columns():
-    """La matriz visual debe mantener Mesh y añadir sólo APRS-IS/APRS RF."""
-    source = Path(web_admin.__file__).read_text(encoding="utf-8")
+def test_dashboard_transform_exposes_two_secondary_matrix_columns():
+    """La extensión visual mantiene Mesh y añade únicamente APRS-IS/APRS RF."""
+    source = Path(matrix.__file__).read_text(encoding="utf-8")
+    dashboard = matrix.transform_dashboard(web_admin.DASHBOARD)
+
     assert "EMERGENCIAS_APRSIS_CATEGORIES" in source
     assert "EMERGENCIAS_APRS_RF_CATEGORIES" in source
     assert "secondary_transports" in source
-    assert "secondary-aprsis" in web_admin.DASHBOARD
-    assert "secondary-aprs-rf" in web_admin.DASHBOARD
-    assert "APRS-IS" in web_admin.DASHBOARD
-    assert "APRS RF" in web_admin.DASHBOARD
-    assert "UI 2 · v7.0.50" in web_admin.DASHBOARD
+    assert "secondary-aprsis" in dashboard
+    assert "secondary-aprs-rf" in dashboard
+    assert "APRS-IS" in dashboard
+    assert "APRS RF" in dashboard
+    assert "UI 2 · v7.0.50" in dashboard
+
+
+def test_controlpanel_filters_persist_independent_aprs_columns(tmp_path, monkeypatch):
+    """GET/PUT reutilizan la matriz histórica y guardan solo las listas APRS nuevas."""
+    env_file = tmp_path / "emergencias.env"
+    monkeypatch.setattr(web_admin, "EMERGENCIAS_ENV_FILE", env_file)
+
+    current_rules = {
+        "low": [],
+        "medium": ["traffic_collision"],
+        "high": ["road_closed", "traffic_collision"],
+        "critical": ["road_closed", "traffic_collision"],
+    }
+
+    def fake_execute(action):
+        argv = list(action.argv)
+        if action.id != "emergency_filters":
+            return {"ok": True, "returncode": 0, "stdout": "", "stderr": "", "data": {}}
+        if argv[-2:] == ["filters", "show"]:
+            return {
+                "ok": True,
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "",
+                "data": {
+                    "rules": {key: list(value) for key, value in current_rules.items()},
+                    "categories": [{"name": name} for name in sorted(web_admin.EMERGENCY_CATEGORIES)],
+                },
+            }
+        if "--rules-json" in argv:
+            index = argv.index("--rules-json")
+            supplied = json.loads(argv[index + 1])
+            current_rules.clear()
+            current_rules.update({key: list(value) for key, value in supplied.items()})
+            return {
+                "ok": True,
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "",
+                "data": {"rules": supplied, "note": "Matriz actualizada"},
+            }
+        raise AssertionError(f"acción de filtros inesperada: {argv}")
+
+    monkeypatch.setattr(web_admin, "execute_action", fake_execute)
+    registry = web_admin.ToolRegistry(tmp_path / "state.json", web_admin.DEFAULT_TOOLS)
+    registry.set_enabled("emergencias_guardia", True)
+    app = matrix.apply_aprs_category_matrix(web_admin.create_app(registry))
+    client = TestClient(app)
+
+    # Sin variables nuevas la respuesta refleja el comportamiento histórico:
+    # todas las categorías siguen autorizadas para ambas salidas.
+    before = client.get("/api/emergencias/filters")
+    assert before.status_code == 200
+    assert set(before.json()["secondary_transports"]["aprsis"]) == web_admin.EMERGENCY_CATEGORIES
+    assert set(before.json()["secondary_transports"]["aprs_rf"]) == web_admin.EMERGENCY_CATEGORIES
+
+    payload = {
+        "rules": current_rules,
+        "secondary_transports": {
+            "aprsis": ["traffic_collision", "road_closed"],
+            "aprs_rf": ["road_closed"],
+        },
+    }
+    saved = client.put("/api/emergencias/filters", json=payload)
+    assert saved.status_code == 200
+    assert saved.json()["secondary_transports"] == {
+        "aprsis": ["road_closed", "traffic_collision"],
+        "aprs_rf": ["road_closed"],
+    }
+    text = env_file.read_text(encoding="utf-8")
+    assert "EMERGENCIAS_APRSIS_CATEGORIES=road_closed,traffic_collision" in text
+    assert "EMERGENCIAS_APRS_RF_CATEGORIES=road_closed" in text
+
+    after = client.get("/api/emergencias/filters")
+    assert after.status_code == 200
+    assert after.json()["secondary_transports"] == saved.json()["secondary_transports"]
