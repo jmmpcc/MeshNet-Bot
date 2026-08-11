@@ -40,6 +40,19 @@ COPY tools/emergencias_guardia/emergencias/models.py /app/tools/emergencias_guar
 COPY tools/emergencias_guardia/emergencias/geo_admin.py /app/tools/emergencias_guardia/emergencias/geo_admin.py
 COPY tools/emergencias_guardia/data/provincias_espana.geojson /app/tools/emergencias_guardia/data/provincias_espana.geojson
 
+# Smoke test de construcción SIN acceso de red: comprueba que el módulo local
+# sustituye correctamente a la antigua dependencia y que el fallback provincial
+# puede cargarse dentro de la imagen.
+RUN BOT_GEO_LOOKUP_ENABLED=0 PYTHONPATH=/app/source python - <<'PY'
+import reverse_geocoder as rg
+
+result = rg.search((41.6488, -0.8891))
+assert isinstance(result, list) and len(result) == 1, result
+assert isinstance(result[0], dict), result
+assert "name" in result[0] and "admin2" in result[0], result
+print("MeshNet lightweight geocoder smoke test: OK")
+PY
+
 COPY docker/entrypoint_broker.sh /usr/local/bin/
 COPY docker/entrypoint_bot.sh    /usr/local/bin/
 RUN chmod +x /usr/local/bin/entrypoint_broker.sh /usr/local/bin/entrypoint_bot.sh
