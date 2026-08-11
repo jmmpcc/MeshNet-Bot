@@ -98,8 +98,8 @@ class FirmsLocalityV7052Tests(unittest.TestCase):
                     "type": "Feature",
                     "properties": {
                         "nombre": "Bailo",
-                        "latitud": 42.509,
-                        "longitud": -0.812,
+                        "latitud": 42.442,
+                        "longitud": -0.768,
                         "habitantes": 200,
                         "cpro": "22",
                         "codine": "22044000000",
@@ -124,7 +124,7 @@ class FirmsLocalityV7052Tests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["name"], "Bailo")
-        self.assertLess(result["distance_km"], 30.0)
+        self.assertLess(result["distance_km"], 1.0)
 
         requested_url = urlopen_mock.call_args.args[0].full_url
         self.assertIn("skipGeometry=true", requested_url)
