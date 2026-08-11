@@ -174,6 +174,16 @@ def test_controlpanel_filters_persist_independent_aprs_columns(tmp_path, monkeyp
     app = matrix.apply_aprs_category_matrix(web_admin.create_app(registry))
     client = TestClient(app)
 
+    # Verificación end-to-end del HTML real que recibirá el navegador, no sólo
+    # de la función de transformación aislada.
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "UI 2 · v7.0.50" in page.text
+    assert "secondary-aprsis" in page.text
+    assert "secondary-aprs-rf" in page.text
+    assert "APRS-IS" in page.text
+    assert "APRS RF" in page.text
+
     # Sin variables nuevas la respuesta refleja el comportamiento histórico:
     # todas las categorías siguen autorizadas para ambas salidas.
     before = client.get("/api/emergencias/filters")
