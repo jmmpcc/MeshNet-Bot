@@ -11,7 +11,7 @@ from tools.emergencias_guardia.emergencias.engine import (
 from tools.emergencias_guardia.emergencias.formatters import aprs_emergency_text
 from tools.emergencias_guardia.emergencias.geo_admin import (
     enrich_event_municipality,
-    resolve_municipality,
+    resolve_nearest_population,
 )
 from tools.emergencias_guardia.emergencias.models import Event
 
@@ -49,44 +49,63 @@ class FirmsLocalityV7052Tests(unittest.TestCase):
 
     @patch("tools.emergencias_guardia.emergencias.engine.enrich_event_municipality")
     def test_engine_enriches_only_accepted_nasa_firms(self, enrich_mock):
-        """El motor sólo llama al resolver municipal para nasa_firms ya filtrado."""
-        enrich_mock.side_effect = lambda event: setattr(event, "municipality", "Bailo") or True
+        """El motor sólo llama al enriquecedor geográfico para FIRMS aceptados."""
+        def enrich(event):
+            event.metadata["nearest_population"] = "Bailo"
+            event.metadata["nearest_population_distance_km"] = 3.2
+            return True
+
+        enrich_mock.side_effect = enrich
         firms_event = make_event("nasa_firms")
-        changed = _enrich_accepted_firms_locations({firms_event.event_id: firms_event}, "nasa_firms")
+        changed = _enrich_accepted_firms_locations(
+            {firms_event.event_id: firms_event},
+            "nasa_firms",
+        )
         self.assertEqual(changed, 1)
-        self.assertEqual(firms_event.municipality, "Bailo")
+        self.assertEqual(firms_event.metadata["nearest_population"], "Bailo")
+        self.assertEqual(firms_event.municipality, "")
         enrich_mock.assert_called_once_with(firms_event)
 
         enrich_mock.reset_mock()
         dgt_event = make_event("dgt_datex")
-        changed = _enrich_accepted_firms_locations({dgt_event.event_id: dgt_event}, "dgt_datex")
+        changed = _enrich_accepted_firms_locations(
+            {dgt_event.event_id: dgt_event},
+            "dgt_datex",
+        )
         self.assertEqual(changed, 0)
         enrich_mock.assert_not_called()
-        self.assertEqual(dgt_event.municipality, "")
+        self.assertNotIn("nearest_population", dgt_event.metadata)
 
     @patch("tools.emergencias_guardia.emergencias.geo_admin.urllib.request.urlopen")
-    def test_resolve_municipality_uses_ign_polygon_and_nameunit(self, urlopen_mock):
-        """La respuesta OGC del IGN se valida point-in-polygon antes de aceptar el nombre."""
+    def test_resolve_nearest_population_selects_haversine_nearest(self, urlopen_mock):
+        """El resolver IGN elige el núcleo realmente más cercano por Haversine."""
         payload = {
             "type": "FeatureCollection",
             "features": [
                 {
                     "type": "Feature",
                     "properties": {
-                        "nationallevelname": "Municipio",
-                        "nameunit": "Bailo",
+                        "nombre": "Lejano",
+                        "latitud": 42.50,
+                        "longitud": -0.80,
+                        "habitantes": 100,
+                        "cpro": "22",
+                        "codine": "22000000000",
                     },
-                    "geometry": {
-                        "type": "Polygon",
-                        "coordinates": [[
-                            [-0.9, 42.3],
-                            [-0.6, 42.3],
-                            [-0.6, 42.6],
-                            [-0.9, 42.6],
-                            [-0.9, 42.3],
-                        ]],
+                    "geometry": None,
+                },
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "nombre": "Bailo",
+                        "latitud": 42.509,
+                        "longitud": -0.812,
+                        "habitantes": 200,
+                        "cpro": "22",
+                        "codine": "22044000000",
                     },
-                }
+                    "geometry": None,
+                },
             ],
         }
         response = MagicMock()
@@ -94,18 +113,26 @@ class FirmsLocalityV7052Tests(unittest.TestCase):
         response.__exit__.return_value = False
         urlopen_mock.return_value = response
 
-        with patch.dict(os.environ, {"EMERGENCIAS_GEO_MUNICIPALITY_ENABLED": "1"}, clear=False):
-            municipality = resolve_municipality(
+        with patch.dict(os.environ, {"EMERGENCIAS_GEO_POPULATION_ENABLED": "1"}, clear=False):
+            result = resolve_nearest_population(
                 42.4407,
                 -0.7678,
-                endpoint="https://example.invalid/administrativeunit/items",
+                endpoint="https://example.invalid/nuc/items",
                 timeout_seconds=1.0,
+                max_radius_km=30.0,
             )
-        self.assertEqual(municipality, "Bailo")
 
-    @patch("tools.emergencias_guardia.emergencias.geo_admin.resolve_municipality")
-    def test_ign_failure_does_not_modify_event(self, resolver_mock):
-        """Un fallo/None del IGN nunca rompe ni reclasifica el evento FIRMS."""
+        self.assertIsNotNone(result)
+        self.assertEqual(result["name"], "Bailo")
+        self.assertLess(result["distance_km"], 30.0)
+
+        requested_url = urlopen_mock.call_args.args[0].full_url
+        self.assertIn("skipGeometry=true", requested_url)
+        self.assertIn("properties=nombre%2Clatitud%2Clongitud%2Chabitantes%2Ccpro%2Ccodine", requested_url)
+
+    @patch("tools.emergencias_guardia.emergencias.geo_admin.resolve_nearest_population")
+    def test_population_failure_does_not_modify_event(self, resolver_mock):
+        """Un fallo/None del IGN nunca reclasifica ni altera el evento FIRMS."""
         resolver_mock.return_value = None
         event = make_event()
         original_hash = event.raw_hash
@@ -115,26 +142,59 @@ class FirmsLocalityV7052Tests(unittest.TestCase):
 
         self.assertFalse(changed)
         self.assertEqual(event.municipality, "")
+        self.assertNotIn("nearest_population", event.metadata)
         self.assertEqual((event.latitude, event.longitude), original_coordinates)
         self.assertEqual(event.raw_hash, original_hash)
 
-    def test_aprs_firms_includes_municipality_and_coordinates(self):
-        """APRS-IS conserva coordenadas e incorpora municipio cuando existe."""
+    @patch("tools.emergencias_guardia.emergencias.geo_admin.resolve_nearest_population")
+    def test_population_enrichment_uses_metadata_not_municipality(self, resolver_mock):
+        """La referencia CERCA se guarda en metadata, nunca en municipality."""
+        resolver_mock.return_value = {
+            "name": "Bailo",
+            "distance_km": 7.42,
+            "latitude": 42.509,
+            "longitude": -0.812,
+            "inhabitants": 200,
+            "province_code": "22",
+            "codine": "22044000000",
+        }
         event = make_event()
-        event.municipality = "Bailo"
-        text = aprs_emergency_text(event, max_chars=67)
-        self.assertLessEqual(len(text), 67)
-        self.assertIn("42.4407,-0.7678", text)
-        self.assertIn("Bailo", text)
-        self.assertTrue(text.startswith("EMERG INCENDIO SAT"))
 
-    def test_aprs_firms_without_municipality_keeps_v7051_shape(self):
-        """Sin localidad resuelta se mantiene el formato operativo previo."""
+        changed = enrich_event_municipality(event)
+
+        self.assertTrue(changed)
+        self.assertEqual(event.municipality, "")
+        self.assertEqual(event.metadata["nearest_population"], "Bailo")
+        self.assertEqual(event.metadata["nearest_population_distance_km"], 7.42)
+        self.assertEqual(
+            event.metadata["nearest_population_resolution_method"],
+            "ign_api_features_nuc_haversine",
+        )
+
+    def test_aprs_firms_includes_nearest_population_and_coordinates(self):
+        """APRS conserva coordenadas e incorpora CERCA cuando existe referencia."""
+        event = make_event()
+        event.metadata["nearest_population"] = "Bailo"
+        event.metadata["nearest_population_distance_km"] = 7.42
+
+        text_is = aprs_emergency_text(event, max_chars=67)
+        text_rf = aprs_emergency_text(event, max_chars=160)
+
+        self.assertLessEqual(len(text_is), 67)
+        self.assertIn("42.4407,-0.7678", text_is)
+        self.assertIn("CERCA Bailo", text_is)
+        self.assertTrue(text_is.startswith("EMERG INCENDIO SAT"))
+
+        self.assertIn("CERCA Bailo,Huesca 7.42km", text_rf)
+        self.assertIn("DET 42", text_rf)
+
+    def test_aprs_firms_without_population_keeps_v7051_shape(self):
+        """Sin referencia cercana se mantiene el formato operativo v7.0.51."""
         event = make_event()
         text = aprs_emergency_text(event, max_chars=67)
         self.assertLessEqual(len(text), 67)
         self.assertIn("42.4407,-0.7678", text)
-        self.assertNotIn("Bailo", text)
+        self.assertNotIn("CERCA", text)
 
 
 if __name__ == "__main__":
