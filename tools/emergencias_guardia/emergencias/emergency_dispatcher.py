@@ -96,7 +96,6 @@ def _aprsis_bulletin_enabled() -> bool:
     )
 
 
-
 def _aprs_rf_enabled() -> bool:
     """Comprueba la autorización explícita de APRS RF para Emergencias.
 
@@ -120,11 +119,15 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
       que calcula las partes con las mismas funciones usadas para RF y sin
       transmitir ni afectar a la deduplicación.
 
-    Antes de consultar el gateway se genera un resumen APRS específico de hasta
-    67 caracteres mediante ``aprs_emergency_text``. El resumen conserva primero
-    estado y tipo de emergencia y después ubicación. Si aun así el gateway
-    informa más partes que ``EMERGENCIAS_APRS_RF_MAX_CHUNKS``, se aplica un
-    segundo límite y se vuelve a previsualizar antes de transmitir.
+    Para fuentes normales se conserva el comportamiento histórico: el resumen
+    APRS se limita a 67 caracteres. Para ``nasa_firms`` se permite un resumen
+    RF mayor, configurable mediante ``EMERGENCIAS_APRS_RF_FIRMS_TEXT_MAX_CHARS``
+    (160 por defecto), de modo que el gateway pueda repartir coordenadas y
+    telemetría FIRMS en varias tramas de estado. El número máximo de tramas sigue
+    limitado por ``EMERGENCIAS_APRS_RF_MAX_CHUNKS``.
+
+    APRS-IS no usa esta ampliación: sus boletines siguen generándose de forma
+    independiente en ``_send_aprsis_bulletin`` con un máximo de 67 caracteres.
 
     Parámetros:
       event: emergencia normalizada que determina severidad y datos compactos.
@@ -136,9 +139,6 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
     if not _aprs_rf_enabled():
         return {"ok": True, "sent": False, "reason": "disabled"}
 
-    # v7.0.50: autorización adicional por categoría. Si la variable todavía no
-    # existe se conserva el comportamiento histórico (todas las categorías que
-    # llegaban hasta aquí siguen siendo elegibles).
     if not _secondary_category_allowed("EMERGENCIAS_APRS_RF_CATEGORIES", event):
         return {"ok": True, "sent": False, "reason": "category_not_allowed"}
 
@@ -177,12 +177,21 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
             return {"ok": False, "sent": False, "reason": "invalid_response"}
         return result
 
-    # APRS v7.0.42: generamos desde el Event una línea específica para APRS.
-    # De este modo el estado y el tipo de emergencia quedan al principio y no
-    # dependen de cómo se haya formateado el mensaje Mesh. 67 caracteres es el
-    # límite estándar del cuerpo APRS; puede reducirse, pero nunca ampliarse por
-    # encima del valor configurado en APRS_MSG_MAX del gateway.
-    aprs_text_max = max(24, min(67, int(os.getenv("EMERGENCIAS_APRS_TEXT_MAX_CHARS", "67") or "67")))
+    is_firms = event.source == "nasa_firms" and event.category == "wildfire"
+    if is_firms:
+        aprs_text_max = max(
+            67,
+            min(
+                240,
+                int(os.getenv("EMERGENCIAS_APRS_RF_FIRMS_TEXT_MAX_CHARS", "160") or "160"),
+            ),
+        )
+    else:
+        aprs_text_max = max(
+            24,
+            min(67, int(os.getenv("EMERGENCIAS_APRS_TEXT_MAX_CHARS", "67") or "67")),
+        )
+
     aprs_message = aprs_emergency_text(event, max_chars=aprs_text_max)
 
     original_preview = gateway_request("aprs_preview", aprs_message)
@@ -196,22 +205,17 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
 
     original_parts = max(0, int(original_preview.get("parts", 0) or 0))
     rf_message = aprs_message
-    # ``compacted`` conserva su semántica histórica: solo indica que se activó
-    # el segundo nivel de reducción por exceso de partes. El nuevo formateo APRS
-    # específico se informa aparte mediante ``aprs_formatted``.
     compacted = False
     compact_parts = original_parts
 
     if original_parts > max_chunks:
-        # El notifier ya genera mensajes compactos. Este segundo nivel solo se
-        # activa cuando una configuración más restrictiva o datos excepcionales
-        # superan el máximo RF. El segundo resumen mantiene la misma regla:
-        # estado y tipo de emergencia nunca se desplazan al final del mensaje.
-        rf_message = aprs_emergency_text(
-            event,
-            max_chars=max(24, min(67, compact_max_bytes)),
-        )
-        compacted = rf_message != message
+        # FIRMS puede usar varias tramas, pero nunca sobrepasa el máximo global.
+        # En ese caso se vuelve a generar el texto con el presupuesto compacto.
+        compact_limit = max(24, min(aprs_text_max, compact_max_bytes))
+        if not is_firms:
+            compact_limit = min(67, compact_limit)
+        rf_message = aprs_emergency_text(event, max_chars=compact_limit)
+        compacted = rf_message != aprs_message
         compact_preview = gateway_request("aprs_preview", rf_message)
         if not compact_preview.get("ok"):
             return {
@@ -237,8 +241,6 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
     if result.get("duplicate"):
         result = {**result, "ok": True, "sent": False, "reason": "duplicate"}
 
-    # Metadatos diagnósticos añadidos sin alterar las claves históricas que ya
-    # consumen notifier/tests. Permiten saber si hubo compactación automática.
     return {
         **result,
         "original_parts": original_parts,
@@ -247,7 +249,9 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
         "compacted": compacted,
         "aprs_formatted": True,
         "aprs_text": rf_message,
+        "firms_multipart": bool(is_firms and compact_parts > 1),
     }
+
 
 def _voice_result(event: Event, message: str) -> dict[str, Any]:
     """Solicita síntesis al servicio Voice RF cuando está autorizada.
@@ -322,18 +326,14 @@ def _voice_result(event: Event, message: str) -> dict[str, Any]:
 def _send_aprsis_bulletin(event: Event, message: str) -> dict[str, Any]:
     """Solicita al gateway APRS activo un boletín público APRS-IS.
 
-    Parámetros:
-      event: emergencia normalizada.
-      message: texto compacto ya aceptado por el flujo Mesh.
-
-    Reutiliza APRS_CTRL_HOST y APRS_CTRL_PORT. No abre otra conexión APRS-IS,
-    no transmite por RF y no usa APRSIS_PUSH_TO.
+    APRS-IS conserva deliberadamente el límite de 67 caracteres del cuerpo de
+    mensaje APRS clásico. Para FIRMS, ``aprs_emergency_text`` sitúa coordenadas
+    inmediatamente después de ``INCENDIO SAT`` para que nunca se pierdan por el
+    límite, en vez de depender de boletines largos no interoperables.
     """
     if not _aprsis_bulletin_enabled():
         return {"ok": True, "sent": False, "reason": "disabled"}
 
-    # v7.0.50: APRS-IS dispone de su propia lista de categorías. Esta condición
-    # es independiente de APRS RF y del nivel mínimo del boletín.
     if not _secondary_category_allowed("EMERGENCIAS_APRSIS_CATEGORIES", event):
         return {"ok": True, "sent": False, "reason": "category_not_allowed"}
 
@@ -403,8 +403,6 @@ def dispatch_secondary_outputs(
             "error": f"{type(exc).__name__}: {exc}",
         }
 
-    # Se conserva la llamada histórica fuera de un try propio: la auditoría no
-    # cambia el comportamiento previo de Voice RF ante una excepción inesperada.
     voice_rf = _voice_result(event, message)
     result = DispatchResult(
         aprs_rf=aprs_rf,
