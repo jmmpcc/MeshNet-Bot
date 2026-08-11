@@ -30,6 +30,44 @@ def _allowed_sources() -> set[str]:
     }
 
 
+def _secondary_category_allowed(env_name: str, event: Event) -> bool:
+    """Comprueba la autorización opcional de categoría para una salida secundaria.
+
+    Cómo se llama:
+        ``_secondary_category_allowed("EMERGENCIAS_APRS_RF_CATEGORIES", event)``
+        ``_secondary_category_allowed("EMERGENCIAS_APRSIS_CATEGORIES", event)``
+
+    Parámetros:
+        env_name:
+            Nombre de la variable de entorno que contiene categorías separadas
+            por comas.
+        event:
+            Evento normalizado cuya ``category`` se va a comprobar.
+
+    Compatibilidad:
+        Si la variable NO existe en el entorno se devuelve ``True`` y se
+        conserva exactamente el comportamiento anterior a v7.0.50. Esto es
+        deliberado para que desplegar la nueva versión no cambie ninguna salida.
+
+        Si la variable existe pero está vacía, no se autoriza ninguna categoría
+        para ese transporte. De este modo el ControlPanel puede representar una
+        columna APRS completamente desmarcada sin recurrir a valores especiales.
+
+    Esta función únicamente añade una autorización por categoría. Nunca sustituye
+    ni rebaja los interruptores generales, los ``MIN_LEVEL``, la deduplicación o
+    cualquier comprobación posterior del gateway APRS.
+    """
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return True
+    allowed = {
+        item.strip().lower()
+        for item in str(raw).split(",")
+        if item.strip()
+    }
+    return str(event.category or "").strip().lower() in allowed
+
+
 @dataclass(slots=True)
 class DispatchResult:
     """Resultado normalizado de las salidas secundarias de una emergencia.
@@ -97,6 +135,12 @@ def _send_aprs_rf(event: Event, message: str) -> dict[str, Any]:
     """
     if not _aprs_rf_enabled():
         return {"ok": True, "sent": False, "reason": "disabled"}
+
+    # v7.0.50: autorización adicional por categoría. Si la variable todavía no
+    # existe se conserva el comportamiento histórico (todas las categorías que
+    # llegaban hasta aquí siguen siendo elegibles).
+    if not _secondary_category_allowed("EMERGENCIAS_APRS_RF_CATEGORIES", event):
+        return {"ok": True, "sent": False, "reason": "category_not_allowed"}
 
     minimum = str(os.getenv("EMERGENCIAS_APRS_RF_MIN_LEVEL", "high") or "high").strip().lower()
     if SEVERITY_RANK.get(event.severity, 0) < SEVERITY_RANK.get(minimum, SEVERITY_RANK["high"]):
@@ -287,6 +331,12 @@ def _send_aprsis_bulletin(event: Event, message: str) -> dict[str, Any]:
     """
     if not _aprsis_bulletin_enabled():
         return {"ok": True, "sent": False, "reason": "disabled"}
+
+    # v7.0.50: APRS-IS dispone de su propia lista de categorías. Esta condición
+    # es independiente de APRS RF y del nivel mínimo del boletín.
+    if not _secondary_category_allowed("EMERGENCIAS_APRSIS_CATEGORIES", event):
+        return {"ok": True, "sent": False, "reason": "category_not_allowed"}
+
     minimum = str(
         os.getenv("APRSIS_EMERGENCY_BULLETIN_MIN_LEVEL", "high") or "high"
     ).strip().lower()

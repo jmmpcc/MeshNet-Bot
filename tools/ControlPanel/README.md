@@ -1,4 +1,4 @@
-# MeshNet ControlPanel v7.0.35
+# MeshNet ControlPanel v7.0.50
 
 Aplicación web independiente para administrar componentes auxiliares de MeshNet-Bot desde el host. Utiliza manifiestos para describir servicios, archivos de configuración y acciones permitidas.
 
@@ -93,7 +93,7 @@ No añadir acciones arbitrarias de shell desde datos aportados por el navegador.
 ```bash
 journalctl -u meshnet-control-panel.service -n 200 --no-pager
 cd /home/meshnet/MeshNet-Bot/tools/ControlPanel
-.venv/bin/python -m py_compile control_panel.py web_admin.py
+.venv/bin/python -m py_compile control_panel.py web_admin.py aprs_category_matrix.py
 .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
@@ -110,8 +110,9 @@ La unidad se ejecuta como `meshnet`. Las operaciones privilegiadas deben limitar
 ## Pruebas
 
 ```bash
-cd /home/meshnet/MeshNet-Bot/tools/ControlPanel
-.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
+cd /home/meshnet/MeshNet-Bot
+python3 -m pytest tests/test_emergency_aprs_category_matrix_v7050.py -v
+python3 -m pytest tools/ControlPanel/tests/test_web_admin.py tests/test_delivery_audit_v7048.py -v
 ```
 
 ## Actualización
@@ -125,6 +126,42 @@ sudo ./install_control_panel_service.sh
 sudo systemctl restart meshnet-control-panel.service
 ```
 
+## Matriz de propagación y salidas APRS — v7.0.50
+
+La pestaña **Emergencias → Propagación** conserva las columnas históricas
+**Baja / Media / Alta / Crítica**, que deciden qué combinaciones de categoría y
+severidad pueden propagarse por el transporte Mesh configurado.
+
+Se añaden dos columnas independientes al final de la misma matriz:
+
+- **APRS-IS**: autoriza la categoría para el boletín APRS-IS automático;
+- **APRS RF**: autoriza la categoría para la salida APRS por radiofrecuencia.
+
+Estas columnas no sustituyen al transporte Mesh ni convierten una ruta `SERV` o
+`METEO` en `EMERG`. Las salidas secundarias se siguen evaluando exclusivamente
+cuando el flujo existente ha clasificado el evento en la ruta `emergencias` y
+la entrega Mesh correspondiente se ha completado.
+
+Las autorizaciones se guardan en:
+
+```env
+EMERGENCIAS_APRSIS_CATEGORIES=road_closed,traffic_collision
+EMERGENCIAS_APRS_RF_CATEGORIES=road_closed
+```
+
+Cada lista es independiente. Una categoría marcada continúa necesitando superar
+los controles históricos del transporte correspondiente, incluyendo:
+
+```env
+APRSIS_EMERGENCY_BULLETIN_MIN_LEVEL=high
+EMERGENCIAS_APRS_RF_MIN_LEVEL=high
+```
+
+Por tanto, marcar una categoría nunca rebaja el nivel mínimo. Si una de las
+variables `*_CATEGORIES` todavía no existe, v7.0.50 conserva el comportamiento
+anterior y considera elegibles todas las categorías que ya alcanzaban el
+dispatcher. Si la variable existe con valor vacío, ese transporte secundario no
+autoriza ninguna categoría.
 
 ## Mensajes emitidos — v7.0.48
 
