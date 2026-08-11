@@ -4,10 +4,36 @@ import hashlib
 import html
 import re
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from ..models import Event, clean_text, fold_text
 from .base import HttpSource, SourceError
+
+
+# Códigos provinciales que utiliza habitualmente el IGN al final de la
+# localización sísmica (por ejemplo ``NW VISTABELLA.Z`` o ``E NERJA.MA``).
+# Se mantienen aquí, dentro del parser RSS/IGN, para no introducir ninguna
+# dependencia ni alterar el filtrado geográfico común del resto de fuentes.
+_IGN_PROVINCE_CODES = {
+    "A": "Alicante", "AB": "Albacete", "AL": "Almería", "AV": "Ávila",
+    "B": "Barcelona", "BA": "Badajoz", "BI": "Bizkaia", "BU": "Burgos",
+    "C": "A Coruña", "CA": "Cádiz", "CC": "Cáceres", "CO": "Córdoba",
+    "CR": "Ciudad Real", "CS": "Castellón", "CU": "Cuenca",
+    "GC": "Las Palmas", "GE": "Girona", "GI": "Girona", "GR": "Granada",
+    "GU": "Guadalajara", "H": "Huelva", "HU": "Huesca", "J": "Jaén",
+    "L": "Lleida", "LE": "León", "LO": "La Rioja", "LU": "Lugo",
+    "M": "Madrid", "MA": "Málaga", "MU": "Murcia", "NA": "Navarra",
+    "O": "Asturias", "OR": "Ourense", "P": "Palencia", "PM": "Illes Balears",
+    "PO": "Pontevedra", "S": "Cantabria", "SA": "Salamanca", "SE": "Sevilla",
+    "SG": "Segovia", "SO": "Soria", "SS": "Gipuzkoa", "T": "Tarragona",
+    "TE": "Teruel", "TF": "Santa Cruz de Tenerife", "TO": "Toledo",
+    "V": "Valencia", "VA": "Valladolid", "VI": "Álava", "Z": "Zaragoza",
+    "ZA": "Zamora",
+}
+
+# Prefijos direccionales empleados por IGN en la localización del epicentro.
+_IGN_DIRECTION_PREFIX = re.compile(r"^(?:N|NE|E|SE|S|SW|W|NW)\s+", re.I)
 
 
 def _local(tag: str) -> str:
@@ -82,22 +108,112 @@ class RssSource(HttpSource):
         category = clean_text(self.config.get("category", "other"))
         severity = clean_text(self.config.get("severity", "medium"))
         metadata: dict[str, object] = {"feed_profile": self.config.get("profile", "generic")}
+        province = clean_text(self.config.get("default_province", ""))
+        municipality = clean_text(self.config.get("default_municipality", ""))
         if self.config.get("profile") == "ign_earthquakes":
+            # El RSS actual de IGN no siempre expone la fecha en pubDate.
+            # Cuando falta, se recupera del título/descripción del propio evento.
+            # Esta lógica es exclusiva del perfil IGN y no afecta a otros RSS.
             category = "earthquake"
-            magnitude = self._magnitude(f"{title} {description}")
+            ign_text = f"{title} {description}"
+            magnitude = self._magnitude(ign_text)
             if magnitude is not None:
                 metadata["magnitude"] = magnitude
                 severity = self._earthquake_severity(magnitude)
+
+            if not published:
+                published = self._ign_datetime(ign_text)
+
+            # IGN suele codificar la provincia al final de la localización con
+            # abreviaturas como .Z, .HU, .TE, .MU, .MA... Aprovechamos ese
+            # dato oficial para que las áreas administrativas ya existentes
+            # puedan filtrar terremotos sin modificar event_matches().
+            location = self._ign_location(description)
+            province, municipality = self._ign_admin_location(location)
+            if location:
+                metadata["ign_location"] = location
             title = title or "Terremoto registrado"
         return Event(
             event_id=f"{self.source_id}:{source_id}", source=self.source_id,
             source_event_id=source_id, category=category,
             verification=self.config.get("verification", "official"), severity=severity,
             title=title or "Aviso oficial", description=description,
-            province=self.config.get("default_province", ""), latitude=lat, longitude=lon,
+            municipality=municipality, province=province, latitude=lat, longitude=lon,
             started_at=published, updated_at=published, source_url=link or self.config.get("url", ""),
             metadata=metadata,
         )
+
+    @staticmethod
+    def _ign_datetime(text: str) -> str:
+        """Extrae la fecha/hora UTC publicada por IGN cuando el RSS no trae pubDate.
+
+        Parámetros:
+            text: texto combinado del título y la descripción del elemento RSS.
+
+        Retorna:
+            Fecha ISO-8601 en UTC, o cadena vacía si no se reconocece el formato.
+
+        Uso:
+            Se invoca automáticamente desde ``_event`` sólo para el perfil
+            ``ign_earthquakes`` y únicamente cuando ``published`` está vacío.
+        """
+        match = re.search(
+            r"\b(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})\b",
+            text or "",
+        )
+        if not match:
+            return ""
+        try:
+            value = datetime.strptime(
+                f"{match.group(1)} {match.group(2)}", "%d/%m/%Y %H:%M:%S"
+            )
+        except ValueError:
+            return ""
+        return value.replace(tzinfo=timezone.utc).isoformat()
+
+    @staticmethod
+    def _ign_location(description: str) -> str:
+        """Obtiene la localización textual incluida por IGN en la descripción.
+
+        El formato observado es equivalente a ``magnitud 2.3 en NW VISTABELLA.Z
+        en la fecha ...``. Si IGN cambia el texto o no existe localización, se
+        devuelve cadena vacía y el evento conserva sus coordenadas GeoRSS.
+        """
+        match = re.search(
+            r"\bmagnitud\s+\d+(?:[.,]\d+)?\s+en\s+(.+?)\s+en\s+la\s+fecha\b",
+            description or "",
+            re.I,
+        )
+        return clean_text(match.group(1)) if match else ""
+
+    @staticmethod
+    def _ign_admin_location(location: str) -> tuple[str, str]:
+        """Traduce una localización IGN con sufijo provincial a provincia/municipio.
+
+        Parámetros:
+            location: localización IGN, por ejemplo ``NW VISTABELLA.Z``.
+
+        Retorna:
+            Tupla ``(provincia, municipio)``. Si el sufijo no representa una
+            provincia española conocida, devuelve ``("", "")`` para no inventar
+            datos en terremotos marítimos, portugueses, franceses o marroquíes.
+
+        La función es deliberadamente local al parser IGN: el motor genérico de
+        áreas y el comportamiento de DGT, FIRMS y otros RSS permanecen intactos.
+        """
+        value = clean_text(location)
+        match = re.search(r"\.([A-Z]{1,2})$", value, re.I)
+        if not match:
+            return "", ""
+        code = match.group(1).upper()
+        province = _IGN_PROVINCE_CODES.get(code, "")
+        if not province:
+            return "", ""
+
+        municipality = value[:match.start()].strip()
+        municipality = _IGN_DIRECTION_PREFIX.sub("", municipality).strip()
+        municipality = municipality.title()
+        return province, municipality
 
     @staticmethod
     def _magnitude(text: str) -> float | None:
