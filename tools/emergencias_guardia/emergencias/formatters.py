@@ -148,6 +148,8 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
         - Si ``metadata['nearest_population']`` existe, añade ``CERCA <nombre>``.
           No usa ``event.municipality`` porque un núcleo cercano no implica que
           el foco esté dentro de su término municipal.
+        - En APRS-IS clásico recorta la población por palabras completas para
+          evitar referencias parciales como ``Salinas de``.
         - En RF ampliado añade también la distancia al núcleo y la provincia si
           hay espacio.
         - Después incorpora DET, FRP, confianza, satélite y FRP total según el
@@ -180,8 +182,9 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
     if nearest_population:
         if limit <= 67:
             # Se reserva el prefijo CERCA para no convertir una referencia
-            # geográfica en una afirmación administrativa incorrecta.
-            available_name = nearest_population[:10].rstrip(" ,.;:-")
+            # geográfica en una afirmación administrativa incorrecta. El nombre
+            # se compacta por palabras completas para evitar textos incompletos.
+            available_name = _aprs_word_trim(nearest_population, 10)
             candidates.append(f"CERCA {available_name}")
         else:
             reference = f"CERCA {nearest_population}"
@@ -224,6 +227,45 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
         candidates.append(f"FRP TOT {frp_total:g}MW")
 
     return _aprs_join_candidates(mandatory, candidates, limit, separator=" ")
+
+
+def _aprs_word_trim(value: str, maximum: int) -> str:
+    """Compacta un nombre APRS sin dejar una palabra parcial o preposición final.
+
+    Uso:
+        compact = _aprs_word_trim("Salinas de Jaca", 10)
+
+    Parámetros:
+        value: texto ASCII ya normalizado.
+        maximum: número máximo de caracteres permitidos.
+
+    Funcionalidad:
+        Conserva tantas palabras completas como quepan. Si el último token es
+        una preposición/artículo corto sin término posterior (por ejemplo ``de``),
+        se elimina. Si la primera palabra supera el límite, se recorta como
+        último recurso para no perder completamente la referencia geográfica.
+    """
+    text = " ".join(str(value or "").split())
+    if not text or maximum <= 0:
+        return ""
+    if len(text) <= maximum:
+        return text
+
+    words = text.split()
+    selected: list[str] = []
+    for word in words:
+        candidate = " ".join(selected + [word])
+        if len(candidate) > maximum:
+            break
+        selected.append(word)
+
+    trailing_connectors = {"a", "al", "de", "del", "el", "la", "las", "los", "y"}
+    while len(selected) > 1 and selected[-1].casefold() in trailing_connectors:
+        selected.pop()
+
+    if selected:
+        return " ".join(selected)
+    return text[:maximum].rstrip(" ,.;:-")
 
 
 def _aprs_join_candidates(mandatory: str, candidates: list[str], limit: int, *, separator: str) -> str:
