@@ -249,57 +249,150 @@ def _resolve_municipality_ign_cached(
     endpoint: str,
     timeout_seconds: float,
 ) -> str | None:
-    """Consulta el IGN y devuelve el municipio que contiene una coordenada.
-
-    La caché usa coordenadas redondeadas a cuatro decimales (~11 m en latitud),
-    suficiente para evitar repetir consultas dentro del mismo proceso sin
-    degradar de forma significativa la precisión administrativa.
     """
-    epsilon = 0.0001
+    Resuelve mediante IGN el municipio que contiene una coordenada WGS84.
+
+    Uso:
+        Esta función es utilizada internamente por ``resolve_municipality()``.
+        No debe llamarse directamente desde los conectores.
+
+    Parámetros:
+        latitude_key:
+            Latitud WGS84 ya normalizada y redondeada.
+        longitude_key:
+            Longitud WGS84 ya normalizada y redondeada.
+        endpoint:
+            Endpoint OGC API-Features ``administrativeunit/items`` del IGN.
+        timeout_seconds:
+            Tiempo máximo permitido para la consulta HTTP.
+
+    Funcionalidad:
+        - Construye un bbox extremadamente pequeño alrededor del punto.
+        - Filtra por ``nationallevelname=Municipio``.
+        - Solicita ``skipGeometry=true`` para evitar recibir las enormes
+          geometrías completas de municipios, provincias y comunidades.
+        - El filtrado espacial queda delegado al servicio oficial del IGN.
+        - Conserva sólo los features de nivel Municipio.
+        - Si existe exactamente un municipio, devuelve ``nameunit``.
+        - Si aparecen varios municipios —por ejemplo, una coordenada situada
+          exactamente sobre un límite administrativo— devuelve ``None`` para
+          no asignar arbitrariamente una población incorrecta.
+        - Aplica un límite de respuesta de 256 KiB como protección adicional.
+        - Mantiene la caché existente para evitar consultas HTTP repetidas.
+
+    Seguridad:
+        Cualquier error HTTP, timeout, respuesta excesiva, JSON inválido o
+        resultado ambiguo devuelve ``None``. Nunca se propaga una excepción que
+        pueda interrumpir el procesamiento de emergencias.
+    """
+
+    # Aproximadamente 10 cm en latitud. Sólo necesitamos que el servidor
+    # ejecute la intersección espacial alrededor de la coordenada.
+    epsilon = 0.000001
+
     bbox = (
         longitude_key - epsilon,
         latitude_key - epsilon,
         longitude_key + epsilon,
         latitude_key + epsilon,
     )
-    query = urllib.parse.urlencode({
-        "f": "json",
-        "bbox": ",".join(f"{value:.6f}" for value in bbox),
-        "limit": "50",
-    })
+
+    query = urllib.parse.urlencode(
+        {
+            "f": "json",
+            "bbox": ",".join(f"{value:.6f}" for value in bbox),
+
+            # El servidor IGN/pygeoapi admite filtros por propiedades.
+            # Aunque el proveedor ignorase este filtro, el código vuelve
+            # a comprobar nationallevelname al procesar los resultados.
+            "nationallevelname": "Municipio",
+
+            # CRÍTICO:
+            # evitamos descargar las geometrías administrativas completas,
+            # que pueden convertir una consulta de una coordenada en más
+            # de 100 MB de GeoJSON.
+            "skipGeometry": "true",
+
+            "limit": "10",
+        }
+    )
+
     request = urllib.request.Request(
         f"{endpoint}?{query}",
         headers={
             "Accept": "application/geo+json, application/json",
-            "User-Agent": "MeshNet-Bot/7.0.52 (+https://github.com/jmmpcc/MeshNet-Bot)",
+            "User-Agent": (
+                "MeshNet-Bot/7.0.52 "
+                "(+https://github.com/jmmpcc/MeshNet-Bot)"
+            ),
         },
     )
+
+    # Con skipGeometry la respuesta debería ser muy pequeña.
+    # Este límite evita que una anomalía del servidor consuma memoria
+    # innecesariamente en la Raspberry.
+    maximum_bytes = 262_144
+
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            body = response.read(2_000_000)
-    except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
+        with urllib.request.urlopen(
+            request,
+            timeout=timeout_seconds,
+        ) as response:
+            body = response.read(maximum_bytes + 1)
+    except (
+        OSError,
+        urllib.error.URLError,
+        urllib.error.HTTPError,
+        TimeoutError,
+    ):
+        return None
+
+    if len(body) > maximum_bytes:
         return None
 
     try:
         payload = json.loads(body.decode("utf-8-sig"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
         return None
+
     if not isinstance(payload, dict):
         return None
+
+    municipality_names: list[str] = []
 
     for feature in payload.get("features", []):
         if not isinstance(feature, dict):
             continue
+
         properties = feature.get("properties") or {}
-        level_name = str(properties.get("nationallevelname") or "").strip().casefold()
+
+        level_name = str(
+            properties.get("nationallevelname") or ""
+        ).strip().casefold()
+
+        # Protección adicional por si el servidor devuelve otros niveles
+        # administrativos pese al filtro de la consulta.
         if level_name != "municipio":
             continue
-        name = str(properties.get("nameunit") or properties.get("name") or "").strip()
-        geometry = feature.get("geometry") or {}
-        if name and _geometry_contains(longitude_key, latitude_key, geometry):
-            return name
-    return None
 
+        name = str(
+            properties.get("nameunit")
+            or properties.get("name")
+            or ""
+        ).strip()
+
+        if name and name not in municipality_names:
+            municipality_names.append(name)
+
+    # Un único resultado es inequívoco.
+    if len(municipality_names) == 1:
+        return municipality_names[0]
+
+    # Cero resultados o más de uno: no inventamos municipio.
+    return None
 
 def resolve_municipality(
     latitude: float,
