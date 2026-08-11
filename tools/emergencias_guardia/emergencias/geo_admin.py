@@ -19,11 +19,11 @@ PROVINCE_BOUNDARIES_FILE = (
     Path(__file__).resolve().parents[1] / "data" / "provincias_espana.geojson"
 )
 
-# v7.0.52: resolución municipal oficial mediante OGC API-Features del IGN.
-# Se usa únicamente como enriquecimiento best-effort. Nunca sustituye las
-# coordenadas ni se convierte en requisito para aceptar o enviar una emergencia.
-IGN_ADMINISTRATIVE_UNIT_API = (
-    "https://api-features.ign.es/collections/administrativeunit/items"
+# v7.0.52: colección oficial de núcleos de población IGN/INE. Se usa sólo
+# como enriquecimiento humano de eventos FIRMS ya aceptados. Nunca interviene
+# en filtros, deduplicación, severidad ni selección geográfica.
+IGN_POPULATION_NUCLEI_API = (
+    "https://api-features.ign.es/collections/nuc/items"
 )
 
 
@@ -242,185 +242,198 @@ def resolve_province(
     return None
 
 
+def _haversine_coordinates(
+    latitude_a: float,
+    longitude_a: float,
+    latitude_b: float,
+    longitude_b: float,
+) -> float:
+    """Calcula distancia geodésica aproximada entre dos puntos WGS84 en km.
+
+    Uso:
+        distance = _haversine_coordinates(42.44, -0.76, 42.52, -0.81)
+
+    Parámetros:
+        latitude_a, longitude_a: coordenadas del evento.
+        latitude_b, longitude_b: coordenadas del núcleo de población.
+
+    Funcionalidad:
+        Usa Haversine con radio terrestre medio IUGG. Es suficientemente preciso
+        para ordenar núcleos cercanos sin añadir dependencias geoespaciales.
+    """
+    radius = 6371.0088
+    phi_a = math.radians(latitude_a)
+    phi_b = math.radians(latitude_b)
+    dphi = math.radians(latitude_b - latitude_a)
+    dlambda = math.radians(longitude_b - longitude_a)
+    value = (
+        math.sin(dphi / 2.0) ** 2
+        + math.cos(phi_a) * math.cos(phi_b) * math.sin(dlambda / 2.0) ** 2
+    )
+    value = min(1.0, max(0.0, value))
+    return radius * 2.0 * math.atan2(math.sqrt(value), math.sqrt(1.0 - value))
+
+
+def _search_bbox(
+    latitude: float,
+    longitude: float,
+    radius_km: float,
+) -> tuple[float, float, float, float]:
+    """Construye un bbox WGS84 que cubre aproximadamente ``radius_km``.
+
+    El ajuste longitudinal tiene en cuenta la latitud para no consultar una zona
+    innecesariamente grande. El resultado se usa sólo para preseleccionar puntos;
+    la distancia final siempre se calcula con Haversine.
+    """
+    latitude_delta = radius_km / 111.32
+    cosine = max(0.15, abs(math.cos(math.radians(latitude))))
+    longitude_delta = radius_km / (111.32 * cosine)
+    return (
+        longitude - longitude_delta,
+        latitude - latitude_delta,
+        longitude + longitude_delta,
+        latitude + latitude_delta,
+    )
+
+
 @lru_cache(maxsize=256)
-def _resolve_municipality_ign_cached(
+def _resolve_nearest_population_ign_cached(
     latitude_key: float,
     longitude_key: float,
     endpoint: str,
     timeout_seconds: float,
-) -> str | None:
-    """
-    Resuelve mediante IGN el municipio que contiene una coordenada WGS84.
+    max_radius_km: float,
+) -> dict[str, Any] | None:
+    """Consulta núcleos IGN/INE y devuelve el más próximo al punto.
 
     Uso:
-        Esta función es utilizada internamente por ``resolve_municipality()``.
-        No debe llamarse directamente desde los conectores.
+        La función se invoca exclusivamente desde ``resolve_nearest_population``.
 
     Parámetros:
-        latitude_key:
-            Latitud WGS84 ya normalizada y redondeada.
-        longitude_key:
-            Longitud WGS84 ya normalizada y redondeada.
-        endpoint:
-            Endpoint OGC API-Features ``administrativeunit/items`` del IGN.
-        timeout_seconds:
-            Tiempo máximo permitido para la consulta HTTP.
+        latitude_key, longitude_key: coordenadas redondeadas para la caché.
+        endpoint: colección OGC API-Features ``nuc/items``.
+        timeout_seconds: timeout máximo por consulta.
+        max_radius_km: distancia máxima aceptada para etiquetar ``CERCA``.
 
     Funcionalidad:
-        - Construye un bbox extremadamente pequeño alrededor del punto.
-        - Filtra por ``nationallevelname=Municipio``.
-        - Solicita ``skipGeometry=true`` para evitar recibir las enormes
-          geometrías completas de municipios, provincias y comunidades.
-        - El filtrado espacial queda delegado al servicio oficial del IGN.
-        - Conserva sólo los features de nivel Municipio.
-        - Si existe exactamente un municipio, devuelve ``nameunit``.
-        - Si aparecen varios municipios —por ejemplo, una coordenada situada
-          exactamente sobre un límite administrativo— devuelve ``None`` para
-          no asignar arbitrariamente una población incorrecta.
-        - Aplica un límite de respuesta de 256 KiB como protección adicional.
-        - Mantiene la caché existente para evitar consultas HTTP repetidas.
-
-    Seguridad:
-        Cualquier error HTTP, timeout, respuesta excesiva, JSON inválido o
-        resultado ambiguo devuelve ``None``. Nunca se propaga una excepción que
-        pueda interrumpir el procesamiento de emergencias.
+        - Prueba radios crecientes de 5, 15 y ``max_radius_km`` km.
+        - Solicita únicamente atributos; ``skipGeometry=true`` evita descargar
+          geometría y reduce drásticamente la respuesta.
+        - Calcula localmente Haversine para todos los candidatos válidos.
+        - Devuelve sólo el núcleo más cercano si queda dentro del radio máximo.
+        - Ante error, timeout, JSON inválido o ausencia de candidatos devuelve
+          ``None`` sin afectar al evento ni a ninguna otra fuente.
     """
+    radii = [5.0, 15.0, max_radius_km]
+    unique_radii: list[float] = []
+    for value in radii:
+        radius = max(1.0, min(100.0, float(value)))
+        if radius not in unique_radii:
+            unique_radii.append(radius)
 
-    # Aproximadamente 10 cm en latitud. Sólo necesitamos que el servidor
-    # ejecute la intersección espacial alrededor de la coordenada.
-    epsilon = 0.000001
-
-    bbox = (
-        longitude_key - epsilon,
-        latitude_key - epsilon,
-        longitude_key + epsilon,
-        latitude_key + epsilon,
-    )
-
-    query = urllib.parse.urlencode(
-        {
+    for radius_km in unique_radii:
+        bbox = _search_bbox(latitude_key, longitude_key, radius_km)
+        query = urllib.parse.urlencode({
             "f": "json",
             "bbox": ",".join(f"{value:.6f}" for value in bbox),
-
-            # El servidor IGN/pygeoapi admite filtros por propiedades.
-            # Aunque el proveedor ignorase este filtro, el código vuelve
-            # a comprobar nationallevelname al procesar los resultados.
-            "nationallevelname": "Municipio",
-
-            # CRÍTICO:
-            # evitamos descargar las geometrías administrativas completas,
-            # que pueden convertir una consulta de una coordenada en más
-            # de 100 MB de GeoJSON.
             "skipGeometry": "true",
+            "properties": "nombre,latitud,longitud,habitantes,cpro,codine",
+            "limit": "500",
+        })
+        request = urllib.request.Request(
+            f"{endpoint}?{query}",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "MeshNet-Bot/7.0.52 (+https://github.com/jmmpcc/MeshNet-Bot)",
+            },
+        )
+        maximum_bytes = 1_000_000
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                body = response.read(maximum_bytes + 1)
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
+            return None
+        if len(body) > maximum_bytes:
+            return None
 
-            "limit": "10",
-        }
-    )
+        try:
+            payload = json.loads(body.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
 
-    request = urllib.request.Request(
-        f"{endpoint}?{query}",
-        headers={
-            "Accept": "application/geo+json, application/json",
-            "User-Agent": (
-                "MeshNet-Bot/7.0.52 "
-                "(+https://github.com/jmmpcc/MeshNet-Bot)"
-            ),
-        },
-    )
+        candidates: list[dict[str, Any]] = []
+        for feature in payload.get("features", []):
+            if not isinstance(feature, dict):
+                continue
+            properties = feature.get("properties") or {}
+            name = str(properties.get("nombre") or "").strip()
+            coordinates = _valid_coordinates(
+                properties.get("latitud"),
+                properties.get("longitud"),
+            )
+            if not name or coordinates is None:
+                continue
+            candidate_latitude, candidate_longitude = coordinates
+            distance_km = _haversine_coordinates(
+                latitude_key,
+                longitude_key,
+                candidate_latitude,
+                candidate_longitude,
+            )
+            if distance_km > max_radius_km:
+                continue
+            inhabitants = properties.get("habitantes")
+            try:
+                inhabitants_value = None if inhabitants is None else int(inhabitants)
+            except (TypeError, ValueError):
+                inhabitants_value = None
+            candidates.append({
+                "name": name,
+                "distance_km": distance_km,
+                "latitude": candidate_latitude,
+                "longitude": candidate_longitude,
+                "inhabitants": inhabitants_value,
+                "province_code": str(properties.get("cpro") or "").strip(),
+                "codine": str(properties.get("codine") or "").strip(),
+            })
 
-    # Con skipGeometry la respuesta debería ser muy pequeña.
-    # Este límite evita que una anomalía del servidor consuma memoria
-    # innecesariamente en la Raspberry.
-    maximum_bytes = 262_144
+        if candidates:
+            candidates.sort(key=lambda item: (item["distance_km"], -int(item["inhabitants"] or 0), item["name"]))
+            return candidates[0]
 
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=timeout_seconds,
-        ) as response:
-            body = response.read(maximum_bytes + 1)
-    except (
-        OSError,
-        urllib.error.URLError,
-        urllib.error.HTTPError,
-        TimeoutError,
-    ):
-        return None
-
-    if len(body) > maximum_bytes:
-        return None
-
-    try:
-        payload = json.loads(body.decode("utf-8-sig"))
-    except (
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-    ):
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-
-    municipality_names: list[str] = []
-
-    for feature in payload.get("features", []):
-        if not isinstance(feature, dict):
-            continue
-
-        properties = feature.get("properties") or {}
-
-        level_name = str(
-            properties.get("nationallevelname") or ""
-        ).strip().casefold()
-
-        # Protección adicional por si el servidor devuelve otros niveles
-        # administrativos pese al filtro de la consulta.
-        if level_name != "municipio":
-            continue
-
-        name = str(
-            properties.get("nameunit")
-            or properties.get("name")
-            or ""
-        ).strip()
-
-        if name and name not in municipality_names:
-            municipality_names.append(name)
-
-    # Un único resultado es inequívoco.
-    if len(municipality_names) == 1:
-        return municipality_names[0]
-
-    # Cero resultados o más de uno: no inventamos municipio.
     return None
 
-def resolve_municipality(
+
+def resolve_nearest_population(
     latitude: float,
     longitude: float,
     *,
     endpoint: str | None = None,
     timeout_seconds: float | None = None,
-) -> str | None:
-    """Resuelve el municipio mediante la API oficial de unidades administrativas IGN.
+    max_radius_km: float | None = None,
+) -> dict[str, Any] | None:
+    """Devuelve el núcleo de población IGN/INE más cercano a una coordenada.
 
     Uso:
-        municipality = resolve_municipality(42.4407, -0.7678)
+        result = resolve_nearest_population(42.4407, -0.7678)
+        # {"name": "...", "distance_km": 3.2, ...}
 
     Parámetros:
-        latitude, longitude: coordenadas WGS84.
-        endpoint: endpoint alternativo, principalmente para pruebas.
-        timeout_seconds: timeout máximo de la consulta HTTP.
+        latitude, longitude: coordenadas WGS84 del evento.
+        endpoint: endpoint alternativo para pruebas.
+        timeout_seconds: timeout HTTP; por defecto 2.5 s.
+        max_radius_km: distancia máxima para considerar una población cercana;
+            por defecto 30 km.
 
     Funcionalidad y seguridad:
-        - Es exclusivamente best-effort y devuelve ``None`` ante cualquier fallo.
-        - No altera filtros, deduplicación, severidad ni estado del evento.
-        - No sustituye las coordenadas; únicamente añade una etiqueta humana.
-        - Usa el servicio oficial OGC API-Features del IGN, que devuelve las
-          unidades administrativas que intersectan un pequeño bbox alrededor del
-          punto; después se confirma localmente point-in-polygon.
-        - Puede desactivarse completamente con ``EMERGENCIAS_GEO_MUNICIPALITY_ENABLED=0``.
+        La función es best-effort. No modifica ningún Event y devuelve ``None``
+        ante cualquier fallo. Puede desactivarse con
+        ``EMERGENCIAS_GEO_POPULATION_ENABLED=0``. El endpoint y límites pueden
+        ajustarse mediante variables de entorno sin alterar configuración previa.
     """
-    enabled = str(os.getenv("EMERGENCIAS_GEO_MUNICIPALITY_ENABLED", "1") or "1").strip().casefold()
+    enabled = str(os.getenv("EMERGENCIAS_GEO_POPULATION_ENABLED", "1") or "1").strip().casefold()
     if enabled not in {"1", "true", "yes", "on", "si", "sí", "y"}:
         return None
 
@@ -428,24 +441,39 @@ def resolve_municipality(
     if coordinates is None:
         return None
     lat, lon = coordinates
-    service = str(endpoint or os.getenv("EMERGENCIAS_GEO_MUNICIPALITY_ENDPOINT", IGN_ADMINISTRATIVE_UNIT_API)).strip()
+    service = str(
+        endpoint
+        or os.getenv("EMERGENCIAS_GEO_POPULATION_ENDPOINT", IGN_POPULATION_NUCLEI_API)
+    ).strip()
     if not service.lower().startswith("https://"):
         return None
+
     try:
         timeout = float(
             timeout_seconds
             if timeout_seconds is not None
-            else os.getenv("EMERGENCIAS_GEO_MUNICIPALITY_TIMEOUT_SEC", "2.5")
+            else os.getenv("EMERGENCIAS_GEO_POPULATION_TIMEOUT_SEC", "2.5")
         )
     except (TypeError, ValueError):
         timeout = 2.5
     timeout = max(0.25, min(10.0, timeout))
 
-    return _resolve_municipality_ign_cached(
-        round(lat, 4),
-        round(lon, 4),
+    try:
+        radius = float(
+            max_radius_km
+            if max_radius_km is not None
+            else os.getenv("EMERGENCIAS_GEO_POPULATION_MAX_RADIUS_KM", "30")
+        )
+    except (TypeError, ValueError):
+        radius = 30.0
+    radius = max(1.0, min(100.0, radius))
+
+    return _resolve_nearest_population_ign_cached(
+        round(lat, 5),
+        round(lon, 5),
         service,
         timeout,
+        radius,
     )
 
 
@@ -467,10 +495,9 @@ def enrich_event_province(
         - Solo actúa si existen latitud y longitud.
         - Añade metadata de auditoría cuando la resolución es satisfactoria.
         - Mantiene ``raw_hash`` intacto deliberadamente: la provincia es un dato
-          derivado local y no debe provocar una falsa notificación ``updated``
-          cuando el contenido original de la fuente no ha cambiado.
+          derivado local y no debe provocar una falsa notificación ``updated``.
         - Ante ausencia/corrupción de cartografía devuelve False y deja el Event
-          exactamente como estaba, preservando el filtrado por radio existente.
+          exactamente como estaba.
     """
     if event.province or event.latitude is None or event.longitude is None:
         return False
@@ -484,26 +511,40 @@ def enrich_event_province(
 
 
 def enrich_event_municipality(event: Event) -> bool:
-    """Añade municipio a un Event ya aceptado que dispone de coordenadas.
+    """Compatibilidad v7.0.52: añade referencia de población cercana a metadata.
 
     Uso:
         changed = enrich_event_municipality(event)
 
     Parámetros:
-        event: evento ya normalizado y, en v7.0.52, normalmente ya filtrado.
+        event: evento FIRMS ya aceptado que dispone de coordenadas.
 
     Funcionalidad:
-        - No toca eventos que ya aportan municipio.
-        - Nunca cambia coordenadas, ``raw_hash`` ni campos de clasificación.
-        - Si el IGN no responde, devuelve False y el evento queda intacto.
-        - Registra en metadata que el municipio fue derivado de coordenadas.
+        El nombre de esta función se conserva para no alterar el flujo del motor
+        ya preparado en la primera iteración v7.0.52. Su comportamiento correcto
+        NO rellena ``event.municipality`` porque un núcleo cercano no implica que
+        el foco esté dentro de ese municipio. En su lugar guarda exclusivamente:
+        - ``nearest_population``
+        - ``nearest_population_distance_km``
+        - coordenadas/código/habitantes del núcleo cuando estén disponibles.
+
+        Si IGN falla, devuelve False y deja el evento intacto. No modifica
+        ``raw_hash``, coordenadas, severidad, estado ni campos de filtrado.
     """
-    if event.municipality or event.latitude is None or event.longitude is None:
+    if event.latitude is None or event.longitude is None:
         return False
-    municipality = resolve_municipality(event.latitude, event.longitude)
-    if not municipality:
+    if event.metadata.get("nearest_population"):
         return False
-    event.municipality = municipality
-    event.metadata["municipality_resolved_from_coordinates"] = True
-    event.metadata["municipality_resolution_method"] = "ign_api_features_administrativeunit"
+
+    result = resolve_nearest_population(event.latitude, event.longitude)
+    if not result:
+        return False
+
+    event.metadata["nearest_population"] = result["name"]
+    event.metadata["nearest_population_distance_km"] = round(float(result["distance_km"]), 2)
+    event.metadata["nearest_population_latitude"] = result.get("latitude")
+    event.metadata["nearest_population_longitude"] = result.get("longitude")
+    event.metadata["nearest_population_inhabitants"] = result.get("inhabitants")
+    event.metadata["nearest_population_codine"] = result.get("codine")
+    event.metadata["nearest_population_resolution_method"] = "ign_api_features_nuc_haversine"
     return True

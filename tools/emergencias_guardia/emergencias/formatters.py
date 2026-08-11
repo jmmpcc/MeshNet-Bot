@@ -81,8 +81,8 @@ def aprs_emergency_text(event: Event, max_chars: int = 67) -> str:
       - Conserva SIEMPRE al comienzo el estado operativo y el tipo de emergencia.
       - Usa ``FIN`` para estados terminales y ``CRIT`` para severidad crítica;
         el resto de emergencias publicables utiliza ``EMERG``.
-      - Para NASA FIRMS prioriza coordenadas y, desde v7.0.52, añade el municipio
-        resuelto por IGN cuando está disponible, sin sacrificar las coordenadas.
+      - Para NASA FIRMS prioriza coordenadas y, desde v7.0.52, puede añadir la
+        referencia ``CERCA <población>`` calculada desde núcleos IGN/INE.
       - Prioriza carretera/km, municipio y provincia para el resto de fuentes.
       - Convierte a ASCII seguro para APRS y nunca corta el tipo de emergencia.
     """
@@ -133,25 +133,28 @@ def aprs_emergency_text(event: Event, max_chars: int = 67) -> str:
 
 
 def _aprs_firms_text(event: Event, limit: int) -> str:
-    """Formatea una detección FIRMS con coordenadas y municipio prioritarios.
+    """Formatea FIRMS priorizando coordenadas y población cercana como referencia.
 
     Cómo se llama:
         ``aprs_emergency_text()`` delega aquí únicamente para
         ``source=nasa_firms`` y ``category=wildfire``.
 
     Parámetros:
-        event: evento FIRMS, individual o agrupado.
+        event: evento FIRMS individual o agrupado.
         limit: presupuesto de caracteres solicitado por el transporte.
 
     Funcionalidad:
         - Conserva siempre ``estado + INCENDIO SAT + coordenadas``.
-        - Si ``event.municipality`` existe, lo añade inmediatamente después de
-          las coordenadas. En 67 caracteres limita el nombre a 12 caracteres
-          para no desplazar toda la telemetría; en RF ampliado usa el nombre
-          completo y añade provincia cuando es distinta.
+        - Si ``metadata['nearest_population']`` existe, añade ``CERCA <nombre>``.
+          No usa ``event.municipality`` porque un núcleo cercano no implica que
+          el foco esté dentro de su término municipal.
+        - En APRS-IS clásico recorta la población por palabras completas para
+          evitar referencias parciales como ``Salinas de``.
+        - En RF ampliado añade también la distancia al núcleo y la provincia si
+          hay espacio.
         - Después incorpora DET, FRP, confianza, satélite y FRP total según el
-          espacio disponible.
-        - Si no hay municipio, el resultado es compatible con v7.0.51.
+          presupuesto disponible.
+        - Sin población cercana conserva el formato operativo v7.0.51.
     """
     status = str(event.status or "active").strip().lower()
     if status in APRS_TERMINAL_STATUSES:
@@ -173,16 +176,23 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
         except (TypeError, ValueError):
             pass
 
-    municipality = _aprs_ascii_text(event.municipality)
+    nearest_population = _aprs_ascii_text(event.metadata.get("nearest_population"))
+    nearest_distance = _metadata_float(event, "nearest_population_distance_km")
     province = _aprs_ascii_text(event.province)
-    if municipality:
+    if nearest_population:
         if limit <= 67:
-            candidates.append(municipality[:12].rstrip(" ,.;:-"))
+            # Se reserva el prefijo CERCA para no convertir una referencia
+            # geográfica en una afirmación administrativa incorrecta. El nombre
+            # se compacta por palabras completas para evitar textos incompletos.
+            available_name = _aprs_word_trim(nearest_population, 10)
+            candidates.append(f"CERCA {available_name}")
         else:
-            place = municipality
-            if province and province.casefold() != municipality.casefold():
-                place = f"{municipality},{province}"
-            candidates.append(place)
+            reference = f"CERCA {nearest_population}"
+            if province:
+                reference += f",{province}"
+            if nearest_distance is not None:
+                reference += f" {nearest_distance:g}km"
+            candidates.append(reference)
     elif province and limit > 67:
         candidates.append(province)
 
@@ -217,6 +227,45 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
         candidates.append(f"FRP TOT {frp_total:g}MW")
 
     return _aprs_join_candidates(mandatory, candidates, limit, separator=" ")
+
+
+def _aprs_word_trim(value: str, maximum: int) -> str:
+    """Compacta un nombre APRS sin dejar una palabra parcial o preposición final.
+
+    Uso:
+        compact = _aprs_word_trim("Salinas de Jaca", 10)
+
+    Parámetros:
+        value: texto ASCII ya normalizado.
+        maximum: número máximo de caracteres permitidos.
+
+    Funcionalidad:
+        Conserva tantas palabras completas como quepan. Si el último token es
+        una preposición/artículo corto sin término posterior (por ejemplo ``de``),
+        se elimina. Si la primera palabra supera el límite, se recorta como
+        último recurso para no perder completamente la referencia geográfica.
+    """
+    text = " ".join(str(value or "").split())
+    if not text or maximum <= 0:
+        return ""
+    if len(text) <= maximum:
+        return text
+
+    words = text.split()
+    selected: list[str] = []
+    for word in words:
+        candidate = " ".join(selected + [word])
+        if len(candidate) > maximum:
+            break
+        selected.append(word)
+
+    trailing_connectors = {"a", "al", "de", "del", "el", "la", "las", "los", "y"}
+    while len(selected) > 1 and selected[-1].casefold() in trailing_connectors:
+        selected.pop()
+
+    if selected:
+        return " ".join(selected)
+    return text[:maximum].rstrip(" ,.;:-")
 
 
 def _aprs_join_candidates(mandatory: str, candidates: list[str], limit: int, *, separator: str) -> str:
