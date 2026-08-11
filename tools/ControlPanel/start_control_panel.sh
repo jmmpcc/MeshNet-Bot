@@ -9,7 +9,14 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 
 cd "${SCRIPT_DIR}"
 
-CONFLICT_FILES=("web_admin.py" "control_panel.py" "aprs_category_matrix.py")
+# Conservamos la comprobación histórica y añadimos el módulo v7.0.50 únicamente
+# cuando está presente. Esto permite seguir usando/copiar el script en contextos
+# de diagnóstico mínimos sin convertir la ausencia del módulo en un falso error
+# de grep antes de la validación de Python.
+CONFLICT_FILES=("web_admin.py" "control_panel.py")
+if [[ -f "aprs_category_matrix.py" ]]; then
+    CONFLICT_FILES+=("aprs_category_matrix.py")
+fi
 if grep -nE '^(<<<<<<<|=======|>>>>>>>)' "${CONFLICT_FILES[@]}"; then
     echo >&2 "[control-panel] ERROR: hay marcadores de conflicto Git sin resolver."
     echo >&2 "[control-panel] Restaura o resuelve los archivos indicados antes de iniciar el panel."
