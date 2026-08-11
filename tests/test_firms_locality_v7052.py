@@ -188,6 +188,21 @@ class FirmsLocalityV7052Tests(unittest.TestCase):
         self.assertIn("CERCA Bailo,Huesca 7.42km", text_rf)
         self.assertIn("DET 42", text_rf)
 
+    def test_aprs_firms_real_population_name_uses_complete_words(self):
+        """El caso real Salinas de Jaca nunca queda como 'CERCA Salinas de'."""
+        event = make_event()
+        event.metadata["nearest_population"] = "Salinas de Jaca"
+        event.metadata["nearest_population_distance_km"] = 3.6
+
+        text_is = aprs_emergency_text(event, max_chars=67)
+        text_rf = aprs_emergency_text(event, max_chars=160)
+
+        self.assertLessEqual(len(text_is), 67)
+        self.assertIn("CERCA Salinas", text_is)
+        self.assertNotIn("CERCA Salinas de", text_is)
+        self.assertIn("DET 42", text_is)
+        self.assertIn("CERCA Salinas de Jaca,Huesca 3.6km", text_rf)
+
     def test_aprs_firms_without_population_keeps_v7051_shape(self):
         """Sin referencia cercana se mantiene el formato operativo v7.0.51."""
         event = make_event()
