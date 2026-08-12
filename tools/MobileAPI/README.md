@@ -1,4 +1,4 @@
-# MeshNet Mobile API v1 — fase A1
+# MeshNet Mobile API v1 — v7.0.54
 
 API REST independiente para `MeshNet-Mobile`.
 
@@ -6,11 +6,17 @@ API REST independiente para `MeshNet-Mobile`.
 
 Proporcionar un contrato estable y seguro para la aplicación Android sin modificar el comportamiento del ControlPanel ni del Web Admin existente.
 
-Esta fase es de **solo lectura**. No expone acciones `systemd`, escritura de `.env`, envío de mensajes ni cambios de configuración.
+La superficie actual continúa siendo de **solo lectura**. No expone acciones `systemd`, escritura de `.env`, envío de mensajes ni cambios de configuración.
 
 ## Puerto
 
-Por defecto se propone `8791`. El ControlPanel actual conserva su puerto y rutas sin cambios.
+Por defecto se utiliza `8791`. El ControlPanel conserva su puerto y rutas sin cambios.
+
+## Versión de MeshNet-Bot
+
+Desde v7.0.54 la API deja de estar anclada a la versión con la que fue creada. Si `MESHNET_BOT_VERSION` no está definida, detecta automáticamente el changelog numérico más reciente de `docs/`.
+
+`MESHNET_BOT_VERSION` sigue disponible como override explícito para despliegues especiales.
 
 ## Variables
 
@@ -24,7 +30,12 @@ Contenido mínimo:
 
 ```env
 MESHNET_MOBILE_API_TOKEN=GENERAR_UN_TOKEN_LARGO_Y_ALEATORIO
-MESHNET_BOT_VERSION=v7.0.49
+```
+
+Override opcional:
+
+```env
+MESHNET_BOT_VERSION=v7.0.54
 ```
 
 No subir `.env` al repositorio.
@@ -32,7 +43,7 @@ No subir `.env` al repositorio.
 ## Ejecución manual
 
 ```bash
-python3 -m uvicorn tools.MobileAPI.mobile_api:app --host 0.0.0.0 --port 8791
+python3 -m uvicorn tools.MobileAPI.mobile_api_v7054:app --host 0.0.0.0 --port 8791
 ```
 
 ## Comprobación desde el PC
@@ -45,11 +56,13 @@ Rutas protegidas:
 
 ```bash
 curl -H "Authorization: Bearer TU_TOKEN" http://IP_RASPBERRY:8791/api/v1/system/overview
+curl -H "Authorization: Bearer TU_TOKEN" http://IP_RASPBERRY:8791/api/v1/capabilities
 ```
 
-## Endpoints A1
+## Endpoints actuales
 
 - `GET /api/v1/health`
+- `GET /api/v1/capabilities`
 - `GET /api/v1/system/overview`
 - `GET /api/v1/services`
 - `GET /api/v1/messages`
@@ -57,9 +70,11 @@ curl -H "Authorization: Bearer TU_TOKEN" http://IP_RASPBERRY:8791/api/v1/system/
 - `GET /api/v1/nodes/meshcore`
 - `GET /api/v1/nodes/meshtastic`
 
-Los endpoints de nodos publican ya el contrato estable, pero en A1 devuelven `available=false`. No se inventan datos ni se enlaza todavía un proveedor hasta identificar y probar la fuente existente correcta.
+`/api/v1/capabilities` permite que la app Android descubra qué funciones están disponibles y no muestre controles de escritura contra servidores que aún sean de solo lectura.
 
-`POST /api/v1/messages/send` queda expresamente fuera de A1. Se incorporará después de validar esta primera superficie de lectura.
+Los endpoints de nodos conservan el contrato estable pero continúan con `available=false` hasta enlazar una fuente de datos existente y probada. No se inventan datos ni se duplica el estado de nodos.
+
+`POST /api/v1/messages/send` y el control de servicios permanecen desactivados hasta completar las fases de lectura y autenticación por permisos.
 
 ## Seguridad
 
