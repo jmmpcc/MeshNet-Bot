@@ -41,7 +41,39 @@ OFFICIAL_VERIFICATIONS = {"official", "confirmed_multi_source"}
 
 
 def route_event(event: Event, config: dict[str, Any]) -> str | None:
-    """Selecciona canal lógico sin rebajar la confianza de la información."""
+    """Selecciona el canal lógico preservando la confianza del evento.
+
+    Uso:
+        route = route_event(event, config)
+
+    Parámetros:
+        event:
+            Evento normalizado que se desea evaluar para propagación.
+        config:
+            Configuración completa de Emergencias.
+
+    Funcionalidad:
+        Mantiene intactos los filtros históricos por categoría, severidad,
+        vigencia y verificación oficial. NASA FIRMS constituye una excepción
+        controlada: sus eventos siguen siendo ``satellite_detection`` y nunca
+        se convierten en avisos oficiales, pero pueden entrar en la ruta
+        ``emergencias`` cuando el usuario los ha autorizado expresamente.
+
+        La autorización FIRMS se considera explícita cuando sucede cualquiera
+        de estas dos condiciones:
+
+        - ``notifications.allow_satellite_detection`` está activado, conservando
+          compatibilidad con la configuración histórica;
+        - existe la matriz de propagación y la combinación concreta
+          categoría/severidad del evento ha superado dicha matriz. El Control
+          Panel actual utiliza precisamente esta matriz, por lo que marcar
+          ``wildfire`` para la severidad FIRMS permite su propagación sin
+          introducir un segundo interruptor oculto.
+
+        Ninguna otra fuente ``satellite_detection`` obtiene este tratamiento.
+        DGT, IGN, AEMET y el resto de verificaciones conservan exactamente las
+        reglas anteriores.
+    """
     if not is_current(event):
         return None
     notifications = config["notifications"]
@@ -64,17 +96,32 @@ def route_event(event: Event, config: dict[str, Any]) -> str | None:
             minimum = propagation.get("minimum_severity", "low")
             if SEVERITY_RANK.get(event.severity, 0) < SEVERITY_RANK.get(minimum, 0):
                 return None
-    if (
-        event.verification == "satellite_detection"
-        and not notifications.get("allow_satellite_detection", False)
-    ):
+
+    is_firms_satellite = (
+        event.source == "nasa_firms"
+        and event.verification == "satellite_detection"
+    )
+    firms_satellite_allowed = is_firms_satellite and (
+        bool(notifications.get("allow_satellite_detection", False))
+        or matrix_enabled
+    )
+
+    # Conserva el bloqueo histórico para cualquier detección satelital que no
+    # sea FIRMS expresamente autorizada. No se rebaja su verificación a official.
+    if event.verification == "satellite_detection" and not firms_satellite_allowed:
         return None
+
     if event.category in WEATHER_CATEGORIES:
         return "meteo"
+
+    verification_allowed_for_emergency = (
+        event.verification in OFFICIAL_VERIFICATIONS
+        or firms_satellite_allowed
+    )
     if (
         event.category in SERIOUS_CATEGORIES
         and (matrix_enabled or SEVERITY_RANK.get(event.severity, 0) >= SEVERITY_RANK["high"])
-        and event.verification in OFFICIAL_VERIFICATIONS
+        and verification_allowed_for_emergency
     ):
         return "emergencias"
     if event.category in SERVICE_CATEGORIES:
