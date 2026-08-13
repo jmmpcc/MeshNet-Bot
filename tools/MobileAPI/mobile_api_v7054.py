@@ -100,6 +100,8 @@ def capabilities() -> dict[str, Any]:
             "services_read": True,
             "messages_audit_read": True,
             "emergencies_overview": True,
+            "emergencies_read": True,
+            "emergencies_coordinates": True,
             "meshcore_nodes": False,
             "meshtastic_nodes": False,
             "message_send": False,
