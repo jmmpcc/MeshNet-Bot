@@ -49,6 +49,7 @@ from tools.ControlPanel.web_admin import (
     probe,
 )
 from shared.delivery_audit import query_operations
+from tools.emergencias_guardia.emergencias.storage import load_current
 
 API_VERSION = os.getenv("MESHNET_MOBILE_API_VERSION", "1").strip() or "1"
 MESHNET_VERSION = os.getenv("MESHNET_BOT_VERSION", "v7.0.49").strip() or "v7.0.49"
@@ -249,6 +250,95 @@ def _emergencies_snapshot() -> dict[str, Any]:
     }
 
 
+def _emergency_events_snapshot(
+    *,
+    source: str = "",
+    severity: str = "",
+    status: str = "",
+    query: str = "",
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Devuelve incidencias actuales reutilizando ``load_current``.
+
+    Esta función es estrictamente de lectura: no recalcula fuentes, no modifica
+    ``current.json`` y no interviene en deduplicación, notificaciones ni envíos.
+    Los filtros se aplican únicamente sobre la instantánea ya persistida por el
+    motor de Emergencias.
+
+    Args:
+        source: identificador exacto de fuente; vacío incluye todas.
+        severity: severidad exacta (low/medium/high/critical); vacío incluye todas.
+        status: estado exacto del evento; vacío incluye todos.
+        query: búsqueda de texto sobre título, descripción, municipio, provincia,
+            carretera, identificador de evento y fuente.
+        limit: máximo de eventos devueltos, limitado por el endpoint FastAPI.
+    """
+    try:
+        events = list(load_current().values())
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail="No se pudieron leer las incidencias") from exc
+
+    source_value = source.strip().casefold()
+    severity_value = severity.strip().casefold()
+    status_value = status.strip().casefold()
+    query_value = query.strip().casefold()
+
+    def matches(event: Any) -> bool:
+        if source_value and str(event.source or "").strip().casefold() != source_value:
+            return False
+        if severity_value and str(event.severity or "").strip().casefold() != severity_value:
+            return False
+        if status_value and str(event.status or "").strip().casefold() != status_value:
+            return False
+        if query_value:
+            haystack = " ".join(
+                str(value or "")
+                for value in (
+                    event.event_id,
+                    event.source,
+                    event.title,
+                    event.description,
+                    event.road,
+                    event.municipality,
+                    event.province,
+                    event.autonomous_region,
+                )
+            ).casefold()
+            if query_value not in haystack:
+                return False
+        return True
+
+    filtered = [event for event in events if matches(event)]
+    filtered.sort(
+        key=lambda event: (
+            str(event.updated_at or event.last_seen or event.started_at or ""),
+            str(event.event_id or ""),
+        ),
+        reverse=True,
+    )
+
+    visible = filtered[:limit]
+    with_coordinates = sum(
+        1 for event in filtered if event.latitude is not None and event.longitude is not None
+    )
+    severity_summary = {
+        level: sum(1 for event in filtered if str(event.severity or "").casefold() == level)
+        for level in ("low", "medium", "high", "critical")
+    }
+
+    return {
+        "ok": True,
+        "events": [event.to_dict() for event in visible],
+        "summary": {
+            "total": len(filtered),
+            "with_coordinates": with_coordinates,
+            "severity": severity_summary,
+        },
+        "limit": limit,
+        "has_more": len(filtered) > limit,
+    }
+
+
 @app.get("/api/v1/health")
 def health() -> dict[str, Any]:
     """Endpoint público mínimo para detectar MeshNet Mobile API."""
@@ -313,6 +403,24 @@ def messages(
 def emergencies_overview() -> dict[str, Any]:
     """Resumen de Emergencias para tarjetas del Dashboard móvil."""
     return {"ok": True, **_emergencies_snapshot()}
+
+
+@app.get("/api/v1/emergencies")
+def emergencies(
+    source: str = "",
+    severity: str = "",
+    status: str = "",
+    q: str = "",
+    limit: int = Query(default=200, ge=1, le=500),
+) -> dict[str, Any]:
+    """Lista incidencias actuales para MeshNet-Mobile, siempre en solo lectura."""
+    return _emergency_events_snapshot(
+        source=source,
+        severity=severity,
+        status=status,
+        query=q,
+        limit=limit,
+    )
 
 
 def _nodes_placeholder(transport: str) -> dict[str, Any]:
