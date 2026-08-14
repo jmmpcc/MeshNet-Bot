@@ -13,14 +13,18 @@ import uvicorn
 try:
     import web_admin
     from aprs_category_matrix import apply_aprs_category_matrix
+    from emergency_province_view import apply_emergency_province_view
 except ModuleNotFoundError:
     from tools.ControlPanel import web_admin
     from tools.ControlPanel.aprs_category_matrix import apply_aprs_category_matrix
+    from tools.ControlPanel.emergency_province_view import apply_emergency_province_view
 
 
-# v7.0.50 amplía la app ya creada por web_admin en lugar de duplicar el servidor
-# o modificar sus rutas no relacionadas. La función es idempotente.
+# Las extensiones amplían la app ya creada por web_admin en lugar de duplicar el servidor
+# o modificar rutas no relacionadas. Ambas funciones son idempotentes y conservan intactas
+# las funciones históricas del Control Panel.
 app = apply_aprs_category_matrix(web_admin.app)
+app = apply_emergency_province_view(app)
 
 
 def main() -> None:
