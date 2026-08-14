@@ -14,17 +14,20 @@ try:
     import web_admin
     from aprs_category_matrix import apply_aprs_category_matrix
     from emergency_province_view import apply_emergency_province_view
+    from message_emergency_filters import apply_message_emergency_filters
 except ModuleNotFoundError:
     from tools.ControlPanel import web_admin
     from tools.ControlPanel.aprs_category_matrix import apply_aprs_category_matrix
     from tools.ControlPanel.emergency_province_view import apply_emergency_province_view
+    from tools.ControlPanel.message_emergency_filters import apply_message_emergency_filters
 
 
 # Las extensiones amplían la app ya creada por web_admin en lugar de duplicar el servidor
-# o modificar rutas no relacionadas. Ambas funciones son idempotentes y conservan intactas
-# las funciones históricas del Control Panel.
+# o modificar rutas no relacionadas. Todas son idempotentes y conservan intactas las
+# funciones históricas del Control Panel.
 app = apply_aprs_category_matrix(web_admin.app)
 app = apply_emergency_province_view(app)
+app = apply_message_emergency_filters(app)
 
 
 def main() -> None:
