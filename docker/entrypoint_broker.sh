@@ -23,9 +23,11 @@ if [[ -z "$BROKER_SCRIPT" ]]; then
   exit 2
 fi
 
-echo "[broker] Ejecutando: $BROKER_SCRIPT"
+echo "[broker] Ejecutando con Channel Gateway integrado: $BROKER_SCRIPT"
 
-exec python -u "$BROKER_SCRIPT" \
+# El launcher instala la pasarela interna de canales DENTRO del mismo proceso
+# del broker y después ejecuta el broker original sin modificar sus argumentos.
+exec python -u /app/source/Meshtastic_Broker_ChannelGateway.py "$BROKER_SCRIPT" \
   --host "${MESHTASTIC_HOST:-127.0.0.1}" \
   --bind "0.0.0.0" \
   --port "${BROKER_PORT:-8765}" \
