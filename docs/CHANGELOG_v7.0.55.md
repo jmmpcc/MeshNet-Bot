@@ -1,87 +1,122 @@
-# MeshNet-Bot v7.0.55 — Pasarela interna entre canales
+# MeshNet-Bot v7.0.55 — Pasarela interna de canales multi-radio
 
 Fecha: 2026-08-15
 
-## Estado
+## Alcance definitivo
 
-**BORRADOR EN DESARROLLO — NO FUSIONAR TODAVÍA.**
+La pasarela interna entre canales se diseña como funcionalidad del broker condicionada por `RADIO_PROFILE`, no como una característica exclusiva de Meshtastic.
 
-La primera iteración del PR implementó la pasarela únicamente para Meshtastic. La funcionalidad se amplía antes de fusionar para cubrir MeshCore y todos los perfiles de radio canónicos del proyecto.
+Perfiles contemplados:
 
-## Requisito funcional definitivo
+- `meshcore_only`: pasarela canal→canal dentro de MeshCore.
+- `meshtastic_a_meshcore_embedded_b`: nodo A Meshtastic y nodo B MeshCore embebido; reglas independientes para ambos motores.
+- `meshcore_a_meshtastic_embedded_b`: nodo A MeshCore y nodo B Meshtastic embebido; reglas independientes para ambos motores.
+- `legacy`: no se fuerza ninguna topología nueva ni se adivina un transporte.
 
-`Channel Gateway` debe permitir pasarelas entre canales del mismo motor de radio activo, sin asumir que el nodo principal sea Meshtastic.
+`source/radio_profile.py` es la autoridad para determinar capacidades, transporte principal, nodo A, nodo B y presencia de nodo embebido.
 
-Perfiles que deben cubrirse:
+## Reglas multi-radio
 
-- `meshcore_only`: nodo A MeshCore. La pasarela opera entre canales MeshCore.
-- `meshtastic_a_meshcore_embedded_b`: nodo A Meshtastic y nodo B MeshCore embebido. La pasarela puede operar sobre cualquiera de los dos motores existentes.
-- `meshcore_a_meshtastic_embedded_b`: nodo A MeshCore y nodo B Meshtastic embebido. La pasarela respeta esta distribución y utiliza el motor correspondiente.
-- `legacy`: se conserva el comportamiento actual sin forzar ningún transporte nuevo.
+Cada regla debe identificar explícitamente el transporte cuando el perfil tiene más de una radio disponible.
 
-El perfil se resuelve mediante `source/radio_profile.py`, que es la autoridad común del proyecto.
-
-## Modelo de reglas
-
-Las reglas continúan siendo direccionales. Una regla bidireccional son dos reglas independientes.
-
-Ejemplos conceptuales:
+Ejemplos:
 
 ```text
-Meshtastic CH0 -> Meshtastic CH2
-MeshCore    CH0 -> MeshCore    CH2
+meshtastic CH0 -> CH2
+meshcore    CH0 -> CH1
 ```
 
-En perfiles combinados las reglas deben identificar también el motor al que pertenecen para evitar ambigüedad entre índices de canal de Meshtastic y MeshCore.
+Una regla incompatible con el perfil activo se conserva en persistencia pero no debe activarse ni abrir conexiones adicionales.
 
-## Integración segura
+## Ayuda contextual del comando
 
-- La funcionalidad pertenece al broker.
-- No se abre una segunda conexión Meshtastic.
-- No se abre una segunda conexión MeshCore.
-- Meshtastic reutiliza `meshtastic.receive` y la `SENDQ` del broker.
-- MeshCore reutiliza el motor embebido ya existente: recepción `CHANNEL_MSG_RECV` y transmisión `send_chan_msg(channel_idx, text)`.
-- Una regla incompatible con el perfil activo se conserva pero queda inactiva; nunca debe provocar una conexión adicional.
-- Se mantienen deduplicación, anti-eco y rate-limit diferenciados por transporte/canal.
-- Las TX internas no deben disparar involuntariamente las pasarelas externas A/B/C.
-
-## Control desde Telegram
-
-Se mantiene el objetivo de control en caliente mediante:
+El comando sin parámetros:
 
 ```text
 /channel_gateway
+```
+
+muestra únicamente la sintaxis válida para el `RADIO_PROFILE` activo.
+
+Reglas de uso:
+
+- Si el perfil solo permite un transporte, como `meshcore_only`, el transporte puede omitirse:
+
+```text
+/channel_gateway add 0 2
+/channel_gateway del 0 2
+```
+
+También se admite la forma explícita:
+
+```text
+/channel_gateway add meshcore 0 2
+```
+
+- Si el perfil es combinado, es obligatorio indicar el transporte para evitar ambigüedad:
+
+```text
+/channel_gateway add meshtastic 0 2
+/channel_gateway add meshcore 0 2
+```
+
+- Un transporte no permitido por el perfil se rechaza antes de enviar ninguna orden al broker.
+- En modo `legacy` o perfil no resoluble no se crean ni eliminan reglas ambiguas.
+- La ayuda muestra también qué transporte corresponde al nodo A y cuál al nodo B embebido.
+
+## Integración técnica prevista
+
+- Meshtastic: reutiliza `meshtastic.receive` y la `SENDQ` existente del broker.
+- MeshCore: reutiliza el motor embebido existente, `CHANNEL_MSG_RECV` y `send_chan_msg(channel_idx, text)`.
+- No se abre una segunda conexión Meshtastic ni MeshCore.
+- Deduplicación, anti-eco y rate-limit se separan por transporte y canal.
+- Las TX internas no deben disparar involuntariamente los bridges externos A/B/C.
+
+## Control desde Telegram
+
+Sintaxis prevista:
+
+```text
+/channel_gateway
+/channel_gateway help
+/channel_gateway status
 /channel_gateway list
 /channel_gateway on
 /channel_gateway off
-/channel_gateway add ...
-/channel_gateway del ...
+/channel_gateway add [transporte] <origen> <destino> [both]
+/channel_gateway del [transporte] <origen> <destino> [both]
 /channel_gateway clear
 ```
 
-La sintaxis final de `add/del` se ampliará para poder seleccionar explícitamente `meshtastic` o `meshcore` cuando el perfil combinado tenga ambos motores activos.
+Alias:
+
+```text
+/pasarela_canales
+```
+
+La consulta y la ayuda son de solo lectura. La activación, desactivación y modificación de reglas requieren un usuario incluido en `ADMIN_IDS`.
 
 ## Persistencia
 
-El estado se conserva en:
+El estado y las reglas se guardan de forma atómica en:
 
 ```text
 ${BOT_DATA_DIR}/channel_gateway.json
 ```
 
-La persistencia debe incluir transporte, canal origen, canal destino y estado de cada regla.
+Los cambios realizados desde el bot sobreviven a reinicios.
 
-## Validación obligatoria antes de fusionar
+## Validación requerida antes del merge
 
-La fase no se considerará terminada hasta validar como mínimo:
+1. Meshtastic CHx→CHy.
+2. Meshtastic CHx↔CHy sin ping-pong.
+3. MeshCore CHx→CHy.
+4. MeshCore CHx↔CHy sin ping-pong.
+5. `meshcore_only` sin inicializar Meshtastic.
+6. Ambos perfiles combinados con reglas independientes por motor.
+7. Gateway OFF conserva comportamiento anterior.
+8. Persistencia y restauración tras reinicio.
+9. Control administrativo desde Telegram.
+10. Ayuda contextual por perfil y rechazo de transportes inválidos.
 
-1. Meshtastic CHx -> CHy unidireccional.
-2. Meshtastic CHx <-> CHy sin ping-pong.
-3. MeshCore CHx -> CHy unidireccional.
-4. MeshCore CHx <-> CHy sin ping-pong.
-5. `meshcore_only` sin intentar inicializar Meshtastic.
-6. `meshtastic_a_meshcore_embedded_b` con ambos motores y reglas separadas.
-7. `meshcore_a_meshtastic_embedded_b` con ambos motores y reglas separadas.
-8. Gateway OFF = comportamiento idéntico al anterior.
-9. Persistencia y restauración tras reinicio.
-10. Comandos administrativos del bot y consulta de estado.
+La primera iteración Meshtastic del PR permanece en Draft hasta completar el soporte multi-radio y toda esta matriz de pruebas.
