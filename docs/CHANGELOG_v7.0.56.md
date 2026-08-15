@@ -17,6 +17,15 @@ La v7.0.55 introdujo la interfaz y el control del Channel Gateway, pero el backe
 - Deduplicación, anti-eco y rate-limit quedan separados por transporte.
 - El estado informa de reglas activas/inactivas para el perfil actual.
 
+## Correcciones de revisión de regresión
+
+Durante la revisión previa al merge se detectaron y corrigieron dos defectos contenidos únicamente en `source/channel_gateway.py`:
+
+1. El callback registrado sobre `CHANNEL_MSG_RECV` es ahora `async def`, manteniendo el mismo contrato de callbacks que utiliza el motor MeshCore existente del broker.
+2. `enqueue_send_channel()` solo se considera correcto cuando devuelve un `tx_id` válido. Un retorno `None` o `False` se contabiliza como error y nunca incrementa las estadísticas de mensajes reenviados.
+
+Estas correcciones no modifican `Meshtastic_Broker.py`, `Telegram_Bot_Broker.py`, `radio_profile.py` ni ningún otro subsistema estable.
+
 ## Perfiles
 
 ### meshcore_only
@@ -60,7 +69,7 @@ En perfiles combinados:
 /channel_gateway add meshcore 0 2 both
 ```
 
-El bot ya valida la sintaxis contra `RADIO_PROFILE` antes de llamar al broker.
+El bot valida la sintaxis contra `RADIO_PROFILE` antes de llamar al broker y el backend vuelve a validarla antes de modificar reglas.
 
 ## Protecciones
 
@@ -72,6 +81,8 @@ El bot ya valida la sintaxis contra `RADIO_PROFILE` antes de llamar al broker.
 - DM Meshtastic excluidos por defecto.
 - `no_bridge=True` en TX Meshtastic internas salvo habilitación explícita.
 - Reglas incompatibles con el perfil se conservan pero permanecen inactivas.
+- Callback MeshCore compatible con la API async existente.
+- Retorno `None` de `enqueue_send_channel()` tratado como fallo de TX.
 
 ## Pruebas añadidas/actualizadas
 
@@ -82,10 +93,12 @@ El bot ya valida la sintaxis contra `RADIO_PROFILE` antes de llamar al broker.
 3. anti-eco Meshtastic bidireccional;
 4. MeshCore CHx→CHy reutilizando `MESHCORE_ENGINE`;
 5. anti-eco MeshCore bidireccional;
-6. rechazo de Meshtastic en `meshcore_only`;
-7. coexistencia de reglas MeshCore/Meshtastic en perfil combinado;
-8. migración segura del estado v7.0.55;
-9. exclusión de DM Meshtastic;
-10. RPC con transporte y persistencia.
+6. retorno `None` de `enqueue_send_channel()` tratado como error;
+7. callback MeshCore registrado como corutina async;
+8. rechazo de Meshtastic en `meshcore_only`;
+9. coexistencia de reglas MeshCore/Meshtastic en perfil combinado;
+10. migración segura del estado v7.0.55;
+11. exclusión de DM Meshtastic;
+12. RPC con transporte y persistencia.
 
 Se conservan además las pruebas de ayuda contextual por perfil introducidas en v7.0.55.
