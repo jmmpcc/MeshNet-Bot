@@ -1,0 +1,160 @@
+"""Pruebas de la autenticación por sesiones de MeshNet Mobile API v7.0.58."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+from tools.MobileAPI.mobile_api_v7058 import app
+from tools.MobileAPI.mobile_auth import (
+    AuthIdentity,
+    authenticate_user,
+    hash_password,
+    issue_session,
+    refresh_session,
+    set_user,
+    verify_access_token,
+    verify_password,
+)
+
+
+def _auth_environment(tmp_path: Path) -> dict[str, str]:
+    """Construye rutas aisladas para que las pruebas nunca usen credenciales reales."""
+    return {
+        "MESHNET_MOBILE_API_TOKEN": "legacy-test-token",
+        "MESHNET_MOBILE_AUTH_USERS_FILE": str(tmp_path / "mobile_users.json"),
+        "MESHNET_MOBILE_AUTH_DB": str(tmp_path / "mobile_auth.db"),
+    }
+
+
+def test_password_hash_is_salted_and_verifiable() -> None:
+    """scrypt debe verificar la clave correcta sin guardar el texto original."""
+    first = hash_password("Clave-de-prueba-2026")
+    second = hash_password("Clave-de-prueba-2026")
+
+    assert first["algorithm"] == "scrypt"
+    assert first["hash"] != second["hash"]
+    assert first["salt"] != second["salt"]
+    assert "Clave-de-prueba-2026" not in str(first)
+    assert verify_password("Clave-de-prueba-2026", first) is True
+    assert verify_password("incorrecta", first) is False
+
+
+def test_user_store_authenticates_without_plaintext_password(tmp_path: Path) -> None:
+    """El almacén local debe devolver identidad y no incluir la contraseña en claro."""
+    environment = _auth_environment(tmp_path)
+    with patch.dict(os.environ, environment, clear=False):
+        set_user("operador", "Secreta-1234", role="operator")
+        identity = authenticate_user("operador", "Secreta-1234")
+        file_content = Path(environment["MESHNET_MOBILE_AUTH_USERS_FILE"]).read_text(encoding="utf-8")
+
+    assert identity == AuthIdentity(username="operador", role="operator")
+    assert "Secreta-1234" not in file_content
+
+
+def test_login_session_can_use_existing_protected_endpoint(tmp_path: Path) -> None:
+    """Un access token nuevo debe atravesar la API histórica sin cambiar /capabilities."""
+    environment = _auth_environment(tmp_path)
+    with patch.dict(os.environ, environment, clear=False):
+        set_user("jmmol", "Prueba-Segura-2026", role="viewer")
+        client = TestClient(app)
+
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"username": "jmmol", "password": "Prueba-Segura-2026"},
+        )
+        assert login.status_code == 200
+        login_data = login.json()
+        access_token = login_data["access_token"]
+
+        capabilities = client.get(
+            "/api/v1/capabilities",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    assert login_data["ok"] is True
+    assert login_data["username"] == "jmmol"
+    assert login_data["role"] == "viewer"
+    assert login_data["token_type"] == "bearer"
+    assert capabilities.status_code == 200
+    assert capabilities.json()["mode"] == "read_only"
+
+
+def test_legacy_bearer_remains_valid_in_v7058(tmp_path: Path) -> None:
+    """La nueva capa no debe romper el token fijo utilizado por clientes actuales."""
+    environment = _auth_environment(tmp_path)
+    with patch.dict(os.environ, environment, clear=False):
+        client = TestClient(app)
+        response = client.get(
+            "/api/v1/capabilities",
+            headers={"Authorization": "Bearer legacy-test-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+
+def test_invalid_login_does_not_issue_tokens(tmp_path: Path) -> None:
+    """Usuario/contraseña erróneos deben producir 401 sin distinguir el motivo."""
+    environment = _auth_environment(tmp_path)
+    with patch.dict(os.environ, environment, clear=False):
+        set_user("jmmol", "Correcta-2026")
+        client = TestClient(app)
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"username": "jmmol", "password": "incorrecta"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Usuario o contraseña no válidos"
+
+
+def test_refresh_rotates_previous_family(tmp_path: Path) -> None:
+    """Un refresh utilizado debe invalidar access y refresh de la familia anterior."""
+    environment = _auth_environment(tmp_path)
+    with patch.dict(os.environ, environment, clear=False):
+        original = issue_session(AuthIdentity(username="jmmol", role="viewer"))
+        refreshed = refresh_session(original["refresh_token"])
+
+        assert refreshed is not None
+        assert verify_access_token(original["access_token"]) is None
+        assert refresh_session(original["refresh_token"]) is None
+        assert verify_access_token(refreshed["access_token"]) == AuthIdentity(
+            username="jmmol",
+            role="viewer",
+        )
+
+
+def test_auth_me_and_logout_revoke_session(tmp_path: Path) -> None:
+    """/me identifica la sesión y logout deja de aceptar su access token."""
+    environment = _auth_environment(tmp_path)
+    with patch.dict(os.environ, environment, clear=False):
+        set_user("jmmol", "Prueba-Segura-2026", role="admin")
+        client = TestClient(app)
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"username": "jmmol", "password": "Prueba-Segura-2026"},
+        ).json()
+
+        me = client.get(
+            "/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {login['access_token']}"},
+        )
+        logout = client.post(
+            "/api/v1/auth/logout",
+            json={"token": login["refresh_token"]},
+        )
+        after_logout = client.get(
+            "/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {login['access_token']}"},
+        )
+
+    assert me.status_code == 200
+    assert me.json()["username"] == "jmmol"
+    assert me.json()["role"] == "admin"
+    assert logout.status_code == 200
+    assert logout.json()["revoked"] is True
+    assert after_logout.status_code == 401
