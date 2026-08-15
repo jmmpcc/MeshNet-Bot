@@ -120,14 +120,16 @@ jobs:
           # Código está en source/
           # Broker
           # El servicio email-to-mesh reutiliza la imagen del broker.
-          # Por tanto, cualquier cambio en email_to_mesh.py debe reconstruir
-          # obligatoriamente ghcr.io/.../meshnet-bot-broker.
-          if changed_match '^(source/)?(Meshtastic_Broker\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py)$'; then
+          # Channel Gateway se ejecuta dentro del broker; tanto su módulo como
+          # su entrypoint deben obligar a publicar una nueva imagen broker.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
             rebuild_broker=true
           fi
 
           # Bot
-          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py)$'; then
+          # El wrapper de comandos Channel Gateway y su entrypoint forman parte
+          # de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
             rebuild_bot=true
           fi
 
