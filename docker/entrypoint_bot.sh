@@ -4,7 +4,7 @@ set -euo pipefail
 BROKER_H="${BROKER_HOST:-127.0.0.1}"
 BROKER_P="${BROKER_PORT:-8765}"
 
-# ⬇️ segundos extra tras ver el puerto abierto (ajustable por env)
+# segundos extra tras ver el puerto abierto (ajustable por env)
 BOT_START_DELAY="${BOT_START_DELAY:-15}"
 
 export BROKER_H BROKER_P
@@ -28,9 +28,12 @@ done
 echo "[bot] Puerto del broker OK. Esperando ${BOT_START_DELAY}s para que termine de enlazar con el nodo…"
 sleep "${BOT_START_DELAY}"
 
-# --- AÑADIDO: asegurar permisos del directorio de datos del bot ---
+# Asegurar permisos del directorio de datos del bot
 mkdir -p /app/bot_data
 chmod 0777 /app/bot_data || true
 
-echo "[bot] ✅ Broker listo. Arrancando bot…"
-exec python -u /app/source/Telegram_Bot_Broker.py
+echo "[bot] Broker listo. Arrancando bot con control Channel Gateway…"
+
+# El wrapper añade /channel_gateway y /pasarela_canales sin modificar el
+# Telegram_Bot_Broker.py existente; después delega en su main() original.
+exec python -u /app/source/Telegram_Bot_ChannelGateway.py
