@@ -2,115 +2,86 @@
 
 Fecha: 2026-08-15
 
-## Nueva funcionalidad
+## Estado
 
-Se incorpora `Channel Gateway`, una pasarela configurable entre canales del mismo nodo Meshtastic gestionado por el broker.
+**BORRADOR EN DESARROLLO — NO FUSIONAR TODAVÍA.**
 
-Ejemplos:
+La primera iteración del PR implementó la pasarela únicamente para Meshtastic. La funcionalidad se amplía antes de fusionar para cubrir MeshCore y todos los perfiles de radio canónicos del proyecto.
+
+## Requisito funcional definitivo
+
+`Channel Gateway` debe permitir pasarelas entre canales del mismo motor de radio activo, sin asumir que el nodo principal sea Meshtastic.
+
+Perfiles que deben cubrirse:
+
+- `meshcore_only`: nodo A MeshCore. La pasarela opera entre canales MeshCore.
+- `meshtastic_a_meshcore_embedded_b`: nodo A Meshtastic y nodo B MeshCore embebido. La pasarela puede operar sobre cualquiera de los dos motores existentes.
+- `meshcore_a_meshtastic_embedded_b`: nodo A MeshCore y nodo B Meshtastic embebido. La pasarela respeta esta distribución y utiliza el motor correspondiente.
+- `legacy`: se conserva el comportamiento actual sin forzar ningún transporte nuevo.
+
+El perfil se resuelve mediante `source/radio_profile.py`, que es la autoridad común del proyecto.
+
+## Modelo de reglas
+
+Las reglas continúan siendo direccionales. Una regla bidireccional son dos reglas independientes.
+
+Ejemplos conceptuales:
 
 ```text
-CH0 -> CH2
-CH0 <-> CH2
-CH0 -> CH1, CH2, CH3
+Meshtastic CH0 -> Meshtastic CH2
+MeshCore    CH0 -> MeshCore    CH2
 ```
 
-La bidireccionalidad se representa internamente mediante dos reglas independientes, lo que permite activar o eliminar cada dirección sin ambigüedad.
+En perfiles combinados las reglas deben identificar también el motor al que pertenecen para evitar ambigüedad entre índices de canal de Meshtastic y MeshCore.
 
-## Integración segura en el broker
+## Integración segura
 
-La funcionalidad se ejecuta dentro del mismo proceso del broker mediante `Meshtastic_Broker_ChannelGateway.py` y `channel_gateway.py`.
-
-No se modifica `Meshtastic_Broker.py` ni se crea una segunda conexión al nodo. El gateway escucha los eventos `meshtastic.receive` y reutiliza preferentemente la cola `SENDQ` ya operativa del broker. Como fallback, reutiliza exclusivamente la misma interfaz recibida en el evento.
-
-Las transmisiones generadas por el gateway usan `origin=channel_gateway` y `no_bridge=True` por defecto para evitar que una pasarela interna active involuntariamente las pasarelas externas A/B/C existentes.
+- La funcionalidad pertenece al broker.
+- No se abre una segunda conexión Meshtastic.
+- No se abre una segunda conexión MeshCore.
+- Meshtastic reutiliza `meshtastic.receive` y la `SENDQ` del broker.
+- MeshCore reutiliza el motor embebido ya existente: recepción `CHANNEL_MSG_RECV` y transmisión `send_chan_msg(channel_idx, text)`.
+- Una regla incompatible con el perfil activo se conserva pero queda inactiva; nunca debe provocar una conexión adicional.
+- Se mantienen deduplicación, anti-eco y rate-limit diferenciados por transporte/canal.
+- Las TX internas no deben disparar involuntariamente las pasarelas externas A/B/C.
 
 ## Control desde Telegram
 
-Se añaden los comandos:
+Se mantiene el objetivo de control en caliente mediante:
 
 ```text
 /channel_gateway
 /channel_gateway list
 /channel_gateway on
 /channel_gateway off
-/channel_gateway add <origen> <destino>
-/channel_gateway add <origen> <destino> both
-/channel_gateway del <origen> <destino>
-/channel_gateway del <origen> <destino> both
+/channel_gateway add ...
+/channel_gateway del ...
 /channel_gateway clear
 ```
 
-También se admite el alias:
-
-```text
-/pasarela_canales
-```
-
-La consulta de estado es de solo lectura. La activación, desactivación y modificación de reglas requieren un usuario incluido en `ADMIN_IDS`.
-
-`Telegram_Bot_Broker.py` permanece sin modificaciones: `Telegram_Bot_ChannelGateway.py` añade los handlers y delega en el bot existente.
+La sintaxis final de `add/del` se ampliará para poder seleccionar explícitamente `meshtastic` o `meshcore` cuando el perfil combinado tenga ambos motores activos.
 
 ## Persistencia
 
-El estado y las reglas se guardan de forma atómica en:
+El estado se conserva en:
 
 ```text
 ${BOT_DATA_DIR}/channel_gateway.json
 ```
 
-Los cambios realizados desde el bot sobreviven a reinicios.
+La persistencia debe incluir transporte, canal origen, canal destino y estado de cada regla.
 
-Si todavía no existe estado persistente, se puede definir una configuración inicial mediante:
+## Validación obligatoria antes de fusionar
 
-```env
-CHANNEL_GATEWAY_ENABLED=0
-CHANNEL_GATEWAY_MAP=
-```
+La fase no se considerará terminada hasta validar como mínimo:
 
-Ejemplo:
-
-```env
-CHANNEL_GATEWAY_ENABLED=1
-CHANNEL_GATEWAY_MAP=0:2,2:0
-```
-
-## Protecciones
-
-La implementación incorpora:
-
-- procesamiento exclusivo de `TEXT_MESSAGE_APP`;
-- mensajes directos excluidos por defecto para no trasladar conversaciones privadas entre canales;
-- deduplicación de recepción;
-- anti-eco específico para transmisiones recientes del gateway;
-- detección del identificador del nodo local cuando está disponible;
-- rate-limit independiente por regla;
-- aislamiento respecto al bridge externo;
-- persistencia atómica;
-- estadísticas de tráfico, duplicados, ecos bloqueados, rate-limit y errores;
-- servidor de control JSONL interno en `BROKER_CTRL_PORT + 1` (`8767` por defecto), con token compartido opcional.
-
-## Compatibilidad
-
-Con `Channel Gateway` desactivado no se genera ninguna retransmisión adicional y las funciones existentes del broker y del bot conservan su comportamiento.
-
-Los entrypoints únicamente cargan las extensiones y después ejecutan el broker y el bot originales.
-
-## Validación
-
-Se incorporan pruebas unitarias para:
-
-- parser de reglas;
-- reenvío a través de la `SENDQ` del broker;
-- prevención de ping-pong en reglas bidireccionales;
-- exclusión de mensajes directos;
-- persistencia de configuración;
-- comandos de control runtime.
-
-La validación local de la implementación ha completado correctamente:
-
-```text
-python -m pytest -q tests/test_channel_gateway.py
-5 passed
-```
-
-También se verificó la compilación Python de los cuatro módulos nuevos y la sintaxis Bash de ambos entrypoints modificados.
+1. Meshtastic CHx -> CHy unidireccional.
+2. Meshtastic CHx <-> CHy sin ping-pong.
+3. MeshCore CHx -> CHy unidireccional.
+4. MeshCore CHx <-> CHy sin ping-pong.
+5. `meshcore_only` sin intentar inicializar Meshtastic.
+6. `meshtastic_a_meshcore_embedded_b` con ambos motores y reglas separadas.
+7. `meshcore_a_meshtastic_embedded_b` con ambos motores y reglas separadas.
+8. Gateway OFF = comportamiento idéntico al anterior.
+9. Persistencia y restauración tras reinicio.
+10. Comandos administrativos del bot y consulta de estado.
