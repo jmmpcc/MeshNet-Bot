@@ -17,7 +17,9 @@ La función permanece desactivable en caliente desde el bot, no crea conexiones 
 ### MeshCore
 
 - RX: suscripción adicional a `CHANNEL_MSG_RECV` sobre la sesión `_meshcore` ya abierta por `MESHCORE_ENGINE`.
+- El callback registrado es `async def`, igual que los callbacks MeshCore que ya utiliza el broker.
 - TX: `MESHCORE_ENGINE.enqueue_send_channel(channel_idx, text)`.
+- La TX solo se considera aceptada si `enqueue_send_channel()` devuelve un `tx_id` válido; `None` o `False` se tratan como error.
 - No se ejecuta `MeshCore.create_tcp`, `create_serial` ni `create_ble` desde Channel Gateway.
 
 ## Perfiles soportados
@@ -161,6 +163,8 @@ CHANNEL_GATEWAY_STATE_FILE=
 - Rate-limit por `(transport, source, destination)`.
 - DM Meshtastic excluidos por defecto.
 - TX internas Meshtastic marcadas `no_bridge=True` salvo configuración contraria.
+- Callback MeshCore compatible con la API async existente.
+- Un retorno `None`/`False` del encolado MeshCore nunca se contabiliza como reenvío correcto.
 - Ninguna conexión de radio adicional.
 
 ## Prueba funcional
