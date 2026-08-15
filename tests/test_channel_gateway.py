@@ -163,7 +163,6 @@ def test_meshcore_forward_reuses_embedded_engine_and_suppresses_echo(
         ) == 1
         assert engine.sent == [(2, "Prueba MC")]
 
-        # Eco de la TX del gateway en CH2: no debe activar 2 -> 0.
         assert mgr.handle_meshcore_message(
             {
                 "channel_idx": 2,
@@ -181,7 +180,6 @@ def test_meshcore_forward_reuses_embedded_engine_and_suppresses_echo(
 
 
 def test_meshcore_none_tx_id_is_error_not_success(tmp_path, monkeypatch):
-    """Un enqueue MeshCore que devuelve None no puede contarse como enviado."""
     _set_profile(monkeypatch, "meshcore_only")
     mgr = cg.ChannelGatewayManager(tmp_path / "state.json")
     mgr.set_enabled(True)
@@ -212,7 +210,6 @@ def test_meshcore_none_tx_id_is_error_not_success(tmp_path, monkeypatch):
 
 
 def test_meshcore_binder_registers_async_callback(tmp_path, monkeypatch):
-    """El callback debe respetar el contrato async de la API MeshCore actual."""
     _set_profile(monkeypatch, "meshcore_only")
     mgr = cg.ChannelGatewayManager(tmp_path / "state.json")
     session = FakeMeshCoreSession()
@@ -233,7 +230,6 @@ def test_meshcore_binder_registers_async_callback(tmp_path, monkeypatch):
         assert event_type is FakeEventType.CHANNEL_MSG_RECV
         assert inspect.iscoroutinefunction(callback)
 
-        # El callback async puede ejecutarse sin modificar el motor estable.
         asyncio.run(
             callback(
                 {
