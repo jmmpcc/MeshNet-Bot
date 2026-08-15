@@ -8,3 +8,8 @@ leer_marca_whitespace.py
 env*
 
 __pycache__/
+
+# MeshNet Mobile API authentication material (local only)
+tools/MobileAPI/data/mobile_users.json
+tools/MobileAPI/data/mobile_auth.db
+tools/MobileAPI/data/mobile_auth.db-*
