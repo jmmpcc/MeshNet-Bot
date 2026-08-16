@@ -28,7 +28,8 @@ def build_emergency_snapshot(events: Iterable[Any]) -> dict[str, Any]:
     La función no modifica los eventos recibidos. Sólo expone los campos necesarios
     para Lista y Mapa, manteniendo ``current.json`` como única fuente de verdad.
     ``category`` se conserva con el código original del backend para no duplicar ni
-    reinterpretar la taxonomía de Emergencias.
+    reinterpretar la taxonomía de Emergencias. ``started_at`` conserva la fecha/hora
+    propia del evento; ``updated_at`` sigue disponible como respaldo y para ordenación.
     """
     rows: list[dict[str, Any]] = []
     provinces: set[str] = set()
@@ -56,6 +57,7 @@ def build_emergency_snapshot(events: Iterable[Any]) -> dict[str, Any]:
             "kilometre": getattr(event, "kilometre", None),
             "latitude": getattr(event, "latitude", None),
             "longitude": getattr(event, "longitude", None),
+            "started_at": str(getattr(event, "started_at", "") or ""),
             "updated_at": str(
                 getattr(event, "updated_at", "")
                 or getattr(event, "last_seen", "")
@@ -146,11 +148,31 @@ def _extension_script() -> str:
       lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
   }
 
+  /**
+   * Formatea la fecha/hora de la incidencia para Lista y Mapa.
+   *
+   * Se prioriza ``started_at`` porque representa el comienzo publicado por la fuente.
+   * Si no existe, se utiliza ``updated_at`` para no perder información en fuentes que
+   * sólo facilitan una marca temporal de actualización. Los valores no parseables se
+   * muestran literalmente en vez de ocultarlos.
+   */
+  function emergencyDateTimePresentation(event) {
+    const raw = String(event?.started_at || event?.updated_at || '').trim();
+    if (!raw) return '';
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    return new Intl.DateTimeFormat('es-ES', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).format(parsed);
+  }
+
   /** HTML compartido por la tarjeta de Lista y el popup del Mapa. */
   function emergencyEventSummaryHtml(event, compact = false) {
     const place = [event.municipality, event.province].filter(Boolean).filter((v,i,a) => a.indexOf(v) === i).join(' · ');
     const road = event.road ? `${event.road}${event.kilometre != null ? ` · km ${event.kilometre}` : ''}` : '';
     const category = categoryPresentation(event.category);
+    const dateTime = emergencyDateTimePresentation(event);
     const coords = validCoordinates(event)
       ? `<a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(event.latitude + ',' + event.longitude)}" target="_blank" rel="noopener noreferrer">📍 ${escLocal(Number(event.latitude).toFixed(5))}, ${escLocal(Number(event.longitude).toFixed(5))} · Google Maps</a>`
       : '';
@@ -159,6 +181,7 @@ def _extension_script() -> str:
       <strong>${escLocal(category.icon)} ${escLocal(category.label)}</strong>
       <div style="margin-top:3px"><strong>${escLocal(event.title || 'Incidencia')}</strong></div>
       <div class="hint">${escLocal(place || 'Provincia no indicada')} · ${escLocal(severityLabel(event.severity))} · ${escLocal(event.status || 'sin estado')}</div>
+      ${dateTime ? `<div class="hint"><strong>Fecha / hora:</strong> ${escLocal(dateTime)}</div>` : ''}
       ${road ? `<div class="hint">${escLocal(road)}</div>` : ''}
       ${description}
       ${coords ? `<div style="margin-top:5px">${coords}</div>` : ''}
