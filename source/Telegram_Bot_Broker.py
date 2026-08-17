@@ -6571,6 +6571,7 @@ async def set_bot_menu(app: Application) -> None:
           
      
         BotCommand("en", "<minutos|m1,m2,...> <destino[:canal] | canal N> <texto…> Programar envío en +minutos"),
+        BotCommand("en_mc", "<minutos|m1,m2,...> <chX|X|canal X> <texto…> Programar MeshCore en +minutos"),
         BotCommand("manana", "<HH:MM> <destino[:canal] | canal N> <texto…> Programar envío mañana a HH:MM"),
         BotCommand("tareas", "Listar tareas programadas /tareas [pending|done|failed|canceled]"),
         BotCommand("cancelar_tarea", "Cancelar tarea por ID"),
@@ -6949,7 +6950,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     s_diario_mc = (
         "────────────────────────────────────────────────\n"
-        "<b>Programación diaria MeshCore</b>\n"
+        "<b>Programación MeshCore</b>\n"
+        "• <code>/en_mc &lt;minutos|m1,m2,...&gt; &lt;chX|X|canal X&gt; &lt;texto&gt;</code> — Programa uno o varios envíos puntuales MeshCore en +minutos.\n"
         "• <code>/diario_mc &lt;HH:MM[,HH:MM...]&gt; [mesh|aprs|ambos] [grupo &lt;id&gt;] canal &lt;channel_idx&gt; [aprs &lt;CALL|broadcast&gt;] &lt;texto&gt;</code> — Diario a MeshCore, APRS o ambos.\n"
         "• <code>/diario_mc_dm &lt;HH:MM[,HH:MM...]&gt; [grupo &lt;id&gt;] &lt;contact_prefix|[MC:prefix]&gt; &lt;texto&gt;</code> — Diario directo MeshCore.\n"
         "Ej.: <code>/diario_mc 09:00 mesh grupo avisos_mc canal 2 Parte diario MeshCore</code>\n"
@@ -13955,6 +13957,148 @@ async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
        await _safe_reply_html(update.effective_message, "❌ No se pudo programar ningún envío.")
 
 # ==========================
+# /en_mc — Programar MeshCore en +minutos
+# ==========================
+
+async def en_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Programa uno o varios envíos MeshCore relativos en minutos.
+
+    Uso:
+        /en_mc <minutos|m1,m2,...> <chX|X|canal X> <texto...>
+
+    Ejemplos:
+        /en_mc 15 ch1 Recordatorio por MeshCore
+        /en_mc 5,10 canal 2 Aviso repetido
+        /en_mc 30 0 Parte de situación
+
+    Parámetros:
+        update:
+            Actualización Telegram que contiene el comando y el chat de origen.
+        context:
+            Contexto PTB. ``context.args`` contiene minutos, destino y texto.
+
+    Funcionalidad:
+        - Reutiliza ``_parse_minutes_list`` para mantener la misma semántica que
+          ``/en`` sin modificar el comando Meshtastic existente.
+        - Reutiliza ``_parse_mc_channel_token`` para aceptar ``chX``, ``X`` o
+          ``canal X``, igual que ``/enviar_mc`` y ``/diario_mc``.
+        - Reutiliza ``broker_tasks.schedule_message``; no crea un scheduler nuevo.
+        - Persiste la tarea con ``transport=meshcore``,
+          ``meshcore_mode=channel`` y ``meshcore_channel_idx`` para que
+          ``broker_task`` la envíe directamente por MESHCORE_SEND.
+        - No depende de Meshtastic ni de ``MESHCORE_CHANNEL_MAP``.
+        - Conserva chat/reply_to para las notificaciones de ejecución existentes.
+    """
+    if await _abort_if_cooldown(update, context):
+        return ConversationHandler.END
+
+    try:
+        bump_stat(update.effective_user.id, update.effective_user.username or "", "en_mc")
+    except Exception:
+        pass
+
+    args = [str(a).strip() for a in (context.args or []) if str(a).strip()]
+    if len(args) < 3:
+        await update.effective_message.reply_text(
+            "Uso: /en_mc <minutos|m1,m2,...> <chX|X|canal X> <texto...>\n"
+            "Ejemplos:\n"
+            "  /en_mc 15 ch1 Recordatorio por MeshCore\n"
+            "  /en_mc 5,10 canal 2 Aviso repetido"
+        )
+        return
+
+    minutes_list = _parse_minutes_list(args[0])
+    if not minutes_list:
+        await update.effective_message.reply_text(
+            "Minutos no válidos. Usa un entero > 0 o una lista, por ejemplo: 5 o 5,10,25."
+        )
+        return
+
+    tail = args[1:]
+    channel_idx = None
+    text = ""
+
+    if len(tail) >= 3 and tail[0].lower() in ("canal", "channel"):
+        channel_idx = _parse_mc_channel_token(tail[1])
+        text = " ".join(tail[2:]).strip()
+    elif len(tail) >= 2:
+        channel_idx = _parse_mc_channel_token(tail[0])
+        text = " ".join(tail[1:]).strip()
+
+    if channel_idx is None or not text:
+        await update.effective_message.reply_text(
+            "Canal o texto no válidos. Usa chX, X o canal X.\n"
+            "Ejemplo: /en_mc 10 canal 2 Aviso MeshCore"
+        )
+        return
+
+    # El validador global limita el payload a BOT_MESH_MAX_BYTES (180 por
+    # defecto). No usamos los helpers locales de /en para mantener /en_mc
+    # independiente y evitar dependencias de alcance no global.
+    texto_norm = text.strip()
+    ok_len, err = _validate_len_or_block(texto_norm)
+    if not ok_len:
+        await update.effective_message.reply_text(err, parse_mode="HTML")
+        return
+
+    ids: list[str] = []
+    errors: list[str] = []
+
+    for mins in minutes_list:
+        when_local_dt = datetime.now(TZ_EUROPE_MADRID) + timedelta(minutes=mins)
+        when_local_str = when_local_dt.strftime("%Y-%m-%d %H:%M")
+        meta = {
+            "scheduled_by": update.effective_user.username or str(update.effective_user.id),
+            # El payload ya ha sido validado <= BOT_MESH_MAX_BYTES: una parte.
+            "bot_est_parts": 1,
+            "via": "/en_mc",
+            "transport": "meshcore",
+            "meshcore_mode": "channel",
+            "meshcore_channel_idx": int(channel_idx),
+            "chat_id": update.effective_chat.id,
+            "reply_to": update.effective_message.message_id,
+        }
+
+        try:
+            res = broker_tasks.schedule_message(
+                when_local=when_local_str,
+                channel=int(channel_idx),
+                message=texto_norm,
+                destination="meshcore:channel",
+                require_ack=False,
+                meta=meta,
+            )
+            if isinstance(res, dict) and res.get("ok"):
+                ids.append(str((res.get("task") or {}).get("id", "?")))
+            else:
+                errors.append(f"{mins}min")
+        except Exception as exc:
+            errors.append(f"{mins}min:{type(exc).__name__}")
+
+    if ids and not errors:
+        await update.effective_message.reply_text(
+            "MeshCore programado:\n"
+            f"• Envíos: {len(ids)}\n"
+            f"• Canal: {channel_idx}\n"
+            f"• Minutos: {','.join(str(m) for m in minutes_list)}\n"
+            f"• IDs: {', '.join(ids)}"
+        )
+        return
+
+    if ids:
+        await update.effective_message.reply_text(
+            "MeshCore programado parcialmente.\n"
+            f"IDs OK: {', '.join(ids)}\n"
+            f"Fallos: {', '.join(errors)}"
+        )
+        return
+
+    await update.effective_message.reply_text(
+        "No se pudo programar ningún envío MeshCore."
+    )
+
+
+# ==========================
 # /mañana — Programar al día siguiente HH:MM
 # ==========================
 
@@ -17931,6 +18075,7 @@ def build_application() -> Application:
 
     # Handlers de los dos comandos
     app.add_handler(CommandHandler("en", en_cmd))
+    app.add_handler(CommandHandler("en_mc", en_mc_cmd))
     app.add_handler(CommandHandler("manana", manana_cmd))  # usa tu función manana_cmd o mañana_cmd según la que pegaste
 
     app.add_handler(CommandHandler("tareas", tareas_cmd))
