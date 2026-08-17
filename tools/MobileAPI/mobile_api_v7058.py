@@ -9,7 +9,9 @@ su middleware Bearer ya validado. La compatibilidad se conserva de esta forma:
 - un access token de sesión válido se traduce internamente al Bearer fijo antes de
   delegar la petición a la API histórica;
 - usuario/contraseña nunca se propagan a los endpoints existentes;
-- los endpoints de lectura y sus respuestas permanecen sin cambios.
+- los endpoints de lectura y sus respuestas permanecen sin cambios;
+- ``/api/v1/emergencies/current-view`` reutiliza exactamente la instantánea de
+  incidencias del Control Panel para evitar diferencias por límites de paginación.
 
 Ejecución:
     python3 -m uvicorn tools.MobileAPI.mobile_api_v7058:app --host 0.0.0.0 --port 8791
@@ -29,6 +31,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from tools.ControlPanel.emergency_province_view import build_emergency_snapshot
 from tools.MobileAPI import mobile_api_v7054 as legacy
 from tools.MobileAPI.mobile_auth import (
     AuthIdentity,
@@ -39,6 +42,7 @@ from tools.MobileAPI.mobile_auth import (
     users_configured,
     verify_access_token,
 )
+from tools.emergencias_guardia.emergencias.storage import load_current
 
 
 class LoginRequest(BaseModel):
@@ -98,6 +102,34 @@ def _replace_authorization_header(request: Request, bearer: str) -> None:
     ]
     headers.append((encoded_name, encoded_value))
     request.scope["headers"] = headers
+
+
+def _require_translated_legacy_bearer(request: Request) -> None:
+    """Protege rutas propias de esta capa con la misma autenticación ya validada.
+
+    Uso:
+        _require_translated_legacy_bearer(request)
+
+    Funcionalidad:
+        ``translate_session_bearer`` convierte previamente un access token de sesión
+        válido al Bearer fijo histórico. Esta comprobación acepta por tanto tanto el
+        Bearer fijo original como una sesión válida y rechaza cualquier otro valor.
+        No registra ni devuelve secretos.
+    """
+    configured = _configured_legacy_token()
+    if not configured:
+        raise HTTPException(
+            status_code=503,
+            detail="MESHNET_MOBILE_API_TOKEN debe mantenerse configurado durante la migración",
+        )
+
+    supplied = _bearer_token(request)
+    if not supplied or not secrets.compare_digest(supplied, configured):
+        raise HTTPException(
+            status_code=401,
+            detail="Token Bearer no válido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 @app.middleware("http")
@@ -205,6 +237,19 @@ def auth_me(request: Request) -> dict[str, Any]:
         "role": identity.role,
         "authentication": identity.auth_type,
     }
+
+
+@app.get("/api/v1/emergencies/current-view")
+def emergencies_current_view(request: Request) -> dict[str, Any]:
+    """Devuelve la misma instantánea completa que usa el Control Panel.
+
+    La función reutiliza literalmente ``build_emergency_snapshot`` sobre
+    ``load_current().values()``. No existe un ``limit`` previo, por lo que provincia,
+    categoría y recuentos disponibles coinciden con la vista real del Control Panel.
+    La ruta es de sólo lectura y no ejecuta colectores ni modifica ``current.json``.
+    """
+    _require_translated_legacy_bearer(request)
+    return build_emergency_snapshot(load_current().values())
 
 
 # Todas las rutas no resueltas arriba se entregan a la aplicación existente. FastAPI
