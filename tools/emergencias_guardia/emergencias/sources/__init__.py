@@ -4,6 +4,7 @@ from .datex2 import Datex2Source
 from .json_source import JsonSource
 from .rss import RssSource
 from .firms import FirmsSource
+from .firms_tracking import FirmsTrackedSource
 
 SOURCE_TYPES = {
     "aemet_cap": AemetCapSource,
@@ -11,7 +12,7 @@ SOURCE_TYPES = {
     "datex2": Datex2Source,
     "json": JsonSource,
     "rss": RssSource,
-    "firms": FirmsSource,
+    "firms": FirmsTrackedSource,
 }
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "JsonSource",
     "RssSource",
     "FirmsSource",
+    "FirmsTrackedSource",
 ]
