@@ -23,7 +23,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from tools.ControlPanel.emergency_province_view import build_emergency_snapshot
 from tools.MobileAPI import mobile_api as base
+from tools.emergencias_guardia.emergencias.storage import load_current
 
 
 REPO_DIR = Path(__file__).resolve().parents[2]
@@ -115,3 +117,19 @@ def capabilities() -> dict[str, Any]:
             "lightweight_node_geolocation": True,
         },
     }
+
+
+@app.get("/api/v1/emergencies/current-view")
+def emergencies_current_view() -> dict[str, Any]:
+    """Devuelve exactamente la instantánea completa usada por el Control Panel.
+
+    Uso HTTP:
+        GET /api/v1/emergencies/current-view
+
+    Funcionalidad:
+        Reutiliza `build_emergency_snapshot(load_current().values())`, igual que
+        `/api/emergencias/current-view` del Control Panel. La ruta hereda el middleware
+        Bearer existente de `mobile_api.py`, no aplica `limit=200`, no ejecuta
+        colectores y no modifica `current.json`.
+    """
+    return build_emergency_snapshot(load_current().values())
