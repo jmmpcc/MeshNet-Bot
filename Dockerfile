@@ -27,8 +27,23 @@ RUN python -m pip install --no-cache-dir \
     -r /app/requirements/requirements.bot.txt
 
 # Código principal del broker/bot.
+# El patrón source/*.py incluye también las extensiones añadidas posteriormente
+# (por ejemplo beacon_bot.py y channel_gateway_bot.py), evitando que un módulo
+# Python nuevo quede fuera de la imagen al reconstruir el contenedor.
 COPY source/*.py /app/source/
 COPY source/*.json /app/source/
+
+# Verificación de extensiones críticas del bot.
+# El build debe fallar inmediatamente si alguno de estos módulos, requeridos por
+# docker/entrypoint_bot.sh -> Telegram_Bot_ChannelGateway.py, no ha sido copiado
+# a la imagen. py_compile valida además su sintaxis sin iniciar Telegram ni radio.
+RUN test -f /app/source/Telegram_Bot_ChannelGateway.py \
+    && test -f /app/source/channel_gateway_bot.py \
+    && test -f /app/source/beacon_bot.py \
+    && python -m py_compile \
+        /app/source/Telegram_Bot_ChannelGateway.py \
+        /app/source/channel_gateway_bot.py \
+        /app/source/beacon_bot.py
 
 # v7.0.53: mínimo subconjunto geográfico compartido con Emergencias.
 # Telegram_Bot_Broker.py continúa usando `import reverse_geocoder as rg`, pero
