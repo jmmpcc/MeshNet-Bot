@@ -128,7 +128,7 @@ def test_current_view_reuses_complete_control_panel_snapshot_with_session(tmp_pa
     }
 
     with patch.dict(os.environ, environment, clear=False), patch(
-        "tools.MobileAPI.mobile_api_v7058.load_current",
+        "tools.MobileAPI.mobile_api_v7054.load_current",
         return_value=current,
     ):
         set_user("jmmol", "Prueba-Segura-2026", role="viewer")
