@@ -127,9 +127,9 @@ jobs:
           fi
 
           # Bot
-          # El wrapper de comandos Channel Gateway y su entrypoint forman parte
-          # de la imagen bot y deben reconstruirla cuando cambien.
-          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
             rebuild_bot=true
           fi
 
