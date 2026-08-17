@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -95,6 +96,75 @@ def test_legacy_bearer_remains_valid_in_v7058(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
+
+
+def test_current_view_reuses_complete_control_panel_snapshot_with_session(tmp_path: Path) -> None:
+    """La ruta móvil debe exponer la instantánea completa sin aplicar el límite histórico de 200.
+
+    Se usa una incidencia forestal de Huesca porque este caso reproduce la diferencia observada
+    entre Control Panel y Android: el selector móvil debe recibir provincia y categoría desde la
+    misma instantánea ``load_current`` que consume el Control Panel.
+    """
+    environment = _auth_environment(tmp_path)
+    current = {
+        "firms:huesca-1": SimpleNamespace(
+            event_id="firms:huesca-1",
+            title="Detección térmica satelital",
+            description="Incendio forestal de prueba",
+            source="nasa_firms",
+            category="wildfire",
+            status="active",
+            severity="high",
+            municipality="Jaca",
+            province="Huesca",
+            road="",
+            kilometre=None,
+            latitude=42.57,
+            longitude=-0.55,
+            started_at="2026-08-17T09:00:00+00:00",
+            updated_at="2026-08-17T10:00:00+00:00",
+            last_seen="2026-08-17T11:00:00+00:00",
+        ),
+    }
+
+    with patch.dict(os.environ, environment, clear=False), patch(
+        "tools.MobileAPI.mobile_api_v7058.load_current",
+        return_value=current,
+    ):
+        set_user("jmmol", "Prueba-Segura-2026", role="viewer")
+        client = TestClient(app)
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"username": "jmmol", "password": "Prueba-Segura-2026"},
+        ).json()
+        response = client.get(
+            "/api/v1/emergencies/current-view",
+            headers={"Authorization": f"Bearer {login['access_token']}"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["total"] == 1
+    assert payload["provinces"] == ["Huesca"]
+    assert payload["categories"] == ["wildfire"]
+    assert payload["events"][0]["event_id"] == "firms:huesca-1"
+    assert payload["events"][0]["province"] == "Huesca"
+    assert payload["events"][0]["category"] == "wildfire"
+
+
+def test_current_view_rejects_invalid_bearer(tmp_path: Path) -> None:
+    """La ruta nueva debe conservar la protección de la Mobile API y no quedar pública."""
+    environment = _auth_environment(tmp_path)
+    with patch.dict(os.environ, environment, clear=False):
+        client = TestClient(app)
+        response = client.get(
+            "/api/v1/emergencies/current-view",
+            headers={"Authorization": "Bearer token-invalido"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Token Bearer no válido"
 
 
 def test_invalid_login_does_not_issue_tokens(tmp_path: Path) -> None:
