@@ -121,6 +121,8 @@ from meshtastic_api_adapter import (
 
 from tcpinterface_persistent import TCPInterfacePool
 
+from radio_profile import PROFILE_MESHCORE_ONLY, normalize_radio_profile
+
 import builtins, sys, time, re
 _builtin_print = builtins.print
 
@@ -251,6 +253,61 @@ except Exception:
 # ──────────────────────────────────────────────────────────────────────────
 
 DEBUG_KM = (os.getenv("DEBUG_KM", "0").strip().lower() in {"1","true","t","yes","y","on","si","sí"})
+
+# === Política de interfaz Telegram según RADIO_PROFILE =======================
+# Estos comandos/callbacks dependen de Meshtastic. En meshcore_only se ocultan
+# de los menús y se interceptan antes de alcanzar sus handlers históricos.
+_MESHTASTIC_ONLY_COMMANDS = frozenset({
+    "enviar", "enviar_ack", "traceroute", "rt", "traceroute_status",
+    "telemetria", "lora", "ver_nodos", "refrescar_nodos", "vecinos",
+    "vecinos5", "ver_nodos_b", "vecinos_b", "programar", "diario", "en",
+    "manana", "tareas", "cancelar_tarea", "position", "position_mapa",
+    "cobertura", "auditoria_red", "auditoria_integral", "auditoria_impacto",
+    "canales",
+})
+
+_MESHTASTIC_ONLY_CALLBACKS = frozenset({
+    "ver_nodos", "ver_nodos_b", "vecinos_b", "traceroute", "telemetria",
+    "enviar", "enviar_ack", "vecinos", "lora",
+})
+
+
+def _is_meshcore_only_profile() -> bool:
+    """Indica si el bot se ejecuta exclusivamente con MeshCore.
+
+    Se llama desde menú, comandos, /start y /ayuda. Delega la normalización en
+    ``radio_profile.normalize_radio_profile`` para reutilizar aliases y reglas
+    existentes. No modifica el entorno; perfiles legacy, mixtos o desconocidos
+    devuelven False y conservan el comportamiento histórico.
+    """
+    return normalize_radio_profile(os.getenv("RADIO_PROFILE", "")) == PROFILE_MESHCORE_ONLY
+
+
+async def _meshtastic_unavailable_cmd(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Bloquea una función Meshtastic cuando RADIO_PROFILE=meshcore_only.
+
+    Se registra antes de los handlers Meshtastic existentes para impedir que
+    comandos antiguos escritos manualmente intenten abrir Meshtastic. Los
+    handlers originales permanecen intactos para perfiles mixtos y legacy.
+
+    Parámetros:
+        update: actualización Telegram que contiene el comando recibido.
+        context: contexto PTB, mantenido en la firma por compatibilidad.
+    """
+    del context
+    message = update.effective_message
+    if message is None and update.callback_query is not None:
+        message = update.callback_query.message
+    if message is None:
+        return
+    await message.reply_text(
+        "Esta función no está disponible con el perfil meshcore_only.\n"
+        "El sistema está configurado exclusivamente para MeshCore."
+    )
+
 
 # === [NUEVO] Helpers: pausar/reanudar IO + CLI segura con timeout + escritura nodos.txt ===
 import os, json, time, signal, subprocess
@@ -6430,26 +6487,44 @@ async def quick_broker_listen(dest_id: Optional[str], channel: Optional[int], se
 # -------------------------
 # ====== MODIFICADA: menú principal con botón LoRa ======
 def main_menu_kb(user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    """Construye el menú principal acorde con las capacidades del perfil.
+
+    En ``meshcore_only`` expone solo acciones compartidas. Para cualquier otro
+    perfil conserva exactamente las opciones históricas. ``user_id`` mantiene
+    el control existente del botón administrativo de estadística.
+    """
     admin = is_admin(user_id) if user_id is not None else False
-    buttons = [
-        [InlineKeyboardButton("📡 Ver nodos", callback_data="ver_nodos")],
-        [
-            InlineKeyboardButton("🧭 Traceroute", callback_data="traceroute"),
-            InlineKeyboardButton("🛰️ Telemetría", callback_data="telemetria"),
-        ],
-        [
-            InlineKeyboardButton("✉️ Enviar", callback_data="enviar"),
-            InlineKeyboardButton("✅ Enviar con ACK", callback_data="enviar_ack"),
-        ],
-        [
-            InlineKeyboardButton("👂 Escuchar", callback_data="escuchar"),
-            InlineKeyboardButton("⏹️ Parar escucha", callback_data="parar_escucha"),
-        ],
-        [InlineKeyboardButton("👥 Vecinos", callback_data="vecinos")],
-        [InlineKeyboardButton("⚙️ LoRa", callback_data="lora")],   # ← NUEVO
-        [InlineKeyboardButton("🧪 Estado", callback_data="estado")],
-        [InlineKeyboardButton("ℹ️ Ayuda", callback_data="ayuda")],
-    ]
+
+    if _is_meshcore_only_profile():
+        buttons = [
+            [
+                InlineKeyboardButton("👂 Escuchar", callback_data="escuchar"),
+                InlineKeyboardButton("⏹️ Parar escucha", callback_data="parar_escucha"),
+            ],
+            [InlineKeyboardButton("🧪 Estado", callback_data="estado")],
+            [InlineKeyboardButton("ℹ️ Ayuda", callback_data="ayuda")],
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton("📡 Ver nodos", callback_data="ver_nodos")],
+            [
+                InlineKeyboardButton("🧭 Traceroute", callback_data="traceroute"),
+                InlineKeyboardButton("🛰️ Telemetría", callback_data="telemetria"),
+            ],
+            [
+                InlineKeyboardButton("✉️ Enviar", callback_data="enviar"),
+                InlineKeyboardButton("✅ Enviar con ACK", callback_data="enviar_ack"),
+            ],
+            [
+                InlineKeyboardButton("👂 Escuchar", callback_data="escuchar"),
+                InlineKeyboardButton("⏹️ Parar escucha", callback_data="parar_escucha"),
+            ],
+            [InlineKeyboardButton("👥 Vecinos", callback_data="vecinos")],
+            [InlineKeyboardButton("⚙️ LoRa", callback_data="lora")],
+            [InlineKeyboardButton("🧪 Estado", callback_data="estado")],
+            [InlineKeyboardButton("ℹ️ Ayuda", callback_data="ayuda")],
+        ]
+
     if admin:
         buttons.append([InlineKeyboardButton("📊 Estadística", callback_data="estadistica")])
     return InlineKeyboardMarkup(buttons)
@@ -6521,6 +6596,17 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("mail_del", "Eliminar contacto de correo"),
         BotCommand("bridge_status", "Comprueba como está el brige operativo")
     ]
+    if _is_meshcore_only_profile():
+        meshcore_descriptions = {
+            "baliza_clima": "cada <minutos> meshcore <destino> <ciudad> - Programar baliza meteorológica",
+            "alerta_aemet": "cada <MM> meshcore canal [x] <zona> - Programar avisos AEMET por RF",
+        }
+        default_cmds = [
+            BotCommand(cmd.command, meshcore_descriptions.get(cmd.command, cmd.description))
+            for cmd in default_cmds
+            if cmd.command not in _MESHTASTIC_ONLY_COMMANDS
+        ]
+
     await app.bot.set_my_commands(default_cmds, scope=BotCommandScopeDefault())
 
     admin_cmds = default_cmds + [BotCommand("estadistica", "Uso del bot (solo admin)")]
@@ -6585,6 +6671,13 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer()
     data = query.data
 
+    if _is_meshcore_only_profile() and data in _MESHTASTIC_ONLY_CALLBACKS:
+        await query.message.reply_text(
+            "Esta función no está disponible con el perfil meshcore_only.\n"
+            "El sistema está configurado exclusivamente para MeshCore."
+        )
+        return
+
     if data == "ver_nodos":
         await ver_nodos_cmd(update, context)
     elif data == "ver_nodos_b":
@@ -6642,14 +6735,30 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---- Básicos
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Abre el menú principal y describe el perfil de radio activo.
+
+    En ``meshcore_only`` evita presentar el sistema como Meshtastic y no muestra
+    ``MESHTASTIC_HOST``. Los demás perfiles conservan el mensaje histórico.
+    """
     bump_stat(update.effective_user.id, update.effective_user.username or "", "start")
     await set_bot_menu(context.application)
-    text = (
-        "🤖 Meshtastic Bot listo.\n"
-        f"- Nodo: {MESHTASTIC_HOST}\n"
-        f"- Broker: {BROKER_HOST}:{BROKER_PORT} canal {BROKER_CHANNEL}\n\n"
-        "Elige una opción:"
-    )
+
+    if _is_meshcore_only_profile():
+        text = (
+            "MeshNet Bot listo.\n"
+            f"- Perfil: {PROFILE_MESHCORE_ONLY}\n"
+            "- Red: MeshCore\n"
+            f"- Broker: {BROKER_HOST}:{BROKER_PORT} canal {BROKER_CHANNEL}\n\n"
+            "Elige una opción:"
+        )
+    else:
+        text = (
+            "🤖 Meshtastic Bot listo.\n"
+            f"- Nodo: {MESHTASTIC_HOST}\n"
+            f"- Broker: {BROKER_HOST}:{BROKER_PORT} canal {BROKER_CHANNEL}\n\n"
+            "Elige una opción:"
+        )
+
     await update.effective_message.reply_text(
         text,
         reply_markup=main_menu_kb(update.effective_user.id)
@@ -7031,29 +7140,118 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• APRS sin salida — Revisar <code>/aprs_status</code>, KISS, Soundmodem y variables APRS.\n"
     )
 
-    full = "\n\n".join([
-        s_intro,
-        s_conv,
-        s_menu,
-        s_mensajeria_mesh,
-        s_mensajeria_mc,
-        s_programacion,
-        s_diario,
-        s_diario_mc,
-        s_clima,
-        s_aemet,
-        s_aprs,
-        s_nodos,
-        s_rutas,
-        s_posicion,
-        s_escucha,
-        s_bbs,
-        s_auditorias,
-        s_estado,
-        s_admin,
-        s_params,
-        s_errores,
-    ])
+    if _is_meshcore_only_profile():
+        # Solo se ensamblan capacidades utilizables con MeshCore exclusivo.
+        s_intro_mc_only = (
+            "<b>Ayuda — MeshNet Bot v7.0.15</b>\n"
+            "Perfil activo: <code>meshcore_only</code>. Control de MeshCore, APRS, "
+            "programación MeshCore, avisos AEMET, balizas y administración del broker.\n"
+        )
+        s_conv_mc_only = (
+            "────────────────────────────────────────────────\n"
+            "<b>Convenciones generales</b>\n"
+            "• <b>Canal MeshCore</b>: <code>chX</code>, <code>X</code> o <code>canal X</code>.\n"
+            "• <b>Directo MeshCore</b>: <code>contact_prefix</code>, <code>[MC:prefix]</code> o número obtenido con <code>/mc_contactos</code>.\n"
+            "• <b>Estados de tarea</b>: <code>pending</code>, <code>done</code>, <code>failed</code>, <code>canceled</code>.\n"
+            "• <b>Zona horaria</b>: <code>Europe/Madrid</code>.\n"
+            "• <b>Textos largos</b>: se validan y/o trocean para proteger el airtime LoRa.\n"
+        )
+        s_menu_mc_only = (
+            "────────────────────────────────────────────────\n"
+            "<b>Menú y ayuda</b>\n"
+            "• <code>/start</code> — Abre el menú principal.\n"
+            "• <code>/menu</code> — Muestra de nuevo el menú.\n"
+            "• <code>/ayuda</code> — Muestra la ayuda correspondiente al perfil activo.\n"
+            "• <code>/cancel</code> — Cancela una conversación activa.\n"
+        )
+        s_clima_mc_only = (
+            "────────────────────────────────────────────────\n"
+            "<b>Baliza meteorológica dinámica</b>\n"
+            "• <code>/baliza_clima cada &lt;minutos&gt; meshcore canal &lt;idx&gt; &lt;ciudad&gt; [lat=&lt;lat&gt; lon=&lt;lon&gt;]</code>\n"
+            "• <code>/baliza_clima cada &lt;minutos&gt; meshcore dm &lt;contact_prefix&gt; &lt;ciudad&gt; [lat=&lt;lat&gt; lon=&lt;lon&gt;]</code>\n"
+            "• <code>/baliza_clima diario &lt;HH:MM[,HH:MM...]&gt; meshcore &lt;destino&gt; &lt;ciudad&gt;</code>\n"
+            "• <code>/mis_balizas [estado]</code> — Lista balizas.\n"
+            "• <code>/parar_baliza &lt;task_id&gt;</code> — Detiene una baliza.\n"
+        )
+        s_aemet_mc_only = (
+            "────────────────────────────────────────────────\n"
+            "<b>Avisos oficiales AEMET</b>\n"
+            "• <code>/alerta_aemet cada &lt;minutos&gt; meshcore canal &lt;idx&gt; &lt;zona&gt; [provincia=&lt;provincia&gt;] [region=&lt;region&gt;]</code>\n"
+            "• <code>/alerta_aemet cada &lt;minutos&gt; meshcore dm &lt;contact_prefix&gt; &lt;zona&gt;</code>\n"
+            "• <code>/mis_alertas_aemet [estado]</code> — Lista vigilancias AEMET.\n"
+            "• <code>/parar_alerta_aemet &lt;task_id&gt;</code> — Detiene una vigilancia AEMET.\n"
+        )
+        s_aprs_mc_only = (
+            "────────────────────────────────────────────────\n"
+            "<b>APRS</b>\n"
+            "• <code>/aprs canal N &lt;texto&gt;</code> — Envía status APRS desde un canal lógico.\n"
+            "• <code>/aprs N &lt;texto&gt;</code> — Forma abreviada con canal.\n"
+            "• <code>/aprs &lt;CALL|broadcast&gt;: &lt;texto&gt;</code> — Mensaje APRS a indicativo o broadcast/status.\n"
+            "• <code>/aprs_on</code> / <code>/aprs_off</code> — Control del gateway APRS→MeshCore.\n"
+            "• <code>/aprsis_push status</code> — Estado del mirror MeshCore→APRS-IS.\n"
+            "• <code>/aprsis_push on meshcore all</code> — Publica todos los canales MeshCore.\n"
+            "• <code>/aprsis_push on meshcore 2,3</code> — Publica canales MeshCore concretos.\n"
+            "• <code>/aprsis_push off</code> — Desactiva el mirror APRS-IS.\n"
+        )
+        s_escucha_mc_only = (
+            "────────────────────────────────────────────────\n"
+            "<b>Escucha y notificaciones</b>\n"
+            "• <code>/escuchar [N|all]</code> — Escucha mensajes del broker en un canal o todos.\n"
+            "• <code>/parar_escucha</code> — Detiene la escucha.\n"
+            "• <code>/notificaciones on|off|estado</code> — Controla avisos automáticos del bot.\n"
+        )
+        s_estado_mc_only = (
+            "────────────────────────────────────────────────\n"
+            "<b>Estado y administración del broker</b>\n"
+            "• <code>/estado</code> — Estado básico del sistema y broker.\n"
+            "• <code>/broker_status [raw|json]</code> — Estado interno completo del broker.\n"
+            "• <code>/bridge_status</code> — Estado del bridge configurado.\n"
+            "• <code>/broker_resume</code> — Limpia cooldown y reanuda el manager.\n"
+            "• <code>/force_reconnect [grace_s]</code> — Fuerza reconexión limpia.\n"
+            "• <code>/reconectar</code> — Reconexión administrativa.\n"
+        )
+        s_params_mc_only = (
+            "────────────────────────────────────────────────\n"
+            "<b>Parámetros útiles</b>\n"
+            "• <code>lat=...</code> y <code>lon=...</code> — Coordenadas manuales para baliza climática.\n"
+            "• <code>provincia=...</code>, <code>region=...</code>, <code>zona=...</code> — Filtros de avisos AEMET.\n"
+        )
+        s_errores_mc_only = (
+            "────────────────────────────────────────────────\n"
+            "<b>Errores y diagnósticos frecuentes</b>\n"
+            "• <code>TX_BLOCKED</code> o cooldown persistente — Usar <code>/broker_status</code>, después <code>/broker_resume</code> o <code>/force_reconnect</code>.\n"
+            "• APRS sin salida — Revisar <code>/aprs_status</code>, KISS, Soundmodem y variables APRS.\n"
+        )
+        full = "\n\n".join([
+            s_intro_mc_only, s_conv_mc_only, s_menu_mc_only, s_mensajeria_mc,
+            s_diario_mc, s_clima_mc_only, s_aemet_mc_only, s_aprs_mc_only,
+            s_escucha_mc_only, s_bbs, s_estado_mc_only, s_admin,
+            s_params_mc_only, s_errores_mc_only,
+        ])
+    else:
+        full = "\n\n".join([
+            s_intro,
+            s_conv,
+            s_menu,
+            s_mensajeria_mesh,
+            s_mensajeria_mc,
+            s_programacion,
+            s_diario,
+            s_diario_mc,
+            s_clima,
+            s_aemet,
+            s_aprs,
+            s_nodos,
+            s_rutas,
+            s_posicion,
+            s_escucha,
+            s_bbs,
+            s_auditorias,
+            s_estado,
+            s_admin,
+            s_params,
+            s_errores,
+        ])
 
     await _send_html_chunks(update, full, block_title="Ayuda")
 
@@ -17682,6 +17880,14 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("ayuda", ayuda))
+
+    if _is_meshcore_only_profile():
+        app.add_handler(CommandHandler(sorted(_MESHTASTIC_ONLY_COMMANDS), _meshtastic_unavailable_cmd))
+        app.add_handler(MessageHandler(
+            filters.COMMAND & filters.Regex(r"^/vecinos\d+(?:@\w+)?(?:\s|$)"),
+            _meshtastic_unavailable_cmd,
+        ))
+
     app.add_handler(CommandHandler("canales", canales_cmd))
    
     # Handlers de comandos…
