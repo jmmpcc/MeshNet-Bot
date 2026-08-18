@@ -32,8 +32,15 @@ except ModuleNotFoundError:
 # o modificar rutas no relacionadas. Todas son idempotentes y conservan intactas las
 # funciones históricas del Control Panel.
 app = apply_aprs_category_matrix(web_admin.app)
-app = apply_emergency_province_view(app)
+
+# IMPORTANTE: la ventana temporal debe instalarse ANTES que la vista de incidencias.
+# Sus middlewares se ejecutan de forma que el script de esta extensión queda inyectado
+# antes de ``emergency_province_view`` en el HTML final. Así ``window.fetch`` ya está
+# interceptado cuando la vista lanza su primera petición y nunca sale una carga inicial
+# sin filtrar de ``/api/emergencias/current-view``.
 app = apply_emergency_current_collapsible(app)
+app = apply_emergency_province_view(app)
+
 app = apply_message_emergency_filters(app)
 app = apply_message_map_links(app)
 app = apply_delivery_audit_collapsible(app)
