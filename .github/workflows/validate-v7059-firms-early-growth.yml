@@ -28,6 +28,7 @@ jobs:
         run: |
           python -m unittest -v \
             tests.test_firms_early_growth_v7059 \
+            tests.test_firms_aprs_evolution_v7059 \
             tests.test_firms_grouping_aprs_v7051 \
             tests.test_firms_locality_v7052 \
             tests.test_firms_propagation_v7054
