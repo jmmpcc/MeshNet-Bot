@@ -14,6 +14,25 @@ Desde v7.0.58 se añade autenticación por **usuario/contraseña + sesiones** en
 
 Por defecto se utiliza `8791`. El ControlPanel conserva su puerto y rutas sin cambios.
 
+## Punto de entrada estable
+
+El arranque operativo de Mobile API utiliza siempre:
+
+```text
+tools.MobileAPI.mobile_api_entrypoint:app
+```
+
+Este nombre es deliberadamente estable y es el único que debe utilizar systemd o cualquier script de producción. Las capas versionadas permanecen como implementación interna:
+
+```text
+mobile_api_entrypoint.py
+    -> mobile_api_v7058.py
+        -> mobile_api_v7054.py
+            -> mobile_api.py
+```
+
+`mobile_api.py` continúa siendo la API base histórica, por lo que no se renombra ni se reutiliza como entrypoint para evitar dependencias circulares. Cuando exista una capa posterior validada sólo deberá cambiar el import interno de `mobile_api_entrypoint.py`; la unidad systemd permanecerá invariable.
+
 ## Versión de MeshNet-Bot
 
 La API detecta automáticamente el changelog numérico más reciente de `docs/` cuando `MESHNET_BOT_VERSION` no está definida.
@@ -83,13 +102,15 @@ python3 -m tools.MobileAPI.mobile_auth user-enable jmmol
 
 Deshabilitar un usuario revoca también sus sesiones activas.
 
-## Ejecución manual v7.0.58
+## Ejecución manual
+
+El arranque manual debe utilizar también el punto de entrada estable:
 
 ```bash
-python3 -m uvicorn tools.MobileAPI.mobile_api_v7058:app --host 0.0.0.0 --port 8791
+python3 -m uvicorn tools.MobileAPI.mobile_api_entrypoint:app --host 0.0.0.0 --port 8791
 ```
 
-La v7.0.58 monta la aplicación v7.0.54 existente detrás de una capa de autenticación. Los endpoints históricos no se reescriben.
+La implementación vigente v7.0.58 monta la aplicación v7.0.54 existente detrás de una capa de autenticación. Los endpoints históricos no se reescriben.
 
 ## Flujo de autenticación
 
@@ -207,6 +228,12 @@ Autenticación de sesión:
 
 ```bash
 python3 -m pytest tools/MobileAPI/tests/test_mobile_auth.py -v
+```
+
+Punto de entrada estable:
+
+```bash
+python3 -m pytest tools/MobileAPI/tests/test_mobile_api_entrypoint.py -v
 ```
 
 Prueba conjunta recomendada:
