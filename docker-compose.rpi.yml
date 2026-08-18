@@ -15,8 +15,12 @@ services:
     # Dentro del contenedor, host.docker.internal resolverá al host Docker.
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    devices:
-      - "/dev/ttyACM0:/dev/ttyACM0"
+
+    # El broker necesita acceso a /dev cuando MeshCore usa MESHCORE_MODE=serial.
+    # No se fija /dev/ttyACM0 ni /dev/ttyUSB0 aquí: el puerto real se selecciona
+    # exclusivamente con MESHCORE_SERIAL_PORT en .env. Esto permite cambiar entre
+    # adaptadores ttyACM* y ttyUSB* sin modificar este compose y mantiene TCP sin
+    # dependencia de que exista un dispositivo serie concreto en el host.
     privileged: true
  
     env_file:
@@ -129,4 +133,3 @@ services:
       - ./bot_data:/app/bot_data:rw
 
     stop_grace_period: 10s
-
