@@ -36,30 +36,17 @@ SOURCE_LABELS = {
     "ign_earthquakes": "IGN",
 }
 
-
 APRS_CATEGORY_LABELS = {
-    "wildfire": "INCENDIO",
-    "urban_fire": "INCENDIO URB",
-    "industrial_fire": "INCENDIO IND",
-    "traffic_collision": "COLISION",
-    "road_closed": "CORTE VIA",
-    "lane_closed": "CARRIL CERRADO",
-    "traffic_obstruction": "AFECCION VIAL",
-    "flood": "INUNDACION",
-    "storm": "TORMENTA",
-    "snow": "NIEVE",
-    "strong_wind": "VIENTO",
-    "extreme_temperature": "TEMP EXTREMA",
-    "chemical": "RIESGO QUIMICO",
-    "power_outage": "CORTE ELECTRICO",
-    "water_outage": "CORTE AGUA",
-    "gas_outage": "CORTE GAS",
-    "public_safety": "SEGURIDAD",
-    "civil_protection": "PROT CIVIL",
-    "earthquake": "TERREMOTO",
-    "tsunami": "TSUNAMI",
-    "volcanic": "VOLCAN",
-    "landslide": "DESLIZAMIENTO",
+    "wildfire": "INCENDIO", "urban_fire": "INCENDIO URB",
+    "industrial_fire": "INCENDIO IND", "traffic_collision": "COLISION",
+    "road_closed": "CORTE VIA", "lane_closed": "CARRIL CERRADO",
+    "traffic_obstruction": "AFECCION VIAL", "flood": "INUNDACION",
+    "storm": "TORMENTA", "snow": "NIEVE", "strong_wind": "VIENTO",
+    "extreme_temperature": "TEMP EXTREMA", "chemical": "RIESGO QUIMICO",
+    "power_outage": "CORTE ELECTRICO", "water_outage": "CORTE AGUA",
+    "gas_outage": "CORTE GAS", "public_safety": "SEGURIDAD",
+    "civil_protection": "PROT CIVIL", "earthquake": "TERREMOTO",
+    "tsunami": "TSUNAMI", "volcanic": "VOLCAN", "landslide": "DESLIZAMIENTO",
     "other": "INCIDENCIA",
 }
 
@@ -69,25 +56,10 @@ APRS_TERMINAL_STATUSES = {"resolved", "cancelled", "expired", "closed"}
 def aprs_emergency_text(event: Event, max_chars: int = 67) -> str:
     """Construye el texto APRS compacto de una emergencia.
 
-    Uso:
-      ``text = aprs_emergency_text(event, max_chars=67)``
-
-    Parámetros:
-      event: evento normalizado de ``emergencias_guardia``.
-      max_chars: longitud máxima del cuerpo APRS. El valor recomendado y por
-        defecto es 67, límite del campo de texto de un mensaje APRS clásico.
-
-    Funcionalidad:
-      - Conserva SIEMPRE al comienzo el estado operativo y el tipo de emergencia.
-      - Usa ``FIN`` para estados terminales y ``CRIT`` para severidad crítica;
-        el resto de emergencias publicables utiliza ``EMERG``.
-      - Para NASA FIRMS prioriza coordenadas y, desde v7.0.52, puede añadir la
-        referencia ``CERCA <población>`` calculada desde núcleos IGN/INE.
-      - Prioriza carretera/km, municipio y provincia para el resto de fuentes.
-      - Convierte a ASCII seguro para APRS y nunca corta el tipo de emergencia.
+    Para FIRMS delega en ``_aprs_firms_text``. El resto de fuentes conserva
+    exactamente la semántica histórica EMERG/CRIT/FIN.
     """
     limit = max(24, int(max_chars or 67))
-
     if event.source == "nasa_firms" and event.category == "wildfire":
         return _aprs_firms_text(event, limit)
 
@@ -109,7 +81,6 @@ def aprs_emergency_text(event: Event, max_chars: int = 67) -> str:
         road = f"{road} km {event.kilometre:g}"
     municipality = _aprs_ascii_text(event.municipality)
     province = _aprs_ascii_text(event.province)
-
     candidates: list[str] = []
     if road:
         candidates.append(road)
@@ -128,42 +99,45 @@ def aprs_emergency_text(event: Event, max_chars: int = 67) -> str:
         and normalized_category not in title.casefold()
     ):
         candidates.append(title)
-
     return _aprs_join_candidates(mandatory, candidates, limit, separator=" | ")
 
 
-def _aprs_firms_text(event: Event, limit: int) -> str:
-    """Formatea FIRMS priorizando coordenadas y población cercana como referencia.
+def _aprs_firms_prefix(event: Event) -> str:
+    """Devuelve el prefijo operativo FIRMS sin alterar compatibilidad histórica.
 
-    Cómo se llama:
-        ``aprs_emergency_text()`` delega aquí únicamente para
-        ``source=nasa_firms`` y ``category=wildfire``.
+    Prioridad:
+      1. estados terminales -> FIN;
+      2. v7.0.59 ``firms_phase=initial`` -> INICIO;
+      3. v7.0.59 ``firms_phase=growth`` -> AUMENTO;
+      4. eventos FIRMS antiguos sin fase -> CRIT/EMERG como hasta ahora.
 
-    Parámetros:
-        event: evento FIRMS individual o agrupado.
-        limit: presupuesto de caracteres solicitado por el transporte.
-
-    Funcionalidad:
-        - Conserva siempre ``estado + INCENDIO SAT + coordenadas``.
-        - Si ``metadata['nearest_population']`` existe, añade ``CERCA <nombre>``.
-          No usa ``event.municipality`` porque un núcleo cercano no implica que
-          el foco esté dentro de su término municipal.
-        - En APRS-IS clásico recorta la población por palabras completas para
-          evitar referencias parciales como ``Salinas de``.
-        - En RF ampliado añade también la distancia al núcleo y la provincia si
-          hay espacio.
-        - Después incorpora DET, FRP, confianza, satélite y FRP total según el
-          presupuesto disponible.
-        - Sin población cercana conserva el formato operativo v7.0.51.
+    ``stable`` no debería llegar al dispatcher porque mantiene el ``raw_hash``;
+    si se formatea manualmente conserva EMERG/CRIT para no introducir un estado
+    APRS nuevo en datos históricos.
     """
     status = str(event.status or "active").strip().lower()
     if status in APRS_TERMINAL_STATUSES:
-        prefix = "FIN"
-    elif str(event.severity or "").strip().lower() == "critical":
-        prefix = "CRIT"
-    else:
-        prefix = "EMERG"
+        return "FIN"
+    phase = str(event.metadata.get("firms_phase") or "").strip().lower()
+    if phase == "initial":
+        return "INICIO"
+    if phase == "growth":
+        return "AUMENTO"
+    if str(event.severity or "").strip().lower() == "critical":
+        return "CRIT"
+    return "EMERG"
 
+
+def _aprs_firms_text(event: Event, limit: int) -> str:
+    """Formatea FIRMS para APRS-IS clásico y APRS RF ampliado.
+
+    Mantiene siempre prefijo, ``INCENDIO SAT`` y coordenadas. Desde v7.0.59
+    refleja ``initial``/``growth`` y, cuando existe crecimiento, muestra la
+    evolución DET/FRP/EXT usando ``previous_*`` y ``latest_*``. Con 67 caracteres
+    prioriza estado, coordenadas y evolución esencial; con presupuesto RF mayor
+    añade población, distancia, confianza, satélite y métricas restantes.
+    """
+    prefix = _aprs_firms_prefix(event)
     mandatory = _aprs_ascii_text(f"{prefix} INCENDIO SAT")
     candidates: list[str] = []
 
@@ -176,14 +150,48 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
         except (TypeError, ValueError):
             pass
 
+    phase = str(event.metadata.get("firms_phase") or "").strip().lower()
+    previous_count = _metadata_int(event, "previous_detection_count")
+    latest_count = _metadata_int(event, "latest_detection_count")
+    if latest_count <= 0:
+        latest_count = _metadata_int(event, "detection_count")
+    previous_frp = _metadata_float(event, "previous_frp_total_mw")
+    latest_frp = _metadata_float(event, "latest_frp_total_mw")
+    if latest_frp is None:
+        latest_frp = _metadata_float(event, "frp_total_mw")
+    previous_extent = _metadata_float(event, "previous_extent_km")
+    latest_extent = _metadata_float(event, "latest_extent_km")
+    if latest_extent is None:
+        latest_extent = _metadata_float(event, "cluster_extent_km")
+    reasons = {
+        str(value).strip().lower()
+        for value in (event.metadata.get("growth_reasons") or [])
+        if str(value).strip()
+    }
+
+    # En crecimiento, la causa del aviso tiene prioridad sobre datos accesorios.
+    if phase == "growth":
+        if "detections" in reasons and latest_count > 0:
+            if previous_count > 0:
+                candidates.append(f"DET {previous_count}>{latest_count}")
+            else:
+                candidates.append(f"DET {latest_count}")
+        if "frp" in reasons and latest_frp is not None:
+            if limit > 67 and previous_frp is not None:
+                candidates.append(f"FRP {previous_frp:g}>{latest_frp:g}MW")
+            else:
+                candidates.append(f"FRP {latest_frp:g}MW")
+        if "extent" in reasons and latest_extent is not None:
+            if limit > 67 and previous_extent is not None:
+                candidates.append(f"EXT {previous_extent:g}>{latest_extent:g}km")
+            else:
+                candidates.append(f"EXT {latest_extent:g}km")
+
     nearest_population = _aprs_ascii_text(event.metadata.get("nearest_population"))
     nearest_distance = _metadata_float(event, "nearest_population_distance_km")
     province = _aprs_ascii_text(event.province)
     if nearest_population:
         if limit <= 67:
-            # Se reserva el prefijo CERCA para no convertir una referencia
-            # geográfica en una afirmación administrativa incorrecta. El nombre
-            # se compacta por palabras completas para evitar textos incompletos.
             available_name = _aprs_word_trim(nearest_population, 10)
             candidates.append(f"CERCA {available_name}")
         else:
@@ -197,24 +205,24 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
         candidates.append(province)
 
     count = _metadata_int(event, "detection_count")
-    if count > 0:
-        candidates.append(f"DET {count}")
+    if phase != "growth" or "detections" not in reasons:
+        if count > 0:
+            candidates.append(f"DET {count}")
 
     frp_max = _metadata_float(event, "frp_max_mw")
     if frp_max is None:
         frp_max = _metadata_float(event, "frp_mw")
-    if frp_max is not None:
-        candidates.append(f"FRP {frp_max:g}MW")
+    if phase != "growth" or "frp" not in reasons:
+        if frp_max is not None:
+            candidates.append(f"FRP {frp_max:g}MW")
 
-    confidence = _aprs_ascii_text(event.metadata.get("confidence_label") or event.metadata.get("confidence"))
+    confidence = _aprs_ascii_text(
+        event.metadata.get("confidence_label") or event.metadata.get("confidence")
+    )
     if confidence:
         confidence_alias = {
-            "low": "L",
-            "l": "L",
-            "nominal": "N",
-            "n": "N",
-            "high": "H",
-            "h": "H",
+            "low": "L", "l": "L", "nominal": "N", "n": "N",
+            "high": "H", "h": "H",
         }.get(confidence.casefold(), confidence[:1].upper())
         candidates.append(f"CONF {confidence_alias}")
 
@@ -223,34 +231,19 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
         candidates.append(satellite)
 
     frp_total = _metadata_float(event, "frp_total_mw")
-    if frp_total is not None and count > 1:
+    if frp_total is not None and count > 1 and (phase != "growth" or "frp" not in reasons):
         candidates.append(f"FRP TOT {frp_total:g}MW")
 
     return _aprs_join_candidates(mandatory, candidates, limit, separator=" ")
 
 
 def _aprs_word_trim(value: str, maximum: int) -> str:
-    """Compacta un nombre APRS sin dejar una palabra parcial o preposición final.
-
-    Uso:
-        compact = _aprs_word_trim("Salinas de Jaca", 10)
-
-    Parámetros:
-        value: texto ASCII ya normalizado.
-        maximum: número máximo de caracteres permitidos.
-
-    Funcionalidad:
-        Conserva tantas palabras completas como quepan. Si el último token es
-        una preposición/artículo corto sin término posterior (por ejemplo ``de``),
-        se elimina. Si la primera palabra supera el límite, se recorta como
-        último recurso para no perder completamente la referencia geográfica.
-    """
+    """Compacta un nombre APRS sin dejar una palabra parcial o preposición final."""
     text = " ".join(str(value or "").split())
     if not text or maximum <= 0:
         return ""
     if len(text) <= maximum:
         return text
-
     words = text.split()
     selected: list[str] = []
     for word in words:
@@ -258,11 +251,9 @@ def _aprs_word_trim(value: str, maximum: int) -> str:
         if len(candidate) > maximum:
             break
         selected.append(word)
-
     trailing_connectors = {"a", "al", "de", "del", "el", "la", "las", "los", "y"}
     while len(selected) > 1 and selected[-1].casefold() in trailing_connectors:
         selected.pop()
-
     if selected:
         return " ".join(selected)
     return text[:maximum].rstrip(" ,.;:-")
@@ -346,16 +337,11 @@ def google_maps_url(event: Event) -> str:
     latitude = float(event.latitude)
     longitude = float(event.longitude)
     if (
-        not math.isfinite(latitude)
-        or not math.isfinite(longitude)
-        or not -90 <= latitude <= 90
-        or not -180 <= longitude <= 180
+        not math.isfinite(latitude) or not math.isfinite(longitude)
+        or not -90 <= latitude <= 90 or not -180 <= longitude <= 180
     ):
         return ""
-    return (
-        "https://maps.google.com/?q="
-        f"{_coordinate(latitude)},{_coordinate(longitude)}"
-    )
+    return "https://maps.google.com/?q=" f"{_coordinate(latitude)},{_coordinate(longitude)}"
 
 
 def short_date(value: str) -> str:
@@ -367,21 +353,13 @@ def short_date(value: str) -> str:
         return value[:10]
 
 
-def compact_messages(
-    events: list[Event],
-    max_bytes: int = 140,
-    prefix: str = "EMERG",
-) -> list[str]:
+def compact_messages(events: list[Event], max_bytes: int = 140, prefix: str = "EMERG") -> list[str]:
     """Genera un mensaje autocontenido por evento, nunca una parte huérfana."""
     if not events:
         return [f"{prefix}\nSin emergencias activas."]
     total = len(events)
     return [
-        _compact_event(
-            event,
-            prefix if total == 1 else f"{prefix} [{index}/{total}]",
-            max_bytes,
-        )
+        _compact_event(event, prefix if total == 1 else f"{prefix} [{index}/{total}]", max_bytes)
         for index, event in enumerate(events, 1)
     ]
 
@@ -392,22 +370,7 @@ def byte_chunks(events: list[Event], max_bytes: int = 140) -> list[str]:
 
 
 def _compact_event(event: Event, header: str, max_bytes: int) -> str:
-    """Construye un mensaje compacto sin generar nunca URLs parciales.
-
-    Uso:
-        message = _compact_event(event, "NUEVA · EMERG", 140)
-
-    Parámetros:
-        event: emergencia normalizada.
-        header: cabecera lógica del mensaje.
-        max_bytes: presupuesto UTF-8 máximo del transporte Mesh.
-
-    Funcionalidad:
-        Conserva el comportamiento histórico de prioridad y recorte,
-        con una única garantía adicional desde v7.0.46: la URL del mapa
-        es atómica. Si no cabe completa, se elimina antes de recortar
-        ubicación o texto. Nunca se devuelve una URL truncada.
-    """
+    """Construye un mensaje compacto sin generar nunca URLs parciales."""
     severity = SEVERITY_LABELS.get(event.severity, event.severity.upper())
     category = CATEGORY_LABELS.get(event.category, "INCIDENCIA")
     place = _compact_place(event)
@@ -415,41 +378,28 @@ def _compact_event(event: Event, header: str, max_bytes: int) -> str:
     end = short_date(event.expected_end)
     source = source_label(event.source)
     map_url = google_maps_url(event)
-
     required = [header, f"{severity} · {category}", _trim_text(place or event.title, 55)]
-    footer = " · ".join(part for part in (
-        f"Hasta {end}" if end else "",
-        source,
-    ) if part)
+    footer = " · ".join(part for part in (f"Hasta {end}" if end else "", source) if part)
     optional = []
     if place and event.title and event.title.casefold() not in place.casefold():
         optional.append(_trim_text(event.title, 52))
     if detail and detail.casefold() != event.title.casefold():
         optional.append(detail)
-
     include_map = bool(map_url)
 
     def build_lines() -> list[str]:
-        return (
-            required
-            + ([map_url] if include_map else [])
-            + optional
-            + ([footer] if footer else [])
-        )
+        return required + ([map_url] if include_map else []) + optional + ([footer] if footer else [])
 
     lines = build_lines()
     while len("\n".join(lines).encode("utf-8")) > max_bytes and optional:
         optional.pop()
         lines = build_lines()
-
     if len("\n".join(lines).encode("utf-8")) > max_bytes and include_map:
         include_map = False
         lines = build_lines()
-
     message = "\n".join(lines)
     if len(message.encode("utf-8")) <= max_bytes:
         return message
-
     fixed_lines = required[:2] + ([footer] if footer else [])
     fixed = "\n".join(fixed_lines)
     allowance = max(12, max_bytes - len(fixed.encode("utf-8")) - 1)
