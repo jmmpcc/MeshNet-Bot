@@ -124,10 +124,13 @@ def build_windowed_emergency_snapshot(
 def _emergency_current_collapsible_script() -> str:
     """Devuelve el JavaScript que añade periodo y plegado sin recrear la vista.
 
-    El script espera a que ``emergency_province_view`` cree su sección. Después mueve
-    los mismos nodos DOM dentro de un ``details`` cerrado inicialmente y añade el selector
-    de periodo. También intercepta exclusivamente las peticiones al endpoint histórico
-    de incidencias y las redirige al endpoint temporal de esta extensión.
+    Esta extensión debe instalarse antes de ``emergency_province_view`` en
+    ``control_panel.py``. De ese modo su script aparece primero en el HTML final e
+    intercepta la primera petición de incidencias antes de que la vista la lance.
+
+    El script puede ejecutarse antes de que exista el panel porque espera a que
+    ``emergency_province_view`` cree su sección. Después mueve los mismos nodos DOM
+    dentro de un ``details`` cerrado inicialmente y añade el selector de periodo.
     """
     return r"""
 <script id="meshnet-emergency-current-collapsible">
@@ -138,6 +141,9 @@ def _emergency_current_collapsible_script() -> str:
   /**
    * Redirige únicamente la lectura de incidencias actuales al endpoint optimizado.
    * El resto de llamadas fetch del Control Panel mantienen su comportamiento original.
+   *
+   * Este interceptor se instala antes de que ``emergency_province_view`` ejecute su
+   * primera carga, por lo que no se produce ninguna petición histórica sin filtrar.
    */
   if (!window.__meshnetEmergencyWindowFetchInstalled) {
     const originalFetch = window.fetch.bind(window);
@@ -236,10 +242,6 @@ def _emergency_current_collapsible_script() -> str:
 
     section.appendChild(details);
     section.dataset.meshnetCollapsible = '1';
-
-    // La primera carga histórica pudo ejecutarse antes de instalar esta extensión.
-    // Se fuerza una única recarga ya con la ventana predeterminada de 24 horas.
-    refreshEmergencyCurrentView();
   }
 
   ensureEmergencyCurrentCollapsible();
@@ -253,8 +255,9 @@ def apply_emergency_current_collapsible(app: FastAPI) -> FastAPI:
     """Añade ventana temporal y plegado a la vista actual de Emergencias.
 
     Args:
-        app: aplicación FastAPI del Control Panel, previamente ampliada con
-            ``apply_emergency_province_view``.
+        app: aplicación FastAPI del Control Panel. Debe aplicarse antes de
+            ``apply_emergency_province_view`` para que el interceptor JavaScript quede
+            disponible antes de la primera carga de incidencias.
 
     Returns:
         La misma instancia FastAPI, ampliada de forma idempotente.

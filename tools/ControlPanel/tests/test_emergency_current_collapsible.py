@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 from tools.ControlPanel.emergency_current_collapsible import (
@@ -110,3 +111,27 @@ def test_script_reuses_existing_panel_and_defaults_to_24_hours():
     assert "document.createElement('details')" in script
     assert "state.textContent = 'DESPLEGAR'" in script
     assert "details.open ? 'OCULTAR' : 'DESPLEGAR'" in script
+
+
+def test_interceptor_is_installed_before_province_view():
+    """Evita que la carga inicial sin filtrar salga antes del interceptor de 24 horas.
+
+    ``control_panel.py`` debe aplicar primero ``emergency_current_collapsible``. Por el
+    orden de los middlewares, esto hace que su script aparezca antes en el HTML final y
+    que ``window.fetch`` ya esté interceptado cuando la vista de provincia se inicializa.
+    """
+    control_panel_path = Path(__file__).resolve().parents[1] / "control_panel.py"
+    source = control_panel_path.read_text(encoding="utf-8")
+
+    window_position = source.index("app = apply_emergency_current_collapsible(app)")
+    province_position = source.index("app = apply_emergency_province_view(app)")
+
+    assert window_position < province_position
+
+
+def test_script_does_not_force_second_initial_refresh():
+    """El plegado no debe crear una segunda carga concurrente al inicializarse."""
+    script = _emergency_current_collapsible_script()
+
+    assert "La primera carga histórica pudo ejecutarse" not in script
+    assert "Se fuerza una única recarga" not in script
