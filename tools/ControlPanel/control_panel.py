@@ -14,6 +14,7 @@ try:
     import web_admin
     from aprs_category_matrix import apply_aprs_category_matrix
     from delivery_audit_collapsible import apply_delivery_audit_collapsible
+    from emergency_current_collapsible import apply_emergency_current_collapsible
     from emergency_province_view import apply_emergency_province_view
     from message_emergency_filters import apply_message_emergency_filters
     from message_map_links import apply_message_map_links
@@ -21,6 +22,7 @@ except ModuleNotFoundError:
     from tools.ControlPanel import web_admin
     from tools.ControlPanel.aprs_category_matrix import apply_aprs_category_matrix
     from tools.ControlPanel.delivery_audit_collapsible import apply_delivery_audit_collapsible
+    from tools.ControlPanel.emergency_current_collapsible import apply_emergency_current_collapsible
     from tools.ControlPanel.emergency_province_view import apply_emergency_province_view
     from tools.ControlPanel.message_emergency_filters import apply_message_emergency_filters
     from tools.ControlPanel.message_map_links import apply_message_map_links
@@ -31,6 +33,7 @@ except ModuleNotFoundError:
 # funciones históricas del Control Panel.
 app = apply_aprs_category_matrix(web_admin.app)
 app = apply_emergency_province_view(app)
+app = apply_emergency_current_collapsible(app)
 app = apply_message_emergency_filters(app)
 app = apply_message_map_links(app)
 app = apply_delivery_audit_collapsible(app)
