@@ -95,6 +95,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "api_key_env": "FIRMS_MAP_KEY", "dataset": "VIIRS_SNPP_NRT",
             "bbox": [-9.4, 35.8, 4.4, 43.9], "days": 1,
             "verification": "satellite_detection", "require_areas": True,
+            "incident_tracking_enabled": True,
+            "incident_radius_km": 8.0,
+            "incident_max_gap_hours": 24.0,
+            "growth_frp_ratio": 0.25,
+            "growth_frp_min_mw": 5.0,
+            "growth_extent_ratio": 0.20,
+            "growth_extent_min_km": 0.5,
         },
         "aemet_cap": {
             "type": "aemet_cap", "enabled": False,

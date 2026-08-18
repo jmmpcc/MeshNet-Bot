@@ -1,0 +1,34 @@
+name: Validate v7.0.59 FIRMS early growth
+
+on:
+  pull_request:
+    paths:
+      - "tools/emergencias_guardia/emergencias/**"
+      - "tests/test_firms_*.py"
+      - ".github/workflows/validate-v7059-firms-early-growth.yml"
+  workflow_dispatch:
+
+jobs:
+  firms-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile emergency application
+        run: |
+          python -m compileall -q tools/emergencias_guardia shared
+
+      - name: Run FIRMS regressions
+        run: |
+          python -m unittest -v \
+            tests.test_firms_early_growth_v7059 \
+            tests.test_firms_aprs_evolution_v7059 \
+            tests.test_firms_grouping_aprs_v7051 \
+            tests.test_firms_locality_v7052 \
+            tests.test_firms_propagation_v7054
