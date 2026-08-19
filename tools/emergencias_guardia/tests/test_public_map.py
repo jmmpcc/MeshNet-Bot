@@ -51,11 +51,14 @@ class PublicEmergencyMapTests(unittest.TestCase):
         self.assertEqual(first["revision"], second["revision"])
 
     def test_html_contains_live_refresh_and_visible_update_time(self) -> None:
+        """El HTML refresca JSON y el popup consulta siempre el evento más reciente."""
         html = render_public_map_html("test-key", refresh_seconds=10)
         self.assertIn("Última actualización", html)
         self.assertIn("events.json?ts=", html)
         self.assertIn("setInterval(refresh,10000)", html)
         self.assertIn("maps.googleapis.com/maps/api/js?key=test-key", html)
+        self.assertIn("m.__meshnetEvent=e", html)
+        self.assertIn("popup(m.__meshnetEvent)", html)
 
     def test_emergency_directory_denies_listing_and_unknown_resources(self) -> None:
         htaccess = render_directory_htaccess("https://ciberforense.com.es")
