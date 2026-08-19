@@ -169,7 +169,6 @@ def _aprs_firms_text(event: Event, limit: int) -> str:
         if str(value).strip()
     }
 
-    # En crecimiento, la causa del aviso tiene prioridad sobre datos accesorios.
     if phase == "growth":
         if "detections" in reasons and latest_count > 0:
             if previous_count > 0:
@@ -369,8 +368,86 @@ def byte_chunks(events: list[Event], max_bytes: int = 140) -> list[str]:
     return compact_messages(events, max_bytes=max_bytes, prefix="EMERG")
 
 
+def _firms_mesh_phase(event: Event) -> str:
+    """Devuelve la fase FIRMS que debe ser obligatoria en mensajes Mesh.
+
+    Uso:
+        ``phase = _firms_mesh_phase(event)`` desde ``_compact_event``.
+
+    Parámetros:
+        event: evento normalizado de Emergencias.
+
+    Funcionalidad:
+        Solo actúa para ``nasa_firms/wildfire``. Los estados terminales tienen
+        prioridad y se muestran como ``FIN``. Las fases v7.0.59 ``initial`` y
+        ``growth`` se muestran como ``INICIO`` y ``AUMENTO``. ``stable`` y los
+        eventos legacy no añaden un estado artificial porque no son avisos
+        notificables por sí mismos.
+    """
+    if event.source != "nasa_firms" or event.category != "wildfire":
+        return ""
+    status = str(event.status or "active").strip().lower()
+    if status in APRS_TERMINAL_STATUSES:
+        return "FIN"
+    phase = str(event.metadata.get("firms_phase") or "").strip().lower()
+    if phase == "initial":
+        return "INICIO"
+    if phase == "growth":
+        return "AUMENTO"
+    return ""
+
+
+def _firms_mesh_growth_detail(event: Event) -> str:
+    """Resume DET/FRP/EXT de un crecimiento FIRMS para Mesh sin excederse.
+
+    Solo devuelve contenido cuando ``firms_phase=growth``. Las métricas usan
+    valores previo>actual cuando están disponibles, haciendo explícita la causa
+    del aviso sin depender del título o descripción opcionales.
+    """
+    phase = str(event.metadata.get("firms_phase") or "").strip().lower()
+    if phase != "growth":
+        return ""
+    reasons = {
+        str(value).strip().lower()
+        for value in (event.metadata.get("growth_reasons") or [])
+        if str(value).strip()
+    }
+    parts: list[str] = []
+    previous_count = _metadata_int(event, "previous_detection_count")
+    latest_count = _metadata_int(event, "latest_detection_count") or _metadata_int(event, "detection_count")
+    if "detections" in reasons and latest_count > 0:
+        parts.append(f"DET {previous_count}>{latest_count}" if previous_count > 0 else f"DET {latest_count}")
+
+    previous_frp = _metadata_float(event, "previous_frp_total_mw")
+    latest_frp = _metadata_float(event, "latest_frp_total_mw")
+    if latest_frp is None:
+        latest_frp = _metadata_float(event, "frp_total_mw")
+    if "frp" in reasons and latest_frp is not None:
+        parts.append(
+            f"FRP {previous_frp:g}>{latest_frp:g}MW"
+            if previous_frp is not None else f"FRP {latest_frp:g}MW"
+        )
+
+    previous_extent = _metadata_float(event, "previous_extent_km")
+    latest_extent = _metadata_float(event, "latest_extent_km")
+    if latest_extent is None:
+        latest_extent = _metadata_float(event, "cluster_extent_km")
+    if "extent" in reasons and latest_extent is not None:
+        parts.append(
+            f"EXT {previous_extent:g}>{latest_extent:g}km"
+            if previous_extent is not None else f"EXT {latest_extent:g}km"
+        )
+    return " · ".join(parts)
+
+
 def _compact_event(event: Event, header: str, max_bytes: int) -> str:
-    """Construye un mensaje compacto sin generar nunca URLs parciales."""
+    """Construye un mensaje compacto sin generar nunca URLs parciales.
+
+    Para NASA FIRMS v7.0.59, ``INICIO/AUMENTO/FIN`` se integra en la cabecera
+    obligatoria. De ese modo MeshCore y Meshtastic nunca pierden la fase aunque
+    haya que descartar URL, título o descripción para respetar ``max_bytes``.
+    El resto de fuentes conserva exactamente el formato histórico.
+    """
     severity = SEVERITY_LABELS.get(event.severity, event.severity.upper())
     category = CATEGORY_LABELS.get(event.category, "INCIDENCIA")
     place = _compact_place(event)
@@ -378,9 +455,16 @@ def _compact_event(event: Event, header: str, max_bytes: int) -> str:
     end = short_date(event.expected_end)
     source = source_label(event.source)
     map_url = google_maps_url(event)
-    required = [header, f"{severity} · {category}", _trim_text(place or event.title, 55)]
+
+    firms_phase = _firms_mesh_phase(event)
+    required_header = f"{firms_phase} · {header}" if firms_phase else header
+    required = [required_header, f"{severity} · {category}", _trim_text(place or event.title, 55)]
     footer = " · ".join(part for part in (f"Hasta {end}" if end else "", source) if part)
-    optional = []
+    optional: list[str] = []
+
+    growth_detail = _firms_mesh_growth_detail(event)
+    if growth_detail:
+        optional.append(growth_detail)
     if place and event.title and event.title.casefold() not in place.casefold():
         optional.append(_trim_text(event.title, 52))
     if detail and detail.casefold() != event.title.casefold():
