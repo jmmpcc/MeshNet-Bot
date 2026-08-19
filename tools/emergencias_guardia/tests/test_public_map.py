@@ -30,6 +30,8 @@ class PublicEmergencyMapTests(unittest.TestCase):
                             "longitude": -0.8,
                             "title": "Incendio",
                             "severity": "high",
+                            "road": "A-2",
+                            "kilometre": 314,
                         },
                         {
                             "event_id": "resolved",
@@ -52,6 +54,8 @@ class PublicEmergencyMapTests(unittest.TestCase):
 
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["events"][0]["event_id"], "active")
+        self.assertEqual(payload["events"][0]["road"], "A-2")
+        self.assertEqual(payload["events"][0]["kilometre"], 314)
         self.assertEqual(payload["source_updated_at"], "2026-08-19T10:00:00+00:00")
 
     def test_revision_changes_only_when_public_content_changes(self) -> None:
@@ -82,7 +86,7 @@ class PublicEmergencyMapTests(unittest.TestCase):
 
         self.assertIn("Última actualización", html)
         self.assertIn("events.json?ts=", html)
-        self.assertIn("setInterval(refresh, 10000)", html)
+        self.assertIn("setInterval(refresh,10000)", html)
         self.assertIn("maplibre-gl@5.6.0", html)
         self.assertIn("https://tiles.openfreemap.org/styles/liberty", html)
         self.assertIn("OpenStreetMap contributors", html)
@@ -90,6 +94,52 @@ class PublicEmergencyMapTests(unittest.TestCase):
         self.assertNotIn("maps.googleapis.com", html)
         self.assertNotIn("google.maps", html)
         self.assertNotIn("api_key", html.casefold())
+
+    def test_html_has_same_operational_filters_as_control_panel(self) -> None:
+        """Periodo, provincia, severidad y tipo se aplican localmente al JSON público."""
+        html = render_public_map_html()
+
+        self.assertIn('id="filter-period"', html)
+        self.assertIn('value="24" selected', html)
+        self.assertIn('value="48"', html)
+        self.assertIn('value="72"', html)
+        self.assertIn('value="168"', html)
+        self.assertIn('id="filter-province"', html)
+        self.assertIn('id="filter-severity"', html)
+        self.assertIn('id="filter-category"', html)
+        self.assertIn("function filteredEvents()", html)
+        self.assertIn("function eventReferenceDate(event)", html)
+
+    def test_html_counts_categories_and_uses_category_colour(self) -> None:
+        """Los recuentos son pulsables y el color identifica el tipo de incidencia."""
+        html = render_public_map_html()
+
+        self.assertIn('id="summary"', html)
+        self.assertIn("CATEGORY_PRESENTATION", html)
+        self.assertIn("Incendio forestal", html)
+        self.assertIn("Corte de carretera", html)
+        self.assertIn("Inundación", html)
+        self.assertIn("Terremoto", html)
+        self.assertIn("renderCategorySummary", html)
+        self.assertIn("category-chip", html)
+        self.assertIn("markerAppearance(event)", html)
+        self.assertIn("border:4", html)
+
+    def test_html_has_hover_summary_and_pinned_complete_detail(self) -> None:
+        """Hover resume y click/tap mantiene una ficha completa con los datos públicos."""
+        html = render_public_map_html()
+
+        self.assertIn("mouseenter", html)
+        self.assertIn("mouseleave", html)
+        self.assertIn("quickPopupHtml", html)
+        self.assertIn("fullPopupHtml", html)
+        self.assertIn("Verificación:", html)
+        self.assertIn("Carretera:", html)
+        self.assertIn("Coordenadas:", html)
+        self.assertIn("Primera detección:", html)
+        self.assertIn("Última detección:", html)
+        self.assertIn("Fuente oficial:", html)
+        self.assertIn("closeOnClick:false", html)
 
     def test_emergency_directory_denies_listing_and_unknown_resources(self) -> None:
         """El directorio público mantiene una superficie mínima y controlada."""
