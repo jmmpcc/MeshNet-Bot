@@ -1,0 +1,15 @@
+[Unit]
+Description=Comprobación de respaldo del mapa público de emergencias MeshNet
+
+[Timer]
+# Failsafe del observador .path: garantiza que una sustitución atómica de current.json
+# no pueda dejar el mapa remoto desactualizado si systemd no entrega el evento esperado.
+# El servicio llama a publish_if_changed(), por lo que si la revisión pública no cambia
+# no se realiza ninguna conexión ni subida FTPS.
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=meshnet-emergencias-public-map.service
+
+[Install]
+WantedBy=timers.target
