@@ -1,0 +1,12 @@
+[Unit]
+Description=Vigilar cambios de incidencias para el mapa público MeshNet
+
+[Path]
+# current.json es la salida consolidada existente de emergencias_guardia.
+# No se toca el recolector ni su temporizador; cualquier actualización del fichero
+# despierta el publicador, que a su vez evita subidas si la revisión pública no cambió.
+PathChanged=/home/meshnet/MeshNet-Bot/tools/emergencias_guardia/data/current.json
+Unit=meshnet-emergencias-public-map.service
+
+[Install]
+WantedBy=multi-user.target

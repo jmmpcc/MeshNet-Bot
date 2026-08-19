@@ -1,0 +1,34 @@
+# POLÍTICA GLOBAL OPCIONAL PARA /public_html/.htaccess
+#
+# NO se instala automáticamente. Debe fusionarse con el .htaccess real del dominio
+# después de verificar qué recursos usa la página principal. Sobrescribir la raíz sin
+# esa comprobación podría romper CSS, JS, imágenes u otras rutas legítimas.
+#
+# Objetivo solicitado:
+#   - permitir el dominio raíz;
+#   - permitir /emergencias/;
+#   - conservar /informes/propagacion/ y /p/ de RadioPropagacion;
+#   - conservar /.well-known/acme-challenge/ para renovación TLS;
+#   - redirigir cualquier otra ruta al dominio principal.
+
+Options -Indexes
+RewriteEngine On
+
+# Dominio principal.
+RewriteRule ^$ - [L]
+
+# Únicas áreas públicas MeshNet autorizadas.
+RewriteRule ^emergencias(?:/|$) - [L,NC]
+RewriteRule ^informes/propagacion(?:/|$) - [L,NC]
+RewriteRule ^p(?:/|$) - [L,NC]
+
+# No bloquear validaciones ACME/Let's Encrypt del hosting.
+RewriteRule ^\.well-known/acme-challenge(?:/|$) - [L,NC]
+
+# Cualquier otra ruta vuelve al dominio principal.
+RewriteRule ^ https://ciberforense.com.es/ [R=302,L]
+
+<IfModule mod_headers.c>
+Header always set X-Content-Type-Options "nosniff"
+Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>

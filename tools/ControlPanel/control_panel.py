@@ -18,6 +18,7 @@ try:
     from emergency_province_view import apply_emergency_province_view
     from message_emergency_filters import apply_message_emergency_filters
     from message_map_links import apply_message_map_links
+    from public_emergency_map_link import apply_public_emergency_map_link
 except ModuleNotFoundError:
     from tools.ControlPanel import web_admin
     from tools.ControlPanel.aprs_category_matrix import apply_aprs_category_matrix
@@ -26,6 +27,7 @@ except ModuleNotFoundError:
     from tools.ControlPanel.emergency_province_view import apply_emergency_province_view
     from tools.ControlPanel.message_emergency_filters import apply_message_emergency_filters
     from tools.ControlPanel.message_map_links import apply_message_map_links
+    from tools.ControlPanel.public_emergency_map_link import apply_public_emergency_map_link
 
 
 # Las extensiones amplían la app ya creada por web_admin en lugar de duplicar el servidor
@@ -44,6 +46,11 @@ app = apply_emergency_province_view(app)
 app = apply_message_emergency_filters(app)
 app = apply_message_map_links(app)
 app = apply_delivery_audit_collapsible(app)
+
+# El mapa público se enlaza al final y abre fuera del panel. No comparte sesión,
+# credenciales ni endpoints internos; la indisponibilidad del hosting público no puede
+# degradar el funcionamiento del Control Panel.
+app = apply_public_emergency_map_link(app)
 
 
 def main() -> None:

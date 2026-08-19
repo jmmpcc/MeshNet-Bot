@@ -1,0 +1,23 @@
+[Unit]
+Description=Publicación segura del mapa público de emergencias MeshNet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=meshnet
+WorkingDirectory=/home/meshnet/MeshNet-Bot/tools/emergencias_guardia
+# Se mantiene la misma jerarquía de configuración que el recolector existente.
+EnvironmentFile=-/home/meshnet/MeshNet-Bot/.env
+EnvironmentFile=-/home/meshnet/MeshNet-Bot/tools/emergencias_guardia/.env
+# El publicador está completamente desacoplado del recolector: lee current.json,
+# calcula una revisión y sólo realiza FTPS si el contenido público ha cambiado.
+ExecStart=/usr/bin/python3 -m emergencias.public_map
+
+# Endurecimiento del proceso. Necesita red saliente y escritura únicamente en data/
+# para recordar la última revisión publicada.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/meshnet/MeshNet-Bot/tools/emergencias_guardia/data

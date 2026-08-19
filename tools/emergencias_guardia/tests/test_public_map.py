@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from tools.emergencias_guardia.emergencias.public_map import (
+    build_public_payload,
+    render_directory_htaccess,
+    render_public_map_html,
+)
+
+
+class PublicEmergencyMapTests(unittest.TestCase):
+    """Regresiones puras del mapa público; no realizan red ni conexiones FTPS."""
+
+    def test_payload_exposes_only_active_geolocated_events(self) -> None:
+        """Resueltas o incidencias sin coordenadas nunca llegan al JSON público."""
+        with tempfile.TemporaryDirectory() as temporary:
+            current = Path(temporary) / "current.json"
+            current.write_text(
+                json.dumps({
+                    "updated_at": "2026-08-19T10:00:00+00:00",
+                    "events": [
+                        {
+                            "event_id": "active",
+                            "status": "active",
+                            "latitude": 41.6,
+                            "longitude": -0.8,
+                            "title": "Incendio",
+                            "severity": "high",
+                        },
+                        {
+                            "event_id": "resolved",
+                            "status": "resolved",
+                            "latitude": 41.7,
+                            "longitude": -0.9,
+                            "title": "Resuelta",
+                        },
+                        {
+                            "event_id": "no-coordinates",
+                            "status": "active",
+                            "title": "Sin posición",
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+
+            payload = build_public_payload(current)
+
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["events"][0]["event_id"], "active")
+        self.assertEqual(payload["source_updated_at"], "2026-08-19T10:00:00+00:00")
+
+    def test_revision_changes_only_when_public_content_changes(self) -> None:
+        """La marca generated_at no provoca por sí sola una nueva publicación."""
+        with tempfile.TemporaryDirectory() as temporary:
+            current = Path(temporary) / "current.json"
+            current.write_text(
+                json.dumps({
+                    "updated_at": "2026-08-19T10:00:00+00:00",
+                    "events": [{
+                        "event_id": "one",
+                        "status": "active",
+                        "latitude": 41.6,
+                        "longitude": -0.8,
+                        "title": "Incidencia",
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            first = build_public_payload(current)
+            second = build_public_payload(current)
+
+        self.assertEqual(first["revision"], second["revision"])
+
+    def test_html_uses_maplibre_openfreemap_and_live_refresh(self) -> None:
+        """El visor gratuito no contiene Google y refresca siempre events.json."""
+        html = render_public_map_html(refresh_seconds=10)
+
+        self.assertIn("Última actualización", html)
+        self.assertIn("events.json?ts=", html)
+        self.assertIn("setInterval(refresh, 10000)", html)
+        self.assertIn("maplibre-gl@5.6.0", html)
+        self.assertIn("https://tiles.openfreemap.org/styles/liberty", html)
+        self.assertIn("OpenStreetMap contributors", html)
+        self.assertIn("entry.event = event", html)
+        self.assertNotIn("maps.googleapis.com", html)
+        self.assertNotIn("google.maps", html)
+        self.assertNotIn("api_key", html.casefold())
+
+    def test_emergency_directory_denies_listing_and_unknown_resources(self) -> None:
+        """El directorio público mantiene una superficie mínima y controlada."""
+        htaccess = render_directory_htaccess("https://ciberforense.com.es")
+
+        self.assertIn("Options -Indexes", htaccess)
+        self.assertIn("events\\.json", htaccess)
+        self.assertIn("Require all denied", htaccess)
+        self.assertIn("https://ciberforense.com.es/", htaccess)
+        self.assertIn("X-Content-Type-Options", htaccess)
+
+
+if __name__ == "__main__":
+    unittest.main()
