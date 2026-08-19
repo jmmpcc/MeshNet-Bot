@@ -13,22 +13,40 @@ from tools.emergencias_guardia.emergencias.public_map import (
 
 
 class PublicEmergencyMapTests(unittest.TestCase):
-    """Regresiones puras: no realizan red, FTPS ni llamadas a Google Maps."""
+    """Regresiones puras del mapa público; no realizan red ni conexiones FTPS."""
 
     def test_payload_exposes_only_active_geolocated_events(self) -> None:
         """Resueltas o incidencias sin coordenadas nunca llegan al JSON público."""
         with tempfile.TemporaryDirectory() as temporary:
             current = Path(temporary) / "current.json"
-            current.write_text(json.dumps({
-                "updated_at": "2026-08-19T10:00:00+00:00",
-                "events": [
-                    {"event_id": "active", "status": "active", "latitude": 41.6,
-                     "longitude": -0.8, "title": "Incendio", "severity": "high"},
-                    {"event_id": "resolved", "status": "resolved", "latitude": 41.7,
-                     "longitude": -0.9, "title": "Resuelta"},
-                    {"event_id": "no-coordinates", "status": "active", "title": "Sin posición"},
-                ],
-            }), encoding="utf-8")
+            current.write_text(
+                json.dumps({
+                    "updated_at": "2026-08-19T10:00:00+00:00",
+                    "events": [
+                        {
+                            "event_id": "active",
+                            "status": "active",
+                            "latitude": 41.6,
+                            "longitude": -0.8,
+                            "title": "Incendio",
+                            "severity": "high",
+                        },
+                        {
+                            "event_id": "resolved",
+                            "status": "resolved",
+                            "latitude": 41.7,
+                            "longitude": -0.9,
+                            "title": "Resuelta",
+                        },
+                        {
+                            "event_id": "no-coordinates",
+                            "status": "active",
+                            "title": "Sin posición",
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
 
             payload = build_public_payload(current)
 
@@ -40,32 +58,48 @@ class PublicEmergencyMapTests(unittest.TestCase):
         """La marca generated_at no provoca por sí sola una nueva publicación."""
         with tempfile.TemporaryDirectory() as temporary:
             current = Path(temporary) / "current.json"
-            current.write_text(json.dumps({
-                "updated_at": "2026-08-19T10:00:00+00:00",
-                "events": [{"event_id": "one", "status": "active", "latitude": 41.6,
-                            "longitude": -0.8, "title": "Incidencia"}],
-            }), encoding="utf-8")
+            current.write_text(
+                json.dumps({
+                    "updated_at": "2026-08-19T10:00:00+00:00",
+                    "events": [{
+                        "event_id": "one",
+                        "status": "active",
+                        "latitude": 41.6,
+                        "longitude": -0.8,
+                        "title": "Incidencia",
+                    }],
+                }),
+                encoding="utf-8",
+            )
             first = build_public_payload(current)
             second = build_public_payload(current)
 
         self.assertEqual(first["revision"], second["revision"])
 
-    def test_html_contains_live_refresh_and_visible_update_time(self) -> None:
-        """El HTML refresca JSON y el popup consulta siempre el evento más reciente."""
-        html = render_public_map_html("test-key", refresh_seconds=10)
+    def test_html_uses_maplibre_openfreemap_and_live_refresh(self) -> None:
+        """El visor gratuito no contiene Google y refresca siempre events.json."""
+        html = render_public_map_html(refresh_seconds=10)
+
         self.assertIn("Última actualización", html)
         self.assertIn("events.json?ts=", html)
-        self.assertIn("setInterval(refresh,10000)", html)
-        self.assertIn("maps.googleapis.com/maps/api/js?key=test-key", html)
-        self.assertIn("m.__meshnetEvent=e", html)
-        self.assertIn("popup(m.__meshnetEvent)", html)
+        self.assertIn("setInterval(refresh, 10000)", html)
+        self.assertIn("maplibre-gl@5.6.0", html)
+        self.assertIn("https://tiles.openfreemap.org/styles/liberty", html)
+        self.assertIn("OpenStreetMap contributors", html)
+        self.assertIn("entry.event = event", html)
+        self.assertNotIn("maps.googleapis.com", html)
+        self.assertNotIn("google.maps", html)
+        self.assertNotIn("api_key", html.casefold())
 
     def test_emergency_directory_denies_listing_and_unknown_resources(self) -> None:
+        """El directorio público mantiene una superficie mínima y controlada."""
         htaccess = render_directory_htaccess("https://ciberforense.com.es")
+
         self.assertIn("Options -Indexes", htaccess)
         self.assertIn("events\\.json", htaccess)
         self.assertIn("Require all denied", htaccess)
         self.assertIn("https://ciberforense.com.es/", htaccess)
+        self.assertIn("X-Content-Type-Options", htaccess)
 
 
 if __name__ == "__main__":
