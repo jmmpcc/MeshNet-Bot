@@ -371,18 +371,10 @@ def byte_chunks(events: list[Event], max_bytes: int = 140) -> list[str]:
 def _firms_mesh_phase(event: Event) -> str:
     """Devuelve la fase FIRMS que debe ser obligatoria en mensajes Mesh.
 
-    Uso:
-        ``phase = _firms_mesh_phase(event)`` desde ``_compact_event``.
-
-    Parámetros:
-        event: evento normalizado de Emergencias.
-
-    Funcionalidad:
-        Solo actúa para ``nasa_firms/wildfire``. Los estados terminales tienen
-        prioridad y se muestran como ``FIN``. Las fases v7.0.59 ``initial`` y
-        ``growth`` se muestran como ``INICIO`` y ``AUMENTO``. ``stable`` y los
-        eventos legacy no añaden un estado artificial porque no son avisos
-        notificables por sí mismos.
+    Solo actúa para ``nasa_firms/wildfire``. Los estados terminales tienen
+    prioridad y se muestran como ``FIN``. Las fases ``initial`` y ``growth`` se
+    muestran como ``INICIO`` y ``AUMENTO``. ``stable`` y los eventos legacy no
+    añaden un estado artificial porque no son avisos notificables por sí mismos.
     """
     if event.source != "nasa_firms" or event.category != "wildfire":
         return ""
@@ -400,9 +392,8 @@ def _firms_mesh_phase(event: Event) -> str:
 def _firms_mesh_growth_detail(event: Event) -> str:
     """Resume DET/FRP/EXT de un crecimiento FIRMS para Mesh sin excederse.
 
-    Solo devuelve contenido cuando ``firms_phase=growth``. Las métricas usan
-    valores previo>actual cuando están disponibles, haciendo explícita la causa
-    del aviso sin depender del título o descripción opcionales.
+    Las métricas usan valores previo>actual cuando están disponibles, haciendo
+    explícita la causa del aviso sin depender del título o descripción.
     """
     phase = str(event.metadata.get("firms_phase") or "").strip().lower()
     if phase != "growth":
@@ -443,9 +434,9 @@ def _firms_mesh_growth_detail(event: Event) -> str:
 def _compact_event(event: Event, header: str, max_bytes: int) -> str:
     """Construye un mensaje compacto sin generar nunca URLs parciales.
 
-    Para NASA FIRMS v7.0.59, ``INICIO/AUMENTO/FIN`` se integra en la cabecera
-    obligatoria. De ese modo MeshCore y Meshtastic nunca pierden la fase aunque
-    haya que descartar URL, título o descripción para respetar ``max_bytes``.
+    Para NASA FIRMS, ``INICIO/AUMENTO/FIN`` se integra en la cabecera obligatoria.
+    Cuando el foco aumenta, DET/FRP/EXT tienen prioridad sobre el enlace de mapa:
+    si ambos no caben en 140 bytes se conserva la evolución y se omite el mapa.
     El resto de fuentes conserva exactamente el formato histórico.
     """
     severity = SEVERITY_LABELS.get(event.severity, event.severity.upper())
@@ -469,7 +460,11 @@ def _compact_event(event: Event, header: str, max_bytes: int) -> str:
         optional.append(_trim_text(event.title, 52))
     if detail and detail.casefold() != event.title.casefold():
         optional.append(detail)
-    include_map = bool(map_url)
+
+    # En crecimiento FIRMS la evolución es operacionalmente más importante que
+    # el enlace del mapa. Coordenadas y mapa siguen disponibles en Control Panel,
+    # mientras APRS conserva siempre las coordenadas en su formatter específico.
+    include_map = bool(map_url) and not bool(growth_detail)
 
     def build_lines() -> list[str]:
         return required + ([map_url] if include_map else []) + optional + ([footer] if footer else [])
