@@ -141,6 +141,30 @@ class PublicEmergencyMapTests(unittest.TestCase):
         self.assertIn("Fuente oficial:", html)
         self.assertIn("closeOnClick:false", html)
 
+    def test_html_marks_recent_incidents_from_first_seen_without_changing_data_contract(self) -> None:
+        """El pulso es puramente visual y usa first_seen, no updated_at, para definir un alta reciente."""
+        html = render_public_map_html()
+
+        self.assertIn("RECENT_PULSE_MINUTES = 30", html)
+        self.assertIn("RECENT_HALO_MINUTES = 120", html)
+        self.assertIn("function eventFirstSeenAgeMinutes(event)", html)
+        self.assertIn("function recentState(event)", html)
+        self.assertIn("event.first_seen", html)
+        self.assertIn("recent-pulse", html)
+        self.assertIn("recent-halo", html)
+        self.assertIn("Incidencia reciente", html)
+        self.assertIn("Pulso = detectada hace menos de 30 min", html)
+        self.assertIn("prefers-reduced-motion:reduce", html)
+
+    def test_html_refreshes_recent_marker_state_even_when_revision_is_unchanged(self) -> None:
+        """Una incidencia deja de pulsar por edad sin esperar a que cambie events.json."""
+        html = render_public_map_html()
+
+        self.assertIn("function refreshMarkerRecency()", html)
+        self.assertIn("if (data.revision === revision)", html)
+        self.assertIn("refreshMarkerRecency();", html)
+        self.assertIn("applyMarkerAppearance(entry.element,entry.event)", html)
+
     def test_emergency_directory_denies_listing_and_unknown_resources(self) -> None:
         """El directorio público mantiene una superficie mínima y controlada."""
         htaccess = render_directory_htaccess("https://ciberforense.com.es")

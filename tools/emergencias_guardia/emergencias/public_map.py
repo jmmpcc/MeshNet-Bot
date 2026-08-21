@@ -121,6 +121,9 @@ def render_public_map_html(refresh_seconds: int = 10) -> str:
         - Muestra contadores totales y por categoría sobre el conjunto filtrado.
         - Usa el color para identificar el tipo de incidencia y borde/tamaño para
           expresar la severidad sin perder ninguna de las dos dimensiones.
+        - Destaca incidencias recién detectadas con un pulso CSS durante sus
+          primeros 30 minutos y un halo fijo hasta las dos horas, basándose
+          exclusivamente en first_seen para no confundir actualizaciones con altas.
         - En escritorio muestra un resumen al pasar el puntero por un marcador.
         - Al pulsar/tocar fija una ficha completa hasta cerrarla o seleccionar otra.
         - Reencuadra sólo cuando el usuario lo solicita o cambia un filtro.
@@ -152,13 +155,22 @@ html,body{{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Ari
 .muted{{color:var(--muted);font-size:.9rem}}
 .badge{{padding:4px 9px;border:1px solid #4b657a;border-radius:999px}}
 .status-ok{{color:#79e3bd}}.status-bad{{color:#ffb0aa}}
+#recent-legend{{display:inline-flex;align-items:center;gap:7px}}
+.recent-legend-dot{{position:relative;width:10px;height:10px;border-radius:50%;background:#ff8a65;display:inline-block}}
+.recent-legend-dot::after{{content:'';position:absolute;inset:-5px;border:2px solid #ff8a65;border-radius:50%;animation:meshnet-recent-pulse 1.8s ease-out infinite}}
 #map{{height:calc(100% - 190px);min-height:430px}}
-.meshnet-marker{{border-radius:50%;box-shadow:0 2px 8px #0009;cursor:pointer;transition:transform .12s ease}}
+.meshnet-marker{{position:relative;border-radius:50%;box-shadow:0 2px 8px #0009;cursor:pointer;transition:transform .12s ease}}
 .meshnet-marker:hover{{transform:scale(1.18)}}
+.meshnet-marker.recent-pulse::after,.meshnet-marker.recent-halo::after{{content:'';position:absolute;pointer-events:none;border-radius:50%;border:2px solid currentColor}}
+.meshnet-marker.recent-pulse::after{{inset:-7px;animation:meshnet-recent-pulse 1.8s ease-out infinite}}
+.meshnet-marker.recent-halo::after{{inset:-6px;opacity:.55}}
+@keyframes meshnet-recent-pulse{{0%{{transform:scale(.72);opacity:.95}}70%,100%{{transform:scale(1.65);opacity:0}}}}
+.recent-notice{{display:inline-block;margin:0 0 5px;padding:3px 7px;border-radius:999px;background:#fff3e0;color:#a34400;font-weight:700;font-size:.78rem}}
 .maplibregl-popup-content{{color:#17212b;max-width:390px}}
 .maplibregl-popup-content hr{{border:0;border-top:1px solid #d9dfe4}}
 .quick-popup .maplibregl-popup-content{{max-width:300px;padding:8px 10px}}
 #footer{{height:21px;padding:2px 10px;background:#0c1925;color:#8096a8;font-size:.72rem}}
+@media(prefers-reduced-motion:reduce){{.recent-legend-dot::after,.meshnet-marker.recent-pulse::after{{animation:none;inset:-6px;opacity:.65;transform:none}}}}
 @media(max-width:900px){{#filters{{grid-template-columns:repeat(2,minmax(130px,1fr))}}#map{{height:calc(100% - 275px)}}}}
 @media(max-width:560px){{#filters{{grid-template-columns:1fr}}#map{{height:calc(100% - 410px);min-height:420px}}}}
 </style>
@@ -171,6 +183,7 @@ html,body{{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Ari
     <span class="muted">Total publicado: <span id="published-count">0</span></span>
     <span class="muted">Última actualización: <span id="updated">--</span></span>
     <span class="muted" id="state">Conectando</span>
+    <span class="muted" id="recent-legend"><span class="recent-legend-dot" aria-hidden="true"></span>Pulso = detectada hace menos de 30 min</span>
   </div>
   <div id="filters">
     <label>Periodo
@@ -206,6 +219,8 @@ html,body{{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Ari
 <script src="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
 <script>
 const PUBLIC_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
+const RECENT_PULSE_MINUTES = 30;
+const RECENT_HALO_MINUTES = 120;
 const markers = new Map();
 let revision = '';
 let publishedEvents = [];
@@ -266,13 +281,38 @@ function eventReferenceDate(event) {{
   return null;
 }}
 
+function eventFirstSeenAgeMinutes(event) {{
+  if (!event.first_seen) return null;
+  const date = new Date(event.first_seen);
+  if (Number.isNaN(date.getTime())) return null;
+  const age = (Date.now() - date.getTime()) / 60000;
+  if (age < -5) return null;
+  return Math.max(0,age);
+}}
+
+function recentState(event) {{
+  const age = eventFirstSeenAgeMinutes(event);
+  if (age == null) return 'normal';
+  if (age <= RECENT_PULSE_MINUTES) return 'pulse';
+  if (age <= RECENT_HALO_MINUTES) return 'halo';
+  return 'normal';
+}}
+
+function recentNoticeHtml(event) {{
+  const age = eventFirstSeenAgeMinutes(event);
+  if (age == null || age > RECENT_PULSE_MINUTES) return '';
+  const rounded = Math.max(0,Math.floor(age));
+  const label = rounded < 1 ? 'detectada ahora' : `detectada hace ${{rounded}} min`;
+  return `<span class="recent-notice">🆕 Incidencia reciente · ${{esc(label)}}</span><br>`;
+}}
+
 function eventPlace(event) {{
   return [event.municipality, event.province].filter(Boolean).filter((value,index,array) => array.indexOf(value) === index).join(' · ');
 }}
 
 function quickPopupHtml(event) {{
   const category = categoryPresentation(event.category);
-  return `<div><strong>${{esc(category.icon)}} ${{esc(category.label)}}</strong>` +
+  return `<div>${{recentNoticeHtml(event)}}<strong>${{esc(category.icon)}} ${{esc(category.label)}}</strong>` +
     `<br><b>${{esc(event.title || 'Incidencia')}}</b>` +
     `<br>${{esc(eventPlace(event) || 'Ubicación no indicada')}}` +
     `<br><b>Nivel:</b> ${{esc(severityLabel(event.severity))}}` +
@@ -288,7 +328,7 @@ function fullPopupHtml(event) {{
   const sourceLink = event.source_url
     ? `<br><b>Fuente oficial:</b> <a href="${{esc(event.source_url)}}" target="_blank" rel="noopener noreferrer">Abrir fuente</a>`
     : '';
-  return `<div><strong>${{esc(category.icon)}} ${{esc(category.label)}}</strong>` +
+  return `<div>${{recentNoticeHtml(event)}}<strong>${{esc(category.icon)}} ${{esc(category.label)}}</strong>` +
     `<br><b>Título:</b> ${{esc(event.title || 'Incidencia')}}` +
     `${{event.description ? `<hr>${{esc(event.description)}}` : ''}}` +
     `<br><b>Estado:</b> ${{esc(event.status || 'sin estado')}}` +
@@ -314,11 +354,13 @@ function markerAppearance(event) {{
 
 function applyMarkerAppearance(element,event) {{
   const appearance = markerAppearance(event);
-  element.className = 'meshnet-marker';
+  const freshness = recentState(event);
+  element.className = 'meshnet-marker' + (freshness === 'pulse' ? ' recent-pulse' : freshness === 'halo' ? ' recent-halo' : '');
   element.style.width = `${{appearance.size}}px`;
   element.style.height = `${{appearance.size}}px`;
   element.style.border = `${{appearance.border}}px solid white`;
   element.style.background = appearance.color;
+  element.style.color = appearance.color;
 }}
 
 function markerElement(event) {{
@@ -406,6 +448,12 @@ function attachMarkerInteractions(entry) {{
   }});
 }}
 
+function refreshMarkerRecency() {{
+  for (const entry of markers.values()) {{
+    applyMarkerAppearance(entry.element,entry.event);
+  }}
+}}
+
 function syncMarkers(rows) {{
   const alive = new Set();
   for (const event of rows) {{
@@ -424,7 +472,8 @@ function syncMarkers(rows) {{
       applyMarkerAppearance(entry.element,event);
     }}
     entry.event = event;
-    entry.element.title = `${{categoryPresentation(event.category).label}} · ${{event.title || 'Incidencia'}}`;
+    const freshness = recentState(event) === 'pulse' ? ' · Nueva (<30 min)' : '';
+    entry.element.title = `${{categoryPresentation(event.category).label}} · ${{event.title || 'Incidencia'}}${{freshness}}`;
   }}
   for (const [eventId,entry] of markers) {{
     if (!alive.has(eventId)) {{entry.marker.remove();markers.delete(eventId);}}
@@ -451,7 +500,10 @@ function renderFiltered(reframe = false) {{
 function sync(data) {{
   document.getElementById('updated').textContent = fmt(data.generated_at || data.source_updated_at);
   document.getElementById('published-count').textContent = String((data.events || []).length);
-  if (data.revision === revision) return;
+  if (data.revision === revision) {{
+    refreshMarkerRecency();
+    return;
+  }}
   revision = data.revision || '';
   publishedEvents = data.events || [];
   populateFilters();
