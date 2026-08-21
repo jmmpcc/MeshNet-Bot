@@ -94,11 +94,23 @@ def _extension_script() -> str:
   const MAPLIBRE_CSS = 'https://unpkg.com/maplibre-gl@5.16.0/dist/maplibre-gl.css';
   const MAP_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
 
+  // Las incidencias actuales se actualizan periódicamente para mantener la
+  // vista alineada con current.json sin utilizar la frecuencia más agresiva
+  // del mapa público. 30 segundos ofrece actualización operativa evitando
+  // transferir innecesariamente cientos de eventos cada pocos segundos.
+  const EMERGENCY_AUTO_REFRESH_MS = 30000;
+
   let snapshot = {events: [], provinces: [], categories: []};
   let currentView = 'list';
   let emergencyMap = null;
   let emergencyMarkers = [];
   let mapAssetsPromise = null;
+
+  // Impide dos lecturas simultáneas del mismo snapshot.
+  // Si el usuario solicita una actualización mientras una carga automática
+  // está en curso, se recuerda la petición manual para ejecutarla después.
+  let emergencyLoadInFlight = false;
+  let emergencyManualReloadPending = false;
 
   const escLocal = value => String(value ?? '').replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
   const severityLabel = value => ({critical:'Crítica',high:'Alta',medium:'Media',low:'Baja'}[String(value || '').toLowerCase()] || value || 'Sin nivel');
@@ -336,26 +348,98 @@ def _extension_script() -> str:
     if ([...selector.options].some(option => option.value === previous)) selector.value = previous;
   }
 
-  async function loadEmergencyProvinceEvents() {
+  /**
+   * Recarga la instantánea de incidencias actuales desde el endpoint existente.
+   *
+   * Parámetros:
+   *   reframe:
+   *     true  -> permite reencuadrar el mapa tras una acción explícita.
+   *     false -> conserva exactamente la posición/zoom durante el auto-refresco.
+   *
+   *   showLoading:
+   *     true  -> muestra estado de carga/error para carga inicial o manual.
+   *     false -> refresco silencioso; ante un error conserva los datos buenos
+   *              que ya estaban visibles.
+   *
+   * La función reutiliza el endpoint histórico. La extensión de ventana temporal
+   * sigue interceptándolo y aplicando el periodo seleccionado (24 h por defecto).
+   * Nunca se mantienen dos peticiones simultáneas.
+   */
+  async function loadEmergencyProvinceEvents({reframe = true, showLoading = true} = {}) {
+    if (emergencyLoadInFlight) {
+      // Los auto-refrescos silenciosos pueden descartarse si ya hay una lectura.
+      // Una petición manual sí se conserva para ejecutarla al terminar.
+      if (showLoading || reframe) emergencyManualReloadPending = true;
+      return;
+    }
+
+    emergencyLoadInFlight = true;
+
     const body = document.querySelector('#emergency-province-events');
-    if (body && currentView === 'list') body.innerHTML = '<p class="hint">Cargando incidencias actuales…</p>';
+    if (showLoading && body && currentView === 'list') {
+      body.innerHTML = '<p class="hint">Cargando incidencias actuales…</p>';
+    }
+
     try {
-      const response = await fetch('/api/emergencias/current-view', {headers: {'Accept':'application/json'}});
+      const response = await fetch(
+        '/api/emergencias/current-view',
+        {headers: {'Accept':'application/json'}}
+      );
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'No se pudieron leer las incidencias actuales');
+
+      if (!response.ok) {
+        throw new Error(
+          data.detail || 'No se pudieron leer las incidencias actuales'
+        );
+      }
+
       snapshot = data;
-      populateDynamicSelect(document.querySelector('#emergency-province-select'), data.provinces || [], 'Todas las provincias');
+
+      populateDynamicSelect(
+        document.querySelector('#emergency-province-select'),
+        data.provinces || [],
+        'Todas las provincias'
+      );
+
       populateDynamicSelect(
         document.querySelector('#emergency-category-select'),
         data.categories || [],
         'Todos los tipos',
         value => `${categoryPresentation(value).icon} ${categoryPresentation(value).label}`
       );
-      renderEmergencyProvinceEvents(true);
+
+      // Un refresco automático actualiza marcadores/lista pero nunca mueve
+      // la cámara que el usuario esté utilizando.
+      renderEmergencyProvinceEvents(reframe);
+
     } catch (error) {
-      if (body) body.innerHTML = `<p class="hint">${escLocal(error.message)}</p>`;
-      const mapBody = document.querySelector('#emergency-map-container');
-      if (mapBody) mapBody.innerHTML = `<p class="hint" style="padding:16px">${escLocal(error.message)}</p>`;
+      // Un error de refresco automático no sustituye una instantánea válida
+      // por un mensaje de error. Los errores de cargas manuales/iniciales sí
+      // continúan siendo visibles como hasta ahora.
+      if (showLoading) {
+        if (body) {
+          body.innerHTML = `<p class="hint">${escLocal(error.message)}</p>`;
+        }
+
+        const mapBody = document.querySelector('#emergency-map-container');
+        if (mapBody) {
+          mapBody.innerHTML =
+            `<p class="hint" style="padding:16px">${escLocal(error.message)}</p>`;
+        }
+      }
+
+    } finally {
+      emergencyLoadInFlight = false;
+
+      // Si una acción explícita coincidió con una lectura en curso,
+      // la atendemos inmediatamente después sin solapar solicitudes.
+      if (emergencyManualReloadPending) {
+        emergencyManualReloadPending = false;
+        void loadEmergencyProvinceEvents({
+          reframe: true,
+          showLoading: false
+        });
+      }
     }
   }
 
@@ -385,7 +469,10 @@ def _extension_script() -> str:
     section.querySelector('#emergency-province-select').addEventListener('change', () => renderEmergencyProvinceEvents(true));
     section.querySelector('#emergency-severity-select').addEventListener('change', () => renderEmergencyProvinceEvents(true));
     section.querySelector('#emergency-category-select').addEventListener('change', () => renderEmergencyProvinceEvents(true));
-    section.querySelector('#emergency-province-refresh').addEventListener('click', loadEmergencyProvinceEvents);
+    section.querySelector('#emergency-province-refresh').addEventListener(
+      'click',
+      () => loadEmergencyProvinceEvents()
+    );
     section.querySelector('#emergency-view-list').addEventListener('click', () => setEmergencyView('list'));
     section.querySelector('#emergency-view-map').addEventListener('click', () => setEmergencyView('map'));
     section.querySelector('#emergency-map-fit').addEventListener('click', () => fitEmergencyMap(filteredEmergencyEvents()));
@@ -394,6 +481,18 @@ def _extension_script() -> str:
 
   ensureEmergencyProvincePanel();
   setInterval(ensureEmergencyProvincePanel, 1000);
+
+  // Mantiene Lista y Mapa alineados con current.json. La carga se omite cuando
+  // la pestaña no está visible y se reanuda de forma natural al siguiente ciclo.
+  setInterval(() => {
+    if (document.hidden) return;
+    if (!document.querySelector('#emergency-province-view')) return;
+
+    void loadEmergencyProvinceEvents({
+      reframe: false,
+      showLoading: false
+    });
+  }, EMERGENCY_AUTO_REFRESH_MS);
 })();
 </script>
 """
