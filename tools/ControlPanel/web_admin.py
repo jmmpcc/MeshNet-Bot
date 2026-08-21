@@ -21,12 +21,20 @@ from urllib.request import Request, urlopen
 from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
-from shared.delivery_audit import export_operations_csv, query_operations
 
+# La raíz del repositorio debe estar disponible antes de importar módulos
+# compartidos como ``shared.delivery_audit``. El Control Panel se ejecuta
+# normalmente con WorkingDirectory=tools/ControlPanel, por lo que Python no
+# incluye automáticamente /home/meshnet/MeshNet-Bot en sys.path.
+#
+# Este bloque únicamente prepara la ruta de importación; no modifica ninguna
+# funcionalidad del panel ni de delivery_audit.
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent.parent
 if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
+
+from shared.delivery_audit import export_operations_csv, query_operations
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 UNIT_RE = re.compile(r"^[A-Za-z0-9_.@:-]+\.(service|timer)$")
 SYSTEMD_OPS = {"status", "start", "stop", "restart", "enable", "disable"}
