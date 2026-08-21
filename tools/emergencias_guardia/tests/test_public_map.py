@@ -163,7 +163,14 @@ class PublicEmergencyMapTests(unittest.TestCase):
         self.assertIn("function refreshMarkerRecency()", html)
         self.assertIn("if (data.revision === revision)", html)
         self.assertIn("refreshMarkerRecency();", html)
-        self.assertIn("applyMarkerAppearance(entry.element,entry.event)", html)
+        # La recencia debe actualizar exclusivamente el hijo visual de MeshNet.
+        # El elemento exterior pertenece a MapLibre y no debe recibir cambios de
+        # apariencia, clases o transformaciones durante los refrescos temporales.
+        self.assertIn("applyMarkerAppearance(entry.visual,entry.event)", html)
+        self.assertNotIn("applyMarkerAppearance(entry.element,entry.event)", html)
+        self.assertIn("meshnet-marker-host", html)
+        self.assertIn("meshnet-marker-visual", html)
+        self.assertIn("visual:markerParts.visual", html)
 
     def test_emergency_directory_denies_listing_and_unknown_resources(self) -> None:
         """El directorio público mantiene una superficie mínima y controlada."""
