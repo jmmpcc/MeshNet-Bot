@@ -159,18 +159,19 @@ html,body{{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Ari
 .recent-legend-dot{{position:relative;width:10px;height:10px;border-radius:50%;background:#ff8a65;display:inline-block}}
 .recent-legend-dot::after{{content:'';position:absolute;inset:-5px;border:2px solid #ff8a65;border-radius:50%;animation:meshnet-recent-pulse 1.8s ease-out infinite}}
 #map{{height:calc(100% - 190px);min-height:430px}}
-.meshnet-marker{{position:relative;border-radius:50%;box-shadow:0 2px 8px #0009;cursor:pointer;transition:transform .12s ease}}
-.meshnet-marker:hover{{transform:scale(1.18)}}
-.meshnet-marker.recent-pulse::after,.meshnet-marker.recent-halo::after{{content:'';position:absolute;pointer-events:none;border-radius:50%;border:2px solid currentColor}}
-.meshnet-marker.recent-pulse::after{{inset:-7px;animation:meshnet-recent-pulse 1.8s ease-out infinite}}
-.meshnet-marker.recent-halo::after{{inset:-6px;opacity:.55}}
+.meshnet-marker-host{{cursor:pointer;display:block}}
+.meshnet-marker-visual{{position:relative;display:block;border-radius:50%;box-shadow:0 2px 8px #0009;transition:transform .12s ease}}
+.meshnet-marker-host:hover .meshnet-marker-visual{{transform:scale(1.18)}}
+.meshnet-marker-visual.recent-pulse::after,.meshnet-marker-visual.recent-halo::after{{content:'';position:absolute;pointer-events:none;border-radius:50%;border:2px solid currentColor}}
+.meshnet-marker-visual.recent-pulse::after{{inset:-7px;animation:meshnet-recent-pulse 1.8s ease-out infinite}}
+.meshnet-marker-visual.recent-halo::after{{inset:-6px;opacity:.55}}
 @keyframes meshnet-recent-pulse{{0%{{transform:scale(.72);opacity:.95}}70%,100%{{transform:scale(1.65);opacity:0}}}}
 .recent-notice{{display:inline-block;margin:0 0 5px;padding:3px 7px;border-radius:999px;background:#fff3e0;color:#a34400;font-weight:700;font-size:.78rem}}
 .maplibregl-popup-content{{color:#17212b;max-width:390px}}
 .maplibregl-popup-content hr{{border:0;border-top:1px solid #d9dfe4}}
 .quick-popup .maplibregl-popup-content{{max-width:300px;padding:8px 10px}}
 #footer{{height:21px;padding:2px 10px;background:#0c1925;color:#8096a8;font-size:.72rem}}
-@media(prefers-reduced-motion:reduce){{.recent-legend-dot::after,.meshnet-marker.recent-pulse::after{{animation:none;inset:-6px;opacity:.65;transform:none}}}}
+@media(prefers-reduced-motion:reduce){{.recent-legend-dot::after,.meshnet-marker-visual.recent-pulse::after{{animation:none;inset:-6px;opacity:.65;transform:none}}}}
 @media(max-width:900px){{#filters{{grid-template-columns:repeat(2,minmax(130px,1fr))}}#map{{height:calc(100% - 275px)}}}}
 @media(max-width:560px){{#filters{{grid-template-columns:1fr}}#map{{height:calc(100% - 410px);min-height:420px}}}}
 </style>
@@ -352,21 +353,41 @@ function markerAppearance(event) {{
   return {{...config,color:category.color}};
 }}
 
-function applyMarkerAppearance(element,event) {{
+function applyMarkerAppearance(visual,event) {{
+  // IMPORTANTE:
+  // `visual` es el elemento hijo propiedad de MeshNet.
+  // Nunca modificamos clases, transformaciones ni estilos de posicionamiento
+  // del contenedor exterior que MapLibre utiliza para colocar el marcador.
   const appearance = markerAppearance(event);
   const freshness = recentState(event);
-  element.className = 'meshnet-marker' + (freshness === 'pulse' ? ' recent-pulse' : freshness === 'halo' ? ' recent-halo' : '');
-  element.style.width = `${{appearance.size}}px`;
-  element.style.height = `${{appearance.size}}px`;
-  element.style.border = `${{appearance.border}}px solid white`;
-  element.style.background = appearance.color;
-  element.style.color = appearance.color;
+
+  visual.className = 'meshnet-marker-visual' +
+    (freshness === 'pulse'
+      ? ' recent-pulse'
+      : freshness === 'halo'
+        ? ' recent-halo'
+        : '');
+
+  visual.style.width = `${{appearance.size}}px`;
+  visual.style.height = `${{appearance.size}}px`;
+  visual.style.border = `${{appearance.border}}px solid white`;
+  visual.style.background = appearance.color;
+  visual.style.color = appearance.color;
 }}
 
 function markerElement(event) {{
+  // Contenedor entregado a MapLibre.
+  // Después de crear el Marker no lo utilizamos para animaciones ni escalado.
   const element = document.createElement('div');
-  applyMarkerAppearance(element,event);
-  return element;
+  element.className = 'meshnet-marker-host';
+
+  // Elemento visual completamente independiente de MapLibre.
+  const visual = document.createElement('div');
+  element.appendChild(visual);
+
+  applyMarkerAppearance(visual,event);
+
+  return {{element,visual}};
 }}
 
 const map = new maplibregl.Map({{container:'map',style:PUBLIC_STYLE,center:[-3.7,40.2],zoom:5.3,attributionControl:true}});
@@ -449,8 +470,10 @@ function attachMarkerInteractions(entry) {{
 }}
 
 function refreshMarkerRecency() {{
+  // Actualiza únicamente la capa visual interna.
+  // Esto permite que el pulso caduque aunque events.json conserve revisión.
   for (const entry of markers.values()) {{
-    applyMarkerAppearance(entry.element,entry.event);
+    applyMarkerAppearance(entry.visual,entry.event);
   }}
 }}
 
@@ -461,15 +484,24 @@ function syncMarkers(rows) {{
     const position = [Number(event.longitude),Number(event.latitude)];
     let entry = markers.get(event.event_id);
     if (!entry) {{
-      const element = markerElement(event);
-      const marker = new maplibregl.Marker({{element}}).setLngLat(position).addTo(map);
-      entry = {{marker,element,event}};
+      const markerParts = markerElement(event);
+      const marker = new maplibregl.Marker({{element:markerParts.element}})
+        .setLngLat(position)
+        .addTo(map);
+
+      entry = {{
+        marker,
+        element:markerParts.element,
+        visual:markerParts.visual,
+        event
+      }};
+
       markers.set(event.event_id,entry);
       attachMarkerInteractions(entry);
     }} else {{
       entry.marker.setLngLat(position);
       entry.event = event;
-      applyMarkerAppearance(entry.element,event);
+      applyMarkerAppearance(entry.visual,event);
     }}
     entry.event = event;
     const freshness = recentState(event) === 'pulse' ? ' · Nueva (<30 min)' : '';
