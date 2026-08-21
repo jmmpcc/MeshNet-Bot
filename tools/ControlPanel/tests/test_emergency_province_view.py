@@ -106,3 +106,23 @@ def test_map_script_identifies_known_incident_types():
     assert "traffic_collision: ['🚗', 'Colisión de tráfico']" in script
     assert "flood: ['🌊', 'Inundación']" in script
     assert "earthquake: ['🌍', 'Terremoto']" in script
+
+def test_map_script_auto_refreshes_current_incidents_without_reframing():
+    """Las incidencias se refrescan solas sin mover el mapa ni solapar lecturas."""
+    script = _extension_script()
+
+    assert "const EMERGENCY_AUTO_REFRESH_MS = 30000;" in script
+    assert "let emergencyLoadInFlight = false;" in script
+    assert "let emergencyManualReloadPending = false;" in script
+    assert "if (emergencyLoadInFlight)" in script
+    assert "if (document.hidden) return;" in script
+    assert "if (!document.querySelector('#emergency-province-view')) return;" in script
+    assert "reframe: false" in script
+    assert "showLoading: false" in script
+    assert "renderEmergencyProvinceEvents(reframe);" in script
+
+    # El refresco manual histórico debe seguir operativo y reutilizar la
+    # misma función que el refresco periódico.
+    assert "#emergency-province-refresh" in script
+    assert "() => loadEmergencyProvinceEvents()" in script
+
