@@ -25,7 +25,8 @@ _MAX_INTERVAL_MINUTES = 24 * 60
 _MIN_DURATION_HOURS = 1
 _MAX_DURATION_HOURS = 168
 _MIN_CHANNEL = 0
-_MAX_CHANNEL = 7
+_MAX_CHANNEL_MESHTASTIC = 7
+_MAX_CHANNEL_MESHCORE = 40
 _NUMBER_MODE_ON = "num"
 _NUMBER_MODE_OFF = "nonum"
 
@@ -255,16 +256,24 @@ async def _beacon_worker(spec: BeaconSpec) -> None:
                 _ACTIVE_BEACONS.pop(spec.key, None)
 
 
-def _validate_definition(args: list[str]) -> tuple[int, int, str, int, bool, str] | str:
+def _validate_definition(
+    args: list[str],
+    transport: str = "meshtastic",
+) -> tuple[int, int, str, int, bool, str] | str:
     """Valida los argumentos comunes de ``/baliza`` y ``/baliza_mc``.
 
-    Sintaxis nueva:
+    Sintaxis:
         ``<minutos> <horas> <nombre> <canal> [num|nonum] <texto...>``
 
+    Rango de canal por transporte:
+        - Meshtastic: 0..7.
+        - MeshCore: 0..40.
+
     Compatibilidad:
+        ``transport`` es opcional y por defecto ``meshtastic`` para que las
+        llamadas históricas directas a este helper conserven el límite 0..7.
         Si no aparece ``num`` o ``nonum`` justo después del canal, todo lo que
-        sigue se considera texto y la baliza queda sin numerar. De esta forma las
-        órdenes existentes conservan exactamente su comportamiento anterior.
+        sigue se considera texto y la baliza queda sin numerar.
 
     Retorna:
         ``(intervalo, horas, nombre, canal, numerada, texto)`` o un mensaje de error.
@@ -304,8 +313,15 @@ def _validate_definition(args: list[str]) -> tuple[int, int, str, int, bool, str
         return f"La duración máxima debe estar entre {_MIN_DURATION_HOURS} y {_MAX_DURATION_HOURS} horas."
     if not _NAME_RE.fullmatch(name):
         return "El nombre debe tener 1-32 caracteres: letras, números, guion o guion bajo."
-    if not (_MIN_CHANNEL <= channel <= _MAX_CHANNEL):
-        return f"El canal debe estar entre {_MIN_CHANNEL} y {_MAX_CHANNEL}."
+
+    transport_norm = str(transport or "meshtastic").strip().lower()
+    max_channel = (
+        _MAX_CHANNEL_MESHCORE
+        if transport_norm == "meshcore"
+        else _MAX_CHANNEL_MESHTASTIC
+    )
+    if not (_MIN_CHANNEL <= channel <= max_channel):
+        return f"El canal {transport_norm} debe estar entre {_MIN_CHANNEL} y {max_channel}."
     if not text:
         return "El texto de la baliza no puede estar vacío."
 
@@ -317,7 +333,7 @@ def _usage(transport: str) -> str:
     if transport == "meshcore":
         return (
             "Uso:\n"
-            "/baliza_mc <minutos> <horas> <nombre> <canal> [num|nonum] <texto>\n"
+            "/baliza_mc <minutos> <horas> <nombre> <canal 0-40> [num|nonum] <texto>\n"
             "num = 1. texto, 2. texto, 3. texto...\n"
             "nonum o argumento omitido = texto sin numerar\n"
             "/balizas_mc\n"
@@ -325,7 +341,7 @@ def _usage(transport: str) -> str:
         )
     return (
         "Uso:\n"
-        "/baliza <minutos> <horas> <nombre> <canal> [num|nonum] <texto>\n"
+        "/baliza <minutos> <horas> <nombre> <canal 0-7> [num|nonum] <texto>\n"
         "num = 1. texto, 2. texto, 3. texto...\n"
         "nonum o argumento omitido = texto sin numerar\n"
         "/balizas\n"
@@ -355,7 +371,7 @@ async def _start_beacon(update: Any, context: Any, transport: str) -> None:
         return
 
     args = [str(x) for x in (getattr(context, "args", None) or [])]
-    parsed = _validate_definition(args)
+    parsed = _validate_definition(args, transport=transport)
     if isinstance(parsed, str):
         await message.reply_text(parsed + "\n\n" + _usage(transport))
         return
@@ -500,13 +516,13 @@ def contextual_help() -> str:
     lines = ["Balizas periódicas:"]
     if "meshtastic" in available:
         lines.extend([
-            "/baliza <min> <horas> <nombre> <canal> [num|nonum] <texto>",
+            "/baliza <min> <horas> <nombre> <canal 0-7> [num|nonum] <texto>",
             "/balizas",
             "/parar_baliza <nombre>",
         ])
     if "meshcore" in available:
         lines.extend([
-            "/baliza_mc <min> <horas> <nombre> <canal> [num|nonum] <texto>",
+            "/baliza_mc <min> <horas> <nombre> <canal 0-40> [num|nonum] <texto>",
             "/balizas_mc",
             "/parar_baliza_mc <nombre>",
         ])
