@@ -2,6 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "source"
@@ -22,7 +23,7 @@ import beacon_bot
 
 
 class BeaconChannelRangeTests(unittest.TestCase):
-    """Valida que cada transporte conserve su rango real de canales."""
+    """Valida límites por transporte y que el canal validado llegue intacto al broker."""
 
     def test_meshtastic_accepts_channel_7(self):
         parsed = beacon_bot._validate_definition(
@@ -61,6 +62,32 @@ class BeaconChannelRangeTests(unittest.TestCase):
         )
         self.assertIsInstance(parsed, str)
         self.assertIn("0 y 7", parsed)
+
+    def test_meshcore_channel_40_reaches_existing_broker_route_unchanged(self):
+        """El nuevo límite no altera MESHCORE_SEND: channel_idx=40 llega intacto."""
+        spec = beacon_bot.BeaconSpec("meshcore", 10, 2, "mc40", 40, "texto")
+        with patch.object(beacon_bot, "_broker_rpc", return_value={"ok": True}) as rpc:
+            result = beacon_bot._send_beacon_sync(spec)
+
+        self.assertTrue(result["ok"])
+        cmd, params = rpc.call_args.args
+        self.assertEqual(cmd, "MESHCORE_SEND")
+        self.assertEqual(params["channel_idx"], 40)
+        self.assertEqual(params["text"], "texto")
+        self.assertEqual(params["max_retries"], 0)
+
+    def test_meshtastic_channel_7_keeps_existing_send_text_route(self):
+        """La separación de límites no modifica la ruta SEND_TEXT de Meshtastic."""
+        spec = beacon_bot.BeaconSpec("meshtastic", 10, 2, "mt7", 7, "texto")
+        with patch.object(beacon_bot, "_broker_rpc", return_value={"ok": True}) as rpc:
+            result = beacon_bot._send_beacon_sync(spec)
+
+        self.assertTrue(result["ok"])
+        cmd, params = rpc.call_args.args
+        self.assertEqual(cmd, "SEND_TEXT")
+        self.assertEqual(params["ch"], 7)
+        self.assertEqual(params["text"], "texto")
+        self.assertFalse(params["require_ack"])
 
     def test_contextual_help_shows_both_ranges(self):
         original = beacon_bot._available_transports
