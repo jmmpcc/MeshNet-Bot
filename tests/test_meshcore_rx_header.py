@@ -3,6 +3,7 @@
 """Regresión del encabezado Telegram para mensajes RX MeshCore."""
 from __future__ import annotations
 
+import ast
 import sys
 import unittest
 from pathlib import Path
@@ -10,6 +11,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "source"
+NORMALIZER = SOURCE / "meshcore_rx_header.py"
+LAUNCHER = SOURCE / "Telegram_Bot_ChannelGateway_RxHeader.py"
+ENTRYPOINT = ROOT / "docker" / "entrypoint_bot.sh"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 
@@ -26,6 +30,17 @@ SAMPLE = (
 
 class MeshCoreRxHeaderTest(unittest.TestCase):
     """Comprueba que solo cambia la representación visual prevista."""
+
+    def test_new_python_sources_parse(self) -> None:
+        for path in (NORMALIZER, LAUNCHER):
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+    def test_entrypoint_uses_rx_header_launcher(self) -> None:
+        entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
+        self.assertIn(
+            "exec python -u /app/source/Telegram_Bot_ChannelGateway_RxHeader.py",
+            entrypoint,
+        )
 
     def test_meshcore_a_meshtastic_b_hides_local_mapping(self) -> None:
         result = normalize_meshcore_rx_header(
