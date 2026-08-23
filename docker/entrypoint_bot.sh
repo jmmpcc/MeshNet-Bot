@@ -32,8 +32,9 @@ sleep "${BOT_START_DELAY}"
 mkdir -p /app/bot_data
 chmod 0777 /app/bot_data || true
 
-echo "[bot] Broker listo. Arrancando bot con control Channel Gateway…"
+echo "[bot] Broker listo. Arrancando bot con control Channel Gateway y normalización RX MeshCore…"
 
-# El wrapper añade /channel_gateway y /pasarela_canales sin modificar el
-# Telegram_Bot_Broker.py existente; después delega en su main() original.
-exec python -u /app/source/Telegram_Bot_ChannelGateway.py
+# El wrapper exterior normaliza únicamente el encabezado RX MeshCore y delega
+# después en Telegram_Bot_ChannelGateway.py, manteniendo intactas todas sus
+# extensiones y el main() histórico de Telegram_Bot_Broker.py.
+exec python -u /app/source/Telegram_Bot_ChannelGateway_RxHeader.py
