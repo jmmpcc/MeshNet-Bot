@@ -20,8 +20,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply minimal source change and focused regression test
-        shell: python
+        shell: bash
         run: |
+          python - <<'PY'
           from pathlib import Path
 
           source_path = Path("source/Telegram_Bot_Broker.py")
@@ -82,13 +83,16 @@ def test_mc_contactos_hides_meshcore_identifiers_but_keeps_numeric_dm_mapping():
     assert 'callback_data=f"mc_dm:{idx}:{dm_key[:32]}"' in body
     assert "/dm_mc N texto" in body
 ''', encoding="utf-8")
+          PY
 
       - name: Validate Python syntax and focused regression test
+        shell: bash
         run: |
           python -m py_compile source/Telegram_Bot_Broker.py
           python -m pytest -q tests/test_mc_contactos_hide_internal_ids.py
 
       - name: Remove temporary workflow and commit final changes
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
