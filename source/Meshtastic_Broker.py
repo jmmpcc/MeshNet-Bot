@@ -1796,8 +1796,8 @@ class MeshCoreEmbeddedBridge:
                     # La API oficial de contactos devuelve public_key completa.
                     # Si alguna versión aporta un prefijo explícito, lo respetamos;
                     # si no, se calcula más abajo con public_key[:12].
-                    display_prefix = c.get("pubkey_prefix") or c.get("key_prefix")
-                    contact_id = c.get("id") or c.get("prefix")
+                    display_prefix = c.get("pubkey_prefix") or c.get("key_prefix") or c.get("prefix")
+                    contact_id = c.get("id")
                     name = c.get("name") or c.get("adv_name") or c.get("alias") or c.get("label")
                     last_seen = c.get("last_seen") or c.get("lastSeen") or c.get("last_advert") or c.get("seen") or c.get("ts")
                     adv_type_raw = c.get("adv_type") if c.get("adv_type") is not None else c.get("type")
@@ -1808,8 +1808,8 @@ class MeshCoreEmbeddedBridge:
                     feat2 = c.get("feat2")
                 else:
                     public_key = getattr(c, "public_key", None) or getattr(c, "pubkey", None) or getattr(c, "key", None)
-                    display_prefix = getattr(c, "pubkey_prefix", None) or getattr(c, "key_prefix", None)
-                    contact_id = getattr(c, "id", None) or getattr(c, "prefix", None)
+                    display_prefix = getattr(c, "pubkey_prefix", None) or getattr(c, "key_prefix", None) or getattr(c, "prefix", None)
+                    contact_id = getattr(c, "id", None)
                     name = getattr(c, "name", None) or getattr(c, "adv_name", None) or getattr(c, "alias", None) or getattr(c, "label", None)
                     last_seen = getattr(c, "last_seen", None) or getattr(c, "lastSeen", None) or getattr(c, "last_advert", None) or getattr(c, "seen", None)
                     adv_type_raw = getattr(c, "adv_type", None)
