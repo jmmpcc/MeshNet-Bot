@@ -1,0 +1,68 @@
+name: Apply MeshCore DM alias fix on current main
+
+on:
+  push:
+    branches:
+      - fix/mc-dm-confirm-alias-current
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/mc-dm-confirm-alias-current
+          fetch-depth: 0
+
+      - name: Reapply already validated functional diff
+        shell: bash
+        run: |
+          git fetch origin fix/mc-dm-confirm-alias
+          git diff 513d292bcf9facb10ae0f239cb28aea448a6476b origin/fix/mc-dm-confirm-alias -- \
+            source/Telegram_Bot_Broker.py \
+            tests/test_mc_dm_alias_confirmation.py > /tmp/mc-dm-alias.patch
+          test -s /tmp/mc-dm-alias.patch
+          git apply --3way /tmp/mc-dm-alias.patch
+
+      - name: Validate syntax and regressions
+        shell: bash
+        run: |
+          python -m py_compile source/Telegram_Bot_Broker.py
+          python - <<'PY'
+          import runpy
+
+          for test_path in (
+              'tests/test_mc_contactos_full_public_key.py',
+              'tests/test_mc_dm_alias_confirmation.py',
+          ):
+              namespace = runpy.run_path(test_path)
+              tests = [
+                  (name, fn) for name, fn in namespace.items()
+                  if name.startswith('test_') and callable(fn)
+              ]
+              if not tests:
+                  raise SystemExit(f'Sin pruebas ejecutables en {test_path}')
+              for name, fn in tests:
+                  fn()
+                  print(f'PASS {test_path}::{name}')
+          PY
+          git diff --check
+          if grep -Fq 'Destino: {contact_prefix}' source/Telegram_Bot_Broker.py; then
+            echo 'ERROR: sigue existiendo una confirmación pública con contact_prefix' >&2
+            exit 1
+          fi
+
+      - name: Commit validated fix and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/apply-mc-dm-alias-current.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add source/Telegram_Bot_Broker.py tests/test_mc_dm_alias_confirmation.py .github/workflows/apply-mc-dm-alias-current.yml
+          git commit -m "fix: show MeshCore DM alias in confirmations"
+          git push origin HEAD:fix/mc-dm-confirm-alias-current
