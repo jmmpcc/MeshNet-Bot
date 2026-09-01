@@ -31,11 +31,14 @@ def test_broker_list_contacts_does_not_use_observed_prefix_map() -> None:
     assert 'resolve_observed_dm_prefix' not in fn
 
 
-def test_rx_learns_only_literal_event_prefix() -> None:
-    source = BROKER.read_text(encoding='utf-8')
-    assert 'self._meshcore_remember_observed_dm_prefix(' in source
-    assert 'alias, str(data.get("pubkey_prefix") or "").strip()' in source
-    assert 'self.contact_aliases[pref] = alias' not in source
+def test_rx_learns_literal_prefix_with_from_name_fallback() -> None:
+    """El RX real puede traer from_name sin alias/name y debe aprender el prefix RF."""
+    fn = function_source(BROKER, '_on_msg')
+    assert 'observed_alias = alias or str(data.get("from_name") or "").strip()' in fn
+    assert 'observed_alias, str(data.get("pubkey_prefix") or "").strip()' in fn
+    assert 'self.contact_aliases[pref] = alias' not in fn
+    assert 'alias = str(data.get("alias") or data.get("name") or "").strip()' in fn
+    assert 'alias = str(data.get("from_name")' not in fn
 
 
 def test_resolver_avoids_public_key_fallback() -> None:
