@@ -1095,6 +1095,27 @@ def _norm_text(value) -> str:
     return " ".join(text.split())
 
 
+
+def _meshcore_alias_key(value: str) -> str:
+    """Devuelve una clave estable para comparar aliases de contactos MeshCore.
+
+    Se usa exclusivamente en la asociación alias -> prefix DM operativo. MeshCore
+    puede anunciar el mismo alias con espacios, guiones o guiones bajos según la
+    fuente (por ejemplo, ``EB2EAS-T1000E`` frente a ``EB2EAS T1000e``). Para no
+    alterar el texto visible ni otras normalizaciones del broker, esta función
+    convierte solo esos separadores en un único espacio, aplica ``casefold()`` y
+    colapsa espacios repetidos.
+
+    Parámetros:
+        value: alias recibido por RF, leído de contactos o configurado.
+
+    Retorno:
+        Clave normalizada usada únicamente para comparar identidades por alias.
+    """
+    normalized = _norm_text(value or "").casefold()
+    normalized = re.sub(r"[-_]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
 class MeshCoreEmbeddedBridge:
     """
     Pasarela MeshCore embebida en el broker.
@@ -1300,7 +1321,7 @@ class MeshCoreEmbeddedBridge:
             alias: nombre/alias anunciado o extraído del mensaje RX.
             prefix: ``pubkey_prefix`` recibido literalmente en el evento RF.
         """
-        wanted = _norm_text(alias or "").casefold()
+        wanted = _meshcore_alias_key(alias)
         clean_prefix = str(prefix or "").strip().lower()
         if not wanted or not re.fullmatch(r"[0-9a-f]{6,64}", clean_prefix):
             return
@@ -1318,7 +1339,7 @@ class MeshCoreEmbeddedBridge:
         evitar repetir la asociación incorrecta que motivó esta corrección. Si
         existen varios prefixes para el mismo alias devuelve cadena vacía.
         """
-        wanted = _norm_text(alias or "").casefold()
+        wanted = _meshcore_alias_key(alias)
         if not wanted:
             return ""
 
@@ -1330,7 +1351,7 @@ class MeshCoreEmbeddedBridge:
 
         configured = []
         for key, value in (self.contact_aliases or {}).items():
-            if _norm_text(value).casefold() == wanted and str(key).strip():
+            if _meshcore_alias_key(value) == wanted and str(key).strip():
                 configured.append(str(key).strip().lower())
         unique = list(dict.fromkeys(configured))
         return unique[0] if len(unique) == 1 else ""
