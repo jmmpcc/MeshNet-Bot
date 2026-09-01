@@ -9524,6 +9524,7 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     mc_map: dict[str, str] = {}
+    mc_alias_map: dict[str, str] = {}
     lines = [
         "📇 <b>Contactos MeshCore</b>",
         "",
@@ -9545,6 +9546,7 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # y /dm_mc N texto continúa enviando al mismo dm_key sin exponer claves al usuario.
         name = (c.get("name") or "Sin nombre").strip()
         mc_map[str(idx)] = dm_key
+        mc_alias_map[str(idx)] = name
 
         lines.append(f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>")
         keyboard.append([
@@ -9559,7 +9561,11 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     try:
+        # Se conservan por separado destino interno y alias visible.
+        # /dm_mc usa mc_contacts_map para el envío y mc_contacts_alias_map
+        # únicamente para mostrar confirmaciones legibles al usuario.
         context.user_data["mc_contacts_map"] = mc_map
+        context.user_data["mc_contacts_alias_map"] = mc_alias_map
     except Exception:
         pass
 
@@ -9624,6 +9630,31 @@ async def mc_canales_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         disable_web_page_preview=True,
     )
 
+def _meshcore_dm_confirmation(alias: str | None, length: Any = None) -> str:
+    """Construye la confirmación visible de un DM MeshCore sin exponer IDs internos.
+
+    Se utiliza tanto por ``/enviar_mc_dm``/``/dm_mc`` como por el ForceReply
+    generado desde ``/mc_contactos``. ``alias`` es exclusivamente informativo;
+    el enrutado real sigue utilizando el ``contact_prefix`` existente. Si no se
+    conoce un alias (por ejemplo, uso manual de un prefijo legacy), se confirma
+    el encolado sin publicar ese identificador.
+
+    Parámetros:
+        alias: alias visible del contacto seleccionado, si está disponible.
+        length: longitud devuelta opcionalmente por el broker.
+
+    Devuelve:
+        Texto de confirmación listo para enviar por Telegram.
+    """
+    lines = ["DM MeshCore encolado"]
+    clean_alias = str(alias or "").strip()
+    if clean_alias:
+        lines.append(f"Destino: {clean_alias}")
+    if isinstance(length, int):
+        lines.append(f"Len: {length}")
+    return "\n".join(lines)
+
+
 async def mc_dm_contact_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q or not q.data or not q.data.startswith("mc_dm:"):
@@ -9637,10 +9668,13 @@ async def mc_dm_contact_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     contact_prefix = None
+    contact_alias = None
     try:
         contact_prefix = (context.user_data.get("mc_contacts_map") or {}).get(idx_s)
+        contact_alias = (context.user_data.get("mc_contacts_alias_map") or {}).get(idx_s)
     except Exception:
         contact_prefix = None
+        contact_alias = None
     contact_prefix = (contact_prefix or pfx).strip().lower()
 
     if not _extract_mc_contact_prefix_from_text(contact_prefix):
@@ -9648,9 +9682,11 @@ async def mc_dm_contact_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     context.user_data["await_mc_dm_text"] = contact_prefix
+    context.user_data["await_mc_dm_alias"] = contact_alias
     await q.answer(f"DM MeshCore {idx_s}")
+    visible_contact = escape(str(contact_alias or "contacto seleccionado"))
     await q.message.reply_text(
-        f"Escribe el texto para enviar DM MeshCore a <code>[MC:{escape(contact_prefix)}]</code>:",
+        f"Escribe el texto para enviar DM MeshCore a <b>{visible_contact}</b>:",
         parse_mode="HTML",
         reply_markup=ForceReply(selective=True),
     )
@@ -9690,15 +9726,19 @@ async def enviar_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # 2) Caso 1: si el primer token parece un prefix / [MC:prefix]
     contact_prefix = None
+    contact_alias = None
     text_tokens = list(args)
 
     if text_tokens:
         cp = _extract_mc_contact_prefix_from_text(text_tokens[0])
         if not cp and str(text_tokens[0]).isdigit():
+            idx_s = str(text_tokens[0])
             try:
-                cp = (context.user_data.get("mc_contacts_map") or {}).get(str(text_tokens[0]))
+                cp = (context.user_data.get("mc_contacts_map") or {}).get(idx_s)
+                contact_alias = (context.user_data.get("mc_contacts_alias_map") or {}).get(idx_s)
             except Exception:
                 cp = None
+                contact_alias = None
         if cp:
             contact_prefix = cp
             text_tokens = text_tokens[1:]
@@ -9712,9 +9752,8 @@ async def enviar_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not contact_prefix or not out_text:
         await msg_obj.reply_text(
             "Uso:\n"
-            "  /enviar_mc_dm 6a18cb3d125b <texto...>\n"
-            "  /enviar_mc_dm [MC:6a18cb3d125b] <texto...>\n"
-            "  (o responde a un mensaje con [MC:...] y usa: /enviar_mc_dm <texto...>)"
+            "  /enviar_mc_dm N <texto...>\n"
+            "Ejecuta /mc_contactos para consultar el número asignado a cada alias."
         )
         return
 
@@ -9726,11 +9765,10 @@ async def enviar_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if resp and resp.get("ok"):
-        # No asumir 'len' si el broker no lo devuelve
-        l = resp.get("len")
-        extra = f"\nLen: {l}" if isinstance(l, int) else ""
+        # La ruta real continúa siendo contact_prefix; la respuesta pública
+        # utiliza únicamente el alias asociado al número seleccionado.
         await msg_obj.reply_text(
-            f"DM MeshCore encolado\nDestino: {contact_prefix}{extra}"
+            _meshcore_dm_confirmation(contact_alias, resp.get("len"))
         )
     else:
         err = (resp or {}).get("error") or "sin_detalle"
@@ -17286,6 +17324,7 @@ async def on_forcereply_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # --- MeshCore DM (Forcereply desde /mc_contactos) ---
     contact_prefix = context.user_data.pop("await_mc_dm_text", None)
+    contact_alias = context.user_data.pop("await_mc_dm_alias", None)
     if contact_prefix:
         contact_prefix = str(contact_prefix).strip().lower()
         if not text:
@@ -17298,9 +17337,9 @@ async def on_forcereply_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if resp and resp.get("ok"):
-            l = resp.get("len")
-            extra = f"\nLen: {l}" if isinstance(l, int) else ""
-            await update.effective_message.reply_text(f"DM MeshCore encolado\nDestino: {contact_prefix}{extra}")
+            await update.effective_message.reply_text(
+                _meshcore_dm_confirmation(contact_alias, resp.get("len"))
+            )
         else:
             err = (resp or {}).get("error") or "sin_detalle"
             await update.effective_message.reply_text(f"No se pudo encolar DM MeshCore: {err}")
