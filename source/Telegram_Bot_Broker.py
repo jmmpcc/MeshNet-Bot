@@ -9528,10 +9528,8 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     lines = [
         "📇 <b>Contactos MeshCore</b>",
         "",
-        "Pulsa <b>DM</b> o usa <code>/dm_mc N texto</code> con el número de la lista.",
+        "Usa <code>/dm_mc N texto</code> con el número de la lista.",
     ]
-    keyboard = []
-
     for idx, c in enumerate(contacts[:max_n], start=1):
         display_prefix = (c.get("prefix") or c.get("pubkey_prefix") or c.get("key_prefix") or "").strip()
         contact_id = (c.get("contact_id") or c.get("id") or "").strip()
@@ -9550,12 +9548,6 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         mc_alias_map[str(idx)] = name
 
         lines.append(f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>")
-        keyboard.append([
-            InlineKeyboardButton(
-                f"✉️ DM {idx:02d} · {name[:24] or display_prefix[:8] or dm_key[:8]}",
-                callback_data=f"mc_dm:{idx}:{dm_key[:32]}",
-            )
-        ])
 
     if not mc_map:
         await update.effective_message.reply_text("MeshCore contactos: (sin prefijos válidos)")
@@ -9573,7 +9565,6 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.effective_message.reply_text(
         "\n".join(lines),
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard[:40]) if keyboard else None,
         disable_web_page_preview=True,
     )
 

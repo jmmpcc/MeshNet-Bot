@@ -30,7 +30,9 @@ def test_mc_contactos_muestra_solo_numero_y_alias_y_conserva_dm_key() -> None:
     # MeshCore ya acepta y que coincide con el prefix observado en RX real.
     assert 'mc_map[str(idx)] = dm_key' in fn
     assert 'routing_key = public_key or dm_key' not in fn
-    assert 'callback_data=f"mc_dm:{idx}:{dm_key[:32]}"' in fn
+    assert 'callback_data=f"mc_dm:{idx}:{dm_key[:32]}"' not in fn
+    assert 'keyboard.append([' not in fn
+    assert 'reply_markup=InlineKeyboardMarkup' not in fn
 
 
 def test_telegram_bot_broker_sigue_siendo_python_valido() -> None:
