@@ -18,6 +18,7 @@ from beacon_bot import (
     parar_baliza_mc_cmd,
 )
 from channel_gateway_bot import channel_gateway_cmd
+from auto_reply_bot import auto_reply_cmd
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.ext import CommandHandler
 from tcpinterface_persistent import TCPInterfacePool
@@ -50,6 +51,8 @@ async def _augment_bot_commands_for_scope(app: Any, scope: Any) -> None:
                 commands[index] = BotCommand(command, description)
                 return
         commands.append(BotCommand(command, description))
+
+    upsert("autorespuesta", "Administrar autorespuesta por canal")
 
     if "meshtastic" in available:
         upsert("baliza", "Baliza Meshtastic periódica por nombre")
@@ -182,6 +185,9 @@ def _install_command_without_touching_original() -> None:
         # Extensión ya existente: pasarela interna entre canales.
         app.add_handler(CommandHandler("channel_gateway", channel_gateway_cmd))
         app.add_handler(CommandHandler("pasarela_canales", channel_gateway_cmd))
+
+        # Extensión de administración: reutiliza auto_reply.json sin tocar AutoReply.
+        app.add_handler(CommandHandler("autorespuesta", auto_reply_cmd))
 
         # Nueva extensión: balizas periódicas independientes por transporte.
         app.add_handler(CommandHandler("baliza", baliza_cmd))
