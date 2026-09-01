@@ -33,6 +33,8 @@ def test_dm_por_numero_conserva_prefijo_interno_y_usa_alias_visible() -> None:
     assert '_meshcore_dm_confirmation(contact_alias, resp.get("len"))' in fn
     assert 'Destino: {contact_prefix}' not in fn
     assert 'context.user_data["mc_contacts_alias_map"] = mc_alias_map' in source
+    assert 'routing_key = public_key or dm_key' in source
+    assert 'mc_map[str(idx)] = routing_key' in source
 
 
 def test_forcereply_tampoco_expone_prefijo() -> None:

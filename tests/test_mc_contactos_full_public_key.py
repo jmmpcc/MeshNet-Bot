@@ -26,8 +26,11 @@ def test_mc_contactos_muestra_solo_numero_y_alias_y_conserva_dm_key() -> None:
     assert 'meta.append(f"id:' not in fn
     assert "_format_meshcore_last_seen(ls)" not in fn
 
-    # Regresión: /dm_mc N y los botones siguen resolviendo internamente por dm_key.
-    assert 'mc_map[str(idx)] = dm_key' in fn
+    # Regresión: /dm_mc N usa la public_key completa cuando está disponible.
+    # El callback corto se conserva solo como fallback compatible con el límite
+    # de callback_data de Telegram; el mapa interno es la ruta autoritativa.
+    assert 'routing_key = public_key or dm_key' in fn
+    assert 'mc_map[str(idx)] = routing_key' in fn
     assert 'callback_data=f"mc_dm:{idx}:{dm_key[:32]}"' in fn
 
 

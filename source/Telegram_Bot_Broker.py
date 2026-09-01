@@ -9542,10 +9542,12 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if not display_prefix:
             display_prefix = dm_key
         # La lista pública muestra únicamente número y alias.
-        # El identificador MeshCore permanece interno: el número se resuelve mediante mc_map
-        # y /dm_mc N texto continúa enviando al mismo dm_key sin exponer claves al usuario.
+        # La referencia autoritativa interna es la public_key completa cuando el
+        # broker la proporciona. El dm_key corto se conserva solo como fallback
+        # compatible para contactos legacy que no expongan public_key.
         name = (c.get("name") or "Sin nombre").strip()
-        mc_map[str(idx)] = dm_key
+        routing_key = public_key or dm_key
+        mc_map[str(idx)] = routing_key
         mc_alias_map[str(idx)] = name
 
         lines.append(f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>")
