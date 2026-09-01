@@ -9540,27 +9540,13 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             continue
         if not display_prefix:
             display_prefix = dm_key
-        # ID canónico del contacto: MeshCore identifica cada nodo por su public_key Ed25519 completa.
-        # El dm_key se mantiene separado e intacto porque send_msg resuelve el destino por prefijo.
-        canonical_id = public_key or display_prefix or contact_id or dm_key
+        # La lista pública muestra únicamente número y alias.
+        # El identificador MeshCore permanece interno: el número se resuelve mediante mc_map
+        # y /dm_mc N texto continúa enviando al mismo dm_key sin exponer claves al usuario.
         name = (c.get("name") or "Sin nombre").strip()
-        ls = c.get("last_seen")
         mc_map[str(idx)] = dm_key
 
-        meta = []
-        if contact_id and contact_id != display_prefix and contact_id != dm_key:
-            meta.append(f"id: {contact_id}")
-        # Mostramos la identidad MeshCore completa y, por separado, el prefijo usado para DM.
-        # Esto corrige únicamente la presentación; mc_map, botones y /dm_mc siguen usando dm_key.
-        last_seen_txt = _format_meshcore_last_seen(ls)
-        if last_seen_txt:
-            meta.append(f"visto: {last_seen_txt}")
-        meta_txt = f" · {' · '.join(meta)}" if meta else ""
-        lines.append(
-            f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>\n"
-            f"    ID: <code>[MC:{escape(canonical_id)}]</code>\n"
-            f"    DM: <code>{escape(dm_key)}</code>{escape(meta_txt)}"
-        )
+        lines.append(f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>")
         keyboard.append([
             InlineKeyboardButton(
                 f"✉️ DM {idx:02d} · {name[:24] or display_prefix[:8] or dm_key[:8]}",

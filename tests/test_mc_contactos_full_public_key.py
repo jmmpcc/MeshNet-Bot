@@ -16,15 +16,17 @@ def _mc_contactos_source() -> str:
     raise AssertionError("mc_contactos_cmd no encontrada")
 
 
-def test_mc_contactos_muestra_public_key_completa_y_conserva_dm_key() -> None:
-    """La UI muestra el ID canónico sin cambiar la clave corta usada para DM."""
+def test_mc_contactos_muestra_solo_numero_y_alias_y_conserva_dm_key() -> None:
+    """La UI no expone IDs y la selección numérica conserva la resolución DM existente."""
     fn = _mc_contactos_source()
 
-    assert "canonical_id = public_key or display_prefix or contact_id or dm_key" in fn
-    assert 'ID: <code>[MC:{escape(canonical_id)}]</code>' in fn
-    assert 'DM: <code>{escape(dm_key)}</code>' in fn
+    assert 'lines.append(f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>")' in fn
+    assert 'ID: <code>[MC:' not in fn
+    assert 'DM: <code>' not in fn
+    assert 'meta.append(f"id:' not in fn
+    assert "_format_meshcore_last_seen(ls)" not in fn
 
-    # Regresión: la resolución numérica y el callback deben seguir usando dm_key.
+    # Regresión: /dm_mc N y los botones siguen resolviendo internamente por dm_key.
     assert 'mc_map[str(idx)] = dm_key' in fn
     assert 'callback_data=f"mc_dm:{idx}:{dm_key[:32]}"' in fn
 
