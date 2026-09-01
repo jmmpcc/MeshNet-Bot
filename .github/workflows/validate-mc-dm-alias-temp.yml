@@ -1,0 +1,30 @@
+name: Validate dm_mc alias regression
+
+on:
+  push:
+    branches: ["fix/mc-dm-number-resolver"]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate dm_mc alias and DM resolver
+        shell: bash
+        run: |
+          python -m py_compile source/Meshtastic_Broker.py source/Telegram_Bot_Broker.py tests/test_mc_dm_number_observed_prefix.py
+          python -m pip install -q pytest
+          python -m pytest -q tests/test_mc_dm_number_observed_prefix.py tests/test_mc_contactos_full_public_key.py tests/test_mc_dm_alias_confirmation.py
+          git diff --check origin/main...HEAD
+      - name: Remove temporary workflow
+        if: success()
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/validate-mc-dm-alias-temp.yml
+          git commit -m "chore: remove temporary dm_mc validation workflow"
+          git push origin HEAD:fix/mc-dm-number-resolver
