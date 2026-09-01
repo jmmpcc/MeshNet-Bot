@@ -182,22 +182,71 @@ def _format_status(config: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _format_help() -> str:
-    """Devuelve la sintaxis completa del comando sin realizar cambios."""
-    return "\n".join([
-        "Autorespuesta por canal",
+def contextual_help() -> str:
+    """
+    Genera la ayuda de ``/autorespuesta`` adaptada al RADIO_PROFILE activo.
+
+    Funcionalidad:
+        - Siempre muestra consulta de estado y activación/desactivación.
+        - Solo muestra altas/bajas de transportes realmente habilitados.
+        - En perfiles con una sola radio evita enseñar comandos incompatibles.
+        - En perfiles desconocidos no inventa transportes y lo indica expresamente.
+
+    Retorno:
+        Texto listo para ``reply_text()`` o para integrarlo en ``/ayuda``.
+    """
+    profile_ctx = _radio_profile_context()
+    profile = str(profile_ctx.get("profile") or "legacy")
+    allowed = tuple(profile_ctx.get("transports") or ())
+
+    lines = [
+        "AUTORESPUESTA POR CANAL",
+        f"Perfil: {profile}",
         "",
         "/autorespuesta",
+        "  Muestra el estado actual.",
         "/autorespuesta status",
+        "  Muestra la configuración actual.",
         "/autorespuesta on",
+        "  Activa las respuestas automáticas.",
         "/autorespuesta off",
-        "/autorespuesta add <mc|mt> <canal>",
-        "/autorespuesta del <mc|mt> <canal>",
+        "  Desactiva las respuestas automáticas.",
+    ]
+
+    if "meshcore" in allowed:
+        lines.extend([
+            "/autorespuesta add mc <canal>",
+            "  Añade un canal MeshCore.",
+            "/autorespuesta del mc <canal>",
+            "  Elimina un canal MeshCore.",
+        ])
+
+    if "meshtastic" in allowed:
+        lines.extend([
+            "/autorespuesta add mt <canal>",
+            "  Añade un canal Meshtastic.",
+            "/autorespuesta del mt <canal>",
+            "  Elimina un canal Meshtastic.",
+        ])
+
+    if not allowed:
+        lines.extend([
+            "",
+            "No se muestran comandos add/del porque el RADIO_PROFILE activo",
+            "no permite determinar de forma segura los transportes disponibles.",
+        ])
+
+    lines.extend([
         "/autorespuesta texto <plantilla>",
-        "",
-        "La plantilla debe contener {message}.",
-        "Ejemplo: /autorespuesta texto Recibido: {message}",
+        "  Configura el texto de respuesta; debe contener {message}.",
+        "  Ejemplo: /autorespuesta texto Recibido: {message}",
     ])
+    return "\n".join(lines)
+
+
+def _format_help() -> str:
+    """Alias interno para mantener una única fuente de ayuda contextual."""
+    return contextual_help()
 
 
 def _transport_allowed(transport: str) -> tuple[bool, str]:
