@@ -1077,6 +1077,24 @@ def _clean_aprs_position_text_for_meshcore(text: str) -> str:
 
     return body or raw
 
+def _norm_text(value) -> str:
+    """Normaliza texto para comparaciones internas del broker.
+
+    Se utiliza en la resolución de contactos MeshCore por alias. Mantiene la
+    misma semántica de normalización ya usada por los módulos bridge del
+    proyecto: convierte a texto, unifica saltos de línea, elimina espacios
+    laterales y colapsa espacios internos.
+
+    Parámetros:
+        value: valor textual o convertible a texto que se desea normalizar.
+
+    Retorna:
+        Texto normalizado; cadena vacía para valores vacíos/None.
+    """
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return " ".join(text.split())
+
+
 class MeshCoreEmbeddedBridge:
     """
     Pasarela MeshCore embebida en el broker.
