@@ -2302,10 +2302,14 @@ class MeshCoreEmbeddedBridge:
                     pass
 
                 # Conserva de forma aislada el prefix DM visto realmente en RF.
-                # Se usa data["pubkey_prefix"] y no ``pref`` porque este último puede
-                # haber sido derivado como fallback cuando el evento no trae prefix.
+                # El alias operativo puede llegar enriquecido como ``from_name`` aunque
+                # ``alias``/``name`` no estén presentes en el evento. Usamos ``from_name``
+                # únicamente como fallback para esta asociación interna, sin modificar
+                # el alias visible ni el flujo existente. El prefix sigue siendo el
+                # ``data["pubkey_prefix"]`` real, nunca el ``pref`` derivado por fallback.
+                observed_alias = alias or str(data.get("from_name") or "").strip()
                 self._meshcore_remember_observed_dm_prefix(
-                    alias, str(data.get("pubkey_prefix") or "").strip()
+                    observed_alias, str(data.get("pubkey_prefix") or "").strip()
                 )
 
                 # === [BBS] Comandos recibidos directamente por MeshCore ======
