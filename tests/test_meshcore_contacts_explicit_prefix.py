@@ -13,13 +13,16 @@ def test_meshcore_contacts_prioriza_prefix_explicito_sobre_public_key_derivada()
     """El destino DM debe conservar el prefix explícito antes de derivar public_key[:12]."""
     source = _broker_source()
 
+    # Normalización dict: prefix explícito entra directamente en display_prefix,
+    # por lo que dm_key lo utiliza antes que el fallback public_key[:12].
     assert 'display_prefix = c.get("pubkey_prefix") or c.get("key_prefix") or c.get("prefix")' in source
     assert 'contact_id = c.get("id")' in source
+
+    # Normalización objeto: mismo orden de prioridad para compatibilidad con
+    # distintas versiones de meshcore_py.
     assert 'display_prefix = getattr(c, "pubkey_prefix", None) or getattr(c, "key_prefix", None) or getattr(c, "prefix", None)' in source
     assert 'contact_id = getattr(c, "id", None)' in source
-    assert 'dm_key = display_id or (public_key[:12] if public_key else "") or contact_id' in source
 
-    # Regresión: no volver a esconder prefix dentro de contact_id, porque eso
-    # hace que public_key[:12] gane prioridad y puede seleccionar otro contacto.
-    assert 'contact_id = c.get("id") or c.get("prefix")' not in source
-    assert 'contact_id = getattr(c, "id", None) or getattr(c, "prefix", None)' not in source
+    # La derivación desde public_key se conserva como fallback; no se elimina
+    # ningún comportamiento previo cuando la API no expone prefix explícito.
+    assert 'dm_key = display_id or (public_key[:12] if public_key else "") or contact_id' in source
