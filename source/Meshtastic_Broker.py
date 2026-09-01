@@ -1198,6 +1198,11 @@ class MeshCoreEmbeddedBridge:
         self._mc_contacts_cache: dict[str, dict] = {}
         self._mc_path_prefix_cache: dict[str, list[dict]] = {}
 
+        # Prefijos DM observados realmente en RX, separados del catálogo de contactos.
+        # Clave: alias normalizado; valor: conjunto de prefixes RF vistos para ese alias.
+        # Este mapa NO interviene en list_contacts() ni modifica MESHCORE_CONTACT_ALIASES.
+        self._mc_observed_dm_prefixes_by_alias: dict[str, set[str]] = {}
+
     def _meshcore_remember_contact(self, contact: dict | None) -> None:
         if not isinstance(contact, dict):
             return
@@ -1264,6 +1269,52 @@ class MeshCoreEmbeddedBridge:
             if dm_key:
                 matches.append(dm_key)
         unique = list(dict.fromkeys(matches))
+        return unique[0] if len(unique) == 1 else ""
+
+    def _meshcore_remember_observed_dm_prefix(self, alias: str, prefix: str) -> None:
+        """Guarda un prefix DM recibido realmente por RF para un alias.
+
+        Se llama desde el manejador RX después de obtener alias y ``pubkey_prefix``
+        directamente del evento MeshCore. No deriva el valor desde ``public_key`` y
+        no altera ``contact_aliases`` ni las estructuras usadas por ``list_contacts``.
+
+        Parámetros:
+            alias: nombre/alias anunciado o extraído del mensaje RX.
+            prefix: ``pubkey_prefix`` recibido literalmente en el evento RF.
+        """
+        wanted = _norm_text(alias or "").casefold()
+        clean_prefix = str(prefix or "").strip().lower()
+        if not wanted or not re.fullmatch(r"[0-9a-f]{6,64}", clean_prefix):
+            return
+        bucket = self._mc_observed_dm_prefixes_by_alias.setdefault(wanted, set())
+        bucket.add(clean_prefix)
+
+    def resolve_observed_dm_prefix(self, alias: str) -> str:
+        """Devuelve un único prefix DM autoritativo para un alias, si existe.
+
+        Prioridad:
+            1. Prefix observado realmente en RX para el alias.
+            2. ``MESHCORE_CONTACT_ALIASES`` ya configurado, si es inequívoco.
+
+        No consulta ``public_key[:12]`` ni el catálogo de ``list_contacts`` para
+        evitar repetir la asociación incorrecta que motivó esta corrección. Si
+        existen varios prefixes para el mismo alias devuelve cadena vacía.
+        """
+        wanted = _norm_text(alias or "").casefold()
+        if not wanted:
+            return ""
+
+        observed = sorted(self._mc_observed_dm_prefixes_by_alias.get(wanted, set()))
+        if len(observed) == 1:
+            return observed[0]
+        if len(observed) > 1:
+            return ""
+
+        configured = []
+        for key, value in (self.contact_aliases or {}).items():
+            if _norm_text(value).casefold() == wanted and str(key).strip():
+                configured.append(str(key).strip().lower())
+        unique = list(dict.fromkeys(configured))
         return unique[0] if len(unique) == 1 else ""
 
     def _meshcore_contact_display(self, contact: dict | None, fallback: str = "") -> str:
@@ -2210,6 +2261,13 @@ class MeshCoreEmbeddedBridge:
                         text_msg = rest
                 except Exception:
                     pass
+
+                # Conserva de forma aislada el prefix DM visto realmente en RF.
+                # Se usa data["pubkey_prefix"] y no ``pref`` porque este último puede
+                # haber sido derivado como fallback cuando el evento no trae prefix.
+                self._meshcore_remember_observed_dm_prefix(
+                    alias, str(data.get("pubkey_prefix") or "").strip()
+                )
 
                 # === [BBS] Comandos recibidos directamente por MeshCore ======
                 # El motor BBS es común a ambas radios. Se responde por el mismo
@@ -7836,6 +7894,29 @@ class _BacklogServer(threading.Thread):
                 conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"));
                 return
             
+            # Resolución de solo lectura: alias -> prefix DM observado/configurado.
+            # No modifica contactos, colas ni estado de transmisión.
+            elif cmd == "MESHCORE_RESOLVE_CONTACT":
+                try:
+                    params = req.get("params") or {}
+                    alias = str(params.get("alias") or "").strip()
+                    eng = globals().get("MESHCORE_ENGINE")
+                    if not alias:
+                        resp = {"ok": False, "error": "missing alias"}
+                    elif not eng or not hasattr(eng, "resolve_observed_dm_prefix"):
+                        resp = {"ok": False, "error": "meshcore_resolver_unavailable"}
+                    else:
+                        resolved_prefix = eng.resolve_observed_dm_prefix(alias)
+                        resp = {
+                            "ok": True,
+                            "resolved": bool(resolved_prefix),
+                            "contact_prefix": resolved_prefix or None,
+                        }
+                except Exception as e:
+                    resp = {"ok": False, "error": f"meshcore_resolve_failed: {type(e).__name__}: {e}"}
+                conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                return
+
             # --- NUEVO: enviar a MeshCore (canal_idx) desde clientes (BOT) ---
             # --- NUEVO: enviar a MeshCore desde clientes (BOT) ---
             elif cmd == "MESHCORE_SEND":
