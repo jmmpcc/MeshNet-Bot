@@ -1,3 +1,4 @@
+# Trigger validation after workflow exists on branch.
 name: Apply observed MeshCore DM prefix
 
 on:
