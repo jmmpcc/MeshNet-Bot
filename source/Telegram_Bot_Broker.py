@@ -1834,6 +1834,56 @@ def _send_via_broker_meshcore_contact(contact_prefix: str, text: str, timeout: f
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+def _resolve_meshcore_contact_alias_via_ctrl(alias: str, timeout: float = 2.0) -> str | None:
+    """Resuelve un alias al prefix DM observado por el broker sin alterar contactos.
+
+    Uso:
+        prefix = _resolve_meshcore_contact_alias_via_ctrl("EB2EAS T1000e")
+
+    Parámetros:
+        alias: alias visible guardado por ``/mc_contactos`` para el número elegido.
+        timeout: tiempo máximo de la consulta al BacklogServer/control del broker.
+
+    Funcionalidad:
+        - Consulta ``MESHCORE_RESOLVE_CONTACT`` de forma síncrona.
+        - Acepta únicamente un prefix hexadecimal válido.
+        - Si el broker no soporta el comando, no conoce el alias o hay ambigüedad,
+          devuelve ``None`` para que el envío conserve el ``dm_key`` existente.
+        - No modifica ``/mc_contactos``, ``list_contacts`` ni la ruta TX manual.
+    """
+    clean_alias = str(alias or "").strip()
+    if not clean_alias:
+        return None
+
+    payload = {"cmd": "MESHCORE_RESOLVE_CONTACT", "params": {"alias": clean_alias}}
+    data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+    try:
+        with socket.create_connection(
+            (BROKER_CTRL_HOST or "127.0.0.1", int(BROKER_CTRL_PORT)),
+            timeout=float(timeout),
+        ) as s:
+            s.sendall(data)
+            s.settimeout(float(timeout))
+            buf = b""
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                if b"\n" in chunk:
+                    break
+        raw = buf.decode("utf-8", "ignore").strip()
+        if not raw:
+            return None
+        response = json.loads(raw)
+    except Exception:
+        return None
+
+    if not isinstance(response, dict) or not response.get("ok") or not response.get("resolved"):
+        return None
+    return _extract_mc_contact_prefix_from_text(str(response.get("contact_prefix") or ""))
+
+
 def _send_via_broker_queue(text: str, ch: int, dest: str | None = None, ack: bool = False, timeout: float = 3.0) -> dict:
     """
     Envía un texto al broker para que lo transmita usando su TCP activa y dispare el espejo A→B.
@@ -9731,6 +9781,16 @@ async def enviar_mc_dm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             except Exception:
                 cp = None
                 contact_alias = None
+
+            # El número conserva el mapa existente. Solo si el broker conoce un
+            # prefix RF inequívoco para su alias, se sustituye el dm_key fallback.
+            # El uso manual de un prefix nunca pasa por este resolvedor.
+            if contact_alias:
+                resolved_prefix = await asyncio.to_thread(
+                    _resolve_meshcore_contact_alias_via_ctrl, contact_alias, 2.0
+                )
+                if resolved_prefix:
+                    cp = resolved_prefix
         if cp:
             contact_prefix = cp
             text_tokens = text_tokens[1:]
