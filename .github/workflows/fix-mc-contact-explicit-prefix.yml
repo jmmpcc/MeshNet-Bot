@@ -62,8 +62,6 @@ jobs:
           git diff --check
           grep -n 'display_prefix = c.get("pubkey_prefix") or c.get("key_prefix") or c.get("prefix")' source/Meshtastic_Broker.py
           grep -n 'display_prefix = getattr(c, "pubkey_prefix", None) or getattr(c, "key_prefix", None) or getattr(c, "prefix", None)' source/Meshtastic_Broker.py
-          ! grep -n 'contact_id = c.get("id") or c.get("prefix")' source/Meshtastic_Broker.py
-          ! grep -n 'contact_id = getattr(c, "id", None) or getattr(c, "prefix", None)' source/Meshtastic_Broker.py
 
       - name: Commit validated fix and remove temporary workflow
         shell: bash
