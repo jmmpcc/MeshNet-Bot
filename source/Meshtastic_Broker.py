@@ -1245,13 +1245,27 @@ class MeshCoreEmbeddedBridge:
 
 
     def _meshcore_contact_prefix_by_name(self, name: str) -> str:
+        """Resuelve de forma inequívoca el prefijo DM conocido para un alias.
+
+        Prioriza los prefijos reales/configurados de ``contact_aliases``. Solo
+        si no existe esa asociación reutiliza los contactos cacheados y deja
+        ``public_key[:12]`` como compatibilidad legacy.
+        """
         wanted = _norm_text(name or "").casefold()
         if not wanted:
             return ""
-        matches = []
+
+        alias_matches = []
         for key, alias in (self.contact_aliases or {}).items():
             if _norm_text(alias).casefold() == wanted and str(key).strip():
-                matches.append(str(key).strip())
+                alias_matches.append(str(key).strip())
+        alias_unique = list(dict.fromkeys(alias_matches))
+        if len(alias_unique) == 1:
+            return alias_unique[0]
+        if len(alias_unique) > 1:
+            return ""
+
+        matches = []
         for contact in (self._mc_contacts_cache or {}).values():
             if not isinstance(contact, dict):
                 continue
@@ -1824,9 +1838,10 @@ class MeshCoreEmbeddedBridge:
                 display_id = (str(display_prefix).strip() if display_prefix is not None else "")
                 contact_id = (str(contact_id).strip() if contact_id is not None else "")
                 public_key = (str(public_key).strip() if public_key is not None else "")
-                # send_msg resuelve contactos por prefijo de public_key mediante
-                # get_contact_by_key_prefix(); no mostramos la clave completa como DM.
-                dm_key = display_id or (public_key[:12] if public_key else "") or contact_id
+                # Para DM, el prefix explícito u observado por RF es autoritativo.
+                # public_key[:12] se conserva solo como fallback legacy.
+                observed_prefix = self._meshcore_contact_prefix_by_name(name)
+                dm_key = display_id or observed_prefix or (public_key[:12] if public_key else "") or contact_id
                 display_id = display_id or dm_key or contact_id
                 if not dm_key or dm_key in seen:
                     continue
@@ -2210,6 +2225,11 @@ class MeshCoreEmbeddedBridge:
                         text_msg = rest
                 except Exception:
                     pass
+
+                # Conserva en memoria el prefijo DM observado realmente por RF
+                # junto a su alias. No reemplaza configuraciones explícitas.
+                if pref and alias and pref not in self.contact_aliases:
+                    self.contact_aliases[pref] = alias
 
                 # === [BBS] Comandos recibidos directamente por MeshCore ======
                 # El motor BBS es común a ambas radios. Se responde por el mismo
