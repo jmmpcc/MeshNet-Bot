@@ -9542,12 +9542,11 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if not display_prefix:
             display_prefix = dm_key
         # La lista pública muestra únicamente número y alias.
-        # La referencia autoritativa interna es la public_key completa cuando el
-        # broker la proporciona. El dm_key corto se conserva solo como fallback
-        # compatible para contactos legacy que no expongan public_key.
+        # El número se asocia al dm_key/prefijo operativo que ya utiliza la ruta
+        # MeshCore validada en producción. La public_key completa se mantiene en
+        # los datos del contacto, pero no sustituye al destino aceptado por send_msg.
         name = (c.get("name") or "Sin nombre").strip()
-        routing_key = public_key or dm_key
-        mc_map[str(idx)] = routing_key
+        mc_map[str(idx)] = dm_key
         mc_alias_map[str(idx)] = name
 
         lines.append(f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>")
