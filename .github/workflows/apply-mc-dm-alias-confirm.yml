@@ -1,0 +1,282 @@
+name: Apply MeshCore DM alias confirmation fix
+
+on:
+  push:
+    branches:
+      - fix/mc-dm-confirm-alias
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: fix/mc-dm-confirm-alias
+          fetch-depth: 0
+
+      - name: Apply deterministic patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('source/Telegram_Bot_Broker.py')
+          text = path.read_text(encoding='utf-8')
+
+          def replace_once(old: str, new: str, label: str) -> None:
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 occurrence, found {count}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              '    mc_map: dict[str, str] = {}\n',
+              '    mc_map: dict[str, str] = {}\n'
+              '    mc_alias_map: dict[str, str] = {}\n',
+              'mc_alias_map declaration',
+          )
+
+          replace_once(
+              '        mc_map[str(idx)] = dm_key\n\n'
+              '        lines.append(f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>")',
+              '        mc_map[str(idx)] = dm_key\n'
+              '        mc_alias_map[str(idx)] = name\n\n'
+              '        lines.append(f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>")',
+              'store alias by contact number',
+          )
+
+          replace_once(
+              '    try:\n'
+              '        context.user_data["mc_contacts_map"] = mc_map\n'
+              '    except Exception:\n'
+              '        pass\n',
+              '    try:\n'
+              '        # Se conservan por separado destino interno y alias visible.\n'
+              '        # /dm_mc usa mc_contacts_map para el envío y mc_contacts_alias_map\n'
+              '        # únicamente para mostrar confirmaciones legibles al usuario.\n'
+              '        context.user_data["mc_contacts_map"] = mc_map\n'
+              '        context.user_data["mc_contacts_alias_map"] = mc_alias_map\n'
+              '    except Exception:\n'
+              '        pass\n',
+              'persist alias map',
+          )
+
+          helper = '''def _meshcore_dm_confirmation(alias: str | None, length: Any = None) -> str:\n    """Construye la confirmación visible de un DM MeshCore sin exponer IDs internos.\n\n    Se utiliza tanto por ``/enviar_mc_dm``/``/dm_mc`` como por el ForceReply\n    generado desde ``/mc_contactos``. ``alias`` es exclusivamente informativo;\n    el enrutado real sigue utilizando el ``contact_prefix`` existente. Si no se\n    conoce un alias (por ejemplo, uso manual de un prefijo legacy), se confirma\n    el encolado sin publicar ese identificador.\n\n    Parámetros:\n        alias: alias visible del contacto seleccionado, si está disponible.\n        length: longitud devuelta opcionalmente por el broker.\n\n    Devuelve:\n        Texto de confirmación listo para enviar por Telegram.\n    """\n    lines = ["DM MeshCore encolado"]\n    clean_alias = str(alias or "").strip()\n    if clean_alias:\n        lines.append(f"Destino: {clean_alias}")\n    if isinstance(length, int):\n        lines.append(f"Len: {length}")\n    return "\\n".join(lines)\n\n\n'''
+          replace_once(
+              'async def mc_dm_contact_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:\n',
+              helper + 'async def mc_dm_contact_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:\n',
+              'confirmation helper insertion',
+          )
+
+          replace_once(
+              '    contact_prefix = None\n'
+              '    try:\n'
+              '        contact_prefix = (context.user_data.get("mc_contacts_map") or {}).get(idx_s)\n'
+              '    except Exception:\n'
+              '        contact_prefix = None\n'
+              '    contact_prefix = (contact_prefix or pfx).strip().lower()\n',
+              '    contact_prefix = None\n'
+              '    contact_alias = None\n'
+              '    try:\n'
+              '        contact_prefix = (context.user_data.get("mc_contacts_map") or {}).get(idx_s)\n'
+              '        contact_alias = (context.user_data.get("mc_contacts_alias_map") or {}).get(idx_s)\n'
+              '    except Exception:\n'
+              '        contact_prefix = None\n'
+              '        contact_alias = None\n'
+              '    contact_prefix = (contact_prefix or pfx).strip().lower()\n',
+              'callback resolve alias',
+          )
+
+          replace_once(
+              '    context.user_data["await_mc_dm_text"] = contact_prefix\n'
+              '    await q.answer(f"DM MeshCore {idx_s}")\n'
+              '    await q.message.reply_text(\n'
+              '        f"Escribe el texto para enviar DM MeshCore a <code>[MC:{escape(contact_prefix)}]</code>:",\n'
+              '        parse_mode="HTML",\n'
+              '        reply_markup=ForceReply(selective=True),\n'
+              '    )\n',
+              '    context.user_data["await_mc_dm_text"] = contact_prefix\n'
+              '    context.user_data["await_mc_dm_alias"] = contact_alias\n'
+              '    await q.answer(f"DM MeshCore {idx_s}")\n'
+              '    visible_contact = escape(str(contact_alias or "contacto seleccionado"))\n'
+              '    await q.message.reply_text(\n'
+              '        f"Escribe el texto para enviar DM MeshCore a <b>{visible_contact}</b>:",\n'
+              '        parse_mode="HTML",\n'
+              '        reply_markup=ForceReply(selective=True),\n'
+              '    )\n',
+              'callback prompt without ID',
+          )
+
+          replace_once(
+              '    contact_prefix = None\n'
+              '    text_tokens = list(args)\n\n'
+              '    if text_tokens:\n'
+              '        cp = _extract_mc_contact_prefix_from_text(text_tokens[0])\n'
+              '        if not cp and str(text_tokens[0]).isdigit():\n'
+              '            try:\n'
+              '                cp = (context.user_data.get("mc_contacts_map") or {}).get(str(text_tokens[0]))\n'
+              '            except Exception:\n'
+              '                cp = None\n'
+              '        if cp:\n'
+              '            contact_prefix = cp\n'
+              '            text_tokens = text_tokens[1:]\n',
+              '    contact_prefix = None\n'
+              '    contact_alias = None\n'
+              '    text_tokens = list(args)\n\n'
+              '    if text_tokens:\n'
+              '        cp = _extract_mc_contact_prefix_from_text(text_tokens[0])\n'
+              '        if not cp and str(text_tokens[0]).isdigit():\n'
+              '            idx_s = str(text_tokens[0])\n'
+              '            try:\n'
+              '                cp = (context.user_data.get("mc_contacts_map") or {}).get(idx_s)\n'
+              '                contact_alias = (context.user_data.get("mc_contacts_alias_map") or {}).get(idx_s)\n'
+              '            except Exception:\n'
+              '                cp = None\n'
+              '                contact_alias = None\n'
+              '        if cp:\n'
+              '            contact_prefix = cp\n'
+              '            text_tokens = text_tokens[1:]\n',
+              'command numeric alias resolution',
+          )
+
+          replace_once(
+              '        await msg_obj.reply_text(\n'
+              '            "Uso:\\n"\n'
+              '            "  /enviar_mc_dm 6a18cb3d125b <texto...>\\n"\n'
+              '            "  /enviar_mc_dm [MC:6a18cb3d125b] <texto...>\\n"\n'
+              '            "  (o responde a un mensaje con [MC:...] y usa: /enviar_mc_dm <texto...>)"\n'
+              '        )\n',
+              '        await msg_obj.reply_text(\n'
+              '            "Uso:\\n"\n'
+              '            "  /enviar_mc_dm N <texto...>\\n"\n'
+              '            "Ejecuta /mc_contactos para consultar el número asignado a cada alias."\n'
+              '        )\n',
+              'command usage without IDs',
+          )
+
+          replace_once(
+              '    if resp and resp.get("ok"):\n'
+              '        # No asumir \'len\' si el broker no lo devuelve\n'
+              '        l = resp.get("len")\n'
+              '        extra = f"\\nLen: {l}" if isinstance(l, int) else ""\n'
+              '        await msg_obj.reply_text(\n'
+              '            f"DM MeshCore encolado\\nDestino: {contact_prefix}{extra}"\n'
+              '        )\n',
+              '    if resp and resp.get("ok"):\n'
+              '        # La ruta real continúa siendo contact_prefix; la respuesta pública\n'
+              '        # utiliza únicamente el alias asociado al número seleccionado.\n'
+              '        await msg_obj.reply_text(\n'
+              '            _meshcore_dm_confirmation(contact_alias, resp.get("len"))\n'
+              '        )\n',
+              'command success confirmation',
+          )
+
+          replace_once(
+              '    contact_prefix = context.user_data.pop("await_mc_dm_text", None)\n'
+              '    if contact_prefix:\n',
+              '    contact_prefix = context.user_data.pop("await_mc_dm_text", None)\n'
+              '    contact_alias = context.user_data.pop("await_mc_dm_alias", None)\n'
+              '    if contact_prefix:\n',
+              'ForceReply alias retrieval',
+          )
+
+          replace_once(
+              '        if resp and resp.get("ok"):\n'
+              '            l = resp.get("len")\n'
+              '            extra = f"\\nLen: {l}" if isinstance(l, int) else ""\n'
+              '            await update.effective_message.reply_text(f"DM MeshCore encolado\\nDestino: {contact_prefix}{extra}")\n',
+              '        if resp and resp.get("ok"):\n'
+              '            await update.effective_message.reply_text(\n'
+              '                _meshcore_dm_confirmation(contact_alias, resp.get("len"))\n'
+              '            )\n',
+              'ForceReply success confirmation',
+          )
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Add regression test
+        shell: bash
+        run: |
+          cat > tests/test_mc_dm_alias_confirmation.py <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+
+          SOURCE = Path(__file__).resolve().parents[1] / "source" / "Telegram_Bot_Broker.py"
+
+
+          def _source() -> str:
+              return SOURCE.read_text(encoding="utf-8")
+
+
+          def _async_function_source(name: str) -> str:
+              source = _source()
+              tree = ast.parse(source)
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.AsyncFunctionDef) and node.name == name:
+                      segment = ast.get_source_segment(source, node)
+                      assert segment is not None
+                      return segment
+              raise AssertionError(f"{name} no encontrada")
+
+
+          def test_dm_por_numero_conserva_prefijo_interno_y_usa_alias_visible() -> None:
+              """El número sigue resolviendo el DM interno, pero la UI usa el alias."""
+              source = _source()
+              fn = _async_function_source("enviar_mc_dm_cmd")
+
+              assert 'context.user_data.get("mc_contacts_map")' in fn
+              assert 'context.user_data.get("mc_contacts_alias_map")' in fn
+              assert '_send_via_broker_meshcore_contact, contact_prefix, out_text, 3.0' in fn
+              assert '_meshcore_dm_confirmation(contact_alias, resp.get("len"))' in fn
+              assert 'Destino: {contact_prefix}' not in fn
+              assert 'context.user_data["mc_contacts_alias_map"] = mc_alias_map' in source
+
+
+          def test_forcereply_tampoco_expone_prefijo() -> None:
+              """El envío iniciado desde el botón DM comparte la misma confirmación segura."""
+              fn = _async_function_source("on_forcereply_text")
+
+              assert 'context.user_data.pop("await_mc_dm_alias", None)' in fn
+              assert '_meshcore_dm_confirmation(contact_alias, resp.get("len"))' in fn
+              assert 'Destino: {contact_prefix}' not in fn
+
+
+          def test_helper_no_publica_identificador_si_no_hay_alias() -> None:
+              """El fallback confirma el encolado sin revelar el prefijo interno."""
+              source = _source()
+              assert 'lines = ["DM MeshCore encolado"]' in source
+              assert 'lines.append(f"Destino: {clean_alias}")' in source
+              assert 'lines.append(f"Destino: {contact_prefix}")' not in source
+
+
+          def test_source_sigue_siendo_python_valido() -> None:
+              ast.parse(_source())
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          python -m py_compile source/Telegram_Bot_Broker.py
+          python -m pytest -q tests/test_mc_contactos_full_public_key.py tests/test_mc_dm_alias_confirmation.py
+          git diff --check
+          grep -n "DM MeshCore encolado" source/Telegram_Bot_Broker.py
+
+      - name: Commit fix and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/apply-mc-dm-alias-confirm.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add source/Telegram_Bot_Broker.py tests/test_mc_dm_alias_confirmation.py .github/workflows/apply-mc-dm-alias-confirm.yml
+          git commit -m "fix: show MeshCore DM alias in confirmations"
+          git push origin HEAD:fix/mc-dm-confirm-alias
