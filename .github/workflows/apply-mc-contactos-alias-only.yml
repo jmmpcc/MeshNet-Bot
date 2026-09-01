@@ -22,52 +22,8 @@ jobs:
       - name: Apply alias-only presentation
         shell: bash
         run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path('source/Telegram_Bot_Broker.py')
-          src = path.read_text(encoding='utf-8')
-
-          old = '''        # ID canónico del contacto: MeshCore identifica cada nodo por su public_key Ed25519 completa.
-        # El dm_key se mantiene separado e intacto porque send_msg resuelve el destino por prefijo.
-        canonical_id = public_key or display_prefix or contact_id or dm_key
-        name = (c.get("name") or "Sin nombre").strip()
-        ls = c.get("last_seen")
-        mc_map[str(idx)] = dm_key
-
-        meta = []
-        if contact_id and contact_id != display_prefix and contact_id != dm_key:
-            meta.append(f"id: {contact_id}")
-        # Mostramos la identidad MeshCore completa y, por separado, el prefijo usado para DM.
-        # Esto corrige únicamente la presentación; mc_map, botones y /dm_mc siguen usando dm_key.
-        last_seen_txt = _format_meshcore_last_seen(ls)
-        if last_seen_txt:
-            meta.append(f"visto: {last_seen_txt}")
-        meta_txt = f" · {' · '.join(meta)}" if meta else ""
-        lines.append(
-            f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>\n"
-            f"    ID: <code>[MC:{escape(canonical_id)}]</code>\n"
-            f"    DM: <code>{escape(dm_key)}</code>{escape(meta_txt)}"
-        )
-'''
-
-          new = '''        # La lista pública muestra únicamente número y alias.
-        # El identificador MeshCore permanece interno: el número se resuelve mediante mc_map
-        # y /dm_mc N texto continúa enviando al mismo dm_key sin exponer claves al usuario.
-        name = (c.get("name") or "Sin nombre").strip()
-        mc_map[str(idx)] = dm_key
-
-        lines.append(f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>")
-'''
-
-          if src.count(old) != 1:
-              raise SystemExit(f'Unexpected target block count: {src.count(old)}')
-          src = src.replace(old, new, 1)
-          path.write_text(src, encoding='utf-8')
-
-          test_path = Path('tests/test_mc_contactos_full_public_key.py')
-          test_path.write_text('''from __future__ import annotations\n\nimport ast\nfrom pathlib import Path\n\n\ndef _mc_contactos_source() -> str:\n    source_path = Path(__file__).resolve().parents[1] / "source" / "Telegram_Bot_Broker.py"\n    source = source_path.read_text(encoding="utf-8")\n    tree = ast.parse(source)\n    for node in tree.body:\n        if isinstance(node, ast.AsyncFunctionDef) and node.name == "mc_contactos_cmd":\n            segment = ast.get_source_segment(source, node)\n            assert segment is not None\n            return segment\n    raise AssertionError("mc_contactos_cmd no encontrada")\n\n\ndef test_mc_contactos_muestra_solo_numero_y_alias_y_conserva_dm_key() -> None:\n    \"\"\"La UI no expone IDs y la selección numérica conserva la resolución DM existente.\"\"\"\n    fn = _mc_contactos_source()\n\n    assert 'lines.append(f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>")' in fn\n    assert 'ID: <code>[MC:' not in fn\n    assert 'DM: <code>' not in fn\n    assert 'meta.append(f"id:' not in fn\n\n    # Regresión: /dm_mc N y los botones siguen resolviendo internamente por dm_key.\n    assert 'mc_map[str(idx)] = dm_key' in fn\n    assert 'callback_data=f"mc_dm:{idx}:{dm_key[:32]}"' in fn\n\n\ndef test_telegram_bot_broker_sigue_siendo_python_valido() -> None:\n    source_path = Path(__file__).resolve().parents[1] / "source" / "Telegram_Bot_Broker.py"\n    ast.parse(source_path.read_text(encoding="utf-8"))\n''', encoding='utf-8')
-          PY
+          echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgpwYXRoID0gUGF0aCgic291cmNlL1RlbGVncmFtX0JvdF9Ccm9rZXIucHkiKQpzcmMgPSBwYXRoLnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKQoKZm5fcG9zID0gc3JjLmluZGV4KCJhc3luYyBkZWYgbWNfY29udGFjdG9zX2NtZCIpCnN0YXJ0ID0gc3JjLmluZGV4KCIgICAgICAgICMgSUQgY2Fuw7NuaWNvIGRlbCBjb250YWN0bzogTWVzaENvcmUgaWRlbnRpZmljYSBjYWRhIG5vZG8gcG9yIHN1IHB1YmxpY19rZXkgRWQyNTUxOSBjb21wbGV0YS5cbiIsIGZuX3BvcykKZW5kID0gc3JjLmluZGV4KCIgICAgICAgIGtleWJvYXJkLmFwcGVuZChbXG4iLCBzdGFydCkKCnJlcGxhY2VtZW50ID0gIiIiICAgICAgICAjIExhIGxpc3RhIHDDumJsaWNhIG11ZXN0cmEgw7puaWNhbWVudGUgbsO6bWVybyB5IGFsaWFzLgogICAgICAgICMgRWwgaWRlbnRpZmljYWRvciBNZXNoQ29yZSBwZXJtYW5lY2UgaW50ZXJubzogZWwgbsO6bWVybyBzZSByZXN1ZWx2ZSBtZWRpYW50ZSBtY19tYXAKICAgICAgICAjIHkgL2RtX21jIE4gdGV4dG8gY29udGluw7phIGVudmlhbmRvIGFsIG1pc21vIGRtX2tleSBzaW4gZXhwb25lciBjbGF2ZXMgYWwgdXN1YXJpby4KICAgICAgICBuYW1lID0gKGMuZ2V0KCJuYW1lIikgb3IgIlNpbiBub21icmUiKS5zdHJpcCgpCiAgICAgICAgbWNfbWFwW3N0cihpZHgpXSA9IGRtX2tleQoKICAgICAgICBsaW5lcy5hcHBlbmQoZiI8Yj57aWR4OjAyZH0uPC9iPiDwn5OhIDxiPntl c2NhcGUobmFtZSl9PC9iPiIpCiIiIi5yZXBsYWNlKCIgIiwgIiAiKQpzcmMgPSBzcmNbOnN0YXJ0XSArIHJlcGxhY2VtZW50ICsgc3JjW2VuZDpdCnBhdGgud3JpdGVfdGV4dChzcmMsIGVuY29kaW5nPSJ1dGYtOCIpCgp0ZXN0X3BhdGggPSBQYXRoKCJ0ZXN0cy90ZXN0X21jX2NvbnRhY3Rvc19mdWxsX3B1YmxpY19rZXkucHkiKQp0ZXN0X3BhdGgud3JpdGVfdGV4dCgiIiJmcm9tIF9fZnV0dXJlX18gaW1wb3J0IGFubm90YXRpb25zCgppbXBvcnQgYXN0CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKCmRlZiBfbWNfY29udGFjdG9zX3NvdXJjZSgpIC0+IHN0cjoKICAgIHNvdXJjZV9wYXRoID0gUGF0aChfX2ZpbGVfXykucmVzb2x2ZSgpLnBhcmVudHNbMV0gLyAic291cmNlIiAvICJUZWxlZ3JhbV9Cb3RfQnJva2VyLnB5IgogICAgc291cmNlID0gc291cmNlX3BhdGgucmVhZF90ZXh0KGVuY29kaW5nPSJ1dGYtOCIpCiAgICB0cmVlID0gYXN0LnBhcnNlKHNvdXJjZSkKICAgIGZvciBub2RlIGluIHRyZWUuYm9keToKICAgICAgICBpZiBpc2luc3RhbmNlKG5vZGUsIGFzdC5Bc3luY0Z1bmN0aW9uRGVmKSBhbmQgbm9kZS5uYW1lID09ICJtY19jb250YWN0b3NfY21kIjoKICAgICAgICAgICAgc2VnbWVudCA9IGFzdC5nZXRfc291cmNlX3NlZ21lbnQoc291cmNlLCBub2RlKQogICAgICAgICAgICBhc3NlcnQgc2VnbWVudCBpcyBub3QgTm9uZQogICAgICAgICAgICByZXR1cm4gc2VnbWVudAogICAgcmFpc2UgQXNzZXJ0aW9uRXJyb3IoIm1jX2NvbnRhY3Rvc19jbWQgbm8gZW5jb250cmFkYSIpCgoKZGVmIHRlc3RfbWNfY29udGFjdG9zX211ZXN0cmFfc29sb19udW1lcm9feV9hbGlhc195X2NvbnNlcnZhX2RtX2tleSgpIC0+IE5vbmU6CiAgICAiIiJMYXUgSSBubyBleHBvbmUgSURzIHkgbGEgc2VsZWNjacOzbiBudW3DqXJpY2EgY29uc2VydmEgbGEgcmVzb2x1Y2nDs24gRE0gZXhpc3RlbnRlLiIiIgogICAgZm4gPSBfbWNfY29udGFjdG9zX3NvdXJjZSgpCgogICAgYXNzZXJ0ICdsaW5lcy5hcHBlbmQoZiI8Yj57aWR4OjAyZH0uPC9iPiDwn5OhIDxiPntlc2NhcGUobmFtZSl9PC9iPiIpJyBpbiBmbgogICAgYXNzZXJ0ICdJRDogPGNvZGU+W01DOicgbm90IGluIGZuCiAgICBhc3NlcnQgJ0RNOiA8Y29kZT4nIG5vdCBpbiBmbgogICAgYXNzZXJ0ICdtZXRhLmFwcGVuZChmImlkOicgbm90IGluIGZuCiAgICBhc3NlcnQgIl9mb3JtYXRfbWVzaGNvcmVfbGFzdF9zZWVuKGxzKSIgbm90IGluIGZuCgogICAgIyBSZWdyZXNpw7NuOiAvZG1fbWMgTiB5IGxvcyBib3RvbmVzIHNpZ3VlbiByZXNvbHZpZW5kbyBpbnRlcm5hbWVudGUgcG9yIGRtX2tleS4KICAgIGFzc2VydCAnbWNfbWFwW3N0cihpZHgpXSA9IGRtX2tleScgaW4gZm4KICAgIGFzc2VydCAnY2FsbGJhY2tfZGF0YT1mIm1jX2RtOntpZHh9OntkbV9rZXlbOjMyXX0iJyBpbiBmbgoKCmRlZiB0ZXN0X3RlbGVncmFtX2JvdF9icm9rZXJfc2lndWVfc2llbmRvX3B5dGhvbl92YWxpZG8oKSAtPiBOb25lOgogICAgc291cmNlX3BhdGggPSBQYXRoKF9fZmlsZV9fKS5yZXNvbHZlKCkucGFyZW50c1sxXSAvICJzb3VyY2UiIC8gIlRlbGVncmFtX0JvdF9Ccm9rZXIucHkiCiAgICBhc3QucGFyc2Uoc291cmNlX3BhdGgucmVhZF90ZXh0KGVuY29kaW5nPSJ1dGYtOCIpKQoiIiIsIGVuY29kaW5nPSJ1dGYtOCIpCg==' | tr -d ' ' | base64 -d > /tmp/apply_alias_only.py
+          python /tmp/apply_alias_only.py
 
       - name: Validate syntax and regression test
         shell: bash
@@ -76,7 +32,6 @@ jobs:
           python - <<'PY'
           import importlib.util
           from pathlib import Path
-
           path = Path('tests/test_mc_contactos_full_public_key.py')
           spec = importlib.util.spec_from_file_location('mc_contactos_test', path)
           module = importlib.util.module_from_spec(spec)
