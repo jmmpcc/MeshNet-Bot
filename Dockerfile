@@ -40,10 +40,12 @@ COPY source/*.json /app/source/
 RUN test -f /app/source/Telegram_Bot_ChannelGateway.py \
     && test -f /app/source/channel_gateway_bot.py \
     && test -f /app/source/beacon_bot.py \
+    && test -f /app/source/auto_reply_bot.py \
     && python -m py_compile \
         /app/source/Telegram_Bot_ChannelGateway.py \
         /app/source/channel_gateway_bot.py \
-        /app/source/beacon_bot.py
+        /app/source/beacon_bot.py \
+        /app/source/auto_reply_bot.py
 
 # v7.0.53: mínimo subconjunto geográfico compartido con Emergencias.
 # Telegram_Bot_Broker.py continúa usando `import reverse_geocoder as rg`, pero

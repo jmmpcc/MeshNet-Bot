@@ -18,19 +18,21 @@ from beacon_bot import (
     parar_baliza_mc_cmd,
 )
 from channel_gateway_bot import channel_gateway_cmd
+from auto_reply_bot import auto_reply_cmd, contextual_help as auto_reply_contextual_help
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.ext import CommandHandler
 from tcpinterface_persistent import TCPInterfacePool
 
 
 async def _augment_bot_commands_for_scope(app: Any, scope: Any) -> None:
-    """Añade las balizas visibles al menú oficial de Telegram para un scope.
+    """Añade las extensiones visibles al menú oficial de Telegram para un scope.
 
     Funcionalidad:
         - Lee primero los comandos ya publicados por el bot principal.
         - Mantiene su orden y descripciones salvo cuando una descripción necesita
           indicar que ``/parar_baliza`` sirve también para la baliza periódica.
-        - Añade únicamente los comandos cuyo transporte está habilitado por
+        - Añade ``/autorespuesta`` sin sustituir comandos históricos.
+        - Añade únicamente las balizas cuyo transporte está habilitado por
           ``RADIO_PROFILE``.
         - Evita comandos duplicados.
 
@@ -51,6 +53,8 @@ async def _augment_bot_commands_for_scope(app: Any, scope: Any) -> None:
                 return
         commands.append(BotCommand(command, description))
 
+    upsert("autorespuesta", "Administrar autorespuesta por canal")
+
     if "meshtastic" in available:
         upsert("baliza", "Baliza Meshtastic periódica por nombre")
         upsert("balizas", "Listar balizas Meshtastic activas")
@@ -67,7 +71,7 @@ async def _augment_bot_commands_for_scope(app: Any, scope: Any) -> None:
 
 
 def _install_visual_extensions() -> None:
-    """Integra balizas en menú ``/`` y ``/ayuda`` sin reescribir el bot principal.
+    """Integra extensiones en menú ``/`` y ``/ayuda`` sin reescribir el bot principal.
 
     Se llama antes de construir la ``Application``. Envuelve las funciones globales
     que el ``build_application`` original consulta al ejecutarse, de modo que los
@@ -78,7 +82,7 @@ def _install_visual_extensions() -> None:
     original_ayuda = bot.ayuda
 
     async def set_bot_menu_with_extensions(app: Any) -> None:
-        """Publica primero el menú histórico y después añade balizas visibles."""
+        """Publica primero el menú histórico y después añade extensiones visibles."""
         await original_set_bot_menu(app)
         await _augment_bot_commands_for_scope(app, BotCommandScopeDefault())
         for admin_id in bot.ADMIN_IDS:
@@ -88,14 +92,24 @@ def _install_visual_extensions() -> None:
                     BotCommandScopeChat(chat_id=admin_id),
                 )
             except Exception as exc:
-                bot.log(f"❗ set_my_commands balizas admin {admin_id}: {exc}")
+                bot.log(f"❗ set_my_commands extensiones admin {admin_id}: {exc}")
 
     async def ayuda_with_extensions(update: Any, context: Any) -> None:
-        """Conserva ``/ayuda`` existente y añade la ayuda contextual de balizas."""
+        """
+        Conserva ``/ayuda`` existente y añade ayudas contextuales externas.
+
+        Orden de salida:
+            1. Ayuda histórica del bot principal.
+            2. Ayuda contextual de balizas.
+            3. Ayuda contextual de autorespuesta.
+
+        Ningún bloque sustituye ni modifica la ayuda histórica existente.
+        """
         await original_ayuda(update, context)
         message = getattr(update, "effective_message", None)
         if message is not None:
             await message.reply_text(contextual_help())
+            await message.reply_text(auto_reply_contextual_help())
 
     bot.set_bot_menu = set_bot_menu_with_extensions
     bot.ayuda = ayuda_with_extensions
@@ -170,8 +184,8 @@ def _install_command_without_touching_original() -> None:
 
     Se llama una sola vez desde :func:`main`. Mantiene intacta la construcción
     histórica de ``Telegram_Bot_Broker.py`` y registra después las extensiones
-    Channel Gateway y balizas periódicas. Ninguna función de envío existente se
-    sustituye: las balizas delegan el TX al control del broker.
+    Channel Gateway, autorespuesta y balizas periódicas. Ninguna función de envío
+    existente se sustituye.
     """
     original_build_application = bot.build_application
 
@@ -182,6 +196,9 @@ def _install_command_without_touching_original() -> None:
         # Extensión ya existente: pasarela interna entre canales.
         app.add_handler(CommandHandler("channel_gateway", channel_gateway_cmd))
         app.add_handler(CommandHandler("pasarela_canales", channel_gateway_cmd))
+
+        # Extensión de administración: reutiliza auto_reply.json sin tocar AutoReply.
+        app.add_handler(CommandHandler("autorespuesta", auto_reply_cmd))
 
         # Nueva extensión: balizas periódicas independientes por transporte.
         app.add_handler(CommandHandler("baliza", baliza_cmd))
