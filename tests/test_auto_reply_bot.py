@@ -106,8 +106,37 @@ def test_transport_must_match_radio_profile(tmp_path, monkeypatch):
     assert stored == {"enabled": False}
 
 
-def test_launcher_registers_command_without_touching_main_bot():
+def test_contextual_help_meshcore_only_hides_meshtastic(monkeypatch):
+    monkeypatch.setattr(module, "_radio_profile_context", lambda: {
+        "profile": "meshcore_only",
+        "transports": ("meshcore",),
+    })
+
+    help_text = module.contextual_help()
+
+    assert "/autorespuesta add mc <canal>" in help_text
+    assert "/autorespuesta del mc <canal>" in help_text
+    assert "/autorespuesta add mt <canal>" not in help_text
+    assert "/autorespuesta del mt <canal>" not in help_text
+
+
+def test_contextual_help_dual_profile_shows_both_transports(monkeypatch):
+    monkeypatch.setattr(module, "_radio_profile_context", lambda: {
+        "profile": "meshcore_a_meshtastic_b",
+        "transports": ("meshcore", "meshtastic"),
+    })
+
+    help_text = module.contextual_help()
+
+    assert "/autorespuesta add mc <canal>" in help_text
+    assert "/autorespuesta add mt <canal>" in help_text
+    assert "La plantilla debe contener" not in help_text
+    assert "debe contener {message}" in help_text
+
+
+def test_launcher_registers_command_and_integrates_help_without_touching_main_bot():
     source = __import__("pathlib").Path("source/Telegram_Bot_ChannelGateway.py").read_text(encoding="utf-8")
-    assert "from auto_reply_bot import auto_reply_cmd" in source
+    assert "from auto_reply_bot import auto_reply_cmd, contextual_help as auto_reply_contextual_help" in source
     assert 'CommandHandler("autorespuesta", auto_reply_cmd)' in source
     assert 'upsert("autorespuesta", "Administrar autorespuesta por canal")' in source
+    assert "await message.reply_text(auto_reply_contextual_help())" in source
