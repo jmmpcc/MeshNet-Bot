@@ -22,6 +22,10 @@ def _runtime_namespace() -> dict:
         n for n in tree.body
         if isinstance(n, ast.FunctionDef) and n.name == "_norm_text"
     )
+    alias_key_node = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_meshcore_alias_key"
+    )
     cls = next(
         n for n in tree.body
         if isinstance(n, ast.ClassDef) and n.name == "MeshCoreEmbeddedBridge"
@@ -37,6 +41,7 @@ def _runtime_namespace() -> dict:
 
     ns = {"re": re}
     exec(compile(ast.Module(body=[norm_node], type_ignores=[]), "<norm>", "exec"), ns)
+    exec(compile(ast.Module(body=[alias_key_node], type_ignores=[]), "<alias_key>", "exec"), ns)
     exec(compile(textwrap.dedent(ast.get_source_segment(source, remember_node)), "<remember>", "exec"), ns)
     exec(compile(textwrap.dedent(ast.get_source_segment(source, resolve_node)), "<resolve>", "exec"), ns)
     return ns
@@ -64,4 +69,21 @@ def test_resolver_returns_real_observed_rf_prefix() -> None:
 def test_resolver_accepts_configured_alias_prefix() -> None:
     ns = _runtime_namespace()
     obj = _dummy(aliases={"8B47FEA70A4B": " EB2EAS   T1000e "})
+    assert ns["resolve_observed_dm_prefix"](obj, "EB2EAS T1000e") == "8b47fea70a4b"
+
+
+def test_resolver_matches_rx_hyphen_alias_with_contact_space_alias() -> None:
+    """Caso real: RX EB2EAS-T1000E debe resolver consulta EB2EAS T1000e."""
+    ns = _runtime_namespace()
+    obj = _dummy()
+    ns["_meshcore_remember_observed_dm_prefix"](
+        obj, "EB2EAS-T1000E", "8B47FEA70A4B"
+    )
+    assert ns["resolve_observed_dm_prefix"](obj, "EB2EAS T1000e") == "8b47fea70a4b"
+
+
+def test_resolver_matches_configured_underscore_alias_with_space_alias() -> None:
+    """Los aliases configurados con '_' comparten la misma clave estable."""
+    ns = _runtime_namespace()
+    obj = _dummy(aliases={"8B47FEA70A4B": "EB2EAS_T1000E"})
     assert ns["resolve_observed_dm_prefix"](obj, "EB2EAS T1000e") == "8b47fea70a4b"
