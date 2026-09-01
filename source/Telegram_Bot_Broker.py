@@ -9540,23 +9540,13 @@ async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             continue
         if not display_prefix:
             display_prefix = dm_key
+        # La lista pública muestra únicamente número y alias.
+        # El identificador MeshCore permanece interno: el número se resuelve mediante mc_map
+        # y /dm_mc N texto continúa enviando al mismo dm_key sin exponer claves al usuario.
         name = (c.get("name") or "Sin nombre").strip()
-        ls = c.get("last_seen")
         mc_map[str(idx)] = dm_key
 
-        meta = []
-        if contact_id and contact_id != display_prefix and contact_id != dm_key:
-            meta.append(f"id: {contact_id}")
-        # No mostramos un segundo [MC:...] para DM: el identificador correcto
-        # para enviar es el prefijo corto mostrado en la primera línea.
-        last_seen_txt = _format_meshcore_last_seen(ls)
-        if last_seen_txt:
-            meta.append(f"visto: {last_seen_txt}")
-        meta_txt = f" · {' · '.join(meta)}" if meta else ""
-        lines.append(
-            f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>\n"
-            f"    <code>[MC:{escape(display_prefix)}]</code>{escape(meta_txt)}"
-        )
+        lines.append(f"<b>{idx:02d}.</b> 📡 <b>{escape(name)}</b>")
         keyboard.append([
             InlineKeyboardButton(
                 f"✉️ DM {idx:02d} · {name[:24] or display_prefix[:8] or dm_key[:8]}",
