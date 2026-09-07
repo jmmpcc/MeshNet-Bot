@@ -68,13 +68,31 @@ def _normalize_spaces(text: str) -> str:
 
 
 def _fit_text(text: str, max_chars: int) -> str:
-    """Ajusta texto a ``max_chars`` intentando cortar por límite de palabra.
+    """Ajusta texto al límite positivo exacto solicitado.
+
+    Cómo se llama:
+        ``_fit_text(respuesta_ia, max_chars)`` tras obtener una respuesta del
+        proveedor. También se reutiliza para limitar el razonamiento de una
+        clasificación.
+
+    Parámetros:
+        text: Texto que debe ajustarse.
+        max_chars: Presupuesto máximo de caracteres. Cualquier valor positivo se
+            respeta literalmente; ``0`` o negativos producen cadena vacía.
+
+    Funcionalidad:
+        Primero normaliza espacios. Si hay que recortar, intenta terminar en un
+        límite de palabra siempre que ello no vacíe el resultado. Nunca amplía el
+        presupuesto indicado por el llamador y nunca devuelve más de
+        ``max_chars`` caracteres.
 
     Esta función se aplica únicamente a una respuesta IA ya obtenida. No sustituye
     los formateadores deterministas existentes de MeshNet.
     """
     clean = _normalize_spaces(text)
-    limit = max(16, int(max_chars))
+    limit = int(max_chars)
+    if limit <= 0:
+        return ""
     if len(clean) <= limit:
         return clean
     candidate = clean[:limit].rstrip()
@@ -123,17 +141,25 @@ class MeshNetAITasks:
         context: str = "",
         preserve: Iterable[str] = (),
     ) -> SummaryResult:
-        """Resume un texto manteniendo un presupuesto máximo de caracteres.
+        """Resume un texto manteniendo un presupuesto máximo estricto.
+
+        Cómo se llama:
+            ``tasks.summarize_text(texto, max_chars=67)``. El consumidor debe usar
+            el texto únicamente cuando ``result.ok`` sea verdadero; en cualquier
+            otro caso mantiene su comportamiento clásico.
 
         Parámetros:
             text: Texto de entrada, previamente anonimizado si procede.
-            max_chars: Límite final del resumen; mínimo interno de 16 caracteres.
+            max_chars: Límite final estricto. Cualquier entero positivo se respeta
+                literalmente. Los valores ``0`` o negativos se rechazan sin
+                realizar ninguna llamada al proveedor.
             context: Contexto funcional opcional para mejorar el resumen.
             preserve: Conceptos que el modelo debe conservar si están presentes.
 
         Retorna:
             ``SummaryResult(ok=True)`` solo cuando IA global y el flag ``summarize``
-            están activos y el proveedor produce contenido no vacío.
+            están activos, el límite es válido y el proveedor produce contenido no
+            vacío. El texto devuelto nunca supera ``max_chars``.
         """
         if not self.ai.feature_enabled("summarize"):
             state = "disabled" if not self.ai.config.enabled else "feature_disabled"
@@ -143,7 +169,13 @@ class MeshNetAITasks:
         if not source:
             return SummaryResult(ok=False, status="error", error="texto vacío")
 
-        limit = max(16, int(max_chars))
+        try:
+            limit = int(max_chars)
+        except (TypeError, ValueError):
+            return SummaryResult(ok=False, status="error", error="max_chars inválido")
+        if limit <= 0:
+            return SummaryResult(ok=False, status="error", error="max_chars debe ser positivo")
+
         preserve_items = [_normalize_spaces(x) for x in preserve if _normalize_spaces(x)]
         preserve_text = ", ".join(preserve_items) if preserve_items else "ninguno"
         prompt = (
