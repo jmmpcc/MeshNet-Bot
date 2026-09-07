@@ -29,8 +29,8 @@ _ALLOWED_RELATIONS = {"same_incident", "contextual", "unrelated", "uncertain"}
 # IA-2D recibe textos de síntesis y también un campo explícito de incertidumbres.
 # A diferencia de IA-2C, en ``uncertainties`` es correcto mencionar conceptos como
 # "superficie afectada" si se hace exclusivamente para negar que pueda determinarse.
-# Estas expresiones permiten esa negación explícita sin relajar las prohibiciones
-# afirmativas ya establecidas por IA-2C.
+# Estas expresiones delimitan qué negaciones explícitas pueden proteger una mención
+# sensible dentro de la misma cláusula, sin relajar las prohibiciones afirmativas.
 _FIRMS_SAFE_NEGATION_PREFIXES = (
     re.compile(r"\bno\s+se\s+puede\b", re.IGNORECASE),
     re.compile(r"\bno\s+es\s+posible\b", re.IGNORECASE),
@@ -39,12 +39,36 @@ _FIRMS_SAFE_NEGATION_PREFIXES = (
     re.compile(r"\bsin\s+(?:poder\s+)?(?:confirmar|determinar|establecer)\b", re.IGNORECASE),
 )
 
-# Formulaciones que convierten la fase determinista de las DETECCIONES FIRMS en una
-# conclusión física sobre un incendio confirmado. IA-2D debe hablar de posible foco,
-# evento satelital o crecimiento de detecciones, nunca de crecimiento del incendio.
+# Tokens que IA-2C ya considera inseguros cuando se presentan como afirmaciones.
+# IA-2D permite citarlos únicamente si CADA aparición concreta permanece bajo una
+# negación explícita dentro de su propia cláusula.
+_FIRMS_UNSAFE_TOKENS = (
+    "área afectada",
+    "area afectada",
+    "superficie afectada",
+    "área quemada",
+    "area quemada",
+    "superficie quemada",
+    "intensidad del incendio",
+)
+
+# Formulaciones categóricas que convierten observaciones FIRMS en conclusiones físicas
+# sobre un incendio confirmado o sobre su estado. Se bloquean independientemente de
+# la fase determinista para que, por ejemplo, ``stable`` nunca equivalga a extinguido.
 _FIRMS_CATEGORICAL_INCIDENT_PATTERNS = (
     re.compile(r"\bfase\s+de\s+(?:crecimiento|aumento)\s+del\s+incendio\b", re.IGNORECASE),
     re.compile(r"\bcrecimiento\s+del\s+incendio\b", re.IGNORECASE),
+    re.compile(r"\bincendio\s+(?:está|esta|se\s+encuentra)\s+(?:confirmado|activo|real|controlado|extinguido)\b", re.IGNORECASE),
+    re.compile(r"\bincendio\s+(?:confirmado|activo|real|controlado|extinguido)\b", re.IGNORECASE),
+    re.compile(r"\b(?:confirmado|controlado|extinguido)\s+(?:el\s+)?incendio\b", re.IGNORECASE),
+)
+
+# Conectores que rompen el alcance de una negación. Si aparece uno entre la negación
+# y una segunda afirmación sensible, esa segunda cláusula debe validarse por separado.
+_FIRMS_CLAUSE_SPLIT_RE = re.compile(
+    r"\s*(?:,|;|:)\s*(?=(?:pero|aunque|sin\s+embargo|no\s+obstante|y\s+en\s+cambio)\b)|"
+    r"\s+\b(?:pero|aunque|sin\s+embargo|no\s+obstante|y\s+en\s+cambio)\b\s+",
+    re.IGNORECASE,
 )
 
 
@@ -99,6 +123,44 @@ def _safe_confidence(value: Any) -> float | None:
     return number
 
 
+def _firms_clause_is_safe(clause: str) -> bool:
+    """Valida una sola cláusula FIRMS sin permitir que una negación cubra otra.
+
+    Cómo se llama:
+        ``_firms_clause_is_safe(clause)`` desde ``_firms_brief_text_is_safe``.
+
+    Parámetros:
+        clause: fragmento textual ya separado por conectores adversativos.
+
+    Funcionalidad:
+        Comprueba cada aparición de términos sensibles. Para aceptar una aparición,
+        debe existir una negación permitida ANTES de esa aparición dentro de la misma
+        cláusula. Una negación previa no protege una segunda cláusula afirmativa.
+    """
+
+    folded = clause.casefold()
+    occurrences: list[int] = []
+    for token in _FIRMS_UNSAFE_TOKENS:
+        start = 0
+        token_folded = token.casefold()
+        while True:
+            index = folded.find(token_folded, start)
+            if index < 0:
+                break
+            occurrences.append(index)
+            start = index + len(token_folded)
+
+    if not occurrences:
+        return _firms_explanation_is_safe(clause)
+
+    for index in sorted(occurrences):
+        prefix = clause[:index]
+        if not any(pattern.search(prefix) for pattern in _FIRMS_SAFE_NEGATION_PREFIXES):
+            return False
+
+    return True
+
+
 def _firms_brief_text_is_safe(text: str) -> bool:
     """Valida semántica FIRMS específica de un brief/uncertainties IA-2D.
 
@@ -110,49 +172,35 @@ def _firms_brief_text_is_safe(text: str) -> bool:
         text: texto ya normalizado que IA-2D pretende aceptar.
 
     Funcionalidad:
-        - reutiliza por frase la barrera estricta IA-2C;
-        - permite mencionar superficie/intensidad únicamente dentro de una negación
-          explícita de capacidad para confirmarla o determinarla;
-        - rechaza formulaciones que convierten la fase de crecimiento de las
-          detecciones FIRMS en "crecimiento del incendio" confirmado;
-        - no modifica el texto ni ningún evento.
-
-    La validación falla de forma conservadora ante cualquier frase afirmativa que
-    IA-2C ya considere insegura.
+        - reutiliza la barrera estricta IA-2C;
+        - permite superficie/intensidad solo cuando cada aparición concreta queda
+          bajo una negación explícita dentro de su propia cláusula;
+        - separa conectores adversativos para evitar que una negación inicial proteja
+          una afirmación posterior no sustentada;
+        - rechaza afirmaciones categóricas de incendio confirmado, activo, real,
+          controlado o extinguido, además de crecimiento físico del incendio;
+        - no modifica texto, evento ni componentes sombra.
     """
 
     if not text:
         return True
 
-    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|[\r\n]+", text) if part.strip()]
+    sentences = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+|[\r\n]+", text)
+        if part.strip()
+    ]
     for sentence in sentences:
         if any(pattern.search(sentence) for pattern in _FIRMS_CATEGORICAL_INCIDENT_PATTERNS):
             return False
 
-        if _firms_explanation_is_safe(sentence):
-            continue
+        clauses = [part.strip(" ,;:") for part in _FIRMS_CLAUSE_SPLIT_RE.split(sentence) if part.strip(" ,;:")]
+        if not clauses:
+            clauses = [sentence]
 
-        # La frase contiene una expresión que IA-2C considera insegura. IA-2D solo
-        # la admite si existe una negación explícita anterior dentro de la misma frase.
-        first_unsafe_index = len(sentence)
-        for token in (
-            "área afectada",
-            "area afectada",
-            "superficie afectada",
-            "área quemada",
-            "area quemada",
-            "superficie quemada",
-            "intensidad del incendio",
-        ):
-            index = sentence.casefold().find(token.casefold())
-            if index >= 0:
-                first_unsafe_index = min(first_unsafe_index, index)
-
-        prefix = sentence[:first_unsafe_index]
-        if first_unsafe_index == len(sentence) or not any(
-            pattern.search(prefix) for pattern in _FIRMS_SAFE_NEGATION_PREFIXES
-        ):
-            return False
+        for clause in clauses:
+            if not _firms_clause_is_safe(clause):
+                return False
 
     return True
 
@@ -318,13 +366,14 @@ class EmergencyAISituationalBriefBuilder:
             "conviertas una correlación same_incident en confirmación operativa. Para NASA "
             "FIRMS debes hablar siempre de posible foco, evento satelital o detecciones; no "
             "afirmes incendio confirmado ni describas una fase de crecimiento del incendio. "
-            "La fase growth describe la evolución determinista de las detecciones FIRMS. "
-            "Extensión significa extensión observada de detecciones y no superficie "
-            "afectada/quemada; FRP es potencia radiante observada y no autoriza afirmar "
-            "intensidad del incendio. Puedes indicar en uncertainties que una superficie o "
-            "intensidad NO puede determinarse con estos datos. stable no significa extinguido. "
-            "Devuelve exclusivamente JSON con brief, uncertainties y confidence. brief y "
-            "uncertainties deben ser cadenas; confidence debe ser un número JSON finito entre 0 y 1."
+            "Tampoco afirmes que el incendio está activo, controlado, extinguido o confirmado "
+            "solo a partir de FIRMS. La fase growth describe la evolución determinista de las "
+            "detecciones FIRMS y stable no significa extinguido. Extensión significa extensión "
+            "observada de detecciones y no superficie afectada/quemada; FRP es potencia "
+            "radiante observada y no autoriza afirmar intensidad del incendio. Puedes indicar "
+            "en uncertainties que una superficie o intensidad NO puede determinarse con estos "
+            "datos. Devuelve exclusivamente JSON con brief, uncertainties y confidence. brief "
+            "y uncertainties deben ser cadenas; confidence debe ser un número JSON finito entre 0 y 1."
         )
 
         result = self.ai.generate_text(prompt, system=system)
