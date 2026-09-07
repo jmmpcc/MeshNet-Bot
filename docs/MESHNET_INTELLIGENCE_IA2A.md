@@ -89,8 +89,12 @@ El proveedor debe devolver únicamente JSON:
 Protecciones:
 
 - JSON inválido -> `ok=False`;
-- objeto sin resumen -> `ok=False`;
-- `confidence` se limita a `0.0..1.0`;
+- `summary` y `notes` deben ser cadenas JSON reales; listas, objetos, `null` u
+  otros tipos se rechazan;
+- objeto sin resumen o con resumen vacío -> `ok=False`;
+- `confidence` debe ser convertible a un número finito;
+- `NaN`, `Infinity`, `-Infinity`, valores no numéricos y overflow -> `ok=False`;
+- una confianza finita fuera de rango se limita a `0.0..1.0`;
 - resumen y notas respetan límites exactos del llamador;
 - cualquier timeout o fallo del proveedor mantiene fallback seguro;
 - el evento original no se modifica.
@@ -128,7 +132,7 @@ API.
 2. Emergencias IA OFF -> cero llamadas externas.
 3. Límites inválidos -> cero llamadas externas.
 4. Proveedor caído -> `ok=False` sin excepción operativa.
-5. JSON inválido o resumen vacío -> rechazo.
+5. JSON inválido, tipos de texto inválidos, confianza no finita o resumen vacío -> rechazo.
 6. FIRMS conserva su fase determinista existente exclusivamente para `nasa_firms`.
 7. Ninguna otra fuente puede heredar `initial / growth / stable` por una metadata ajena.
 8. Eventos terminales conservan `resolved` como autoridad.
