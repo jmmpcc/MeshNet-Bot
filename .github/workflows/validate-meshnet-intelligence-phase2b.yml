@@ -5,6 +5,7 @@ on:
     paths:
       - 'shared/meshnet_ai_emergency_correlation.py'
       - 'tests/test_meshnet_ai_emergency_correlation.py'
+      - 'tests/test_meshnet_ai_emergency_correlation_contract.py'
       - 'docs/MESHNET_INTELLIGENCE_IA2B.md'
       - '.github/workflows/validate-meshnet-intelligence-phase2b.yml'
       - 'shared/meshnet_ai.py'
@@ -41,7 +42,8 @@ jobs:
             tests/test_meshnet_ai_tasks.py \
             tests/test_meshnet_ai_tasks_contract.py \
             tests/test_meshnet_ai_emergencies.py \
-            tests/test_meshnet_ai_emergency_correlation.py
+            tests/test_meshnet_ai_emergency_correlation.py \
+            tests/test_meshnet_ai_emergency_correlation_contract.py
 
       - name: Run IA-0 IA-1 IA-2A IA-2B tests
         run: |
@@ -52,6 +54,7 @@ jobs:
             tests.test_meshnet_ai_tasks_contract \
             tests.test_meshnet_ai_emergencies \
             tests.test_meshnet_ai_emergency_correlation \
+            tests.test_meshnet_ai_emergency_correlation_contract \
             -v
 
       - name: Verify IA-2B disabled contract
