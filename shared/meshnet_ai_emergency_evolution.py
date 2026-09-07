@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +23,7 @@ from shared.meshnet_ai_emergencies import (
     _clean_text,
     _event_metadata,
     _event_value,
+    _fit_text,
     _safe_event_payload,
     deterministic_phase,
 )
@@ -42,6 +44,16 @@ _FIRMS_EVOLUTION_KEYS = (
     "previous_extent_km",
     "latest_extent_km",
     "incident_peak_extent_km",
+)
+
+# Expresiones que, en una explicación FIRMS, transforman una observación satelital
+# en una conclusión física que NASA FIRMS/nuestro tracker no ha determinado. Se
+# mantienen deliberadamente acotadas a afirmaciones de alto riesgo ya observadas
+# en la prueba real con proveedor para no intentar clasificar semánticamente toda
+# la respuesta mediante heurísticas frágiles.
+_FIRMS_UNSAFE_EXPLANATION_PATTERNS = (
+    re.compile(r"\b(?:área|area|superficie)\s+(?:afectada|quemada)\b", re.IGNORECASE),
+    re.compile(r"\bintensidad\s+(?:del|de\s+el)\s+incendio\b", re.IGNORECASE),
 )
 
 
@@ -103,6 +115,29 @@ def deterministic_evolution_snapshot(event: Any) -> dict[str, Any]:
         snapshot["firms_tracking"] = firms_tracking
 
     return snapshot
+
+
+def _firms_explanation_is_safe(explanation: str) -> bool:
+    """Valida que una explicación FIRMS no introduzca conclusiones no observadas.
+
+    Cómo se llama:
+        ``_firms_explanation_is_safe(explanation)`` después de validar el JSON y
+        antes de aceptar la salida del proveedor.
+
+    Parámetros:
+        explanation: texto ya normalizado devuelto por el proveedor.
+
+    Funcionalidad:
+        Rechaza expresiones que convierten la extensión de detecciones en área o
+        superficie afectada/quemada, o el FRP en intensidad del incendio. Es una
+        barrera determinista adicional al prompt; ante duda falla de forma segura
+        con ``ok=False`` y nunca modifica el evento ni ningún flujo operativo.
+    """
+
+    return not any(
+        pattern.search(explanation)
+        for pattern in _FIRMS_UNSAFE_EXPLANATION_PATTERNS
+    )
 
 
 class EmergencyAIEvolutionExplainer:
@@ -200,13 +235,16 @@ class EmergencyAIEvolutionExplainer:
             "es autoritativa: NO la cambies, recalcules ni contradigas. Explica únicamente "
             "qué datos observados justifican o describen esa evolución. No cambies categoría, "
             "severidad, verificación o estado. No inventes causas, daños, superficie afectada "
-            "ni consecuencias. Para NASA FIRMS, cluster/extent describe extensión observada "
-            "de detecciones satelitales y NO superficie quemada o afectada. growth_reasons "
-            "son señales deterministas ya calculadas. stable significa sin crecimiento "
-            "significativo detectado en esa pasada, NO incendio extinguido. resolved solo "
-            "puede afirmarse cuando la fase determinista recibida sea resolved. Devuelve "
-            "exclusivamente JSON con explanation y confidence. explanation debe ser factual, "
-            "sin órdenes operativas. confidence debe ser un número JSON finito entre 0 y 1."
+            "ni consecuencias. Para NASA FIRMS, habla de posible foco o detecciones satelitales, "
+            "no de un incendio confirmado. cluster/extent describe exclusivamente extensión "
+            "observada del conjunto de detecciones satelitales: nunca la llames área/superficie "
+            "afectada o quemada. El FRP es potencia radiante observada y no debe describirse "
+            "como intensidad del incendio. growth_reasons son señales deterministas ya "
+            "calculadas. stable significa sin crecimiento significativo detectado en esa "
+            "pasada, NO incendio extinguido. resolved solo puede afirmarse cuando la fase "
+            "determinista recibida sea resolved. Devuelve exclusivamente JSON con explanation "
+            "y confidence. explanation debe ser factual, sin órdenes operativas. confidence "
+            "debe ser un número JSON finito entre 0 y 1."
         )
 
         result = self.ai.generate_text(prompt, system=system)
@@ -256,8 +294,20 @@ class EmergencyAIEvolutionExplainer:
                 error="respuesta de evolución sin explicación",
                 duration_ms=result.duration_ms,
             )
-        if len(explanation) > explanation_limit:
-            explanation = explanation[:explanation_limit].rstrip(" ,;:-")
+
+        source = _clean_text(_event_value(event, "source", "")).casefold()
+        if source == "nasa_firms" and not _firms_explanation_is_safe(explanation):
+            return EmergencyAIEvolutionExplanation(
+                False,
+                phase=phase,
+                status="error",
+                error="explicación FIRMS contiene una conclusión no sustentada",
+                duration_ms=result.duration_ms,
+            )
+
+        # Reutilizamos el recorte ya probado de IA-2A: conserva frases/palabras y
+        # evita terminar a mitad de token como ocurrió en la primera prueba real.
+        explanation = _fit_text(explanation, explanation_limit)
 
         confidence_raw = parsed.get("confidence")
         if isinstance(confidence_raw, bool) or not isinstance(confidence_raw, (int, float)):
