@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
@@ -24,6 +25,27 @@ from shared.meshnet_ai_emergency_evolution import _firms_explanation_is_safe
 
 
 _ALLOWED_RELATIONS = {"same_incident", "contextual", "unrelated", "uncertain"}
+
+# IA-2D recibe textos de síntesis y también un campo explícito de incertidumbres.
+# A diferencia de IA-2C, en ``uncertainties`` es correcto mencionar conceptos como
+# "superficie afectada" si se hace exclusivamente para negar que pueda determinarse.
+# Estas expresiones permiten esa negación explícita sin relajar las prohibiciones
+# afirmativas ya establecidas por IA-2C.
+_FIRMS_SAFE_NEGATION_PREFIXES = (
+    re.compile(r"\bno\s+se\s+puede\b", re.IGNORECASE),
+    re.compile(r"\bno\s+es\s+posible\b", re.IGNORECASE),
+    re.compile(r"\bno\s+permite(?:n)?\b", re.IGNORECASE),
+    re.compile(r"\bno\s+constituye(?:n)?\b", re.IGNORECASE),
+    re.compile(r"\bsin\s+(?:poder\s+)?(?:confirmar|determinar|establecer)\b", re.IGNORECASE),
+)
+
+# Formulaciones que convierten la fase determinista de las DETECCIONES FIRMS en una
+# conclusión física sobre un incendio confirmado. IA-2D debe hablar de posible foco,
+# evento satelital o crecimiento de detecciones, nunca de crecimiento del incendio.
+_FIRMS_CATEGORICAL_INCIDENT_PATTERNS = (
+    re.compile(r"\bfase\s+de\s+(?:crecimiento|aumento)\s+del\s+incendio\b", re.IGNORECASE),
+    re.compile(r"\bcrecimiento\s+del\s+incendio\b", re.IGNORECASE),
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +97,64 @@ def _safe_confidence(value: Any) -> float | None:
     if not math.isfinite(number) or not 0.0 <= number <= 1.0:
         return None
     return number
+
+
+def _firms_brief_text_is_safe(text: str) -> bool:
+    """Valida semántica FIRMS específica de un brief/uncertainties IA-2D.
+
+    Cómo se llama:
+        ``_firms_brief_text_is_safe(text)`` sobre ``brief`` y ``uncertainties``
+        después de validar y recortar el JSON del proveedor.
+
+    Parámetros:
+        text: texto ya normalizado que IA-2D pretende aceptar.
+
+    Funcionalidad:
+        - reutiliza por frase la barrera estricta IA-2C;
+        - permite mencionar superficie/intensidad únicamente dentro de una negación
+          explícita de capacidad para confirmarla o determinarla;
+        - rechaza formulaciones que convierten la fase de crecimiento de las
+          detecciones FIRMS en "crecimiento del incendio" confirmado;
+        - no modifica el texto ni ningún evento.
+
+    La validación falla de forma conservadora ante cualquier frase afirmativa que
+    IA-2C ya considere insegura.
+    """
+
+    if not text:
+        return True
+
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|[\r\n]+", text) if part.strip()]
+    for sentence in sentences:
+        if any(pattern.search(sentence) for pattern in _FIRMS_CATEGORICAL_INCIDENT_PATTERNS):
+            return False
+
+        if _firms_explanation_is_safe(sentence):
+            continue
+
+        # La frase contiene una expresión que IA-2C considera insegura. IA-2D solo
+        # la admite si existe una negación explícita anterior dentro de la misma frase.
+        first_unsafe_index = len(sentence)
+        for token in (
+            "área afectada",
+            "area afectada",
+            "superficie afectada",
+            "área quemada",
+            "area quemada",
+            "superficie quemada",
+            "intensidad del incendio",
+        ):
+            index = sentence.casefold().find(token.casefold())
+            if index >= 0:
+                first_unsafe_index = min(first_unsafe_index, index)
+
+        prefix = sentence[:first_unsafe_index]
+        if first_unsafe_index == len(sentence) or not any(
+            pattern.search(prefix) for pattern in _FIRMS_SAFE_NEGATION_PREFIXES
+        ):
+            return False
+
+    return True
 
 
 def deterministic_brief_snapshot(
@@ -236,11 +316,15 @@ class EmergencyAISituationalBriefBuilder:
             "La fase determinista es autoritativa y no puede cambiarse. No decidas prioridad, "
             "severidad, verificación, resolución, envío, evacuación ni ninguna acción. No "
             "conviertas una correlación same_incident en confirmación operativa. Para NASA "
-            "FIRMS, extensión significa extensión observada de detecciones y no superficie "
+            "FIRMS debes hablar siempre de posible foco, evento satelital o detecciones; no "
+            "afirmes incendio confirmado ni describas una fase de crecimiento del incendio. "
+            "La fase growth describe la evolución determinista de las detecciones FIRMS. "
+            "Extensión significa extensión observada de detecciones y no superficie "
             "afectada/quemada; FRP es potencia radiante observada y no autoriza afirmar "
-            "intensidad del incendio. stable no significa extinguido. Devuelve exclusivamente "
-            "JSON con brief, uncertainties y confidence. brief y uncertainties deben ser "
-            "cadenas; confidence debe ser un número JSON finito entre 0 y 1."
+            "intensidad del incendio. Puedes indicar en uncertainties que una superficie o "
+            "intensidad NO puede determinarse con estos datos. stable no significa extinguido. "
+            "Devuelve exclusivamente JSON con brief, uncertainties y confidence. brief y "
+            "uncertainties deben ser cadenas; confidence debe ser un número JSON finito entre 0 y 1."
         )
 
         result = self.ai.generate_text(prompt, system=system)
@@ -265,8 +349,8 @@ class EmergencyAISituationalBriefBuilder:
 
         source = _clean_text(_event_value(event, "source", "")).casefold()
         if source == "nasa_firms" and (
-            not _firms_explanation_is_safe(brief)
-            or (uncertainties and not _firms_explanation_is_safe(uncertainties))
+            not _firms_brief_text_is_safe(brief)
+            or (uncertainties and not _firms_brief_text_is_safe(uncertainties))
         ):
             return EmergencyAISituationalBrief(False, phase=phase, components=component_names, status="error", error="brief FIRMS contiene una sobreafirmación no permitida", duration_ms=result.duration_ms)
 
