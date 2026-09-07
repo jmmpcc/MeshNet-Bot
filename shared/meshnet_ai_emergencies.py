@@ -27,6 +27,7 @@ Reglas de seguridad:
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -75,7 +76,7 @@ def _fit_text(value: Any, max_chars: int) -> str:
         ``_fit_text(valor, limite)`` tras validar una respuesta IA.
 
     Parámetros:
-        value: texto de entrada.
+        value: texto de entrada ya validado como ``str``.
         max_chars: límite máximo exacto; 0 o negativo devuelve cadena vacía.
 
     Funcionalidad:
@@ -150,9 +151,9 @@ def _optional_float(value: Any) -> float | None:
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    if number != number or number in {float("inf"), float("-inf")}:
+    if not math.isfinite(number):
         return None
     return number
 
@@ -268,8 +269,8 @@ class EmergencyAIObserver:
             - comprueba flags antes de cualquier llamada externa;
             - deriva la fase determinísticamente;
             - envía solo un subconjunto mínimo del evento;
-            - exige JSON objeto con summary, notes y confidence;
-            - normaliza confidence a 0..1;
+            - exige JSON objeto con ``summary`` y ``notes`` de tipo ``str``;
+            - exige ``confidence`` convertible a número finito y la normaliza a 0..1;
             - nunca modifica el evento recibido.
         """
         phase = deterministic_phase(event, change)
@@ -364,8 +365,19 @@ class EmergencyAIObserver:
                 duration_ms=result.duration_ms,
             )
 
-        summary = _fit_text(parsed.get("summary", ""), summary_limit)
-        notes = _fit_text(parsed.get("notes", ""), notes_limit)
+        summary_raw = parsed.get("summary")
+        notes_raw = parsed.get("notes")
+        if not isinstance(summary_raw, str) or not isinstance(notes_raw, str):
+            return EmergencyAIAnalysis(
+                ok=False,
+                phase=phase,
+                status="error",
+                error="summary/notes inválidos en respuesta IA de emergencias",
+                duration_ms=result.duration_ms,
+            )
+
+        summary = _fit_text(summary_raw, summary_limit)
+        notes = _fit_text(notes_raw, notes_limit)
         if not summary:
             return EmergencyAIAnalysis(
                 ok=False,
@@ -376,9 +388,23 @@ class EmergencyAIObserver:
             )
 
         try:
-            confidence = float(parsed.get("confidence", 0.0))
-        except (TypeError, ValueError):
-            confidence = 0.0
+            confidence = float(parsed.get("confidence"))
+        except (TypeError, ValueError, OverflowError):
+            return EmergencyAIAnalysis(
+                ok=False,
+                phase=phase,
+                status="error",
+                error="confidence inválida en respuesta IA de emergencias",
+                duration_ms=result.duration_ms,
+            )
+        if not math.isfinite(confidence):
+            return EmergencyAIAnalysis(
+                ok=False,
+                phase=phase,
+                status="error",
+                error="confidence no finita en respuesta IA de emergencias",
+                duration_ms=result.duration_ms,
+            )
         confidence = max(0.0, min(1.0, confidence))
 
         return EmergencyAIAnalysis(
