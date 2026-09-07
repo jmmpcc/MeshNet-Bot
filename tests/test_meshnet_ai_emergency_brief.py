@@ -167,6 +167,7 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
         self.assertIn("No decidas prioridad", ai.last_system)
         self.assertIn("posible foco", ai.last_system)
         self.assertIn("ni describas una fase de crecimiento del incendio", ai.last_system.casefold())
+        self.assertIn("stable no significa extinguido", ai.last_system.casefold())
 
     def test_non_string_text_fields_are_rejected(self):
         for bad in (["texto"], None, {"x": 1}):
@@ -216,6 +217,40 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
         ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({
             "brief": "El evento se encuentra en fase de crecimiento del incendio.",
             "uncertainties": "La observación es satelital.",
+            "confidence": 0.9,
+        })))
+        result = EmergencyAISituationalBriefBuilder(ai).build(event(), evolution=evolution())
+        self.assertFalse(result.ok)
+        self.assertIn("sobreafirmación", result.error)
+
+    def test_firms_stable_cannot_become_extinguished_confirmed_fire(self):
+        """Regresión Codex P2: stable no puede convertirse en incendio extinguido/confirmado."""
+
+        stable_event = event(
+            change="updated",
+            title="Posible foco satelital estable",
+            metadata={"firms_phase": "stable"},
+        )
+        stable_analysis = analysis(phase="stable")
+        ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({
+            "brief": "El incendio está extinguido y confirmado.",
+            "uncertainties": "La observación procede de FIRMS.",
+            "confidence": 0.95,
+        })))
+        result = EmergencyAISituationalBriefBuilder(ai).build(stable_event, analysis=stable_analysis)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, "stable")
+        self.assertIn("sobreafirmación", result.error)
+
+    def test_firms_negation_does_not_cover_later_affirmative_clause(self):
+        """Regresión Codex P2: cada aparición sensible requiere su propia negación."""
+
+        ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({
+            "brief": "Posible foco FIRMS observado por satélite.",
+            "uncertainties": (
+                "No se puede determinar la superficie afectada, pero la superficie "
+                "afectada es de 100 km²."
+            ),
             "confidence": 0.9,
         })))
         result = EmergencyAISituationalBriefBuilder(ai).build(event(), evolution=evolution())
