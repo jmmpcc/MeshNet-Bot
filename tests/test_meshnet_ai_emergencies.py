@@ -170,6 +170,50 @@ class EmergencyAIObserverTests(unittest.TestCase):
         self.assertEqual(result.summary, "Foco observado en Zaragoza.")
         self.assertLessEqual(len(result.summary), 40)
 
+    def test_decimal_point_is_not_treated_as_sentence_end(self):
+        response = AIResult(
+            ok=True,
+            status="available",
+            text=json.dumps(
+                {
+                    "summary": (
+                        "Posible foco detectado por NASA FIRMS en Zaragoza con FRP total "
+                        "de 18.4 MW y extensión observada de 1.2 km en seguimiento satelital."
+                    ),
+                    "notes": "Sin confirmación de terreno.",
+                    "confidence": 0.8,
+                }
+            ),
+        )
+        ai = FakeAI(enabled=True, emergencies=True, response=response)
+        result = EmergencyAIObserver(ai).analyze_event(
+            sample_event(), max_summary_chars=95, max_notes_chars=100
+        )
+
+        self.assertTrue(result.ok)
+        self.assertNotEqual(result.summary[-2:], "1.")
+        self.assertNotEqual(result.summary[-3:], "18.")
+        self.assertLessEqual(len(result.summary), 95)
+
+    def test_firms_prompt_forbids_turning_extent_into_affected_area(self):
+        response = AIResult(
+            ok=True,
+            status="available",
+            text=json.dumps(
+                {
+                    "summary": "Posible foco FIRMS en observación.",
+                    "notes": "Sin confirmación de terreno.",
+                    "confidence": 0.7,
+                }
+            ),
+        )
+        ai = FakeAI(enabled=True, emergencies=True, response=response)
+        result = EmergencyAIObserver(ai).analyze_event(sample_event(), change="updated")
+
+        self.assertTrue(result.ok)
+        self.assertIn("extensión de cluster NO equivale a superficie o área afectada", ai.last_system)
+        self.assertIn("no uses 'afecta', 'afectando'", ai.last_system)
+
     def test_invalid_coordinates_are_not_forwarded_as_strings(self):
         response = AIResult(
             ok=True,
