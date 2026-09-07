@@ -58,6 +58,26 @@ class MeshNetAITasksTests(unittest.TestCase):
         self.assertLessEqual(len(result.text), 36)
         self.assertEqual(ai.calls, 1)
 
+    def test_summary_respects_positive_limit_below_sixteen(self) -> None:
+        """Un presupuesto pequeño nunca se amplía silenciosamente a 16 caracteres."""
+        ai = FakeMeshNetAI(
+            self._config(),
+            [AIResult(ok=True, text="Incendio activo", status="available")],
+        )
+        result = MeshNetAITasks(ai).summarize_text("Entrada", max_chars=5)
+        self.assertTrue(result.ok)
+        self.assertLessEqual(len(result.text), 5)
+        self.assertEqual(ai.calls, 1)
+
+    def test_summary_rejects_non_positive_limit_without_provider_call(self) -> None:
+        """Los límites 0 o negativos fallan antes de consumir proveedor o API."""
+        ai = FakeMeshNetAI(self._config(), [])
+        result = MeshNetAITasks(ai).summarize_text("Entrada", max_chars=0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "error")
+        self.assertIn("positivo", result.error)
+        self.assertEqual(ai.calls, 0)
+
     def test_summary_provider_failure_returns_fallback_signal(self) -> None:
         ai = FakeMeshNetAI(
             self._config(),
