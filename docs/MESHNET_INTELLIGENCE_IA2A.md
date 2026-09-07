@@ -52,9 +52,10 @@ continúa sin cambios.
 `deterministic_phase(event, change)` deriva la fase sin IA:
 
 1. estado terminal o `change=resolved` -> `resolved`;
-2. FIRMS reutiliza `metadata['firms_phase']` cuando contiene `initial`, `growth`
-   o `stable`;
-3. resto de fuentes conserva `new` o `updated`;
+2. únicamente la fuente `nasa_firms` reutiliza `metadata['firms_phase']` cuando
+   contiene `initial`, `growth` o `stable`;
+3. el resto de fuentes conserva `new` o `updated`, incluso si una metadata ajena
+   contiene por error una clave `firms_phase`;
 4. falta de datos -> `unknown`.
 
 El modelo recibe esa fase como dato autoritativo y no puede sustituirla.
@@ -67,6 +68,7 @@ IA-2A construye un payload mínimo con:
 - cambio y fase deterministas;
 - título y descripción;
 - carretera, municipio y provincia;
+- latitud y longitud normalizadas cuando están disponibles;
 - fechas de inicio y actualización.
 
 No se envía el diccionario `metadata` completo. Esto evita transmitir campos
@@ -127,8 +129,9 @@ API.
 3. Límites inválidos -> cero llamadas externas.
 4. Proveedor caído -> `ok=False` sin excepción operativa.
 5. JSON inválido o resumen vacío -> rechazo.
-6. FIRMS conserva su fase determinista existente.
-7. Eventos terminales conservan `resolved` como autoridad.
-8. El evento recibido permanece inmutable.
-9. Ningún fichero operativo de Emergencias resulta modificado en IA-2A.
-10. Ninguna salida radio o de mensajería consume el resultado de IA-2A.
+6. FIRMS conserva su fase determinista existente exclusivamente para `nasa_firms`.
+7. Ninguna otra fuente puede heredar `initial / growth / stable` por una metadata ajena.
+8. Eventos terminales conservan `resolved` como autoridad.
+9. El evento recibido permanece inmutable.
+10. Ningún fichero operativo de Emergencias resulta modificado en IA-2A.
+11. Ninguna salida radio o de mensajería consume el resultado de IA-2A.
