@@ -79,8 +79,10 @@ def _fit_text(value: Any, max_chars: int) -> str:
         max_chars: límite máximo exacto; 0 o negativo devuelve cadena vacía.
 
     Funcionalidad:
-        Normaliza espacios y recorta preferentemente por palabra. Nunca devuelve
-        más caracteres que el límite solicitado.
+        Normaliza espacios. Si hace falta recortar, intenta conservar primero una
+        frase completa suficientemente representativa; si no existe, recorta por
+        palabra. Nunca devuelve más caracteres que el límite solicitado y evita,
+        cuando es posible, dejar una cláusula final claramente incompleta.
     """
     limit = int(max_chars)
     if limit <= 0:
@@ -88,12 +90,25 @@ def _fit_text(value: Any, max_chars: int) -> str:
     clean = _clean_text(value)
     if len(clean) <= limit:
         return clean
+
     candidate = clean[:limit].rstrip()
+
+    # Si dentro del presupuesto existe una frase completa que ocupa una parte
+    # sustancial del espacio, se prefiere ese cierre natural frente a conservar
+    # unas pocas palabras adicionales de la frase siguiente.
+    sentence_end = max(
+        candidate.rfind("."),
+        candidate.rfind("!"),
+        candidate.rfind("?"),
+    )
+    if sentence_end >= int(limit * 0.55):
+        return candidate[: sentence_end + 1].rstrip()
+
     if " " in candidate:
         shortened = candidate.rsplit(" ", 1)[0].rstrip(" ,;:-")
         if shortened:
             candidate = shortened
-    return candidate.rstrip(" .")
+    return candidate.rstrip(" ,;:-")
 
 
 def _event_value(event: Any, name: str, default: Any = "") -> Any:
@@ -111,6 +126,32 @@ def _event_metadata(event: Any) -> dict[str, Any]:
     """Obtiene una copia superficial de metadata sin modificar el evento original."""
     value = _event_value(event, "metadata", {})
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _optional_float(value: Any) -> float | None:
+    """Normaliza una coordenada numérica para el payload mínimo del observador.
+
+    Cómo se llama:
+        ``_optional_float(_event_value(event, "latitude", None))``.
+
+    Parámetros:
+        value: valor original de latitud o longitud del evento normalizado.
+
+    Funcionalidad:
+        Devuelve ``float`` cuando el valor es numérico y finito para JSON. Si el
+        campo está ausente o no es convertible devuelve ``None``. Esta función no
+        modifica el evento y evita que tipos auxiliares no serializables rompan la
+        llamada opcional a IA.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return number
 
 
 def deterministic_phase(event: Any, change: str = "") -> str:
@@ -153,9 +194,11 @@ def deterministic_phase(event: Any, change: str = "") -> str:
 def _safe_event_payload(event: Any, change: str, phase: str) -> dict[str, Any]:
     """Construye la representación mínima que IA-2A puede enviar al proveedor.
 
-    Solo incluye datos del evento necesarios para resumirlo. No incorpora el
-    diccionario ``metadata`` completo, evitando enviar campos auxiliares no
-    requeridos. La función no modifica el objeto recibido.
+    Solo incluye datos normalizados necesarios para resumir el evento. Se añaden
+    latitud y longitud porque forman parte del propio ``Event`` y son información
+    operativamente relevante para describir una emergencia sin inventar ubicación.
+    No se incorpora el diccionario ``metadata`` completo, evitando enviar campos
+    auxiliares no requeridos. La función no modifica el objeto recibido.
     """
     return {
         "event_id": _clean_text(_event_value(event, "event_id", "")),
@@ -171,6 +214,8 @@ def _safe_event_payload(event: Any, change: str, phase: str) -> dict[str, Any]:
         "road": _clean_text(_event_value(event, "road", "")),
         "municipality": _clean_text(_event_value(event, "municipality", "")),
         "province": _clean_text(_event_value(event, "province", "")),
+        "latitude": _optional_float(_event_value(event, "latitude", None)),
+        "longitude": _optional_float(_event_value(event, "longitude", None)),
         "started_at": _clean_text(_event_value(event, "started_at", "")),
         "updated_at": _clean_text(_event_value(event, "updated_at", "")),
     }
@@ -260,9 +305,10 @@ class EmergencyAIObserver:
             "Eres un observador auxiliar de emergencias. No tomas decisiones operativas. "
             "No cambies categoría, severidad, verificación, estado ni fase. No inventes "
             "hechos. Devuelve exclusivamente un objeto JSON con las claves summary, notes "
-            "y confidence. summary debe describir solo los datos recibidos. notes puede "
-            "indicar incertidumbres o datos faltantes, nunca órdenes de actuación. "
-            "confidence debe estar entre 0 y 1."
+            "y confidence. summary debe describir solo los datos recibidos, respetar el "
+            "límite indicado y terminar como una frase completa, sin dejar una cláusula "
+            "inacabada. notes puede indicar incertidumbres o datos faltantes, nunca órdenes "
+            "de actuación. confidence debe estar entre 0 y 1."
         )
         prompt = json.dumps(
             {
