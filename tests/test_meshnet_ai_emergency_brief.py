@@ -166,7 +166,7 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
         self.assertIn("no_operational_decisions", json.loads(ai.last_prompt)["constraints"])
         self.assertIn("No decidas prioridad", ai.last_system)
         self.assertIn("posible foco", ai.last_system)
-        self.assertIn("no describas una fase de crecimiento del incendio", ai.last_system.casefold())
+        self.assertIn("ni describas una fase de crecimiento del incendio", ai.last_system.casefold())
 
     def test_non_string_text_fields_are_rejected(self):
         for bad in (["texto"], None, {"x": 1}):
