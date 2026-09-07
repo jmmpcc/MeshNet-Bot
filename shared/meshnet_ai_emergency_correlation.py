@@ -443,8 +443,19 @@ class EmergencyAICorrelator:
         if len(explanation) > explanation_limit:
             explanation = explanation[:explanation_limit].rstrip(" ,;:-")
 
+        confidence_raw = parsed.get("confidence")
+        if isinstance(confidence_raw, bool) or not isinstance(confidence_raw, (int, float)):
+            return EmergencyAICorrelation(
+                False,
+                candidate=True,
+                status="error",
+                error="confidence inválida en respuesta de correlación",
+                duration_ms=result.duration_ms,
+                distance_km=candidate.distance_km,
+                time_delta_minutes=candidate.time_delta_minutes,
+            )
         try:
-            confidence = float(parsed.get("confidence"))
+            confidence = float(confidence_raw)
         except (TypeError, ValueError, OverflowError):
             return EmergencyAICorrelation(
                 False,
