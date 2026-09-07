@@ -169,12 +169,13 @@ def deterministic_phase(event: Any, change: str = "") -> str:
 
     Funcionalidad:
         1. Un estado terminal o ``change=resolved`` siempre produce ``resolved``.
-        2. Para NASA FIRMS reutiliza ``metadata['firms_phase']`` existente:
-           initial, growth o stable.
-        3. Para el resto, ``new`` y ``updated`` se conservan literalmente.
+        2. SOLO para la fuente ``nasa_firms`` reutiliza ``metadata['firms_phase']``
+           existente cuando contiene initial, growth o stable.
+        3. Para el resto de fuentes, ``new`` y ``updated`` se conservan literalmente.
         4. Si no existe información suficiente devuelve ``unknown``.
 
-    La IA nunca participa en esta decisión.
+    La IA nunca participa en esta decisión. El aislamiento por ``source`` evita
+    que una clave metadata ajena pueda adoptar accidentalmente una fase FIRMS.
     """
     normalized_change = _clean_text(change).casefold()
     if normalized_change not in _ALLOWED_CHANGES:
@@ -184,10 +185,12 @@ def deterministic_phase(event: Any, change: str = "") -> str:
     if normalized_change == "resolved" or status in _TERMINAL_STATUSES:
         return "resolved"
 
-    metadata = _event_metadata(event)
-    firms_phase = _clean_text(metadata.get("firms_phase")).casefold()
-    if firms_phase in {"initial", "growth", "stable"}:
-        return firms_phase
+    source = _clean_text(_event_value(event, "source", "")).casefold()
+    if source == "nasa_firms":
+        metadata = _event_metadata(event)
+        firms_phase = _clean_text(metadata.get("firms_phase")).casefold()
+        if firms_phase in {"initial", "growth", "stable"}:
+            return firms_phase
 
     if normalized_change in {"new", "updated"}:
         return normalized_change
