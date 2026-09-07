@@ -165,6 +165,8 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
         self.assertEqual(set(result.components), {"ia2a_analysis", "ia2c_evolution", "ia2b_correlations"})
         self.assertIn("no_operational_decisions", json.loads(ai.last_prompt)["constraints"])
         self.assertIn("No decidas prioridad", ai.last_system)
+        self.assertIn("posible foco", ai.last_system)
+        self.assertIn("no describas una fase de crecimiento del incendio", ai.last_system)
 
     def test_non_string_text_fields_are_rejected(self):
         for bad in (["texto"], None, {"x": 1}):
@@ -191,6 +193,30 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
             "brief": "Ha aumentado la superficie afectada por el incendio.",
             "uncertainties": "",
             "confidence": 0.8,
+        })))
+        result = EmergencyAISituationalBriefBuilder(ai).build(event(), evolution=evolution())
+        self.assertFalse(result.ok)
+        self.assertIn("sobreafirmación", result.error)
+
+    def test_firms_negated_affected_surface_is_allowed(self):
+        """La incertidumbre real observada no debe provocar un falso positivo."""
+
+        ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({
+            "brief": "Posible foco FIRMS con crecimiento de las detecciones satelitales.",
+            "uncertainties": "No se puede confirmar el incendio ni establecer con certeza la superficie afectada.",
+            "confidence": 0.9,
+        })))
+        result = EmergencyAISituationalBriefBuilder(ai).build(event(), evolution=evolution())
+        self.assertTrue(result.ok)
+        self.assertIn("superficie afectada", result.uncertainties)
+
+    def test_firms_categorical_fire_growth_is_rejected(self):
+        """La fase growth de FIRMS nunca debe convertirse en crecimiento del incendio."""
+
+        ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({
+            "brief": "El evento se encuentra en fase de crecimiento del incendio.",
+            "uncertainties": "La observación es satelital.",
+            "confidence": 0.9,
         })))
         result = EmergencyAISituationalBriefBuilder(ai).build(event(), evolution=evolution())
         self.assertFalse(result.ok)
