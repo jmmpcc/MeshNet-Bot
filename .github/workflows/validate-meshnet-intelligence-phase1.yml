@@ -6,6 +6,7 @@ on:
       - 'shared/meshnet_ai_tasks.py'
       - 'tools/intelligence/meshnet_ai_tasks_cli.py'
       - 'tests/test_meshnet_ai_tasks.py'
+      - 'tests/test_meshnet_ai_tasks_contract.py'
       - 'docs/MESHNET_INTELLIGENCE_IA1.md'
       - '.github/workflows/validate-meshnet-intelligence-phase1.yml'
   workflow_dispatch:
@@ -34,7 +35,8 @@ jobs:
             tools/intelligence/meshnet_ai_tasks_cli.py \
             tests/test_meshnet_ai.py \
             tests/test_meshnet_intelligence_health.py \
-            tests/test_meshnet_ai_tasks.py
+            tests/test_meshnet_ai_tasks.py \
+            tests/test_meshnet_ai_tasks_contract.py
 
       - name: Run IA-0 and IA-1 tests
         run: |
@@ -42,6 +44,7 @@ jobs:
             tests.test_meshnet_ai \
             tests.test_meshnet_intelligence_health \
             tests.test_meshnet_ai_tasks \
+            tests.test_meshnet_ai_tasks_contract \
             -v
 
       - name: Verify IA-1 disabled fallback without network
