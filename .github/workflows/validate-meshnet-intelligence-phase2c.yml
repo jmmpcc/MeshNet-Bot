@@ -1,0 +1,88 @@
+name: Validate MeshNet Intelligence IA-2C
+
+on:
+  pull_request:
+    paths:
+      - 'shared/meshnet_ai_emergency_evolution.py'
+      - 'tests/test_meshnet_ai_emergency_evolution.py'
+      - 'docs/MESHNET_INTELLIGENCE_IA2C.md'
+      - '.github/workflows/validate-meshnet-intelligence-phase2c.yml'
+      - 'shared/meshnet_ai.py'
+      - 'shared/meshnet_ai_tasks.py'
+      - 'shared/meshnet_ai_emergencies.py'
+      - 'shared/meshnet_ai_emergency_correlation.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile IA modules
+        run: |
+          python -m py_compile \
+            shared/meshnet_ai.py \
+            shared/meshnet_ai_tasks.py \
+            shared/meshnet_ai_emergencies.py \
+            shared/meshnet_ai_emergency_correlation.py \
+            shared/meshnet_ai_emergency_evolution.py \
+            tests/test_meshnet_ai.py \
+            tests/test_meshnet_intelligence_health.py \
+            tests/test_meshnet_ai_tasks.py \
+            tests/test_meshnet_ai_tasks_contract.py \
+            tests/test_meshnet_ai_emergencies.py \
+            tests/test_meshnet_ai_emergency_correlation.py \
+            tests/test_meshnet_ai_emergency_correlation_contract.py \
+            tests/test_meshnet_ai_emergency_evolution.py
+
+      - name: Run IA-0 IA-1 IA-2A IA-2B IA-2C tests
+        run: |
+          python -m unittest \
+            tests.test_meshnet_ai \
+            tests.test_meshnet_intelligence_health \
+            tests.test_meshnet_ai_tasks \
+            tests.test_meshnet_ai_tasks_contract \
+            tests.test_meshnet_ai_emergencies \
+            tests.test_meshnet_ai_emergency_correlation \
+            tests.test_meshnet_ai_emergency_correlation_contract \
+            tests.test_meshnet_ai_emergency_evolution \
+            -v
+
+      - name: Verify IA-2C disabled contract
+        run: |
+          MESHNET_AI_ENABLED=0 \
+          MESHNET_AI_EMERGENCIES_ENABLED=1 \
+          python - <<'PY'
+          from shared.meshnet_ai import MeshNetAI
+          from shared.meshnet_ai_emergency_evolution import EmergencyAIEvolutionExplainer
+
+          event = {
+              'event_id': 'firms:1',
+              'source': 'nasa_firms',
+              'category': 'wildfire',
+              'status': 'active',
+              'change': 'updated',
+              'title': 'Aumento del foco de incendio satelital',
+              'metadata': {
+                  'firms_phase': 'growth',
+                  'growth_reasons': ['frp'],
+                  'previous_frp_total_mw': 10.0,
+                  'latest_frp_total_mw': 20.0,
+              },
+          }
+          result = EmergencyAIEvolutionExplainer(MeshNetAI.from_env()).explain(event)
+          assert result.ok is False
+          assert result.status == 'disabled'
+          assert result.phase == 'growth'
+          print('IA-2C disabled fallback: OK')
+          PY
