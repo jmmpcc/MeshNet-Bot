@@ -1,0 +1,58 @@
+name: Validate MeshNet Intelligence IA-0
+
+on:
+  pull_request:
+    paths:
+      - 'shared/meshnet_ai.py'
+      - 'tools/intelligence/**'
+      - 'tests/test_meshnet_ai.py'
+      - 'tests/test_meshnet_intelligence_health.py'
+      - 'config/meshnet_ai.env.example'
+      - 'docs/MESHNET_INTELLIGENCE.md'
+      - '.github/workflows/validate-meshnet-intelligence-phase0.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile IA-0 modules
+        run: |
+          python -m py_compile \
+            shared/meshnet_ai.py \
+            tools/intelligence/meshnet_intelligence.py \
+            tests/test_meshnet_ai.py \
+            tests/test_meshnet_intelligence_health.py
+
+      - name: Run IA-0 tests
+        run: |
+          python -m unittest \
+            tests.test_meshnet_ai \
+            tests.test_meshnet_intelligence_health \
+            -v
+
+      - name: Verify disabled status
+        env:
+          MESHNET_AI_ENABLED: '0'
+        run: |
+          python tools/intelligence/meshnet_intelligence.py --status > /tmp/meshnet-ai-status.json
+          python - <<'PY'
+          import json
+          with open('/tmp/meshnet-ai-status.json', encoding='utf-8') as fh:
+              data = json.load(fh)
+          assert data['enabled'] is False
+          assert data['state'] == 'disabled'
+          assert 'api_key' not in json.dumps(data).casefold()
+          print('IA disabled fallback: OK')
+          PY
