@@ -260,6 +260,126 @@ class EmergencyAIObserverTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertEqual(ai.calls, 1)
 
+    def test_non_string_summary_is_rejected(self):
+        """El contrato estricto no permite listas/dicts como texto del proveedor."""
+        ai = FakeAI(
+            enabled=True,
+            emergencies=True,
+            response=AIResult(
+                ok=True,
+                status="available",
+                text=json.dumps(
+                    {
+                        "summary": ["Foco observado"],
+                        "notes": "Sin confirmación de terreno.",
+                        "confidence": 0.5,
+                    }
+                ),
+            ),
+        )
+        result = EmergencyAIObserver(ai).analyze_event(sample_event())
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "error")
+        self.assertIn("summary/notes", result.error)
+
+    def test_non_string_notes_is_rejected(self):
+        """Las notas también deben ser una cadena real, nunca serialización implícita."""
+        ai = FakeAI(
+            enabled=True,
+            emergencies=True,
+            response=AIResult(
+                ok=True,
+                status="available",
+                text=json.dumps(
+                    {
+                        "summary": "Foco observado.",
+                        "notes": {"detalle": "sin confirmar"},
+                        "confidence": 0.5,
+                    }
+                ),
+            ),
+        )
+        result = EmergencyAIObserver(ai).analyze_event(sample_event())
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "error")
+        self.assertIn("summary/notes", result.error)
+
+    def test_non_finite_confidence_is_rejected(self):
+        """NaN e infinitos no pueden convertirse en una confianza válida."""
+        for raw_value in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(confidence=raw_value):
+                ai = FakeAI(
+                    enabled=True,
+                    emergencies=True,
+                    response=AIResult(
+                        ok=True,
+                        status="available",
+                        text=json.dumps(
+                            {
+                                "summary": "Foco observado.",
+                                "notes": "Sin confirmación de terreno.",
+                                "confidence": raw_value,
+                            }
+                        ),
+                    ),
+                )
+                result = EmergencyAIObserver(ai).analyze_event(sample_event())
+
+                self.assertFalse(result.ok)
+                self.assertEqual(result.status, "error")
+                self.assertIn("no finita", result.error)
+
+    def test_invalid_confidence_type_is_rejected(self):
+        """Ausencia, texto arbitrario y estructuras no numéricas fallan de forma segura."""
+        for raw_value in (None, "alto", [0.8], {"value": 0.8}):
+            with self.subTest(confidence=raw_value):
+                ai = FakeAI(
+                    enabled=True,
+                    emergencies=True,
+                    response=AIResult(
+                        ok=True,
+                        status="available",
+                        text=json.dumps(
+                            {
+                                "summary": "Foco observado.",
+                                "notes": "Sin confirmación de terreno.",
+                                "confidence": raw_value,
+                            }
+                        ),
+                    ),
+                )
+                result = EmergencyAIObserver(ai).analyze_event(sample_event())
+
+                self.assertFalse(result.ok)
+                self.assertEqual(result.status, "error")
+                self.assertIn("confidence inválida", result.error)
+
+    def test_huge_confidence_integer_overflow_is_rejected(self):
+        """Un entero JSON extremo no puede escapar del fallback mediante OverflowError."""
+        huge_value = 10**10000
+        ai = FakeAI(
+            enabled=True,
+            emergencies=True,
+            response=AIResult(
+                ok=True,
+                status="available",
+                text=json.dumps(
+                    {
+                        "summary": "Foco observado.",
+                        "notes": "Sin confirmación de terreno.",
+                        "confidence": huge_value,
+                    }
+                ),
+            ),
+        )
+        result = EmergencyAIObserver(ai).analyze_event(sample_event())
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "error")
+        self.assertIn("confidence inválida", result.error)
+
     def test_provider_failure_is_propagated_as_safe_fallback(self):
         ai = FakeAI(
             enabled=True,
