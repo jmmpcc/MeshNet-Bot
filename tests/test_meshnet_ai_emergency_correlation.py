@@ -224,6 +224,46 @@ class EmergencyAICorrelationTests(unittest.TestCase):
         self.assertTrue(prompt["constraints"]["informational_only"])
         self.assertIn("NO prueba", ai.last_system)
 
+    def test_multiline_indented_json_response_is_accepted(self):
+        """Acepta JSON puro multilínea como el observado con el proveedor real.
+
+        Cómo se llama:
+            Se ejecuta dentro de la suite IA-2B con un ``FakeAI`` que reproduce
+            literalmente una respuesta JSON indentada y con saltos de línea.
+
+        Funcionalidad:
+            Verifica que ``json.loads`` acepte el formato válido devuelto por el
+            proveedor sin relajar el contrato a Markdown, prosa adicional ni
+            estructuras no JSON. La relación sigue siendo únicamente informativa.
+        """
+
+        ai = FakeAI(
+            response=AIResult(
+                ok=True,
+                status="available",
+                duration_ms=34,
+                text=(
+                    '{\n'
+                    '  "relation": "contextual",\n'
+                    '  "explanation": "El aviso meteorológico aporta contexto relevante sin ser el mismo incidente.",\n'
+                    '  "confidence": 0.85\n'
+                    '}'
+                ),
+            )
+        )
+
+        result = EmergencyAICorrelator(ai).correlate(
+            event("nasa_firms", "firms:multiline"),
+            event("aemet_cap", "aemet:multiline", category="strong_wind"),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.candidate)
+        self.assertEqual(result.relation, "contextual")
+        self.assertEqual(result.confidence, 0.85)
+        self.assertEqual(result.status, "available")
+        self.assertEqual(ai.calls, 1)
+
     def test_invalid_relation_is_rejected(self):
         ai = FakeAI(
             response=AIResult(
