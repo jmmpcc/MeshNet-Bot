@@ -1,0 +1,74 @@
+name: Validate MeshNet Intelligence IA-2A
+
+on:
+  pull_request:
+    paths:
+      - 'shared/meshnet_ai_emergencies.py'
+      - 'tests/test_meshnet_ai_emergencies.py'
+      - 'docs/MESHNET_INTELLIGENCE_IA2A.md'
+      - '.github/workflows/validate-meshnet-intelligence-phase2a.yml'
+      - 'shared/meshnet_ai.py'
+      - 'shared/meshnet_ai_tasks.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile IA modules
+        run: |
+          python -m py_compile \
+            shared/meshnet_ai.py \
+            shared/meshnet_ai_tasks.py \
+            shared/meshnet_ai_emergencies.py \
+            tools/intelligence/meshnet_intelligence.py \
+            tools/intelligence/meshnet_ai_tasks_cli.py \
+            tests/test_meshnet_ai.py \
+            tests/test_meshnet_intelligence_health.py \
+            tests/test_meshnet_ai_tasks.py \
+            tests/test_meshnet_ai_tasks_contract.py \
+            tests/test_meshnet_ai_emergencies.py
+
+      - name: Run IA-0 IA-1 IA-2A tests
+        run: |
+          python -m unittest \
+            tests.test_meshnet_ai \
+            tests.test_meshnet_intelligence_health \
+            tests.test_meshnet_ai_tasks \
+            tests.test_meshnet_ai_tasks_contract \
+            tests.test_meshnet_ai_emergencies \
+            -v
+
+      - name: Verify IA-2A disabled contract
+        run: |
+          MESHNET_AI_ENABLED=0 \
+          MESHNET_AI_EMERGENCIES_ENABLED=1 \
+          python - <<'PY'
+          from shared.meshnet_ai import MeshNetAI
+          from shared.meshnet_ai_emergencies import EmergencyAIObserver
+
+          event = {
+              'event_id': 'test:1',
+              'source': 'test',
+              'category': 'other',
+              'severity': 'low',
+              'verification': 'unverified',
+              'status': 'active',
+              'title': 'Evento de prueba',
+          }
+          result = EmergencyAIObserver(MeshNetAI.from_env()).analyze_event(event, change='new')
+          assert result.ok is False
+          assert result.status == 'disabled'
+          print('IA-2A disabled fallback: OK')
+          PY
