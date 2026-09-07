@@ -62,6 +62,8 @@ def sample_event(**overrides):
         "road": "",
         "municipality": "Zaragoza",
         "province": "Zaragoza",
+        "latitude": 41.65,
+        "longitude": -0.88,
         "started_at": "2026-09-07T08:00:00+00:00",
         "updated_at": "2026-09-07T09:00:00+00:00",
         "metadata": {"firms_phase": "growth", "frp_total_mw": 25.0},
@@ -121,6 +123,8 @@ class EmergencyAIObserverTests(unittest.TestCase):
         self.assertEqual(ai.calls, 1)
         payload = json.loads(ai.last_prompt)
         self.assertEqual(payload["event"]["phase"], "growth")
+        self.assertEqual(payload["event"]["latitude"], 41.65)
+        self.assertEqual(payload["event"]["longitude"], -0.88)
         self.assertNotIn("metadata", payload["event"])
 
     def test_summary_and_notes_respect_exact_limits(self):
@@ -144,6 +148,45 @@ class EmergencyAIObserverTests(unittest.TestCase):
         self.assertLessEqual(len(result.summary), 7)
         self.assertLessEqual(len(result.notes), 10)
         self.assertEqual(result.confidence, 1.0)
+
+    def test_summary_prefers_complete_sentence_when_truncated(self):
+        response = AIResult(
+            ok=True,
+            status="available",
+            text=json.dumps(
+                {
+                    "summary": "Foco observado en Zaragoza. Estado activo y seguimiento adicional pendiente.",
+                    "notes": "Sin cambios operativos.",
+                    "confidence": 0.8,
+                }
+            ),
+        )
+        ai = FakeAI(enabled=True, emergencies=True, response=response)
+        result = EmergencyAIObserver(ai).analyze_event(
+            sample_event(), max_summary_chars=40, max_notes_chars=100
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.summary, "Foco observado en Zaragoza.")
+        self.assertLessEqual(len(result.summary), 40)
+
+    def test_invalid_coordinates_are_not_forwarded_as_strings(self):
+        response = AIResult(
+            ok=True,
+            status="available",
+            text=json.dumps(
+                {"summary": "Evento observado.", "notes": "", "confidence": 0.5}
+            ),
+        )
+        ai = FakeAI(enabled=True, emergencies=True, response=response)
+        result = EmergencyAIObserver(ai).analyze_event(
+            sample_event(latitude="no-num", longitude=""), change="updated"
+        )
+
+        self.assertTrue(result.ok)
+        payload = json.loads(ai.last_prompt)
+        self.assertIsNone(payload["event"]["latitude"])
+        self.assertIsNone(payload["event"]["longitude"])
 
     def test_invalid_json_is_rejected(self):
         ai = FakeAI(
