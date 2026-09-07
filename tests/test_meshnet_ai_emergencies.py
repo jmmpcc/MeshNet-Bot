@@ -293,6 +293,15 @@ class EmergencyAIObserverTests(unittest.TestCase):
         self.assertEqual(deterministic_phase(event, "new"), "new")
         self.assertEqual(deterministic_phase(event, "updated"), "updated")
 
+    def test_non_firms_source_cannot_inherit_firms_phase_metadata(self):
+        """Una metadata ajena nunca puede convertir otra fuente en fase FIRMS."""
+        event = sample_event(
+            source="aemet",
+            metadata={"firms_phase": "growth"},
+            category="storm",
+        )
+        self.assertEqual(deterministic_phase(event, "updated"), "updated")
+
     def test_event_is_not_mutated(self):
         event = {
             "event_id": "aemet:1",
