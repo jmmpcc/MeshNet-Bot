@@ -154,7 +154,8 @@ class EmergencyAIEvolutionTests(unittest.TestCase):
         prompt = json.loads(ai.last_prompt)
         self.assertTrue(prompt["constraints"]["phase_is_authoritative"])
         self.assertIn("NO la cambies", ai.last_system)
-        self.assertIn("NO superficie quemada", ai.last_system)
+        self.assertIn("no de un incendio confirmado", ai.last_system)
+        self.assertIn("no debe describirse como intensidad del incendio", ai.last_system)
 
     def test_stable_prompt_forbids_equating_stable_with_extinguished(self):
         ai = FakeAI(
@@ -168,6 +169,65 @@ class EmergencyAIEvolutionTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.phase, "stable")
         self.assertIn("NO incendio extinguido", ai.last_system)
+
+    def test_real_provider_overclaims_are_rejected(self):
+        """Reproduce las conclusiones no sustentadas observadas en la prueba real.
+
+        Cómo se llama:
+            La suite entrega al explicador una respuesta equivalente a la salida
+            real que convirtió extensión FIRMS en área afectada y FRP en intensidad.
+
+        Funcionalidad:
+            Verifica que la barrera determinista rechace esa explicación con
+            ``ok=False`` aunque el proveedor haya respondido correctamente.
+        """
+        explanation = (
+            "La extensión observada del conjunto de detecciones ha crecido de 1.2 km a 2.0 km, "
+            "indicando que el área afectada por las señales térmicas es más amplia. "
+            "La potencia radiante total aumentó de 18.4 MW a 28.0 MW, evidenciando una mayor "
+            "intensidad del incendio."
+        )
+        ai = FakeAI(
+            response=AIResult(
+                ok=True,
+                status="available",
+                text=json.dumps({"explanation": explanation, "confidence": 0.95}),
+            )
+        )
+        result = EmergencyAIEvolutionExplainer(ai).explain(firms_event())
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "error")
+        self.assertIn("no sustentada", result.error)
+
+    def test_truncation_reuses_safe_word_boundary_helper(self):
+        """Evita que el límite IA-2C corte la explicación a mitad de palabra.
+
+        Cómo se llama:
+            Ejecuta ``explain`` con un límite corto sobre una explicación larga.
+
+        Funcionalidad:
+            Confirma que IA-2C reutiliza ``_fit_text`` de IA-2A y que la salida
+            resultante permanece dentro del presupuesto sin terminar en un fragmento.
+        """
+        explanation = (
+            "La pasada más reciente muestra más detecciones térmicas y mayor FRP observado. "
+            "La extensión del conjunto de detecciones también aumenta respecto a la pasada anterior."
+        )
+        ai = FakeAI(
+            response=AIResult(
+                ok=True,
+                status="available",
+                text=json.dumps({"explanation": explanation, "confidence": 0.9}),
+            )
+        )
+        result = EmergencyAIEvolutionExplainer(ai).explain(
+            firms_event(),
+            max_explanation_chars=90,
+        )
+        self.assertTrue(result.ok)
+        self.assertLessEqual(len(result.explanation), 90)
+        self.assertTrue(result.explanation.endswith("."))
+        self.assertNotIn("anteri", result.explanation)
 
     def test_non_string_explanation_is_rejected(self):
         ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({"explanation": ["texto"], "confidence": 0.5})))
