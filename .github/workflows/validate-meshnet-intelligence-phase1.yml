@@ -1,0 +1,63 @@
+name: Validate MeshNet Intelligence IA-1
+
+on:
+  pull_request:
+    paths:
+      - 'shared/meshnet_ai_tasks.py'
+      - 'tools/intelligence/meshnet_ai_tasks_cli.py'
+      - 'tests/test_meshnet_ai_tasks.py'
+      - 'docs/MESHNET_INTELLIGENCE_IA1.md'
+      - '.github/workflows/validate-meshnet-intelligence-phase1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile IA-0 and IA-1 modules
+        run: |
+          python -m py_compile \
+            shared/meshnet_ai.py \
+            shared/meshnet_ai_tasks.py \
+            tools/intelligence/meshnet_intelligence.py \
+            tools/intelligence/meshnet_ai_tasks_cli.py \
+            tests/test_meshnet_ai.py \
+            tests/test_meshnet_intelligence_health.py \
+            tests/test_meshnet_ai_tasks.py
+
+      - name: Run IA-0 and IA-1 tests
+        run: |
+          python -m unittest \
+            tests.test_meshnet_ai \
+            tests.test_meshnet_intelligence_health \
+            tests.test_meshnet_ai_tasks \
+            -v
+
+      - name: Verify IA-1 disabled fallback without network
+        env:
+          MESHNET_AI_ENABLED: '0'
+          MESHNET_AI_SUMMARIZE_ENABLED: '1'
+        run: |
+          set +e
+          output="$(python tools/intelligence/meshnet_ai_tasks_cli.py summarize 'texto de prueba')"
+          rc=$?
+          set -e
+          test "$rc" -eq 2
+          OUTPUT="$output" python - <<'PY'
+          import json, os
+          data = json.loads(os.environ['OUTPUT'])
+          assert data['ok'] is False
+          assert data['status'] == 'disabled'
+          print('IA-1 disabled fallback: OK')
+          PY
