@@ -81,8 +81,10 @@ def _fit_text(value: Any, max_chars: int) -> str:
     Funcionalidad:
         Normaliza espacios. Si hace falta recortar, intenta conservar primero una
         frase completa suficientemente representativa; si no existe, recorta por
-        palabra. Nunca devuelve más caracteres que el límite solicitado y evita,
-        cuando es posible, dejar una cláusula final claramente incompleta.
+        palabra. Los puntos decimales (por ejemplo ``1.2`` o ``18.4``) NO se
+        consideran finales de frase. Nunca devuelve más caracteres que el límite
+        solicitado y evita, cuando es posible, dejar una cláusula final claramente
+        incompleta.
     """
     limit = int(max_chars)
     if limit <= 0:
@@ -93,16 +95,17 @@ def _fit_text(value: Any, max_chars: int) -> str:
 
     candidate = clean[:limit].rstrip()
 
-    # Si dentro del presupuesto existe una frase completa que ocupa una parte
-    # sustancial del espacio, se prefiere ese cierre natural frente a conservar
-    # unas pocas palabras adicionales de la frase siguiente.
-    sentence_end = max(
-        candidate.rfind("."),
-        candidate.rfind("!"),
-        candidate.rfind("?"),
-    )
-    if sentence_end >= int(limit * 0.55):
-        return candidate[: sentence_end + 1].rstrip()
+    # Solo consideramos cierre de frase la puntuación seguida de espacio/fin y,
+    # para el punto, que no esté precedido por un dígito. Esto impide interpretar
+    # el punto de ``1.2`` como final de oración y producir salidas como "... 1.".
+    sentence_ends = [
+        match.end()
+        for match in re.finditer(r"(?<!\d)[.!?](?=\s|$)", candidate)
+    ]
+    if sentence_ends:
+        sentence_end = sentence_ends[-1]
+        if sentence_end >= int(limit * 0.55):
+            return candidate[:sentence_end].rstrip()
 
     if " " in candidate:
         shortened = candidate.rsplit(" ", 1)[0].rstrip(" ,;:-")
@@ -304,11 +307,16 @@ class EmergencyAIObserver:
         system = (
             "Eres un observador auxiliar de emergencias. No tomas decisiones operativas. "
             "No cambies categoría, severidad, verificación, estado ni fase. No inventes "
-            "hechos. Devuelve exclusivamente un objeto JSON con las claves summary, notes "
-            "y confidence. summary debe describir solo los datos recibidos, respetar el "
-            "límite indicado y terminar como una frase completa, sin dejar una cláusula "
-            "inacabada. notes puede indicar incertidumbres o datos faltantes, nunca órdenes "
-            "de actuación. confidence debe estar entre 0 y 1."
+            "hechos ni conviertas una detección o medida observada en una consecuencia no "
+            "confirmada. En particular, para NASA FIRMS una 'extensión observada' o una "
+            "extensión de cluster NO equivale a superficie o área afectada: conserva ese "
+            "significado literal y no uses 'afecta', 'afectando' o equivalentes salvo que "
+            "el dato de afectación esté explícitamente presente. Devuelve exclusivamente "
+            "un objeto JSON con las claves summary, notes y confidence. summary debe "
+            "describir solo los datos recibidos, respetar el límite indicado y terminar "
+            "como una frase completa, sin dejar una cláusula inacabada. notes puede indicar "
+            "incertidumbres o datos faltantes, nunca órdenes de actuación. confidence debe "
+            "estar entre 0 y 1."
         )
         prompt = json.dumps(
             {
