@@ -1,0 +1,88 @@
+name: Validate MeshNet Intelligence IA-2B
+
+on:
+  pull_request:
+    paths:
+      - 'shared/meshnet_ai_emergency_correlation.py'
+      - 'tests/test_meshnet_ai_emergency_correlation.py'
+      - 'docs/MESHNET_INTELLIGENCE_IA2B.md'
+      - '.github/workflows/validate-meshnet-intelligence-phase2b.yml'
+      - 'shared/meshnet_ai.py'
+      - 'shared/meshnet_ai_tasks.py'
+      - 'shared/meshnet_ai_emergencies.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile IA modules
+        run: |
+          python -m py_compile \
+            shared/meshnet_ai.py \
+            shared/meshnet_ai_tasks.py \
+            shared/meshnet_ai_emergencies.py \
+            shared/meshnet_ai_emergency_correlation.py \
+            tools/intelligence/meshnet_intelligence.py \
+            tools/intelligence/meshnet_ai_tasks_cli.py \
+            tests/test_meshnet_ai.py \
+            tests/test_meshnet_intelligence_health.py \
+            tests/test_meshnet_ai_tasks.py \
+            tests/test_meshnet_ai_tasks_contract.py \
+            tests/test_meshnet_ai_emergencies.py \
+            tests/test_meshnet_ai_emergency_correlation.py
+
+      - name: Run IA-0 IA-1 IA-2A IA-2B tests
+        run: |
+          python -m unittest \
+            tests.test_meshnet_ai \
+            tests.test_meshnet_intelligence_health \
+            tests.test_meshnet_ai_tasks \
+            tests.test_meshnet_ai_tasks_contract \
+            tests.test_meshnet_ai_emergencies \
+            tests.test_meshnet_ai_emergency_correlation \
+            -v
+
+      - name: Verify IA-2B disabled contract
+        run: |
+          MESHNET_AI_ENABLED=0 \
+          MESHNET_AI_EMERGENCIES_ENABLED=1 \
+          MESHNET_AI_CORRELATION_ENABLED=1 \
+          python - <<'PY'
+          from shared.meshnet_ai import MeshNetAI
+          from shared.meshnet_ai_emergency_correlation import EmergencyAICorrelator
+
+          event_a = {
+              'event_id': 'firms:1',
+              'source': 'nasa_firms',
+              'category': 'wildfire',
+              'status': 'active',
+              'title': 'Foco satelital',
+              'latitude': 41.65,
+              'longitude': -0.88,
+          }
+          event_b = {
+              'event_id': 'aemet:1',
+              'source': 'aemet_cap',
+              'category': 'strong_wind',
+              'status': 'active',
+              'title': 'Aviso de viento',
+              'latitude': 41.67,
+              'longitude': -0.89,
+          }
+          result = EmergencyAICorrelator(MeshNetAI.from_env()).correlate(event_a, event_b)
+          assert result.ok is False
+          assert result.status == 'disabled'
+          print('IA-2B disabled fallback: OK')
+          PY
