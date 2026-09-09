@@ -1,0 +1,103 @@
+name: Validate MeshNet Intelligence IA-2E
+
+on:
+  pull_request:
+    paths:
+      - 'config/meshnet_ai.env.example'
+      - 'shared/meshnet_ai.py'
+      - 'shared/meshnet_ai_tasks.py'
+      - 'shared/meshnet_ai_emergencies.py'
+      - 'shared/meshnet_ai_emergency_correlation.py'
+      - 'shared/meshnet_ai_emergency_evolution.py'
+      - 'shared/meshnet_ai_emergency_brief.py'
+      - 'shared/meshnet_ai_emergency_orchestrator.py'
+      - 'tests/test_meshnet_ai.py'
+      - 'tests/test_meshnet_intelligence_health.py'
+      - 'tests/test_meshnet_ai_tasks.py'
+      - 'tests/test_meshnet_ai_tasks_contract.py'
+      - 'tests/test_meshnet_ai_emergencies.py'
+      - 'tests/test_meshnet_ai_emergency_correlation.py'
+      - 'tests/test_meshnet_ai_emergency_correlation_contract.py'
+      - 'tests/test_meshnet_ai_emergency_evolution.py'
+      - 'tests/test_meshnet_ai_emergency_brief.py'
+      - 'tests/test_meshnet_ai_emergency_orchestrator.py'
+      - '.github/workflows/validate-meshnet-intelligence-phase2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile IA modules
+        run: |
+          python -m py_compile \
+            shared/meshnet_ai.py \
+            shared/meshnet_ai_tasks.py \
+            shared/meshnet_ai_emergencies.py \
+            shared/meshnet_ai_emergency_correlation.py \
+            shared/meshnet_ai_emergency_evolution.py \
+            shared/meshnet_ai_emergency_brief.py \
+            shared/meshnet_ai_emergency_orchestrator.py \
+            tests/test_meshnet_ai.py \
+            tests/test_meshnet_intelligence_health.py \
+            tests/test_meshnet_ai_tasks.py \
+            tests/test_meshnet_ai_tasks_contract.py \
+            tests/test_meshnet_ai_emergencies.py \
+            tests/test_meshnet_ai_emergency_correlation.py \
+            tests/test_meshnet_ai_emergency_correlation_contract.py \
+            tests/test_meshnet_ai_emergency_evolution.py \
+            tests/test_meshnet_ai_emergency_brief.py \
+            tests/test_meshnet_ai_emergency_orchestrator.py
+
+      - name: Run IA-0 IA-1 IA-2A IA-2B IA-2C IA-2D IA-2E tests
+        run: |
+          python -m unittest \
+            tests.test_meshnet_ai \
+            tests.test_meshnet_intelligence_health \
+            tests.test_meshnet_ai_tasks \
+            tests.test_meshnet_ai_tasks_contract \
+            tests.test_meshnet_ai_emergencies \
+            tests.test_meshnet_ai_emergency_correlation \
+            tests.test_meshnet_ai_emergency_correlation_contract \
+            tests.test_meshnet_ai_emergency_evolution \
+            tests.test_meshnet_ai_emergency_brief \
+            tests.test_meshnet_ai_emergency_orchestrator \
+            -v
+
+      - name: Verify IA-2E disabled contract
+        run: |
+          MESHNET_AI_ENABLED=1 \
+          MESHNET_AI_EMERGENCIES_ENABLED=1 \
+          MESHNET_AI_CORRELATION_ENABLED=1 \
+          MESHNET_AI_EMERGENCY_ORCHESTRATOR_ENABLED=0 \
+          python - <<'PY'
+          from shared.meshnet_ai import MeshNetAI
+          from shared.meshnet_ai_emergency_orchestrator import EmergencyAIShadowOrchestrator
+
+          event = {
+              'event_id': 'firms:1',
+              'source': 'nasa_firms',
+              'category': 'wildfire',
+              'status': 'active',
+              'metadata': {'firms_phase': 'growth'},
+          }
+          result = EmergencyAIShadowOrchestrator(MeshNetAI.from_env()).analyze(
+              event,
+              change='updated',
+          )
+          assert result.ok is False
+          assert result.status == 'disabled'
+          assert result.deterministic_phase == 'growth'
+          print('IA-2E disabled fallback: OK')
+          PY
