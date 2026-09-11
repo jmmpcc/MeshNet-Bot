@@ -40,10 +40,6 @@ services:
     # Datos persistentes de bot/broker (backlogs, mapas, auditorías, etc.)
     volumes:
       - ./bot_data:/app/bot_data:rw
-      # Zaragoza DM: overlay quirúrgico sobre la imagen GHCR. Mantiene intacta
-      # la imagen base y permite validar esta fase sin reconstruir el stack.
-      - ./source/Meshtastic_Broker.py:/app/source/Meshtastic_Broker.py:ro
-      - ./source/zaragoza_commands.py:/app/source/zaragoza_commands.py:ro
      
     stop_grace_period: 15s
 
