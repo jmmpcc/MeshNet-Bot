@@ -120,9 +120,9 @@ jobs:
           # Código está en source/
           # Broker
           # El servicio email-to-mesh reutiliza la imagen del broker.
-          # Channel Gateway se ejecuta dentro del broker; tanto su módulo como
-          # su entrypoint deben obligar a publicar una nueva imagen broker.
-          if changed_match '^(source/)?(Meshtastic_Broker\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
             rebuild_broker=true
           fi
 

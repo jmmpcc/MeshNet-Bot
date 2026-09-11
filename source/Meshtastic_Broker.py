@@ -2469,6 +2469,61 @@ class MeshCoreEmbeddedBridge:
                         flush=True,
                     )
 
+                # === [ZARAGOZA] AGENDA/NOTICIAS internos MeshCore =============
+                # ZaragozaNoticias se consulta mediante una API HTTP local/LAN.
+                # Este bloque no abre ninguna conexión de radio nueva: las
+                # respuestas vuelven por enqueue_send_contact(), la misma ruta TX
+                # persistente ya validada por Farmacias y Emergencias.
+                try:
+                    from zaragoza_commands import (
+                        ZaragozaCommandContext,
+                        handle_zaragoza_command,
+                        is_allowed_origin as is_zaragoza_allowed_origin,
+                        is_zaragoza_command,
+                    )
+                    if is_zaragoza_command(text_msg):
+                        _ctx_zaragoza = ZaragozaCommandContext(
+                            network="meshcore",
+                            source_id=pref,
+                            text=text_msg,
+                            channel=chan_idx,
+                            is_direct=(kind == "contact"),
+                            packet_id=(
+                                data.get("id")
+                                or data.get("message_id")
+                                or data.get("timestamp")
+                            ),
+                        )
+                        if is_zaragoza_allowed_origin(_ctx_zaragoza):
+                            if pref:
+                                def _zaragoza_meshcore_worker():
+                                    def _enqueue_dm(_message: str) -> None:
+                                        self.enqueue_send_contact(pref, str(_message))
+
+                                    handle_zaragoza_command(
+                                        _ctx_zaragoza,
+                                        _enqueue_dm,
+                                    )
+
+                                threading.Thread(
+                                    target=_zaragoza_meshcore_worker,
+                                    name="zaragoza-meshcore",
+                                    daemon=True,
+                                ).start()
+                                self._last_ok = time.time()
+                                return
+                            print(
+                                "[zaragoza] meshcore WARN: comando de canal sin "
+                                "pubkey_prefix resoluble; se deja pasar",
+                                flush=True,
+                            )
+                except Exception as _e_zaragoza:
+                    print(
+                        f"[zaragoza] meshcore WARN: "
+                        f"{type(_e_zaragoza).__name__}: {_e_zaragoza}",
+                        flush=True,
+                    )
+
                 try:
                     mail_reply = _handle_mesh_mail_command_if_needed(text_msg, source=(alias or pref or "meshcore"))
                     if mail_reply is not None:
