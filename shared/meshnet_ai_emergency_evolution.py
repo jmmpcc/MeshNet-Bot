@@ -359,6 +359,20 @@ class EmergencyAIEvolutionExplainer:
 
         snapshot = deterministic_evolution_snapshot(event)
         phase = _clean_text(snapshot.get("phase")) or "unknown"
+        firms_evidence = _firms_evidence_constraints(snapshot)
+        allowed_facts = _firms_allowed_facts(snapshot)
+
+        if firms_evidence == {"detections": True, "extent": False, "frp": False}:
+            firms_evidence_instruction = (
+                "Para este evento describe únicamente el cambio del número de "
+                "detecciones incluido en constraints.allowed_facts. No describas "
+                "ningún otro cambio cuantitativo ni cualitativo."
+            )
+        else:
+            firms_evidence_instruction = (
+                "Describe únicamente conceptos respaldados por "
+                "constraints.firms_evidence y constraints.allowed_facts."
+            )
 
         if not self.ai.config.enabled:
             return EmergencyAIEvolutionExplanation(
@@ -407,8 +421,8 @@ class EmergencyAIEvolutionExplainer:
                     "explanation_max_chars": explanation_limit,
                     "informational_only": True,
                     "phase_is_authoritative": True,
-                    "firms_evidence": _firms_evidence_constraints(snapshot),
-                    "allowed_facts": _firms_allowed_facts(snapshot),
+                    "firms_evidence": firms_evidence,
+                    "allowed_facts": allowed_facts,
                     "output_language": "es",
                 },
             },
@@ -429,14 +443,8 @@ class EmergencyAIEvolutionExplainer:
             "observada del conjunto de detecciones satelitales: nunca la llames área/superficie "
             "afectada o quemada. El FRP es potencia radiante observada y no debe describirse "
             "como intensidad del incendio. Cada concepto citado debe estar respaldado por "
-            "su señal determinista correspondiente. Usa constraints.firms_evidence como "
-            "lista cerrada: si extent=false no menciones extensión; si frp=false no menciones "
-            "FRP/potencia radiante; si detections=true puedes describir el cambio de detecciones. "
-            "Si solo aumenta detection_count, describe únicamente un aumento de detecciones y "
-            "NO infieras mayor actividad, extensión, FRP, "
-            "superficie o intensidad. Solo puedes mencionar cambios de extensión cuando existan "
-            "campos de extensión o growth_reasons=extent, y FRP cuando existan campos FRP o "
-            "growth_reasons=frp. growth_reasons son señales deterministas ya calculadas. stable "
+            "su señal determinista correspondiente. " + firms_evidence_instruction + " "
+            "growth_reasons son señales deterministas ya calculadas. stable "
             "significa sin crecimiento significativo detectado en esa "
             "pasada, NO incendio extinguido. resolved solo puede afirmarse cuando la fase "
             "determinista recibida sea resolved. Devuelve exclusivamente JSON con explanation "
