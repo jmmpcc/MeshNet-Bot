@@ -438,7 +438,38 @@ def byte_chunks(lines: list[str], header: str, max_bytes: int) -> list[str]:
     return result
 
 
-def grouped_lines(pharmacies: list[Pharmacy], locality_filter: str | None = None, area_filter: str | None = None) -> list[str]:
+def grouped_lines(
+    pharmacies: list[Pharmacy],
+    locality_filter: str | None = None,
+    area_filter: str | None = None,
+    *,
+    repeat_group: bool = False,
+) -> list[str]:
+    """Genera las líneas legibles de farmacias agrupadas por sector/localidad.
+
+    Uso:
+        grouped_lines(pharmacies)
+        grouped_lines(pharmacies, repeat_group=True)
+
+    Parámetros:
+        pharmacies:
+            Farmacias normalizadas que se desean mostrar.
+        locality_filter:
+            Localidad exacta opcional usada por las consultas de farmacias.
+        area_filter:
+            Sector exacto opcional usado por las consultas de farmacias.
+        repeat_group:
+            Si es False conserva el formato histórico: una cabecera de grupo
+            seguida por sus direcciones. Si es True cada farmacia incorpora
+            su grupo en la misma línea, evitando que una fragmentación deje
+            una dirección sin contexto.
+
+    Funcionalidad:
+        - Mantiene intacto el formato histórico de las consultas.
+        - Permite a la difusión Mesh producir unidades autosuficientes
+          SECTOR · dirección · teléfono.
+        - Conserva el mismo orden y los mismos filtros existentes.
+    """
     selected = []
     for p in pharmacies:
         if locality_filter and key_text(locality_filter) != key_text(p.locality):
@@ -447,16 +478,22 @@ def grouped_lines(pharmacies: list[Pharmacy], locality_filter: str | None = None
             continue
         selected.append(p)
     selected.sort(key=lambda p: (key_text(p.locality), key_text(p.area), key_text(p.name), key_text(p.address)))
+
     lines: list[str] = []
     previous = None
     for p in selected:
         group = p.area if key_text(p.locality) == "zaragoza" else p.locality
-        if group != previous:
-            lines.append(group.upper())
-            previous = group
         details = compact_address(p.address)
         if p.phone:
             details += f" · {p.phone}"
+
+        if repeat_group:
+            lines.append(f"{group.upper()} · {details}")
+            continue
+
+        if group != previous:
+            lines.append(group.upper())
+            previous = group
         lines.append(details)
     return lines
 
@@ -621,9 +658,32 @@ def broadcast_messages(
     pharmacies: list[Pharmacy] | None = None,
     header: str | None = None,
 ) -> list[str]:
+    """Construye los fragmentos de difusión respetando el transporte real.
+
+    Uso:
+        messages = broadcast_messages("meshcore", pharmacies, header)
+
+    Parámetros:
+        network:
+            Transporte de salida: meshcore o meshtastic.
+        pharmacies:
+            Listado opcional. Si se omite se usa la instantánea vigente.
+        header:
+            Cabecera opcional, por ejemplo NUEVAS FARMACIAS DE GUARDIA.
+
+    Funcionalidad:
+        - MeshCore usa 140 bytes por defecto, alineado con el límite efectivo
+          del broker para impedir una segunda fragmentación (1/2).
+        - Meshtastic conserva su límite histórico de 170 bytes.
+        - Cada farmacia incluye su sector/localidad en la misma unidad de
+          salida para que ningún fragmento empiece con una dirección huérfana.
+    """
     pharmacies = load_pharmacies() if pharmacies is None else pharmacies
-    max_bytes = int(os.getenv("FARMACIAS_MESHCORE_MAX_BYTES" if network == "meshcore" else "FARMACIAS_MESHTASTIC_MAX_BYTES", "170"))
-    lines = grouped_lines(pharmacies)
+    if network == "meshcore":
+        max_bytes = int(os.getenv("FARMACIAS_MESHCORE_MAX_BYTES", "140"))
+    else:
+        max_bytes = int(os.getenv("FARMACIAS_MESHTASTIC_MAX_BYTES", "170"))
+    lines = grouped_lines(pharmacies, repeat_group=True)
     title = header or f"FARMACIAS GUARDIA {datetime.now(TZ).strftime('%d/%m')}"
     return byte_chunks(lines, title, max_bytes)
 

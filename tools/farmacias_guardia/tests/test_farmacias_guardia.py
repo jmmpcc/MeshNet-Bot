@@ -274,6 +274,31 @@ class FarmaciasAppTests(unittest.TestCase):
         chunks = app.byte_chunks(lines, "GUARDIA ZARAGOZA 24/07", 90)
         self.assertGreaterEqual(len(chunks), 2)
         self.assertTrue(all(len(chunk.encode("utf-8")) <= 90 for chunk in chunks))
+    def test_broadcast_meshcore_defaults_to_140_bytes_and_repeats_group(self):
+        """La difusión MeshCore no debe requerir una segunda fragmentación del broker."""
+        pharmacies = [
+            app.Pharmacy("A", "Calle Uno 1", "976111111", "Zaragoza", "Centro", "G", "2026-09-12", "1"),
+            app.Pharmacy("B", "Calle Dos 2", "976222222", "Zaragoza", "Delicias", "G", "2026-09-12", "2"),
+        ]
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FARMACIAS_MESHCORE_MAX_BYTES", None)
+            messages = app.broadcast_messages("meshcore", pharmacies, "NUEVAS FARMACIAS DE GUARDIA")
+
+        self.assertTrue(messages)
+        self.assertTrue(all(len(message.encode("utf-8")) <= 140 for message in messages))
+        joined = "\n".join(messages)
+        self.assertIn("CENTRO · C/ Uno 1 · 976111111", joined)
+        self.assertIn("DELICIAS · C/ Dos 2 · 976222222", joined)
+
+    def test_grouped_lines_keeps_historical_query_format_by_default(self):
+        """El nuevo formato de difusión no modifica la salida histórica de consultas."""
+        pharmacy = app.Pharmacy(
+            "A", "Calle Uno 1", "976111111", "Zaragoza", "Centro", "G", "2026-09-12", "1"
+        )
+        self.assertEqual(
+            app.grouped_lines([pharmacy]),
+            ["CENTRO", "C/ Uno 1 · 976111111"],
+        )
 
     def test_canonical_hash_ignores_input_order(self):
         a = app.Pharmacy("A", "C/ Uno 1", "1", "Utebo", "Utebo", "G", "2026-07-24", "1")
