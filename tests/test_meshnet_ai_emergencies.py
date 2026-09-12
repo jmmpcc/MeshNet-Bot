@@ -162,18 +162,22 @@ class EmergencyAIObserverTests(unittest.TestCase):
             Verifica que IA-2A rechace un resumen que convierta una detección
             satelital FIRMS en un incendio forestal actualmente activo.
         """
-        ai = FakeAI(response=AIResult(
-            ok=True,
-            status="available",
-            text=json.dumps({
+        ai = FakeAI(
+            enabled=True,
+            emergencies=True,
+            response=AIResult(
+                ok=True,
+                status="available",
+                text=json.dumps({
                 "summary": (
                     "Se reporta un evento sintético de incendio forestal detectado "
                     "por NASA FIRMS, actualmente activo."
                 ),
                 "notes": "Evento sintético de prueba.",
-                "confidence": 0.8,
-            }),
-        ))
+                    "confidence": 0.8,
+                }),
+            ),
+        )
 
         result = EmergencyAIObserver(ai).analyze_event(sample_event(), change="updated")
 
@@ -183,18 +187,22 @@ class EmergencyAIObserverTests(unittest.TestCase):
 
     def test_firms_possible_focus_summary_is_allowed(self):
         """Una formulación FIRMS prudente debe seguir siendo válida."""
-        ai = FakeAI(response=AIResult(
-            ok=True,
-            status="available",
-            text=json.dumps({
+        ai = FakeAI(
+            enabled=True,
+            emergencies=True,
+            response=AIResult(
+                ok=True,
+                status="available",
+                text=json.dumps({
                 "summary": (
                     "Detección FIRMS compatible con un posible foco en seguimiento "
                     "satelital activo."
                 ),
                 "notes": "La detección no confirma por sí sola un incendio.",
-                "confidence": 0.8,
-            }),
-        ))
+                    "confidence": 0.8,
+                }),
+            ),
+        )
 
         result = EmergencyAIObserver(ai).analyze_event(sample_event(), change="updated")
 
