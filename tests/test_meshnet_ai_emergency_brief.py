@@ -218,6 +218,37 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("superficie afectada", result.uncertainties)
 
+    def test_firms_absent_frp_can_be_stated_as_missing_information(self):
+        """Regresión IA-2E: negar datos FRP ausentes no es una sobreafirmación.
+
+        Cómo se llama:
+            Reproduce la frase real devuelta por el proveedor en Raspberry.
+
+        Funcionalidad:
+            Verifica que, con frp=false, una frase que diga explícitamente que no
+            se dispone de información sobre potencia radiante sea aceptada.
+        """
+        ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({
+            "brief": (
+                "Posible foco FIRMS con aumento del número de detecciones. "
+                "No se dispone de información sobre la extensión o potencia "
+                "radiante del fenómeno."
+            ),
+            "uncertainties": (
+                "No es posible determinar con los datos disponibles la superficie "
+                "afectada ni la intensidad precisa del posible evento."
+            ),
+            "confidence": 0.9,
+        })))
+
+        result = EmergencyAISituationalBriefBuilder(ai).build(
+            event(),
+            analysis=analysis(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertIn("No se dispone de información", result.brief)
+
     def test_firms_frp_mention_without_frp_evidence_is_rejected(self):
         """Regresión IA-2E: IA-2D no puede inventar potencia radiante observada.
 
