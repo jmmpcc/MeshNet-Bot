@@ -163,7 +163,10 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
         self.assertEqual(result.confidence, 0.88)
         self.assertEqual(result.status, "available")
         self.assertEqual(set(result.components), {"ia2a_analysis", "ia2c_evolution", "ia2b_correlations"})
-        self.assertIn("no_operational_decisions", json.loads(ai.last_prompt)["constraints"])
+        constraints = json.loads(ai.last_prompt)["constraints"]
+        self.assertIn("no_operational_decisions", constraints)
+        self.assertEqual(constraints["output_language"], "es")
+        self.assertIn("Responde SIEMPRE en español", ai.last_system)
         self.assertIn("No decidas prioridad", ai.last_system)
         self.assertIn("posible foco", ai.last_system)
         self.assertIn("ni describas una fase de crecimiento del incendio", ai.last_system.casefold())
