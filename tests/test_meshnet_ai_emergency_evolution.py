@@ -268,6 +268,11 @@ class EmergencyAIEvolutionTests(unittest.TestCase):
         self.assertEqual(result.phase, "growth")
         self.assertIn("si solo aumenta detection_count", ai.last_system)
         self.assertIn("NO infieras mayor actividad, extensión, FRP", ai.last_system)
+        prompt = json.loads(ai.last_prompt)
+        self.assertEqual(
+            prompt["constraints"]["firms_evidence"],
+            {"detections": True, "extent": False, "frp": False},
+        )
 
     def test_truncation_reuses_safe_word_boundary_helper(self):
         """Evita que el límite IA-2C corte la explicación a mitad de palabra.
