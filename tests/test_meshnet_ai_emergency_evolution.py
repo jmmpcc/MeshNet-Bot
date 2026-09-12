@@ -199,6 +199,91 @@ class EmergencyAIEvolutionTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertIn("no sustentada", result.error)
 
+    def test_detection_count_only_cannot_infer_extent(self):
+        """Regresión IA-2E: detecciones 2->4 no autorizan afirmar mayor extensión.
+
+        Cómo se llama:
+            Simula la salida observada con proveedor real usando un evento cuyo
+            tracking solo contiene aumento del número de detecciones.
+
+        Funcionalidad:
+            Verifica que la nueva barrera determinista rechace cualquier mención de
+            extensión cuando el snapshot no contiene campos/reason de extensión.
+        """
+        detection_only = firms_event(
+            metadata={
+                "firms_phase": "growth",
+                "growth_reasons": ["increase_in_detection_count"],
+                "previous_detection_count": 2,
+                "latest_detection_count": 4,
+            }
+        )
+        ai = FakeAI(
+            response=AIResult(
+                ok=True,
+                status="available",
+                text=json.dumps({
+                    "explanation": (
+                        "Las detecciones aumentan de 2 a 4, indicando también un "
+                        "aumento de la extensión del posible foco detectado."
+                    ),
+                    "confidence": 0.95,
+                }),
+            )
+        )
+
+        result = EmergencyAIEvolutionExplainer(ai).explain(detection_only)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "error")
+        self.assertIn("sin evidencia determinista", result.error)
+
+    def test_detection_count_only_allows_detection_wording_and_prompt_forbids_inference(self):
+        """El mismo snapshot acepta una explicación limitada a lo observado."""
+        detection_only = firms_event(
+            metadata={
+                "firms_phase": "growth",
+                "growth_reasons": ["increase_in_detection_count"],
+                "previous_detection_count": 2,
+                "latest_detection_count": 4,
+            }
+        )
+        ai = FakeAI(
+            response=AIResult(
+                ok=True,
+                status="available",
+                text=json.dumps({
+                    "explanation": (
+                        "El número de detecciones satelitales aumenta de 2 a 4 "
+                        "respecto a la observación anterior."
+                    ),
+                    "confidence": 0.9,
+                }),
+            )
+        )
+
+        result = EmergencyAIEvolutionExplainer(ai).explain(detection_only)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.phase, "growth")
+        self.assertIn(
+            "describe únicamente el cambio del número de detecciones",
+            ai.last_system,
+        )
+        self.assertIn("No describas ningún otro cambio cuantitativo", ai.last_system)
+        prompt = json.loads(ai.last_prompt)
+        self.assertEqual(
+            prompt["constraints"]["firms_evidence"],
+            {"detections": True, "extent": False, "frp": False},
+        )
+        self.assertEqual(prompt["constraints"]["output_language"], "es")
+        self.assertEqual(
+            prompt["constraints"]["allowed_facts"],
+            ["El número de detecciones satelitales pasa de 2 a 4."],
+        )
+        self.assertIn("Responde SIEMPRE en español", ai.last_system)
+        self.assertIn("constraints.allowed_facts", ai.last_system)
+
     def test_truncation_reuses_safe_word_boundary_helper(self):
         """Evita que el límite IA-2C corte la explicación a mitad de palabra.
 

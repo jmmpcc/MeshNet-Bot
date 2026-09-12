@@ -38,6 +38,45 @@ from shared.meshnet_ai import MeshNetAI
 _ALLOWED_CHANGES = {"", "new", "updated", "resolved"}
 _TERMINAL_STATUSES = {"resolved", "cancelled", "expired", "closed"}
 
+# Formulaciones que convertirían una detección FIRMS en un incendio categórico.
+# Se aplican únicamente al resumen IA-2A de NASA FIRMS; las notas pueden mencionar
+# conceptos sensibles en forma de incertidumbre ("no se dispone de...").
+_FIRMS_UNSAFE_SUMMARY_PATTERNS = (
+    re.compile(
+        r"\bincendio(?:\s+forestal)?\b.{0,90}\b(?:actualmente\s+)?"
+        r"(?:activo|confirmado|controlado|extinguido|real)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:incendio|fuego)\b.{0,50}\b(?:está|esta|se\s+encuentra)\s+"
+        r"(?:activo|confirmado|controlado|extinguido)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:fase\s+de\s+)?(?:crecimiento|aumento)\s+del\s+incendio\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _firms_summary_is_safe(summary: str) -> bool:
+    """Valida que IA-2A no convierta NASA FIRMS en un incendio confirmado.
+
+    Cómo se llama:
+        ``_firms_summary_is_safe(summary)`` después de validar el JSON del
+        proveedor y antes de aceptar el resultado IA-2A.
+
+    Parámetros:
+        summary: resumen normalizado generado por el proveedor.
+
+    Funcionalidad:
+        Rechaza formulaciones categóricas observadas en pruebas reales, como
+        "incendio ... activo", "incendio confirmado" o "crecimiento del incendio".
+        No modifica el texto ni el evento y falla de forma segura con ``ok=False``.
+    """
+
+    return not any(pattern.search(summary) for pattern in _FIRMS_UNSAFE_SUMMARY_PATTERNS)
+
 
 @dataclass(frozen=True)
 class EmergencyAIAnalysis:
@@ -309,10 +348,17 @@ class EmergencyAIObserver:
             )
 
         system = (
-            "Eres un observador auxiliar de emergencias. No tomas decisiones operativas. "
+            "Eres un observador auxiliar de emergencias. Responde SIEMPRE en español. "
+            "No tomas decisiones operativas. "
             "No cambies categoría, severidad, verificación, estado ni fase. No inventes "
             "hechos ni conviertas una detección o medida observada en una consecuencia no "
-            "confirmada. En particular, para NASA FIRMS una 'extensión observada' o una "
+            "confirmada. Para NASA FIRMS, la fuente representa detecciones satelitales: habla "
+            "de 'detección FIRMS', 'evento satelital' o 'posible foco', nunca de un incendio "
+            "confirmado. Aunque category sea wildfire o status sea active, no escribas "
+            "'incendio activo', 'incendio forestal activo' ni equivalentes; si necesitas "
+            "reflejar status=active, di 'seguimiento/evento FIRMS activo'. La fase growth "
+            "describe evolución determinista de detecciones, no crecimiento físico del "
+            "incendio. En particular, para NASA FIRMS una 'extensión observada' o una "
             "extensión de cluster NO equivale a superficie o área afectada: conserva ese "
             "significado literal y no uses 'afecta', 'afectando' o equivalentes salvo que "
             "el dato de afectación esté explícitamente presente. Devuelve exclusivamente "
@@ -330,6 +376,7 @@ class EmergencyAIObserver:
                     "summary_max_chars": summary_limit,
                     "notes_max_chars": notes_limit,
                     "phase_is_authoritative": phase,
+                    "output_language": "es",
                 },
             },
             ensure_ascii=False,
@@ -378,6 +425,17 @@ class EmergencyAIObserver:
 
         summary = _fit_text(summary_raw, summary_limit)
         notes = _fit_text(notes_raw, notes_limit)
+
+        source = _clean_text(_event_value(event, "source", "")).casefold()
+        if source == "nasa_firms" and not _firms_summary_is_safe(summary):
+            return EmergencyAIAnalysis(
+                ok=False,
+                phase=phase,
+                status="error",
+                error="resumen FIRMS contiene una sobreafirmación no permitida",
+                duration_ms=result.duration_ms,
+            )
+
         if not summary:
             return EmergencyAIAnalysis(
                 ok=False,

@@ -21,7 +21,11 @@ from shared.meshnet_ai_emergencies import (
     _safe_event_payload,
     deterministic_phase,
 )
-from shared.meshnet_ai_emergency_evolution import _firms_explanation_is_safe
+from shared.meshnet_ai_emergency_evolution import (
+    _firms_evidence_constraints,
+    _firms_explanation_is_safe,
+    deterministic_evolution_snapshot,
+)
 
 
 _ALLOWED_RELATIONS = {"same_incident", "contextual", "unrelated", "uncertain"}
@@ -70,6 +74,101 @@ _FIRMS_CLAUSE_SPLIT_RE = re.compile(
     r"\s+\b(?:pero|aunque|sin\s+embargo|no\s+obstante|y\s+en\s+cambio)\b\s+",
     re.IGNORECASE,
 )
+
+_FIRMS_FRP_MENTION_RE = re.compile(r"\b(?:frp|potencia\s+radiante)\b", re.IGNORECASE)
+_FIRMS_OBSERVED_EXTENT_RE = re.compile(
+    r"\b(?:extensión|extension)\s+observada\b",
+    re.IGNORECASE,
+)
+
+# Prefijos muy acotados que expresan AUSENCIA de evidencia de una señal. Se usan
+# solo para permitir frases negativas como "no se dispone de información sobre
+# potencia radiante" cuando frp=false. No incluyen "no se puede evaluar ... más
+# allá de ..." porque esa construcción puede afirmar que la señal sí fue observada.
+_FIRMS_SIGNAL_ABSENCE_PREFIXES = (
+    re.compile(r"\bno\s+se\s+dispone\s+de\s+(?:datos|información)\b", re.IGNORECASE),
+    re.compile(r"\bno\s+hay\s+(?:datos|información)\b", re.IGNORECASE),
+    re.compile(r"\bsin\s+(?:datos|información)\b", re.IGNORECASE),
+)
+
+
+def _firms_signal_mentions_are_absence_only(
+    text: str,
+    mention_re: re.Pattern[str],
+) -> bool:
+    """Comprueba que una señal sin evidencia solo se cite para negar su existencia.
+
+    Cómo se llama:
+        ``_firms_signal_mentions_are_absence_only(text, mention_re)`` desde
+        ``_firms_brief_matches_evidence()``.
+
+    Parámetros:
+        text: texto generado por IA-2D.
+        mention_re: patrón que identifica la señal no disponible, por ejemplo FRP
+            o potencia radiante.
+
+    Funcionalidad:
+        Cada aparición de la señal debe estar precedida, dentro de la misma frase,
+        por un prefijo explícito de ausencia de datos. Permite expresar una
+        incertidumbre real ("no hay datos de FRP") sin aceptar afirmaciones de que
+        el FRP fue observado. No modifica el texto ni relaja otras barreras.
+    """
+
+    matches = list(mention_re.finditer(text))
+    if not matches:
+        return True
+
+    for match in matches:
+        sentence_start = max(
+            text.rfind(".", 0, match.start()),
+            text.rfind("!", 0, match.start()),
+            text.rfind("?", 0, match.start()),
+            text.rfind("\n", 0, match.start()),
+        ) + 1
+        prefix = text[sentence_start:match.start()]
+        if not any(pattern.search(prefix) for pattern in _FIRMS_SIGNAL_ABSENCE_PREFIXES):
+            return False
+
+    return True
+
+
+def _firms_brief_matches_evidence(
+    text: str,
+    evidence: Mapping[str, bool],
+) -> bool:
+    """Impide citar señales FIRMS que no existen en el evento determinista.
+
+    Cómo se llama:
+        ``_firms_brief_matches_evidence(text, evidence)`` sobre ``brief`` y
+        ``uncertainties`` después de la barrera semántica general.
+
+    Parámetros:
+        text: texto generado por IA-2D.
+        evidence: matriz booleana detections/extent/frp derivada del evento.
+
+    Funcionalidad:
+        Si no existen datos FRP, solo permite mencionar FRP/potencia radiante para
+        expresar de forma explícita que NO existen datos de esa señal. Cualquier
+        mención afirmativa sigue bloqueada. Si no existen datos de extensión
+        observada, bloquea afirmaciones de "extensión observada". Las
+        incertidumbres genéricas sobre no poder determinar superficie/extensión
+        real siguen permitidas.
+    """
+
+    if (
+        not evidence.get("frp", False)
+        and not _firms_signal_mentions_are_absence_only(
+            text,
+            _FIRMS_FRP_MENTION_RE,
+        )
+    ):
+        return False
+    if (
+        not evidence.get("extent", False)
+        and _FIRMS_OBSERVED_EXTENT_RE.search(text)
+    ):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -324,6 +423,12 @@ class EmergencyAISituationalBriefBuilder:
         )
         phase = _clean_text(snapshot.get("phase")) or "unknown"
         component_names = tuple(snapshot["shadow_components"].keys())
+        source = _clean_text(_event_value(event, "source", "")).casefold()
+        firms_evidence = (
+            _firms_evidence_constraints(deterministic_evolution_snapshot(event))
+            if source == "nasa_firms"
+            else {"detections": False, "extent": False, "frp": False}
+        )
 
         if not self.ai.config.enabled:
             return EmergencyAISituationalBrief(False, phase=phase, components=component_names, status="disabled", error="IA desactivada")
@@ -353,24 +458,33 @@ class EmergencyAISituationalBriefBuilder:
                     "informational_only": True,
                     "no_new_facts": True,
                     "no_operational_decisions": True,
+                    "output_language": "es",
+                    "firms_evidence": firms_evidence,
                 },
             },
             ensure_ascii=False,
             sort_keys=True,
         )
         system = (
-            "Eres un sintetizador auxiliar de emergencias en modo sombra. Usa SOLO los "
+            "Eres un sintetizador auxiliar de emergencias en modo sombra. Responde SIEMPRE "
+            "en español. Usa SOLO los "
             "datos incluidos en input; no añadas hechos, causalidad ni inferencias nuevas. "
             "La fase determinista es autoritativa y no puede cambiarse. No decidas prioridad, "
             "severidad, verificación, resolución, envío, evacuación ni ninguna acción. No "
-            "conviertas una correlación same_incident en confirmación operativa. Para NASA "
-            "FIRMS debes hablar siempre de posible foco, evento satelital o detecciones; no "
-            "afirmes incendio confirmado ni describas una fase de crecimiento del incendio. "
-            "Tampoco afirmes que el incendio está activo, controlado, extinguido o confirmado "
-            "solo a partir de FIRMS. La fase growth describe la evolución determinista de las "
-            "detecciones FIRMS y stable no significa extinguido. Extensión significa extensión "
-            "observada de detecciones y no superficie afectada/quemada; FRP es potencia "
-            "radiante observada y no autoriza afirmar intensidad del incendio. Puedes indicar "
+            "conviertas una correlación same_incident en confirmación operativa. Los textos de "
+            "componentes sombra son auxiliares y NO son autoridad semántica: no copies literalmente "
+            "una formulación si contradice estas restricciones. Para NASA FIRMS debes hablar siempre "
+            "de posible foco, evento satelital o detecciones; no afirmes incendio confirmado ni "
+            "describas una fase de crecimiento del incendio. Tampoco afirmes que el incendio está "
+            "activo, controlado, extinguido o confirmado solo a partir de FIRMS. Para phase=growth "
+            "prefiere formulaciones como 'aumento de detecciones FIRMS observadas' o 'detecciones "
+            "FIRMS en fase determinista growth', únicamente cuando esos datos estén presentes. "
+            "Evita expresamente 'incendio activo', 'crecimiento del incendio', 'fase de crecimiento "
+            "del incendio' y equivalentes, aunque aparezcan en un componente sombra. La fase growth "
+            "describe la evolución determinista de las detecciones FIRMS y stable no significa "
+            "extinguido. Respeta constraints.firms_evidence como lista cerrada: "
+            "si frp=false no menciones FRP ni potencia radiante; si extent=false no afirmes "
+            "que existe extensión observada. Puedes indicar "
             "en uncertainties que una superficie o intensidad NO puede determinarse con estos "
             "datos. Devuelve exclusivamente JSON con brief, uncertainties y confidence. brief "
             "y uncertainties deben ser cadenas; confidence debe ser un número JSON finito entre 0 y 1."
@@ -396,10 +510,17 @@ class EmergencyAISituationalBriefBuilder:
         if not brief:
             return EmergencyAISituationalBrief(False, phase=phase, components=component_names, status="error", error="respuesta de brief vacía", duration_ms=result.duration_ms)
 
-        source = _clean_text(_event_value(event, "source", "")).casefold()
         if source == "nasa_firms" and (
             not _firms_brief_text_is_safe(brief)
             or (uncertainties and not _firms_brief_text_is_safe(uncertainties))
+            or not _firms_brief_matches_evidence(brief, firms_evidence)
+            or (
+                uncertainties
+                and not _firms_brief_matches_evidence(
+                    uncertainties,
+                    firms_evidence,
+                )
+            )
         ):
             return EmergencyAISituationalBrief(False, phase=phase, components=component_names, status="error", error="brief FIRMS contiene una sobreafirmación no permitida", duration_ms=result.duration_ms)
 

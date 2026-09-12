@@ -163,11 +163,18 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
         self.assertEqual(result.confidence, 0.88)
         self.assertEqual(result.status, "available")
         self.assertEqual(set(result.components), {"ia2a_analysis", "ia2c_evolution", "ia2b_correlations"})
-        self.assertIn("no_operational_decisions", json.loads(ai.last_prompt)["constraints"])
+        constraints = json.loads(ai.last_prompt)["constraints"]
+        self.assertIn("no_operational_decisions", constraints)
+        self.assertEqual(constraints["output_language"], "es")
+        self.assertIn("Responde SIEMPRE en español", ai.last_system)
         self.assertIn("No decidas prioridad", ai.last_system)
         self.assertIn("posible foco", ai.last_system)
         self.assertIn("ni describas una fase de crecimiento del incendio", ai.last_system.casefold())
         self.assertIn("stable no significa extinguido", ai.last_system.casefold())
+        self.assertEqual(
+            constraints["firms_evidence"],
+            {"detections": False, "extent": False, "frp": False},
+        )
 
     def test_non_string_text_fields_are_rejected(self):
         for bad in (["texto"], None, {"x": 1}):
@@ -210,6 +217,102 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
         result = EmergencyAISituationalBriefBuilder(ai).build(event(), evolution=evolution())
         self.assertTrue(result.ok)
         self.assertIn("superficie afectada", result.uncertainties)
+
+    def test_firms_absent_frp_can_be_stated_as_missing_information(self):
+        """Regresión IA-2E: negar datos FRP ausentes no es una sobreafirmación.
+
+        Cómo se llama:
+            Reproduce la frase real devuelta por el proveedor en Raspberry.
+
+        Funcionalidad:
+            Verifica que, con frp=false, una frase que diga explícitamente que no
+            se dispone de información sobre potencia radiante sea aceptada.
+        """
+        ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({
+            "brief": (
+                "Posible foco FIRMS con aumento del número de detecciones. "
+                "No se dispone de información sobre la extensión o potencia "
+                "radiante del fenómeno."
+            ),
+            "uncertainties": (
+                "No es posible determinar con los datos disponibles la superficie "
+                "afectada ni la intensidad precisa del posible evento."
+            ),
+            "confidence": 0.9,
+        })))
+
+        result = EmergencyAISituationalBriefBuilder(ai).build(
+            event(),
+            analysis=analysis(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertIn("No se dispone de información", result.brief)
+
+    def test_firms_frp_mention_without_frp_evidence_is_rejected(self):
+        """Regresión IA-2E: IA-2D no puede inventar potencia radiante observada.
+
+        Cómo se llama:
+            Reproduce la incertidumbre observada en Raspberry, donde el proveedor
+            mencionó potencia radiante pese a que el evento no incluía ningún dato
+            FRP.
+
+        Funcionalidad:
+            Comprueba que la barrera de evidencia rechace cualquier mención de FRP
+            o potencia radiante cuando ``firms_evidence["frp"]`` es False.
+        """
+        ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({
+            "brief": "Posible foco FIRMS en seguimiento satelital.",
+            "uncertainties": (
+                "No puede evaluarse la intensidad real más allá de la potencia "
+                "radiante observada por FIRMS."
+            ),
+            "confidence": 0.8,
+        })))
+
+        result = EmergencyAISituationalBriefBuilder(ai).build(
+            event(),
+            analysis=analysis(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("sobreafirmación", result.error)
+        constraints = json.loads(ai.last_prompt)["constraints"]
+        self.assertEqual(constraints["firms_evidence"]["frp"], False)
+
+    def test_firms_prompt_does_not_trust_unsafe_shadow_wording(self):
+        """Regresión IA-2E: IA-2D debe reformular texto sombra potencialmente inseguro.
+
+        La salida simulada es segura, pero la entrada IA-2A contiene la formulación
+        "incendio activo". El prompt debe indicar explícitamente que los componentes
+        sombra no son autoridad semántica y que esa expresión no debe copiarse.
+        """
+        unsafe_analysis = {
+            **analysis(),
+            "summary": (
+                "La detección FIRMS indica un evento de incendio forestal activo "
+                "no verificado."
+            ),
+        }
+        ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({
+            "brief": (
+                "Posible foco observado por FIRMS con aumento de detecciones "
+                "satelitales en la fase determinista growth."
+            ),
+            "uncertainties": "La detección satelital no confirma un incendio.",
+            "confidence": 0.85,
+        })))
+
+        result = EmergencyAISituationalBriefBuilder(ai).build(
+            event(),
+            analysis=unsafe_analysis,
+            evolution=evolution(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertIn("NO son autoridad semántica", ai.last_system)
+        self.assertIn("aunque aparezcan en un componente sombra", ai.last_system)
+        self.assertIn("Evita expresamente 'incendio activo'", ai.last_system)
 
     def test_firms_categorical_fire_growth_is_rejected(self):
         """La fase growth de FIRMS nunca debe convertirse en crecimiento del incendio."""
