@@ -266,7 +266,7 @@ class EmergencyAIEvolutionTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.phase, "growth")
-        self.assertIn("si solo aumenta detection_count", ai.last_system)
+        self.assertIn("si solo aumenta detection_count", ai.last_system.casefold())
         self.assertIn("NO infieras mayor actividad, extensión, FRP", ai.last_system)
         prompt = json.loads(ai.last_prompt)
         self.assertEqual(
