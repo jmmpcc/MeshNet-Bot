@@ -353,13 +353,15 @@ class EmergencyAISituationalBriefBuilder:
                     "informational_only": True,
                     "no_new_facts": True,
                     "no_operational_decisions": True,
+                    "output_language": "es",
                 },
             },
             ensure_ascii=False,
             sort_keys=True,
         )
         system = (
-            "Eres un sintetizador auxiliar de emergencias en modo sombra. Usa SOLO los "
+            "Eres un sintetizador auxiliar de emergencias en modo sombra. Responde SIEMPRE "
+            "en español. Usa SOLO los "
             "datos incluidos en input; no añadas hechos, causalidad ni inferencias nuevas. "
             "La fase determinista es autoritativa y no puede cambiarse. No decidas prioridad, "
             "severidad, verificación, resolución, envío, evacuación ni ninguna acción. No "
