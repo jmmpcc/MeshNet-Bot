@@ -348,7 +348,8 @@ class EmergencyAIObserver:
             )
 
         system = (
-            "Eres un observador auxiliar de emergencias. No tomas decisiones operativas. "
+            "Eres un observador auxiliar de emergencias. Responde SIEMPRE en español. "
+            "No tomas decisiones operativas. "
             "No cambies categoría, severidad, verificación, estado ni fase. No inventes "
             "hechos ni conviertas una detección o medida observada en una consecuencia no "
             "confirmada. Para NASA FIRMS, la fuente representa detecciones satelitales: habla "
@@ -375,6 +376,7 @@ class EmergencyAIObserver:
                     "summary_max_chars": summary_limit,
                     "notes_max_chars": notes_limit,
                     "phase_is_authoritative": phase,
+                    "output_language": "es",
                 },
             },
             ensure_ascii=False,
