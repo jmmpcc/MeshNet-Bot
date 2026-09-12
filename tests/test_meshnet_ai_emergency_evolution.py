@@ -273,6 +273,13 @@ class EmergencyAIEvolutionTests(unittest.TestCase):
             prompt["constraints"]["firms_evidence"],
             {"detections": True, "extent": False, "frp": False},
         )
+        self.assertEqual(prompt["constraints"]["output_language"], "es")
+        self.assertEqual(
+            prompt["constraints"]["allowed_facts"],
+            ["El número de detecciones satelitales pasa de 2 a 4."],
+        )
+        self.assertIn("Responde SIEMPRE en español", ai.last_system)
+        self.assertIn("constraints.allowed_facts", ai.last_system)
 
     def test_truncation_reuses_safe_word_boundary_helper(self):
         """Evita que el límite IA-2C corte la explicación a mitad de palabra.
