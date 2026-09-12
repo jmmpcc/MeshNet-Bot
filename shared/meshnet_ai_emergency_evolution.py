@@ -213,6 +213,71 @@ def _firms_explanation_matches_snapshot(
     return True
 
 
+def _firms_evidence_constraints(snapshot: Mapping[str, Any]) -> dict[str, bool]:
+    """Resume qué tipos de señal FIRMS están presentes de forma determinista.
+
+    Cómo se llama:
+        ``_firms_evidence_constraints(snapshot)`` al construir el prompt IA-2C.
+
+    Parámetros:
+        snapshot: salida de ``deterministic_evolution_snapshot()``.
+
+    Funcionalidad:
+        Expone tres booleanos independientes (detections, extent, frp) para que el
+        proveedor conozca exactamente qué conceptos puede describir. La función no
+        infiere significado operativo y no modifica el snapshot.
+    """
+
+    tracking = snapshot.get("firms_tracking", {})
+    if not isinstance(tracking, Mapping):
+        tracking = {}
+
+    growth_reasons_raw = tracking.get("growth_reasons", ())
+    if isinstance(growth_reasons_raw, (list, tuple, set)):
+        growth_reasons = {
+            _clean_text(value).casefold()
+            for value in growth_reasons_raw
+            if _clean_text(value)
+        }
+    else:
+        growth_reasons = set()
+
+    detections = (
+        any(
+            tracking.get(key) not in (None, "")
+            for key in (
+                "previous_detection_count",
+                "latest_detection_count",
+                "incident_peak_detection_count",
+            )
+        )
+        or any("detection" in reason for reason in growth_reasons)
+    )
+    extent = (
+        "extent" in growth_reasons
+        or any(
+            tracking.get(key) not in (None, "")
+            for key in (
+                "previous_extent_km",
+                "latest_extent_km",
+                "incident_peak_extent_km",
+            )
+        )
+    )
+    frp = (
+        "frp" in growth_reasons
+        or any(
+            tracking.get(key) not in (None, "")
+            for key in (
+                "previous_frp_total_mw",
+                "latest_frp_total_mw",
+                "incident_peak_frp_total_mw",
+            )
+        )
+    )
+    return {"detections": detections, "extent": extent, "frp": frp}
+
+
 class EmergencyAIEvolutionExplainer:
     """Explicador IA-2C en sombra de una evolución ya determinada.
 
@@ -297,6 +362,7 @@ class EmergencyAIEvolutionExplainer:
                     "explanation_max_chars": explanation_limit,
                     "informational_only": True,
                     "phase_is_authoritative": True,
+                    "firms_evidence": _firms_evidence_constraints(snapshot),
                 },
             },
             ensure_ascii=False,
@@ -313,8 +379,11 @@ class EmergencyAIEvolutionExplainer:
             "observada del conjunto de detecciones satelitales: nunca la llames área/superficie "
             "afectada o quemada. El FRP es potencia radiante observada y no debe describirse "
             "como intensidad del incendio. Cada concepto citado debe estar respaldado por "
-            "su señal determinista correspondiente: si solo aumenta detection_count, describe "
-            "únicamente un aumento de detecciones y NO infieras mayor actividad, extensión, FRP, "
+            "su señal determinista correspondiente. Usa constraints.firms_evidence como "
+            "lista cerrada: si extent=false no menciones extensión; si frp=false no menciones "
+            "FRP/potencia radiante; si detections=true puedes describir el cambio de detecciones. "
+            "Si solo aumenta detection_count, describe únicamente un aumento de detecciones y "
+            "NO infieras mayor actividad, extensión, FRP, "
             "superficie o intensidad. Solo puedes mencionar cambios de extensión cuando existan "
             "campos de extensión o growth_reasons=extent, y FRP cuando existan campos FRP o "
             "growth_reasons=frp. growth_reasons son señales deterministas ya calculadas. stable "
