@@ -171,6 +171,10 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
         self.assertIn("posible foco", ai.last_system)
         self.assertIn("ni describas una fase de crecimiento del incendio", ai.last_system.casefold())
         self.assertIn("stable no significa extinguido", ai.last_system.casefold())
+        self.assertEqual(
+            constraints["firms_evidence"],
+            {"detections": False, "extent": False, "frp": False},
+        )
 
     def test_non_string_text_fields_are_rejected(self):
         for bad in (["texto"], None, {"x": 1}):
@@ -213,6 +217,37 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
         result = EmergencyAISituationalBriefBuilder(ai).build(event(), evolution=evolution())
         self.assertTrue(result.ok)
         self.assertIn("superficie afectada", result.uncertainties)
+
+    def test_firms_frp_mention_without_frp_evidence_is_rejected(self):
+        """Regresión IA-2E: IA-2D no puede inventar potencia radiante observada.
+
+        Cómo se llama:
+            Reproduce la incertidumbre observada en Raspberry, donde el proveedor
+            mencionó potencia radiante pese a que el evento no incluía ningún dato
+            FRP.
+
+        Funcionalidad:
+            Comprueba que la barrera de evidencia rechace cualquier mención de FRP
+            o potencia radiante cuando ``firms_evidence["frp"]`` es False.
+        """
+        ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({
+            "brief": "Posible foco FIRMS en seguimiento satelital.",
+            "uncertainties": (
+                "No puede evaluarse la intensidad real más allá de la potencia "
+                "radiante observada por FIRMS."
+            ),
+            "confidence": 0.8,
+        })))
+
+        result = EmergencyAISituationalBriefBuilder(ai).build(
+            event(),
+            analysis=analysis(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("sobreafirmación", result.error)
+        constraints = json.loads(ai.last_prompt)["constraints"]
+        self.assertEqual(constraints["firms_evidence"]["frp"], False)
 
     def test_firms_prompt_does_not_trust_unsafe_shadow_wording(self):
         """Regresión IA-2E: IA-2D debe reformular texto sombra potencialmente inseguro.
