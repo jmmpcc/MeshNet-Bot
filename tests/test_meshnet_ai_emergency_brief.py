@@ -211,6 +211,40 @@ class EmergencyAISituationalBriefTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("superficie afectada", result.uncertainties)
 
+    def test_firms_prompt_does_not_trust_unsafe_shadow_wording(self):
+        """Regresión IA-2E: IA-2D debe reformular texto sombra potencialmente inseguro.
+
+        La salida simulada es segura, pero la entrada IA-2A contiene la formulación
+        "incendio activo". El prompt debe indicar explícitamente que los componentes
+        sombra no son autoridad semántica y que esa expresión no debe copiarse.
+        """
+        unsafe_analysis = {
+            **analysis(),
+            "summary": (
+                "La detección FIRMS indica un evento de incendio forestal activo "
+                "no verificado."
+            ),
+        }
+        ai = FakeAI(response=AIResult(ok=True, status="available", text=json.dumps({
+            "brief": (
+                "Posible foco observado por FIRMS con aumento de detecciones "
+                "satelitales en la fase determinista growth."
+            ),
+            "uncertainties": "La detección satelital no confirma un incendio.",
+            "confidence": 0.85,
+        })))
+
+        result = EmergencyAISituationalBriefBuilder(ai).build(
+            event(),
+            analysis=unsafe_analysis,
+            evolution=evolution(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertIn("NO son autoridad semántica", ai.last_system)
+        self.assertIn("aunque aparezcan en un componente sombra", ai.last_system)
+        self.assertIn("Evita expresamente 'incendio activo'", ai.last_system)
+
     def test_firms_categorical_fire_growth_is_rejected(self):
         """La fase growth de FIRMS nunca debe convertirse en crecimiento del incendio."""
 
