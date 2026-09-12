@@ -113,6 +113,8 @@ class EmergencyAIObserverTests(unittest.TestCase):
         self.assertEqual(payload["event"]["latitude"], 41.65)
         self.assertEqual(payload["event"]["longitude"], -0.88)
         self.assertNotIn("metadata", payload["event"])
+        self.assertEqual(payload["constraints"]["output_language"], "es")
+        self.assertIn("Responde SIEMPRE en español", ai.last_system)
 
     def test_summary_and_notes_respect_exact_limits(self):
         response = AIResult(ok=True, status="available", text=json.dumps({
