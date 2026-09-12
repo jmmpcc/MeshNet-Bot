@@ -16,7 +16,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from shared.meshnet_ai import MeshNetAI
 from shared.meshnet_ai_emergencies import (
