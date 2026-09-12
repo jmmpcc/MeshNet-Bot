@@ -152,6 +152,56 @@ class EmergencyAIObserverTests(unittest.TestCase):
         self.assertNotEqual(result.summary[-3:], "18.")
         self.assertLessEqual(len(result.summary), 95)
 
+    def test_firms_categorical_active_fire_summary_is_rejected(self):
+        """Regresión IA-2E: FIRMS no puede convertirse en incendio activo.
+
+        Cómo se llama:
+            Simula la formulación observada en Raspberry con proveedor real.
+
+        Funcionalidad:
+            Verifica que IA-2A rechace un resumen que convierta una detección
+            satelital FIRMS en un incendio forestal actualmente activo.
+        """
+        ai = FakeAI(response=AIResult(
+            ok=True,
+            status="available",
+            text=json.dumps({
+                "summary": (
+                    "Se reporta un evento sintético de incendio forestal detectado "
+                    "por NASA FIRMS, actualmente activo."
+                ),
+                "notes": "Evento sintético de prueba.",
+                "confidence": 0.8,
+            }),
+        ))
+
+        result = EmergencyAIObserver(ai).analyze_event(sample_event(), change="updated")
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "error")
+        self.assertIn("sobreafirmación", result.error)
+
+    def test_firms_possible_focus_summary_is_allowed(self):
+        """Una formulación FIRMS prudente debe seguir siendo válida."""
+        ai = FakeAI(response=AIResult(
+            ok=True,
+            status="available",
+            text=json.dumps({
+                "summary": (
+                    "Detección FIRMS compatible con un posible foco en seguimiento "
+                    "satelital activo."
+                ),
+                "notes": "La detección no confirma por sí sola un incendio.",
+                "confidence": 0.8,
+            }),
+        ))
+
+        result = EmergencyAIObserver(ai).analyze_event(sample_event(), change="updated")
+
+        self.assertTrue(result.ok)
+        self.assertIn("posible foco", result.summary)
+        self.assertIn("seguimiento/evento FIRMS activo", ai.last_system)
+
     def test_firms_prompt_forbids_turning_extent_into_affected_area(self):
         response = AIResult(ok=True, status="available", text=json.dumps({
             "summary": "Posible foco FIRMS en observación.",
