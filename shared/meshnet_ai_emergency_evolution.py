@@ -278,6 +278,51 @@ def _firms_evidence_constraints(snapshot: Mapping[str, Any]) -> dict[str, bool]:
     return {"detections": detections, "extent": extent, "frp": frp}
 
 
+def _firms_allowed_facts(snapshot: Mapping[str, Any]) -> tuple[str, ...]:
+    """Construye hechos FIRMS permitidos a partir del snapshot determinista.
+
+    Cómo se llama:
+        ``_firms_allowed_facts(snapshot)`` al preparar el prompt IA-2C.
+
+    Parámetros:
+        snapshot: snapshot creado por ``deterministic_evolution_snapshot()``.
+
+    Funcionalidad:
+        Devuelve exclusivamente afirmaciones literales respaldadas por datos
+        deterministas. No interpreta causalidad, superficie afectada, intensidad
+        ni estado físico de un incendio.
+    """
+
+    tracking = snapshot.get("firms_tracking", {})
+    if not isinstance(tracking, Mapping):
+        return ()
+
+    facts: list[str] = []
+    previous_count = tracking.get("previous_detection_count")
+    latest_count = tracking.get("latest_detection_count")
+    if previous_count not in (None, "") and latest_count not in (None, ""):
+        facts.append(
+            f"El número de detecciones satelitales pasa de {previous_count} a {latest_count}."
+        )
+
+    previous_extent = tracking.get("previous_extent_km")
+    latest_extent = tracking.get("latest_extent_km")
+    if previous_extent not in (None, "") and latest_extent not in (None, ""):
+        facts.append(
+            "La extensión observada del conjunto de detecciones pasa de "
+            f"{previous_extent} km a {latest_extent} km."
+        )
+
+    previous_frp = tracking.get("previous_frp_total_mw")
+    latest_frp = tracking.get("latest_frp_total_mw")
+    if previous_frp not in (None, "") and latest_frp not in (None, ""):
+        facts.append(
+            f"El FRP total observado pasa de {previous_frp} MW a {latest_frp} MW."
+        )
+
+    return tuple(facts)
+
+
 class EmergencyAIEvolutionExplainer:
     """Explicador IA-2C en sombra de una evolución ya determinada.
 
@@ -363,13 +408,18 @@ class EmergencyAIEvolutionExplainer:
                     "informational_only": True,
                     "phase_is_authoritative": True,
                     "firms_evidence": _firms_evidence_constraints(snapshot),
+                    "allowed_facts": _firms_allowed_facts(snapshot),
+                    "output_language": "es",
                 },
             },
             ensure_ascii=False,
             sort_keys=True,
         )
         system = (
-            "Eres un observador auxiliar de evolución de emergencias. La fase incluida "
+            "Eres un observador auxiliar de evolución de emergencias. Responde SIEMPRE "
+            "en español. Usa únicamente los hechos de constraints.allowed_facts para "
+            "describir cambios cuantitativos; no añadas otros cambios aunque parezcan "
+            "plausibles. La fase incluida "
             "en deterministic_evolution ya ha sido decidida por lógica determinista y "
             "es autoritativa: NO la cambies, recalcules ni contradigas. Explica únicamente "
             "qué datos observados justifican o describen esa evolución. No cambies categoría, "
