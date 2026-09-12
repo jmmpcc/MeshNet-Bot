@@ -81,6 +81,56 @@ _FIRMS_OBSERVED_EXTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Prefijos muy acotados que expresan AUSENCIA de evidencia de una señal. Se usan
+# solo para permitir frases negativas como "no se dispone de información sobre
+# potencia radiante" cuando frp=false. No incluyen "no se puede evaluar ... más
+# allá de ..." porque esa construcción puede afirmar que la señal sí fue observada.
+_FIRMS_SIGNAL_ABSENCE_PREFIXES = (
+    re.compile(r"\bno\s+se\s+dispone\s+de\s+(?:datos|información)\b", re.IGNORECASE),
+    re.compile(r"\bno\s+hay\s+(?:datos|información)\b", re.IGNORECASE),
+    re.compile(r"\bsin\s+(?:datos|información)\b", re.IGNORECASE),
+)
+
+
+def _firms_signal_mentions_are_absence_only(
+    text: str,
+    mention_re: re.Pattern[str],
+) -> bool:
+    """Comprueba que una señal sin evidencia solo se cite para negar su existencia.
+
+    Cómo se llama:
+        ``_firms_signal_mentions_are_absence_only(text, mention_re)`` desde
+        ``_firms_brief_matches_evidence()``.
+
+    Parámetros:
+        text: texto generado por IA-2D.
+        mention_re: patrón que identifica la señal no disponible, por ejemplo FRP
+            o potencia radiante.
+
+    Funcionalidad:
+        Cada aparición de la señal debe estar precedida, dentro de la misma frase,
+        por un prefijo explícito de ausencia de datos. Permite expresar una
+        incertidumbre real ("no hay datos de FRP") sin aceptar afirmaciones de que
+        el FRP fue observado. No modifica el texto ni relaja otras barreras.
+    """
+
+    matches = list(mention_re.finditer(text))
+    if not matches:
+        return True
+
+    for match in matches:
+        sentence_start = max(
+            text.rfind(".", 0, match.start()),
+            text.rfind("!", 0, match.start()),
+            text.rfind("?", 0, match.start()),
+            text.rfind("\n", 0, match.start()),
+        ) + 1
+        prefix = text[sentence_start:match.start()]
+        if not any(pattern.search(prefix) for pattern in _FIRMS_SIGNAL_ABSENCE_PREFIXES):
+            return False
+
+    return True
+
 
 def _firms_brief_matches_evidence(
     text: str,
@@ -97,13 +147,21 @@ def _firms_brief_matches_evidence(
         evidence: matriz booleana detections/extent/frp derivada del evento.
 
     Funcionalidad:
-        Si no existen datos FRP, bloquea cualquier mención de FRP o potencia
-        radiante. Si no existen datos de extensión observada, bloquea afirmaciones
-        de "extensión observada". Las incertidumbres genéricas sobre no poder
-        determinar superficie/extensión real siguen permitidas.
+        Si no existen datos FRP, solo permite mencionar FRP/potencia radiante para
+        expresar de forma explícita que NO existen datos de esa señal. Cualquier
+        mención afirmativa sigue bloqueada. Si no existen datos de extensión
+        observada, bloquea afirmaciones de "extensión observada". Las
+        incertidumbres genéricas sobre no poder determinar superficie/extensión
+        real siguen permitidas.
     """
 
-    if not evidence.get("frp", False) and _FIRMS_FRP_MENTION_RE.search(text):
+    if (
+        not evidence.get("frp", False)
+        and not _firms_signal_mentions_are_absence_only(
+            text,
+            _FIRMS_FRP_MENTION_RE,
+        )
+    ):
         return False
     if (
         not evidence.get("extent", False)
