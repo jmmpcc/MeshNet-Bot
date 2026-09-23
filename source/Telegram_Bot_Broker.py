@@ -16916,21 +16916,21 @@ async def parar_escucha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     chat_id = update.effective_chat.id
     now_ts = int(datetime.now(tz=timezone.utc).timestamp())
     context.bot_data[f"escucha_last_stop_{chat_id}"] = now_ts
-    await update.effective_message.reply_text("🛑 Escucha detenida. Registraré y reproduciré lo perdido cuando vuelvas a /escuchar.")
 
-    # Estado previo para informar
+    # Estado previo para informar y persistir antes de cualquier await. Así, una
+    # caída justo después de recibir /parar_escucha no reactivará la escucha.
     prev_state = context.chat_data.get("listen_state") or {}
     prev_chan = prev_state.get("channel", None)
     canal_txt = "todos los canales" if prev_chan is None else f"canal {prev_chan}"
     was_active = bool(prev_state.get("active"))
 
-    # Persistir primero la intención de parada. Si el proceso cae durante la
-    # cancelación runtime, el siguiente arranque no reactivará esta escucha.
     _persist_listener_preference(
         chat_id=chat_id,
         enabled=False,
         channel=prev_chan,
     )
+
+    await update.effective_message.reply_text("🛑 Escucha detenida. Registraré y reproduciré lo perdido cuando vuelvas a /escuchar.")
 
     # === NUEVO: decrementar contador global si esta escucha estaba contabilizada
     try:
@@ -17058,18 +17058,18 @@ async def escuchar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception:
         pass
 
-    # Lanzar la task del bucle de escucha antes de tareas auxiliares para que
-    # /escuchar all confirme inmediatamente que la escucha queda activa.
-    task = asyncio.create_task(_broker_listen_loop(update.effective_chat.id, listen_chan, context))
-    context.chat_data["listen_task"] = task
-
-    # Persistir únicamente la intención estable. La task y el writer pertenecen
-    # al proceso actual y se reconstruyen después de cada reinicio.
+    # Persistir la intención antes de crear la task. Si el proceso cae en este
+    # punto, el siguiente arranque reconstruirá la escucha solicitada.
     _persist_listener_preference(
         chat_id=update.effective_chat.id,
         enabled=True,
         channel=listen_chan,
     )
+
+    # Lanzar la task del bucle de escucha antes de tareas auxiliares para que
+    # /escuchar all confirme inmediatamente que la escucha queda activa.
+    task = asyncio.create_task(_broker_listen_loop(update.effective_chat.id, listen_chan, context))
+    context.chat_data["listen_task"] = task
 
     fuente_msg = "Meshtastic/MeshCore" if listen_chan is None else "del broker"
     await update.effective_message.reply_text(
