@@ -35,6 +35,7 @@ import time
 from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 from datetime import datetime, timedelta, UTC
@@ -122,6 +123,10 @@ from meshtastic_api_adapter import (
 from tcpinterface_persistent import TCPInterfacePool
 
 from radio_profile import PROFILE_MESHCORE_ONLY, normalize_radio_profile
+from telegram_listen_state import (
+    load_state as load_listen_state,
+    set_listener as set_persisted_listener,
+)
 
 import builtins, sys, time, re
 _builtin_print = builtins.print
@@ -16919,6 +16924,14 @@ async def parar_escucha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     canal_txt = "todos los canales" if prev_chan is None else f"canal {prev_chan}"
     was_active = bool(prev_state.get("active"))
 
+    # Persistir primero la intención de parada. Si el proceso cae durante la
+    # cancelación runtime, el siguiente arranque no reactivará esta escucha.
+    _persist_listener_preference(
+        chat_id=chat_id,
+        enabled=False,
+        channel=prev_chan,
+    )
+
     # === NUEVO: decrementar contador global si esta escucha estaba contabilizada
     try:
         if prev_state.get("active_was_counted"):
@@ -17049,6 +17062,14 @@ async def escuchar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # /escuchar all confirme inmediatamente que la escucha queda activa.
     task = asyncio.create_task(_broker_listen_loop(update.effective_chat.id, listen_chan, context))
     context.chat_data["listen_task"] = task
+
+    # Persistir únicamente la intención estable. La task y el writer pertenecen
+    # al proceso actual y se reconstruyen después de cada reinicio.
+    _persist_listener_preference(
+        chat_id=update.effective_chat.id,
+        enabled=True,
+        channel=listen_chan,
+    )
 
     fuente_msg = "Meshtastic/MeshCore" if listen_chan is None else "del broker"
     await update.effective_message.reply_text(
@@ -18093,6 +18114,98 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         pass
 
+def _persist_listener_preference(
+    *,
+    chat_id: int,
+    enabled: bool,
+    channel: Optional[int],
+) -> None:
+    """Guarda la intención de escucha sin afectar al flujo del bot si falla el disco."""
+    try:
+        set_persisted_listener(
+            chat_id,
+            enabled=enabled,
+            channel=channel,
+        )
+    except Exception as exc:
+        log(
+            f"⚠️ No se pudo persistir escucha Telegram "
+            f"(chat={chat_id}, enabled={enabled}, channel={channel}): {exc}"
+        )
+
+
+async def _restore_persisted_listeners(app: Application) -> None:
+    """Reconstruye las escuchas habilitadas usando el estado runtime normal del bot."""
+    app.bot_data["listen_active_count"] = 0
+
+    try:
+        state = load_listen_state()
+    except Exception as exc:
+        log(f"⚠️ No se pudo cargar el estado persistente de escucha Telegram: {exc}")
+        return
+
+    listeners = state.get("listeners") or {}
+    if not isinstance(listeners, dict):
+        return
+
+    restored = 0
+    for raw_chat_id, spec in listeners.items():
+        if not isinstance(spec, dict) or spec.get("enabled") is not True:
+            continue
+
+        try:
+            chat_id = int(raw_chat_id)
+            raw_channel = spec.get("channel")
+            listen_chan = None if raw_channel is None else int(raw_channel)
+        except (TypeError, ValueError):
+            log(f"⚠️ Listener Telegram persistido inválido para chat={raw_chat_id!r}; omitido.")
+            continue
+
+        try:
+            # Application.chat_data es de solo lectura a nivel de mapping, pero
+            # sus valores son los mismos dict mutables que recibe CallbackContext.
+            chat_data = app.chat_data[chat_id]
+            current = chat_data.get("listen_state") or {}
+            if current.get("active"):
+                continue
+
+            chat_data["listen_state"] = {
+                "active": True,
+                "channel": listen_chan,
+                "since": int(time.time()),
+                "active_was_counted": True,
+            }
+
+            runtime_context = SimpleNamespace(
+                chat_data=chat_data,
+                bot=app.bot,
+            )
+            task = app.create_task(
+                _broker_listen_loop(chat_id, listen_chan, runtime_context)
+            )
+            chat_data["listen_task"] = task
+            app.bot_data["listen_active_count"] += 1
+            restored += 1
+        except Exception as exc:
+            try:
+                chat_data["listen_state"] = {
+                    "active": False,
+                    "channel": listen_chan,
+                    "since": None,
+                    "active_was_counted": False,
+                }
+                chat_data.pop("listen_task", None)
+            except Exception:
+                pass
+            log(
+                f"⚠️ No se pudo restaurar escucha Telegram "
+                f"(chat={chat_id}, channel={listen_chan}): {exc}"
+            )
+
+    if restored:
+        log(f"👂 Escuchas Telegram restauradas automáticamente: {restored}")
+
+
 def build_application() -> Application:
     if not TOKEN:
         print("❗ Falta TELEGRAM_TOKEN en variables de entorno.", file=sys.stderr)
@@ -18280,6 +18393,11 @@ async def post_startup(app: Application) -> None:
         log("[Tasks] Scheduler del bot inicializado.")
     except Exception as e:
         log(f"[Tasks] No se pudo iniciar el scheduler en el bot: {e}")
+
+    # Restaurar únicamente escuchas que quedaron habilitadas de forma persistente.
+    # /parar_escucha guarda enabled=False antes de cancelar el runtime, por lo que
+    # una parada voluntaria nunca se reactiva en el siguiente arranque.
+    await _restore_persisted_listeners(app)
 
     log("🤖 Bot arrancado y listo. Menú establecido (pool TCP inicializado).")
 
