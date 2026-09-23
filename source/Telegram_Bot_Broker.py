@@ -18180,7 +18180,10 @@ async def _restore_persisted_listeners(app: Application) -> None:
                 chat_data=chat_data,
                 bot=app.bot,
             )
-            task = app.create_task(
+            # post_init se ejecuta antes de que Application esté en estado
+            # running. Usamos la misma creación de task que /escuchar para no
+            # registrar una tarea infinita en el ciclo de stop() de PTB.
+            task = asyncio.create_task(
                 _broker_listen_loop(chat_id, listen_chan, runtime_context)
             )
             chat_data["listen_task"] = task
