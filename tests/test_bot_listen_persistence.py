@@ -131,7 +131,7 @@ class TelegramListenIntegrationStructureTests(unittest.TestCase):
     def test_parar_persists_before_first_await_and_runtime_cancellation(self):
         body = self._function_source("parar_escucha_cmd", "escuchar_cmd")
         persist_at = body.index("_persist_listener_preference(")
-        first_await_at = body.index("await ")
+        first_await_at = body.index("await update.effective_message.reply_text")
         cancel_at = body.index('task = context.chat_data.pop("listen_task", None)')
         self.assertLess(persist_at, first_await_at)
         self.assertLess(persist_at, cancel_at)
@@ -150,7 +150,8 @@ class TelegramListenIntegrationStructureTests(unittest.TestCase):
         self.assertIn('app.bot_data["listen_active_count"] = 0', body)
         self.assertIn("app.chat_data[chat_id]", body)
         self.assertIn("SimpleNamespace(", body)
-        self.assertIn("app.create_task(", body)
+        self.assertIn("asyncio.create_task(", body)
+        self.assertNotIn("app.create_task(", body)
         self.assertNotIn("listen_writer", body)
 
 
