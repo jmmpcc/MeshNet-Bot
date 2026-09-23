@@ -120,16 +120,20 @@ class TelegramListenIntegrationStructureTests(unittest.TestCase):
         end = self.source.index(f"async def {next_name}(", start)
         return self.source[start:end]
 
-    def test_escuchar_persists_enabled_preference(self):
+    def test_escuchar_persists_before_creating_runtime_task(self):
         body = self._function_source("escuchar_cmd", "refrescar_nodos_cmd")
-        self.assertIn("_persist_listener_preference(", body)
+        persist_at = body.index("_persist_listener_preference(")
+        create_task_at = body.index("asyncio.create_task(")
+        self.assertLess(persist_at, create_task_at)
         self.assertIn("enabled=True", body)
         self.assertIn("channel=listen_chan", body)
 
-    def test_parar_persists_disabled_before_runtime_cancellation(self):
+    def test_parar_persists_before_first_await_and_runtime_cancellation(self):
         body = self._function_source("parar_escucha_cmd", "escuchar_cmd")
         persist_at = body.index("_persist_listener_preference(")
+        first_await_at = body.index("await ")
         cancel_at = body.index('task = context.chat_data.pop("listen_task", None)')
+        self.assertLess(persist_at, first_await_at)
         self.assertLess(persist_at, cancel_at)
         self.assertIn("enabled=False", body)
 
