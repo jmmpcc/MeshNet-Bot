@@ -57,7 +57,7 @@ def _runtime_namespace() -> tuple[dict, type]:
     if {node.name for node in global_nodes} != GLOBAL_HELPERS:
         raise AssertionError("No se localizaron todos los helpers globales MeshCore")
 
-    namespace = {"re": re}
+    namespace = {"re": re, "os": __import__("os")}
     exec(compile(ast.Module(body=global_nodes, type_ignores=[]), str(BROKER), "exec"), namespace)
 
     bridge_node = next(
@@ -230,11 +230,9 @@ class MeshCoreRepeaterPathContractTest(unittest.TestCase):
 
         fake_mc = FakeMC()
 
-        old_event_type = self.ns.get("_MCEventType")
-        self.ns["_MCEventType"] = types.SimpleNamespace(ERROR="ERROR")
         method_globals = self.bridge_type._meshcore_prepare_rx_path_correlation.__globals__
         method_old_event_type = method_globals.get("_MCEventType")
-        method_globals["_MCEventType"] = self.ns["_MCEventType"]
+        method_globals["_MCEventType"] = types.SimpleNamespace(ERROR="ERROR")
         try:
             asyncio.run(bridge._meshcore_prepare_rx_path_correlation(fake_mc))
         finally:
@@ -242,10 +240,6 @@ class MeshCoreRepeaterPathContractTest(unittest.TestCase):
                 method_globals.pop("_MCEventType", None)
             else:
                 method_globals["_MCEventType"] = method_old_event_type
-            if old_event_type is None:
-                self.ns.pop("_MCEventType", None)
-            else:
-                self.ns["_MCEventType"] = old_event_type
 
         self.assertTrue(fake_mc.enabled)
         self.assertEqual(fake_mc.commands.loaded, [2, 4, 6])
