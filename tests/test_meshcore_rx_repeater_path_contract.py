@@ -30,6 +30,7 @@ CLASS_METHODS = {
     "_meshcore_remember_contact",
     "_meshcore_contact_display",
     "_meshcore_enrich_path_info",
+    "_meshcore_prepare_rx_path_correlation",
 }
 
 
@@ -42,7 +43,7 @@ def _runtime_namespace() -> tuple[dict, type]:
     Funcionalidad:
         - parsea el broker actual mediante AST;
         - compila únicamente los dos helpers globales necesarios;
-        - extrae los tres métodos ya existentes del resolvedor MeshCore;
+        - extrae los métodos necesarios del resolvedor MeshCore;
         - evita ejecutar inicialización de radio, sockets o threads.
     """
     tree = ast.parse(BROKER.read_text(encoding="utf-8"), filename=str(BROKER))
@@ -56,7 +57,7 @@ def _runtime_namespace() -> tuple[dict, type]:
     if {node.name for node in global_nodes} != GLOBAL_HELPERS:
         raise AssertionError("No se localizaron todos los helpers globales MeshCore")
 
-    namespace = {"re": re}
+    namespace = {"re": re, "os": __import__("os")}
     exec(compile(ast.Module(body=global_nodes, type_ignores=[]), str(BROKER), "exec"), namespace)
 
     bridge_node = next(
@@ -199,6 +200,73 @@ class MeshCoreRepeaterPathContractTest(unittest.TestCase):
         self.assertIn("prefijo ambiguo: 2 contactos", hop["name"])
         self.assertNotEqual(hop["name"], "RPT-UNO")
         self.assertNotEqual(hop["name"], "RPT-DOS")
+
+    def test_prepare_rx_path_correlation_enables_library_and_loads_channels(self) -> None:
+        """La sesión activa la correlación oficial sin transmitir por RF."""
+        import asyncio
+        import types
+
+        bridge = self._bridge()
+        bridge.ch_map = {0: {"kind": "chan", "channel_idx": 2}}
+        bridge.chanidx_to_ch = {4: 0}
+        bridge.chanidx_to_tag = {6: "TEST"}
+        bridge._mc_rx_path_channels_loaded = set()
+
+        class FakeCommands:
+            def __init__(self):
+                self.loaded = []
+
+            async def get_channel(self, channel_idx):
+                self.loaded.append(channel_idx)
+                return types.SimpleNamespace(type="CHANNEL_INFO")
+
+        class FakeMC:
+            def __init__(self):
+                self.commands = FakeCommands()
+                self.enabled = None
+
+            def set_decrypt_channel_logs(self, value):
+                self.enabled = value
+
+        fake_mc = FakeMC()
+
+        method_globals = self.bridge_type._meshcore_prepare_rx_path_correlation.__globals__
+        method_old_event_type = method_globals.get("_MCEventType")
+        method_globals["_MCEventType"] = types.SimpleNamespace(ERROR="ERROR")
+        try:
+            asyncio.run(bridge._meshcore_prepare_rx_path_correlation(fake_mc))
+        finally:
+            if method_old_event_type is None:
+                method_globals.pop("_MCEventType", None)
+            else:
+                method_globals["_MCEventType"] = method_old_event_type
+
+        self.assertTrue(fake_mc.enabled)
+        self.assertEqual(fake_mc.commands.loaded, [2, 4, 6])
+        self.assertEqual(bridge._mc_rx_path_channels_loaded, {2, 4, 6})
+
+    def test_enriched_correlated_path_uses_real_hash_width(self) -> None:
+        """Una ruta de log RF de 2 bytes/hash resuelve cada repetidor."""
+        bridge = self._bridge()
+        bridge._meshcore_remember_contact(
+            {"public_key": "aabb11223344556677889900aabbccdd", "name": "RPT-AB"}
+        )
+        bridge._meshcore_remember_contact(
+            {"public_key": "ccdd11223344556677889900aabbccdd", "name": "RPT-CD"}
+        )
+
+        enriched = bridge._meshcore_enrich_path_info(
+            {
+                "path_len": 2,
+                "path_hash_size": 2,
+                "path": "aabbccdd",
+            }
+        )
+
+        self.assertEqual(
+            [hop["name"] for hop in enriched["meshcore_repeaters"]],
+            ["RPT-AB", "RPT-CD"],
+        )
 
 
 if __name__ == "__main__":

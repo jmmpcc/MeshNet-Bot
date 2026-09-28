@@ -1242,6 +1242,102 @@ class MeshCoreEmbeddedBridge:
         # Este mapa NO interviene en list_contacts() ni modifica MESHCORE_CONTACT_ALIASES.
         self._mc_observed_dm_prefixes_by_alias: dict[str, set[str]] = {}
 
+        # Canales MeshCore ya precargados en meshcore_py para correlacionar
+        # CHANNEL_MSG_RECV con el LOG_RX_DATA de la misma trama RF.
+        # El evento RX normal solo entrega path_len; los hashes reales se
+        # recuperan del log RF 0x88 y meshcore_py los asocia al mensaje.
+        self._mc_rx_path_channels_loaded: set[int] = set()
+
+    async def _meshcore_prepare_rx_path_correlation(self, mc) -> None:
+        """Activa la correlación oficial log RF -> mensaje de canal MeshCore.
+
+        Cómo se llama:
+            await self._meshcore_prepare_rx_path_correlation(mc)
+
+        Parámetros:
+            mc: instancia MeshCore ya conectada de la sesión embebida.
+
+        Funcionalidad:
+            - Activa set_decrypt_channel_logs(True) en meshcore_py.
+            - Precarga canales conocidos para validar/descifrar GRP_TXT.
+            - No modifica canales ni transmite tráfico RF.
+            - Tolera slots vacíos y librerías antiguas.
+        """
+        if mc is None:
+            return
+
+        setter = getattr(mc, "set_decrypt_channel_logs", None)
+        if not callable(setter):
+            print(
+                "[meshcore-embedded] RX path correlation WARN: "
+                "set_decrypt_channel_logs no disponible",
+                flush=True,
+            )
+            return
+        setter(True)
+
+        commands = getattr(mc, "commands", None)
+        get_channel = getattr(commands, "get_channel", None) if commands is not None else None
+        if not callable(get_channel):
+            print(
+                "[meshcore-embedded] RX path correlation WARN: get_channel no disponible",
+                flush=True,
+            )
+            return
+
+        channel_indexes: set[int] = set()
+        for mapping in (self.ch_map or {}).values():
+            try:
+                if (mapping or {}).get("kind") in ("chan", "channel"):
+                    channel_indexes.add(int((mapping or {}).get("channel_idx")))
+            except Exception:
+                pass
+        for idx in (self.chanidx_to_ch or {}).keys():
+            try:
+                channel_indexes.add(int(idx))
+            except Exception:
+                pass
+        for idx in (self.chanidx_to_tag or {}).keys():
+            try:
+                channel_indexes.add(int(idx))
+            except Exception:
+                pass
+
+        # Sin mapa explícito mantenemos la misma exploración acotada que
+        # list_channels(); get_channel es una consulta local Companion.
+        if not channel_indexes:
+            try:
+                scan_max = max(
+                    1,
+                    min(
+                        256,
+                        int(os.getenv("MESHCORE_CHANNEL_SCAN_MAX", "40") or "40"),
+                    ),
+                )
+            except Exception:
+                scan_max = 40
+            channel_indexes.update(range(scan_max))
+
+        loaded = 0
+        for channel_idx in sorted(channel_indexes):
+            if channel_idx < 0 or channel_idx > 255:
+                continue
+            if channel_idx in self._mc_rx_path_channels_loaded:
+                continue
+            try:
+                result = await get_channel(int(channel_idx))
+                if result is not None and getattr(result, "type", None) != _MCEventType.ERROR:
+                    self._mc_rx_path_channels_loaded.add(int(channel_idx))
+                    loaded += 1
+            except Exception:
+                continue
+
+        print(
+            "[meshcore-embedded] RX path correlation ON "
+            f"channels_loaded={loaded}",
+            flush=True,
+        )
+
     def _meshcore_remember_contact(self, contact: dict | None) -> None:
         if not isinstance(contact, dict):
             return
@@ -2174,6 +2270,9 @@ class MeshCoreEmbeddedBridge:
 
         self._loop = _aio.get_running_loop()
         self._tx_q = _aio.Queue()
+        # Cada reconexión crea un parser MeshCore nuevo; por tanto los canales
+        # deben precargarse otra vez en esa sesión aunque se conocieran antes.
+        self._mc_rx_path_channels_loaded.clear()
 
         # --- conectar ---
         print(f"[meshcore-embedded] CONNECTING mode={self.mode}", flush=True)
@@ -2222,6 +2321,19 @@ class MeshCoreEmbeddedBridge:
             except Exception:
                 pass
 
+        # Preparar la correlación RX antes del auto-fetch.
+        # El firmware Companion publica cada trama RF cruda mediante 0x88.
+        # meshcore_py extrae de ella el path real y lo asocia después con
+        # CHANNEL_MSG_RECV por sender_timestamp + texto.
+        try:
+            await self._meshcore_prepare_rx_path_correlation(mc)
+        except Exception as e:
+            print(
+                f"[meshcore-embedded] RX path correlation WARN: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+
         # --- activar auto-fetch (CRÍTICO para que entren eventos RX) ---
         try:
             await mc.start_auto_message_fetching()  # type: ignore[union-attr]
@@ -2245,6 +2357,18 @@ class MeshCoreEmbeddedBridge:
                 text_msg = str(data.get("text") or "").strip()
                 if not text_msg:
                     return
+
+                # CHANNEL_MSG_RECV puede traer path desde LOG_RX_DATA ya
+                # correlacionado por meshcore_py. El evento normal aporta
+                # path_hash_mode; derivamos el ancho solo cuando hay ruta real.
+                if kind == "chan" and data.get("path"):
+                    if data.get("path_hash_size") is None:
+                        try:
+                            mode = int(data.get("path_hash_mode"))
+                            if mode >= 0:
+                                data["path_hash_size"] = mode + 1
+                        except Exception:
+                            pass
 
                 # Enriquecer con contactos/posiciones conocidos antes de formatear ruta.
                 try:
@@ -6986,6 +7110,55 @@ def emit_meshcore_rx_to_hub_and_log(
     mc_path_chunks, mc_path_len, mc_path_hash_size = _meshcore_path_chunks_from_payload(path_info)
     mc_path_text = _meshcore_format_repeater_path(path_info)
 
+    # RX_LOG_DATA aporta las métricas de la recepción RF real. Se normalizan una
+    # sola vez y se transportan por los mismos nombres que ya entienden el BOT y
+    # el backlog; si la librería no las aporta, se conserva None sin estimarlas.
+    def _metric_float(*keys):
+        for key in keys:
+            try:
+                value = path_info.get(key)
+                if value is not None:
+                    return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    mc_rssi = _metric_float("rssi", "rx_rssi", "rxRssi")
+    mc_snr = _metric_float("snr", "rx_snr", "rxSnr")
+
+    # Un mismo identificador enlaza evento live, backlog y visor cartográfico.
+    # Incluimos microsegundos + contenido/ruta para evitar colisiones entre RX
+    # consecutivos sin introducir estado global ni modificar la deduplicación.
+    event_ts = _now_s()
+    trace_seed = "|".join(
+        (
+            f"{float(event_ts):.6f}",
+            str(pubkey_prefix or ""),
+            str(kind or ""),
+            str(chan_idx if chan_idx is not None else ""),
+            str(text or ""),
+            str(mc_path_text or ""),
+        )
+    )
+    mc_trace_id = hashlib.sha256(trace_seed.encode("utf-8", errors="ignore")).hexdigest()[:20]
+    trace_base_url = (os.getenv("MESHCORE_TRACE_MAP_BASE_URL") or "").strip().rstrip("/")
+    mc_trace_url = f"{trace_base_url}/meshcore/trace/{mc_trace_id}" if trace_base_url else None
+
+    def _env_float(name: str):
+        try:
+            raw = (os.getenv(name) or "").strip()
+            return float(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+
+    receiver_lat = _env_float("HOME_LAT")
+    receiver_lon = _env_float("HOME_LON")
+    receiver_name = (
+        (os.getenv("MESHCORE_LOCAL_NAME") or "").strip()
+        or (os.getenv("HOSTNAME") or "").strip()
+        or "MeshNet"
+    )
+
     # Canal / nombre de canal
     try:
         ch_i = int(ch)
@@ -7007,7 +7180,9 @@ def emit_meshcore_rx_to_hub_and_log(
                 "packet": {
                     "fromId": (f"meshcore:{(pubkey_prefix or '').strip()}" if (pubkey_prefix or '').strip() else "meshcore"),
                     "toId": "^all",
-                    "rxTime": int(_now_s()),
+                    "rxTime": int(event_ts),
+                    "rxRssi": mc_rssi,
+                    "rxSnr": mc_snr,
                     "decoded": {
                         "portnum": "TEXT_MESSAGE_APP",
                         "text": text,
@@ -7033,8 +7208,13 @@ def emit_meshcore_rx_to_hub_and_log(
                     "meshcore_from_name": path_info.get("from_name"),
                     "meshcore_from_lat": path_info.get("from_lat"),
                     "meshcore_from_lon": path_info.get("from_lon"),
+                    "meshcore_receiver_name": receiver_name,
+                    "meshcore_receiver_lat": receiver_lat,
+                    "meshcore_receiver_lon": receiver_lon,
+                    "meshcore_trace_id": mc_trace_id,
+                    "meshcore_trace_url": mc_trace_url,
                 },
-                "ts": _now_s(),
+                "ts": event_ts,
             }
             hub.broadcast_line(_json_dumps(ev) + "\n")
     except Exception:
@@ -7044,7 +7224,7 @@ def emit_meshcore_rx_to_hub_and_log(
     try:
         append_offline_log(
             {
-                "ts": int(_now_s()),
+                "ts": int(event_ts),
                 "channel": ch_i,
                 "channel_name": channel_name,
                 "portnum": "TEXT_MESSAGE_APP",
@@ -7053,8 +7233,8 @@ def emit_meshcore_rx_to_hub_and_log(
                 "from_alias": (from_alias or None),
                 "to_alias": None,
                 "text": text,
-                "rx_rssi": None,
-                "rx_snr": None,
+                "rx_rssi": mc_rssi,
+                "rx_snr": mc_snr,
                 "meshcore": 1,
                 "meshcore_kind": kind,
                 "meshcore_chan_idx": chan_idx,
@@ -7068,6 +7248,11 @@ def emit_meshcore_rx_to_hub_and_log(
                 "meshcore_from_name": path_info.get("from_name"),
                 "meshcore_from_lat": path_info.get("from_lat"),
                 "meshcore_from_lon": path_info.get("from_lon"),
+                "meshcore_receiver_name": receiver_name,
+                "meshcore_receiver_lat": receiver_lat,
+                "meshcore_receiver_lon": receiver_lon,
+                "meshcore_trace_id": mc_trace_id,
+                "meshcore_trace_url": mc_trace_url,
             }
         )
     except Exception:

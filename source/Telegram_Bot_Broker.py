@@ -16651,6 +16651,24 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 if isinstance(mc_path_txt, str):
                     mc_path_txt = mc_path_txt.strip() or None
 
+                # URL de la traza histórica generada por el broker. El BOT no
+                # reconstruye rutas ni coordenadas: solo presenta el enlace
+                # autoritativo asociado a esta recepción concreta.
+                mc_trace_url = None
+                try:
+                    mc_trace_url = (
+                        pkt.get("meshcore_trace_url")
+                        or summary.get("meshcore_trace_url")
+                        or obj.get("meshcore_trace_url")
+                    ) if isinstance(pkt, dict) else (
+                        summary.get("meshcore_trace_url")
+                        or obj.get("meshcore_trace_url")
+                    )
+                except Exception:
+                    mc_trace_url = None
+                if isinstance(mc_trace_url, str):
+                    mc_trace_url = mc_trace_url.strip() or None
+
                 # Posición MeshCore del emisor, si el broker pudo resolverla desde contactos.
                 mc_from_pos_txt = None
                 try:
@@ -16721,6 +16739,8 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                             detail_lines.append(f"   • Hops reales: {hops_real_txt}")
                         if extra_meshcore_path:
                             detail_lines.append(extra_meshcore_path.rstrip("\n"))
+                        if mc_trace_url:
+                            detail_lines.append(f"   • 🗺 Ver traza en mapa: {mc_trace_url}")
                         if hop_limit is not None or hop_start is not None or relay is not None:
                             detail_lines.append(f"   • hop_limit: {hl_txt} | hop_start: {hs_txt} | relay_node: {rn_txt}")
                         details = ("\n" + "\n".join(detail_lines)) if detail_lines else ""

@@ -18,6 +18,7 @@ try:
     from emergency_province_view import apply_emergency_province_view
     from message_emergency_filters import apply_message_emergency_filters
     from message_map_links import apply_message_map_links
+    from meshcore_rx_trace_map import apply_meshcore_rx_trace_map
     from public_emergency_map_link import apply_public_emergency_map_link
 except ModuleNotFoundError:
     from tools.ControlPanel import web_admin
@@ -27,6 +28,7 @@ except ModuleNotFoundError:
     from tools.ControlPanel.emergency_province_view import apply_emergency_province_view
     from tools.ControlPanel.message_emergency_filters import apply_message_emergency_filters
     from tools.ControlPanel.message_map_links import apply_message_map_links
+    from tools.ControlPanel.meshcore_rx_trace_map import apply_meshcore_rx_trace_map
     from tools.ControlPanel.public_emergency_map_link import apply_public_emergency_map_link
 
 
@@ -45,6 +47,7 @@ app = apply_emergency_province_view(app)
 
 app = apply_message_emergency_filters(app)
 app = apply_message_map_links(app)
+app = apply_meshcore_rx_trace_map(app)
 app = apply_delivery_audit_collapsible(app)
 
 # El mapa público se enlaza al final y abre fuera del panel. No comparte sesión,
