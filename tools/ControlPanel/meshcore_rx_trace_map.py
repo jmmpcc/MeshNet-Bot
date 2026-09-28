@@ -137,6 +137,7 @@ def _render_trace_html(item: dict[str, Any]) -> str:
     signal_text = " · ".join(signal) if signal else "sin métricas RF"
 
     data_json = json.dumps(points, ensure_ascii=False).replace("</", "<\\/")
+    route_complete = bool(total_repeaters == located_repeaters)
     location_note = (
         f"{located_repeaters}/{total_repeaters} repetidores localizados"
         if total_repeaters
@@ -166,6 +167,7 @@ h1{{font-size:18px;margin:0 0 8px}} .meta{{font-size:14px;line-height:1.5;color:
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const points = {data_json};
+const routeComplete = ${str(route_complete).lower()};
 const mapNode = document.getElementById('map');
 if (!points.length) {{
   mapNode.className = 'empty';
@@ -187,7 +189,10 @@ if (!points.length) {{
     popup.appendChild(document.createTextNode(point.name));
     L.marker(ll).addTo(map).bindPopup(popup);
   }});
-  if (latlngs.length > 1) L.polyline(latlngs).addTo(map);
+  // Una línea continua solo es fiel si todos los repetidores de la ruta
+  // tienen posición. Con saltos sin localizar mostramos los marcadores
+  // conocidos, pero no inventamos un tramo geográfico entre ellos.
+  if (latlngs.length > 1 && routeComplete) L.polyline(latlngs).addTo(map);
   if (latlngs.length === 1) map.setView(latlngs[0], 13);
   else map.fitBounds(latlngs, {{padding:[30,30]}});
 }}
