@@ -7110,6 +7110,55 @@ def emit_meshcore_rx_to_hub_and_log(
     mc_path_chunks, mc_path_len, mc_path_hash_size = _meshcore_path_chunks_from_payload(path_info)
     mc_path_text = _meshcore_format_repeater_path(path_info)
 
+    # RX_LOG_DATA aporta las métricas de la recepción RF real. Se normalizan una
+    # sola vez y se transportan por los mismos nombres que ya entienden el BOT y
+    # el backlog; si la librería no las aporta, se conserva None sin estimarlas.
+    def _metric_float(*keys):
+        for key in keys:
+            try:
+                value = path_info.get(key)
+                if value is not None:
+                    return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    mc_rssi = _metric_float("rssi", "rx_rssi", "rxRssi")
+    mc_snr = _metric_float("snr", "rx_snr", "rxSnr")
+
+    # Un mismo identificador enlaza evento live, backlog y visor cartográfico.
+    # Incluimos microsegundos + contenido/ruta para evitar colisiones entre RX
+    # consecutivos sin introducir estado global ni modificar la deduplicación.
+    event_ts = _now_s()
+    trace_seed = "|".join(
+        (
+            f"{float(event_ts):.6f}",
+            str(pubkey_prefix or ""),
+            str(kind or ""),
+            str(chan_idx if chan_idx is not None else ""),
+            str(text or ""),
+            str(mc_path_text or ""),
+        )
+    )
+    mc_trace_id = hashlib.sha256(trace_seed.encode("utf-8", errors="ignore")).hexdigest()[:20]
+    trace_base_url = (os.getenv("MESHCORE_TRACE_MAP_BASE_URL") or "").strip().rstrip("/")
+    mc_trace_url = f"{trace_base_url}/meshcore/trace/{mc_trace_id}" if trace_base_url else None
+
+    def _env_float(name: str):
+        try:
+            raw = (os.getenv(name) or "").strip()
+            return float(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+
+    receiver_lat = _env_float("HOME_LAT")
+    receiver_lon = _env_float("HOME_LON")
+    receiver_name = (
+        (os.getenv("MESHCORE_LOCAL_NAME") or "").strip()
+        or (os.getenv("HOSTNAME") or "").strip()
+        or "MeshNet"
+    )
+
     # Canal / nombre de canal
     try:
         ch_i = int(ch)
@@ -7131,7 +7180,9 @@ def emit_meshcore_rx_to_hub_and_log(
                 "packet": {
                     "fromId": (f"meshcore:{(pubkey_prefix or '').strip()}" if (pubkey_prefix or '').strip() else "meshcore"),
                     "toId": "^all",
-                    "rxTime": int(_now_s()),
+                    "rxTime": int(event_ts),
+                    "rxRssi": mc_rssi,
+                    "rxSnr": mc_snr,
                     "decoded": {
                         "portnum": "TEXT_MESSAGE_APP",
                         "text": text,
@@ -7157,8 +7208,13 @@ def emit_meshcore_rx_to_hub_and_log(
                     "meshcore_from_name": path_info.get("from_name"),
                     "meshcore_from_lat": path_info.get("from_lat"),
                     "meshcore_from_lon": path_info.get("from_lon"),
+                    "meshcore_receiver_name": receiver_name,
+                    "meshcore_receiver_lat": receiver_lat,
+                    "meshcore_receiver_lon": receiver_lon,
+                    "meshcore_trace_id": mc_trace_id,
+                    "meshcore_trace_url": mc_trace_url,
                 },
-                "ts": _now_s(),
+                "ts": event_ts,
             }
             hub.broadcast_line(_json_dumps(ev) + "\n")
     except Exception:
@@ -7168,7 +7224,7 @@ def emit_meshcore_rx_to_hub_and_log(
     try:
         append_offline_log(
             {
-                "ts": int(_now_s()),
+                "ts": int(event_ts),
                 "channel": ch_i,
                 "channel_name": channel_name,
                 "portnum": "TEXT_MESSAGE_APP",
@@ -7177,8 +7233,8 @@ def emit_meshcore_rx_to_hub_and_log(
                 "from_alias": (from_alias or None),
                 "to_alias": None,
                 "text": text,
-                "rx_rssi": None,
-                "rx_snr": None,
+                "rx_rssi": mc_rssi,
+                "rx_snr": mc_snr,
                 "meshcore": 1,
                 "meshcore_kind": kind,
                 "meshcore_chan_idx": chan_idx,
@@ -7192,6 +7248,11 @@ def emit_meshcore_rx_to_hub_and_log(
                 "meshcore_from_name": path_info.get("from_name"),
                 "meshcore_from_lat": path_info.get("from_lat"),
                 "meshcore_from_lon": path_info.get("from_lon"),
+                "meshcore_receiver_name": receiver_name,
+                "meshcore_receiver_lat": receiver_lat,
+                "meshcore_receiver_lon": receiver_lon,
+                "meshcore_trace_id": mc_trace_id,
+                "meshcore_trace_url": mc_trace_url,
             }
         )
     except Exception:
