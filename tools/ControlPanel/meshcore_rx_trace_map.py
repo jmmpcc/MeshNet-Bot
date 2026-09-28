@@ -167,7 +167,7 @@ h1{{font-size:18px;margin:0 0 8px}} .meta{{font-size:14px;line-height:1.5;color:
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const points = {data_json};
-const routeComplete = ${str(route_complete).lower()};
+const routeComplete = {str(route_complete).lower()};
 const mapNode = document.getElementById('map');
 if (!points.length) {{
   mapNode.className = 'empty';
