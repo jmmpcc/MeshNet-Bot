@@ -43,7 +43,7 @@ def _runtime_namespace() -> tuple[dict, type]:
     Funcionalidad:
         - parsea el broker actual mediante AST;
         - compila únicamente los dos helpers globales necesarios;
-        - extrae los tres métodos ya existentes del resolvedor MeshCore;
+        - extrae los métodos necesarios del resolvedor MeshCore;
         - evita ejecutar inicialización de radio, sockets o threads.
     """
     tree = ast.parse(BROKER.read_text(encoding="utf-8"), filename=str(BROKER))
