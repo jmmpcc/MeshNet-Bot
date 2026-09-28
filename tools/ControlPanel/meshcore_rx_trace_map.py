@@ -179,7 +179,13 @@ if (!points.length) {{
   points.forEach((point) => {{
     const ll = [point.lat, point.lon];
     latlngs.push(ll);
-    L.marker(ll).addTo(map).bindPopup('<b>' + point.role + '</b><br>' + point.name);
+    const popup = document.createElement('div');
+    const role = document.createElement('strong');
+    role.textContent = point.role;
+    popup.appendChild(role);
+    popup.appendChild(document.createElement('br'));
+    popup.appendChild(document.createTextNode(point.name));
+    L.marker(ll).addTo(map).bindPopup(popup);
   }});
   if (latlngs.length > 1) L.polyline(latlngs).addTo(map);
   if (latlngs.length === 1) map.setView(latlngs[0], 13);
