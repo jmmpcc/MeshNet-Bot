@@ -2270,6 +2270,9 @@ class MeshCoreEmbeddedBridge:
 
         self._loop = _aio.get_running_loop()
         self._tx_q = _aio.Queue()
+        # Cada reconexión crea un parser MeshCore nuevo; por tanto los canales
+        # deben precargarse otra vez en esa sesión aunque se conocieran antes.
+        self._mc_rx_path_channels_loaded.clear()
 
         # --- conectar ---
         print(f"[meshcore-embedded] CONNECTING mode={self.mode}", flush=True)
