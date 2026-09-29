@@ -16715,8 +16715,28 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 # En MeshCore directo/DM no mostramos el canal Meshtastic local como si fuera
                 # el origen del mensaje, ni métricas Meshtastic desconocidas.
                 try:
+                    # meshcore_path_len ya representa el número de repetidores
+                    # atravesados por la trama. Lo mostramos junto a la ruta sin
+                    # recalcularlo desde el texto ni alterar el detalle existente.
+                    mc_path_count = None
+                    try:
+                        raw_mc_path_len = (
+                            pkt.get("meshcore_path_len")
+                            or summary.get("meshcore_path_len")
+                            or obj.get("meshcore_path_len")
+                        ) if isinstance(pkt, dict) else (
+                            summary.get("meshcore_path_len")
+                            or obj.get("meshcore_path_len")
+                        )
+                        if raw_mc_path_len is not None:
+                            mc_path_count = max(0, int(raw_mc_path_len))
+                    except (TypeError, ValueError):
+                        mc_path_count = None
+
                     extra_meshcore_path = (
-                        f"   • MeshCore repetidores: {mc_path_txt}\n"
+                        f"   • MeshCore repetidores"
+                        f"{f' ({mc_path_count})' if mc_path_count is not None else ''}: "
+                        f"{mc_path_txt}\n"
                         if mc_path_txt else ""
                     )
                     if is_meshcore:
