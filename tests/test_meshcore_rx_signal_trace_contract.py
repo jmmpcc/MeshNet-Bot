@@ -123,10 +123,59 @@ def test_meshcore_rx_accepts_uppercase_metrics_from_meshcore_py(monkeypatch) -> 
     assert captured["offline"][0]["rx_snr"] == -2.25
 
 
+def test_append_offline_log_preserves_meshcore_trace_metadata(tmp_path) -> None:
+    """El backlog normalizado conserva los metadatos necesarios para el mapa RX."""
+    tree = ast.parse(BROKER.read_text(encoding="utf-8"))
+    fn = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "append_offline_log"
+    )
+    module = ast.Module(body=[fn], type_ignores=[])
+    ast.fix_missing_locations(module)
+
+    runtime = {
+        "OFFLINE_LOG_PATH": str(tmp_path / "broker_offline_log.jsonl"),
+        "_traceroute_safe_jsonable": lambda value, max_depth=6: value,
+        "_log_ex": lambda *args, **kwargs: None,
+    }
+    exec(compile(module, str(BROKER), "exec"), runtime)
+    runtime["append_offline_log"](
+        {
+            "ts": 123,
+            "channel": 4,
+            "portnum": "TEXT_MESSAGE_APP",
+            "text": "TZ: Testing",
+            "rx_rssi": -106.0,
+            "rx_snr": 5.2,
+            "meshcore": 1,
+            "meshcore_path_len": 2,
+            "meshcore_path_text": "58 -> f8",
+            "meshcore_repeaters": [
+                {"hash": "58", "resolved": False},
+                {"hash": "f8", "resolved": False},
+            ],
+            "meshcore_trace_id": "2d97743288be316ccb4b",
+            "meshcore_trace_url": "http://example/meshcore/trace/2d97743288be316ccb4b",
+        }
+    )
+
+    row = json.loads((tmp_path / "broker_offline_log.jsonl").read_text(encoding="utf-8"))
+    assert row["meshcore"] == 1
+    assert row["meshcore_path_len"] == 2
+    assert row["meshcore_path_text"] == "58 -> f8"
+    assert len(row["meshcore_repeaters"]) == 2
+    assert row["meshcore_trace_id"] == "2d97743288be316ccb4b"
+    assert row["rx_rssi"] == -106.0
+    assert row["rx_snr"] == 5.2
+
+
 def test_telegram_listener_surfaces_trace_url_without_changing_send_mode() -> None:
     source = BOT.read_text(encoding="utf-8")
     assert 'pkt.get("meshcore_trace_url")' in source
     assert '🗺 Ver traza en mapa: {mc_trace_url}' in source
+    assert 'pkt.get("meshcore_path_len")' in source
+    assert "mc_path_count" in source
+    assert "MeshCore repetidores" in source
     # Se mantiene send_message sin introducir parse_mode, por lo que Telegram
     # autoenlaza la URL y no cambia el escapado de mensajes ya existente.
     assert "await context.bot.send_message(chat_id=chat_id, text=text_out)" in source
