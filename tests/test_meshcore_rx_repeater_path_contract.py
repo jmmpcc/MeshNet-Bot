@@ -201,6 +201,54 @@ class MeshCoreRepeaterPathContractTest(unittest.TestCase):
         self.assertNotEqual(hop["name"], "RPT-UNO")
         self.assertNotEqual(hop["name"], "RPT-DOS")
 
+    def test_collision_resolves_only_unique_explicit_repeater(self) -> None:
+        """Una colisión repeater/chat se resuelve sin depender del orden de caché."""
+        bridge = self._bridge()
+        bridge._meshcore_remember_contact(
+            {
+                "public_key": "5811223344556677889900aabbccddeeff",
+                "name": "CONTACTO-CHAT",
+                "adv_type": 1,
+            }
+        )
+        bridge._meshcore_remember_contact(
+            {
+                "public_key": "58ffeeddccbbaa00998877665544332211",
+                "name": "RPT-UTEBO",
+                "adv_type": 2,
+            }
+        )
+
+        enriched = bridge._meshcore_enrich_path_info(
+            {"path_len": 1, "path_hash_size": 1, "path": "58"}
+        )
+
+        hop = enriched["meshcore_repeaters"][0]
+        self.assertTrue(hop["resolved"])
+        self.assertTrue(hop["ambiguous"])
+        self.assertEqual(hop["name"], "RPT-UTEBO")
+
+    def test_collision_between_two_explicit_repeaters_stays_ambiguous(self) -> None:
+        """Dos repetidores con el mismo hash corto nunca se desambiguan por heurística."""
+        bridge = self._bridge()
+        for suffix, name in (("11", "RPT-A"), ("ff", "RPT-B")):
+            bridge._meshcore_remember_contact(
+                {
+                    "public_key": "f8" + suffix * 16,
+                    "name": name,
+                    "adv_type": 2,
+                }
+            )
+
+        enriched = bridge._meshcore_enrich_path_info(
+            {"path_len": 1, "path_hash_size": 1, "path": "f8"}
+        )
+
+        hop = enriched["meshcore_repeaters"][0]
+        self.assertFalse(hop["resolved"])
+        self.assertTrue(hop["ambiguous"])
+        self.assertIn("prefijo ambiguo: 2 contactos", hop["name"])
+
     def test_prepare_rx_path_correlation_enables_library_and_loads_channels(self) -> None:
         """La sesión activa la correlación oficial sin transmitir por RF."""
         import asyncio
