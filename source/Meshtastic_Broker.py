@@ -1487,7 +1487,34 @@ class MeshCoreEmbeddedBridge:
         for idx, chunk in enumerate(chunks):
             chunk_s = str(chunk).strip().lower()
             matches = self._mc_path_prefix_cache.get(chunk_s, [])
-            c = matches[0] if len(matches) == 1 else None
+
+            # Los hashes de ruta identifican nodos que han repetido la trama. Con
+            # hashes legacy de 1 byte pueden existir colisiones entre contactos.
+            # Conservamos la resolución anterior cuando el prefijo es único y,
+            # cuando colisiona, solo desambiguamos si exactamente un candidato
+            # está identificado explícitamente como REPEATER. Nunca elegimos por
+            # orden de caché, nombre, posición o antigüedad: si quedan dos
+            # repetidores posibles, el salto continúa marcado como ambiguo.
+            def _is_explicit_repeater(candidate: dict) -> bool:
+                if not isinstance(candidate, dict):
+                    return False
+                for key in ("adv_type", "node_type"):
+                    value = candidate.get(key)
+                    try:
+                        if int(value) == 2:
+                            return True
+                    except (TypeError, ValueError):
+                        if str(value or "").strip().casefold() == "repeater":
+                            return True
+                return str(candidate.get("node_type_label") or "").strip().casefold() == "repeater"
+
+            repeater_matches = [candidate for candidate in matches if _is_explicit_repeater(candidate)]
+            if len(matches) == 1:
+                c = matches[0]
+            elif len(repeater_matches) == 1:
+                c = repeater_matches[0]
+            else:
+                c = None
             snr = None
             try:
                 if idx < len(path_items) and isinstance(path_items[idx], dict):
@@ -1503,7 +1530,7 @@ class MeshCoreEmbeddedBridge:
                 "lat": c.get("lat") if isinstance(c, dict) else None,
                 "lon": c.get("lon") if isinstance(c, dict) else None,
             }
-            if len(matches) > 1:
+            if len(matches) > 1 and c is None:
                 entry["name"] = f"{chunk_s} (prefijo ambiguo: {len(matches)} contactos)"
             repeaters.append(entry)
         if repeaters:
@@ -7123,8 +7150,11 @@ def emit_meshcore_rx_to_hub_and_log(
                 continue
         return None
 
-    mc_rssi = _metric_float("rssi", "rx_rssi", "rxRssi")
-    mc_snr = _metric_float("snr", "rx_snr", "rxSnr")
+    # meshcore_py usa RSSI/SNR (mayúsculas) en CHANNEL_MSG_RECV cuando
+    # correlaciona el mensaje con RX_LOG_DATA; mantenemos además todos los
+    # nombres ya soportados para no alterar compatibilidad con otras versiones.
+    mc_rssi = _metric_float("rssi", "RSSI", "rx_rssi", "rxRssi")
+    mc_snr = _metric_float("snr", "SNR", "rx_snr", "rxSnr")
 
     # Un mismo identificador enlaza evento live, backlog y visor cartográfico.
     # Incluimos microsegundos + contenido/ruta para evitar colisiones entre RX
