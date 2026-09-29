@@ -6742,6 +6742,38 @@ def append_offline_log(rec: dict):
             if payload_hex:
                 obj["payload_hex"] = payload_hex
 
+            # Los RX MeshCore usan el mismo TEXT_MESSAGE_APP que Meshtastic,
+            # pero añaden metadatos de la ruta RF histórica. append_offline_log
+            # reconstruye deliberadamente un objeto normalizado, por lo que
+            # debemos conservar explícitamente estos campos ya calculados por
+            # emit_meshcore_rx_to_hub_and_log(). No se inventa ni recalcula
+            # información aquí: únicamente se transporta al backlog para que el
+            # visor /meshcore/trace/{id} pueda recuperar el mismo evento live.
+            if rec.get("meshcore") or pkt.get("meshcore"):
+                for key in (
+                    "meshcore",
+                    "meshcore_kind",
+                    "meshcore_chan_idx",
+                    "meshcore_chan_tag",
+                    "meshcore_pubkey_prefix",
+                    "meshcore_path_len",
+                    "meshcore_path_hash_size",
+                    "meshcore_path",
+                    "meshcore_path_text",
+                    "meshcore_repeaters",
+                    "meshcore_from_name",
+                    "meshcore_from_lat",
+                    "meshcore_from_lon",
+                    "meshcore_receiver_name",
+                    "meshcore_receiver_lat",
+                    "meshcore_receiver_lon",
+                    "meshcore_trace_id",
+                    "meshcore_trace_url",
+                ):
+                    value = rec.get(key) if rec.get(key) is not None else pkt.get(key)
+                    if value is not None:
+                        obj[key] = value
+
         elif port == "POSITION_APP":
             pos = dec.get("position") or pkt.get("position") or rec.get("position") or {}
             if pos:
