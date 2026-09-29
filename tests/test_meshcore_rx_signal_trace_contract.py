@@ -97,6 +97,32 @@ def test_meshcore_rx_publishes_real_signal_and_trace_metadata(monkeypatch) -> No
     assert offline["meshcore_repeaters"][0]["name"] == "RPT-A"
 
 
+def test_meshcore_rx_accepts_uppercase_metrics_from_meshcore_py(monkeypatch) -> None:
+    """Conserva RSSI/SNR correlacionados por meshcore_py en CHANNEL_MSG_RECV."""
+    emit, hub, captured = _emit_runtime()
+    monkeypatch.delenv("MESHCORE_TRACE_MAP_BASE_URL", raising=False)
+
+    emit(
+        ch=4,
+        text="[MC] uppercase metrics",
+        kind="chan",
+        chan_idx=5,
+        path_info={
+            "path_len": 1,
+            "path_hash_size": 1,
+            "path": "aa",
+            "RSSI": -103,
+            "SNR": -2.25,
+        },
+    )
+
+    packet = json.loads(hub.lines[0])["packet"]
+    assert packet["rxRssi"] == -103.0
+    assert packet["rxSnr"] == -2.25
+    assert captured["offline"][0]["rx_rssi"] == -103.0
+    assert captured["offline"][0]["rx_snr"] == -2.25
+
+
 def test_telegram_listener_surfaces_trace_url_without_changing_send_mode() -> None:
     source = BOT.read_text(encoding="utf-8")
     assert 'pkt.get("meshcore_trace_url")' in source
