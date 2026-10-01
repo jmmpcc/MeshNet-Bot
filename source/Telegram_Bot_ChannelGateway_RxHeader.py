@@ -3,8 +3,10 @@
 """Launcher fino que normaliza encabezados RX y delega en Channel Gateway.
 
 No sustituye ninguna función del broker ni del bot. Solo intercepta el texto que
-ExtBot va a enviar a Telegram y aplica transformaciones visuales idempotentes
-sobre mensajes MeshCore conocidos.
+ExtBot va a enviar a Telegram y aplica una transformación idempotente cuando el
+encabezado coincide exactamente con un RX MeshCore conocido. La misma envoltura
+puede añadir el scope a una confirmación TX cuando ese valor es conocido de forma
+explícita por el comando que acaba de enviarla.
 """
 from __future__ import annotations
 
@@ -21,13 +23,14 @@ from meshcore_rx_header import normalize_meshcore_rx_header
 def _install_meshcore_rx_header_normalizer() -> None:
     """Envuelve ``ExtBot.send_message`` sin alterar el resto del bot.
 
-    Funcionalidad:
-        - Mantiene la normalización visual RX MeshCore ya existente.
-        - Añade ``Scope TX`` únicamente a la confirmación de un /enviar_mc que
-          haya usado ``--scope``.
-        - No inventa un valor de scope en RX: la versión actual de meshcore_py no
-          lo expone en ``CHANNEL_MSG_RECV``.
-        - Todos los demás argumentos y llamadas se delegan exactamente igual.
+    El wrapper mantiene primero la normalización RX MeshCore existente. Después
+    añade ``Scope TX`` solo a la confirmación de un ``/enviar_mc --scope`` en el
+    que conocemos el valor solicitado. No se añade scope a RX porque la versión
+    actual de ``meshcore_py`` no lo expone en ``CHANNEL_MSG_RECV`` y no debemos
+    presentar un valor inferido como si fuera recibido por radio.
+
+    Todos los demás argumentos y llamadas se delegan exactamente al método
+    original.
     """
     current_send_message = ExtBot.send_message
     if getattr(current_send_message, "_meshnet_rx_header_normalizer", False):
