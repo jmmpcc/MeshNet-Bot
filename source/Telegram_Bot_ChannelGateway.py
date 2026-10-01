@@ -39,7 +39,7 @@ async def _augment_bot_commands_for_scope(app: Any, scope: Any) -> None:
         - Añade únicamente las balizas cuyo transporte está habilitado por
           ``RADIO_PROFILE``.
         - Amplía la descripción de ``/enviar_mc`` cuando MeshCore está disponible
-          para anunciar el modificador opcional ``--scope`` por transmisión.
+          para anunciar el modificador opcional ``scope#region`` por transmisión.
         - Evita comandos duplicados.
 
     Parámetros:
@@ -69,7 +69,7 @@ async def _augment_bot_commands_for_scope(app: Any, scope: Any) -> None:
         upsert("parar_baliza", "Detener baliza Meshtastic por nombre o meteorológica por ID")
 
     if "meshcore" in available:
-        upsert("enviar_mc", "Enviar MeshCore/APRS; --scope opcional por TX")
+        upsert("enviar_mc", "Enviar MeshCore/APRS; scope#region opcional por TX")
         upsert("baliza_mc", "Baliza MeshCore periódica por nombre")
         upsert("balizas_mc", "Listar balizas MeshCore activas")
         upsert("parar_baliza_mc", "Detener baliza MeshCore por nombre")
@@ -194,8 +194,8 @@ def _install_command_without_touching_original() -> None:
     Se llama una sola vez desde :func:`main`. Mantiene intacta la construcción
     histórica de ``Telegram_Bot_Broker.py`` y registra después las extensiones
     Channel Gateway, autorespuesta y balizas periódicas. El handler histórico de
-    ``/enviar_mc`` se conserva y solo se envuelve para extraer ``--scope`` cuando
-    el usuario lo especifica.
+    ``/enviar_mc`` se conserva y solo se envuelve para extraer ``scope#region``
+    (o la sintaxis legacy ``--scope``) cuando el usuario lo especifica.
     """
     original_build_application = bot.build_application
 
@@ -204,8 +204,8 @@ def _install_command_without_touching_original() -> None:
         app = original_build_application()
 
         # Conserva el parser, transportes y respuestas de /enviar_mc. La capa
-        # adicional únicamente retira --scope de context.args y transporta ese
-        # valor como metadato del TX MeshCore.
+        # adicional únicamente retira el modificador de scope de context.args y
+        # transporta ese valor como metadato del TX MeshCore.
         install_enviar_mc_scope_support(app, bot)
 
         # Extensión ya existente: pasarela interna entre canales.
