@@ -52,46 +52,30 @@ def _load_environment_before_gateway() -> None:
             continue
 
 
-def _install_meshcore_scope_runtime_if_configured() -> None:
-    """Instala el flood scope por canal sin modificar el broker principal.
+def _install_meshcore_tx_scope_runtime() -> None:
+    """Instala el scope MeshCore por TX antes de ejecutar el broker principal.
 
-    Uso:
-        _install_meshcore_scope_runtime_if_configured()
-
-    Parámetros:
-        Ninguno. Lee ``MESHCORE_CHANNEL_SCOPE_MAP`` desde el entorno ya cargado.
-
-    Funcionalidad:
-        - Si no hay mapa configurado, no cambia absolutamente nada.
-        - Con mapa configurado, cada ``send_chan_msg`` aplica primero el scope
-          del ``channel_idx``; canales no mapeados vuelven al default del nodo.
-        - Si ``meshcore_py`` no ofrece la API necesaria o no puede instalarse el
-          wrapper, el arranque falla explícitamente. Es preferible no habilitar
-          TX MeshCore a volver silenciosamente al envío unscoped.
-        - Si ``set_flood_scope`` devuelve ERROR durante un TX, dicho mensaje no
-          se transmite.
+    No depende de un mapa channel_idx->scope. La capa permanece pasiva hasta que
+    una petición ``MESHCORE_SEND`` incluye ``params.scope``. De ese modo todos
+    los clientes históricos que no conocen el nuevo parámetro conservan su flujo.
     """
-    if not (os.getenv("MESHCORE_CHANNEL_SCOPE_MAP") or "").strip():
-        return
-
     try:
         from meshcore import MeshCore  # type: ignore
-        from meshcore_channel_scope import install_meshcore_channel_scope_runtime
+        from meshcore_channel_scope import install_meshcore_tx_scope_runtime
 
-        installed = install_meshcore_channel_scope_runtime(MeshCore)
-        if not installed:
-            raise RuntimeError("meshcore_scope_runtime_not_installed")
+        if install_meshcore_tx_scope_runtime(MeshCore):
+            print(
+                "[meshcore-scope] soporte de flood scope por TX habilitado",
+                flush=True,
+            )
     except Exception as exc:
+        # Fail-closed: esta versión publica --scope en Telegram, por lo que no
+        # se permite arrancar un runtime que pudiera aceptar la orden y emitirla
+        # después sin aplicar el scope solicitado.
         raise RuntimeError(
-            "MESHCORE_CHANNEL_SCOPE_MAP está configurado pero no se pudo "
-            f"instalar el runtime seguro de scope: {type(exc).__name__}: {exc}"
+            "No se pudo instalar el runtime seguro de scope MeshCore: "
+            f"{type(exc).__name__}: {exc}"
         ) from exc
-
-    print(
-        "[meshcore-scope] runtime por channel_idx habilitado mediante "
-        "MESHCORE_CHANNEL_SCOPE_MAP",
-        flush=True,
-    )
 
 
 def main() -> None:
@@ -105,7 +89,7 @@ def main() -> None:
     Funcionalidad:
         1. Resuelve el script original recibido como primer argumento.
         2. Precarga variables de entorno de forma compatible con el broker.
-        3. Instala, solo si está configurado, el scope MeshCore por canal.
+        3. Instala el soporte opcional de scope por transmisión MeshCore.
         4. Instala Channel Gateway en el mismo proceso.
         5. Ejecuta el broker original como ``__main__`` con sus argumentos.
     """
@@ -118,7 +102,7 @@ def main() -> None:
         raise SystemExit(f"Broker no encontrado: {broker_script}")
 
     _load_environment_before_gateway()
-    _install_meshcore_scope_runtime_if_configured()
+    _install_meshcore_tx_scope_runtime()
 
     # Import diferido: garantiza que channel_gateway lea las variables una vez
     # precargado el entorno en ejecuciones manuales fuera de Docker Compose.
