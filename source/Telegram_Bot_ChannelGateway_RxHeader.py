@@ -3,8 +3,8 @@
 """Launcher fino que normaliza encabezados RX y delega en Channel Gateway.
 
 No sustituye ninguna función del broker ni del bot. Solo intercepta el texto que
-ExtBot va a enviar a Telegram y aplica una transformación idempotente cuando el
-encabezado coincide exactamente con un RX MeshCore conocido.
+ExtBot va a enviar a Telegram y aplica transformaciones visuales idempotentes
+sobre mensajes MeshCore conocidos.
 """
 from __future__ import annotations
 
@@ -14,15 +14,28 @@ from typing import Any
 from telegram.ext import ExtBot
 
 import Telegram_Bot_ChannelGateway as channel_gateway_launcher
+from meshcore_channel_scope import annotate_meshcore_scope
 from meshcore_rx_header import normalize_meshcore_rx_header
 
 
 def _install_meshcore_rx_header_normalizer() -> None:
     """Envuelve ``ExtBot.send_message`` sin alterar el resto del bot.
 
-    El wrapper solo modifica el argumento ``text`` cuando el normalizador reconoce
-    el encabezado RX MeshCore. Todos los demás argumentos y llamadas se delegan
-    exactamente al método original.
+    Uso:
+        _install_meshcore_rx_header_normalizer()
+
+    Parámetros:
+        Ninguno.
+
+    Funcionalidad:
+        - Normaliza primero el encabezado RX MeshCore ya existente.
+        - Añade después información de scope únicamente cuando el canal figura
+          en ``MESHCORE_CHANNEL_SCOPE_MAP``.
+        - En RX identifica el dato como configuración del canal, no como scope
+          real recibido, porque ``meshcore_py`` aún no lo entrega en el evento.
+        - En la respuesta TX de ``/enviar_mc`` muestra el mismo scope que aplica
+          el runtime del broker antes de ``send_chan_msg``.
+        - Todos los demás argumentos y llamadas se delegan sin cambios.
     """
     current_send_message = ExtBot.send_message
     if getattr(current_send_message, "_meshnet_rx_header_normalizer", False):
@@ -38,10 +51,12 @@ def _install_meshcore_rx_header_normalizer() -> None:
         profile = os.getenv("RADIO_PROFILE", "")
 
         if "text" in kwargs:
-            kwargs["text"] = normalize_meshcore_rx_header(kwargs["text"], profile)
+            text = normalize_meshcore_rx_header(kwargs["text"], profile)
+            kwargs["text"] = annotate_meshcore_scope(text)
         elif len(args) >= 2:
             mutable_args = list(args)
-            mutable_args[1] = normalize_meshcore_rx_header(mutable_args[1], profile)
+            text = normalize_meshcore_rx_header(mutable_args[1], profile)
+            mutable_args[1] = annotate_meshcore_scope(text)
             args = tuple(mutable_args)
 
         return await original_send_message(self, *args, **kwargs)
