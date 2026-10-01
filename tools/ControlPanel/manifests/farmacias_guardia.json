@@ -8,5 +8,5 @@
 {"id":"preview","name":"Ver farmacias","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia.py","preview"]},
 {"id":"fetch","name":"Actualizar datos","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia.py","fetch"],"timeout":90,"mutating":true},
 {"id":"check","name":"Comprobar cambios","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia.py","check"],"timeout":90,"mutating":true},
-{"id":"publish","name":"Publicar ahora","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia.py","send","--force"],"timeout":120,"mutating":true,"confirm":true},
+{"id":"publish","name":"Publicar ahora","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia_scoped.py","send","--force"],"timeout":120,"mutating":true,"confirm":true},
 {"id":"doctor","name":"Diagnóstico","kind":"command","argv":["${PYTHON}","${REPO}/tools/farmacias_guardia/farmacias_guardia.py","doctor"],"timeout":90}]}
