@@ -12,8 +12,8 @@ from telegram.ext import CommandHandler
 from meshcore_channel_scope import (
     bot_tx_scope,
     current_bot_tx_scope,
-    extract_scope_modifier,
 )
+from meshcore_scope_token import extract_scope_modifier
 
 
 _PATCH_MARKER = "_meshnet_enviar_mc_scope"
@@ -23,12 +23,14 @@ def _scope_help_text() -> str:
     """Texto de ayuda reutilizable para /ayuda y errores de sintaxis."""
     return (
         "MeshCore - scope por transmisión\n"
-        "• Añade --scope <región> a /enviar_mc para limitar únicamente ese TX.\n"
-        "• Ej.: /enviar_mc ch5 --scope #zaragoza Hola\n"
-        "• Ej.: /enviar_mc ambos ch5 --scope #zaragoza aprs broadcast Aviso\n"
-        "• --scope 0 usa el scope por defecto del nodo.\n"
-        "• --scope * fuerza un TX sin scope.\n"
-        "• Si omites --scope, /enviar_mc conserva su funcionamiento histórico.\n"
+        "• Sintaxis recomendada: scope#<región>.\n"
+        "• Ej.: /enviar_mc canal 5 scope#utebo Hola\n"
+        "• Ej.: /enviar_mc ch5 scope#zaragoza Hola\n"
+        "• Ej.: /enviar_mc ambos ch5 scope#zaragoza aprs broadcast Aviso\n"
+        "• scope#0 usa el scope por defecto del nodo.\n"
+        "• scope#* fuerza un TX sin scope.\n"
+        "• Compatibilidad: --scope #region y --scope=#region siguen admitidos.\n"
+        "• Si omites el modificador, /enviar_mc conserva su funcionamiento histórico.\n"
         "• El scope es independiente del channel_idx y no modifica la configuración permanente del canal.\n"
         "• En TX el bot muestra Scope TX. En RX no se muestra un scope inventado: meshcore_py no lo expone aún en CHANNEL_MSG_RECV."
     )
@@ -48,8 +50,9 @@ def _send_scoped_via_broker(
 ) -> dict:
     """Envía MESHCORE_SEND incluyendo ``params.scope``.
 
-    Se usa exclusivamente cuando /enviar_mc contiene ``--scope``. Si no existe
-    modificador, el wrapper delega en ``_send_via_broker_meshcore`` original.
+    Se usa exclusivamente cuando /enviar_mc contiene un modificador de scope.
+    Si no existe modificador, el wrapper delega en
+    ``_send_via_broker_meshcore`` original.
     """
     host = str(getattr(bot_module, "BROKER_CTRL_HOST", "127.0.0.1") or "127.0.0.1")
     port = int(getattr(bot_module, "BROKER_CTRL_PORT", 8766) or 8766)
@@ -85,17 +88,18 @@ def _send_scoped_via_broker(
 
 
 def install_enviar_mc_scope_support(app: Any, bot_module: Any) -> bool:
-    """Añade ``--scope`` al /enviar_mc existente sin reescribir su handler.
+    """Añade scope por TX al /enviar_mc existente sin reescribir su handler.
 
     Funcionamiento:
         1. Localiza el CommandHandler histórico de ``/enviar_mc``.
         2. Conserva su callback, grupo y toda su lógica de transporte/APRS.
-        3. Extrae únicamente ``--scope`` de ``context.args``.
+        3. Extrae únicamente ``scope#region`` o la sintaxis legacy ``--scope``
+           de ``context.args``.
         4. Mientras se ejecuta el callback original, la función interna de TX
            MeshCore añade ``params.scope`` al broker mediante un ContextVar.
         5. Restaura siempre ``context.args`` al terminar.
 
-    Si no se indica ``--scope`` se delega exactamente en la función histórica.
+    Si no se indica scope se delega exactamente en la función histórica.
     """
     if bool(getattr(app, _PATCH_MARKER, False)):
         return True
