@@ -21,21 +21,13 @@ from meshcore_rx_header import normalize_meshcore_rx_header
 def _install_meshcore_rx_header_normalizer() -> None:
     """Envuelve ``ExtBot.send_message`` sin alterar el resto del bot.
 
-    Uso:
-        _install_meshcore_rx_header_normalizer()
-
-    Parámetros:
-        Ninguno.
-
     Funcionalidad:
-        - Normaliza primero el encabezado RX MeshCore ya existente.
-        - Añade después información de scope únicamente cuando el canal figura
-          en ``MESHCORE_CHANNEL_SCOPE_MAP``.
-        - En RX identifica el dato como configuración del canal, no como scope
-          real recibido, porque ``meshcore_py`` aún no lo entrega en el evento.
-        - En la respuesta TX de ``/enviar_mc`` muestra el mismo scope que aplica
-          el runtime del broker antes de ``send_chan_msg``.
-        - Todos los demás argumentos y llamadas se delegan sin cambios.
+        - Mantiene la normalización visual RX MeshCore ya existente.
+        - Añade ``Scope TX`` únicamente a la confirmación de un /enviar_mc que
+          haya usado ``--scope``.
+        - No inventa un valor de scope en RX: la versión actual de meshcore_py no
+          lo expone en ``CHANNEL_MSG_RECV``.
+        - Todos los demás argumentos y llamadas se delegan exactamente igual.
     """
     current_send_message = ExtBot.send_message
     if getattr(current_send_message, "_meshnet_rx_header_normalizer", False):
