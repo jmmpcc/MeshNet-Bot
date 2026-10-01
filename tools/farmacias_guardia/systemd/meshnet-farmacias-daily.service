@@ -6,4 +6,4 @@ After=network-online.target docker.service meshnet-farmacias-api.service
 Type=oneshot
 User=meshnet
 WorkingDirectory=/home/meshnet/MeshNet-Bot/tools/farmacias_guardia
-ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/farmacias_guardia/farmacias_guardia.py send
+ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/farmacias_guardia/farmacias_guardia_scoped.py send
