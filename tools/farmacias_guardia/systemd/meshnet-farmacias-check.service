@@ -6,4 +6,5 @@ After=network-online.target docker.service meshnet-farmacias-api.service
 Type=oneshot
 User=meshnet
 WorkingDirectory=/home/meshnet/MeshNet-Bot/tools/farmacias_guardia
+# El launcher scoped delega en el flujo histórico equivalente a: farmacias_guardia.py check --send
 ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/farmacias_guardia/farmacias_guardia_scoped.py check --send
