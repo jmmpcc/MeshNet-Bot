@@ -25,8 +25,6 @@ from typing import Any, Iterable
 
 
 _PATCH_MARKER = "_meshnet_tx_scope_runtime"
-_ORIGINAL_BUILD_CLASS = builtins.__build_class__
-_ORIGINAL_JSON_LOADS = json.loads
 
 # El BacklogServer/control puede procesar peticiones desde hilos. Este estado se
 # consume inmediatamente dentro de enqueue_send_channel(), por lo que no se
