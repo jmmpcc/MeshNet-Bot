@@ -19,6 +19,10 @@ from beacon_bot import (
 )
 from channel_gateway_bot import channel_gateway_cmd
 from auto_reply_bot import auto_reply_cmd, contextual_help as auto_reply_contextual_help
+from meshcore_scope_bot import (
+    contextual_help as meshcore_scope_contextual_help,
+    install_enviar_mc_scope_support,
+)
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.ext import CommandHandler
 from tcpinterface_persistent import TCPInterfacePool
@@ -34,6 +38,8 @@ async def _augment_bot_commands_for_scope(app: Any, scope: Any) -> None:
         - Añade ``/autorespuesta`` sin sustituir comandos históricos.
         - Añade únicamente las balizas cuyo transporte está habilitado por
           ``RADIO_PROFILE``.
+        - Amplía la descripción de ``/enviar_mc`` cuando MeshCore está disponible
+          para anunciar el modificador opcional ``--scope`` por transmisión.
         - Evita comandos duplicados.
 
     Parámetros:
@@ -63,6 +69,7 @@ async def _augment_bot_commands_for_scope(app: Any, scope: Any) -> None:
         upsert("parar_baliza", "Detener baliza Meshtastic por nombre o meteorológica por ID")
 
     if "meshcore" in available:
+        upsert("enviar_mc", "Enviar MeshCore/APRS; --scope opcional por TX")
         upsert("baliza_mc", "Baliza MeshCore periódica por nombre")
         upsert("balizas_mc", "Listar balizas MeshCore activas")
         upsert("parar_baliza_mc", "Detener baliza MeshCore por nombre")
@@ -100,14 +107,16 @@ def _install_visual_extensions() -> None:
 
         Orden de salida:
             1. Ayuda histórica del bot principal.
-            2. Ayuda contextual de balizas.
-            3. Ayuda contextual de autorespuesta.
+            2. Ayuda de scope MeshCore por transmisión.
+            3. Ayuda contextual de balizas.
+            4. Ayuda contextual de autorespuesta.
 
         Ningún bloque sustituye ni modifica la ayuda histórica existente.
         """
         await original_ayuda(update, context)
         message = getattr(update, "effective_message", None)
         if message is not None:
+            await message.reply_text(meshcore_scope_contextual_help())
             await message.reply_text(contextual_help())
             await message.reply_text(auto_reply_contextual_help())
 
@@ -184,14 +193,20 @@ def _install_command_without_touching_original() -> None:
 
     Se llama una sola vez desde :func:`main`. Mantiene intacta la construcción
     histórica de ``Telegram_Bot_Broker.py`` y registra después las extensiones
-    Channel Gateway, autorespuesta y balizas periódicas. Ninguna función de envío
-    existente se sustituye.
+    Channel Gateway, autorespuesta y balizas periódicas. El handler histórico de
+    ``/enviar_mc`` se conserva y solo se envuelve para extraer ``--scope`` cuando
+    el usuario lo especifica.
     """
     original_build_application = bot.build_application
 
     def build_application_with_channel_gateway():
         """Construye la app original y registra los comandos de las extensiones."""
         app = original_build_application()
+
+        # Conserva el parser, transportes y respuestas de /enviar_mc. La capa
+        # adicional únicamente retira --scope de context.args y transporta ese
+        # valor como metadato del TX MeshCore.
+        install_enviar_mc_scope_support(app, bot)
 
         # Extensión ya existente: pasarela interna entre canales.
         app.add_handler(CommandHandler("channel_gateway", channel_gateway_cmd))
