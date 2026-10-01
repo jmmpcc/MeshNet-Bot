@@ -4,104 +4,83 @@
 
 Esta funcionalidad permite elegir el **flood scope de MeshCore en cada transmisión**, de forma independiente del canal (`channel_idx`) por el que se envía el mensaje.
 
-El canal y el scope pasan a tener responsabilidades separadas:
-
 - **Canal**: determina por qué canal MeshCore se transmite el texto.
 - **Scope**: determina el ámbito regional de propagación de ese TX.
 
-No se modifica la configuración permanente del canal ni se mantiene un mapa fijo `canal -> scope`.
+No se modifica la configuración permanente del canal ni existe un mapa fijo `canal -> scope`.
 
-## 2. Motivo del cambio
+## 2. Sintaxis recomendada
 
-Las pruebas RF realizadas mostraron este comportamiento:
-
-1. Un mensaje enviado desde 3UTB mediante MeshNet-Bot salía sin scope y era repetido por repetidores que no pertenecían a la región deseada.
-2. Un mensaje enviado con scope desde otro nodo era repetido únicamente por el repetidor regional.
-3. El mismo 3UTB, conectado directamente a la aplicación MeshCore y sin MeshNet-Bot, enviaba con scope correctamente.
-
-Esto aisló el problema en la ruta TX de MeshNet-Bot: `send_chan_msg()` no incorpora el scope como argumento. La API actual de `meshcore_py` utiliza primero `set_flood_scope(scope)` y después `send_chan_msg(...)`.
-
-## 3. Sintaxis del bot
-
-La sintaxis histórica de `/enviar_mc` continúa funcionando sin cambios.
-
-### Envío normal, sin scope explícito
+Para evitar problemas de autocorrección con guiones en Telegram, la sintaxis recomendada es:
 
 ```text
-/enviar_mc ch5 Hola
-```
-
-```text
-/enviar_mc canal 5 Hola
-```
-
-```text
-/enviar_mc ambos ch5 aprs broadcast Aviso
-```
-
-### Envío con scope regional explícito
-
-```text
-/enviar_mc ch5 --scope #zaragoza Hola
-```
-
-También se admite el nombre sin `#`:
-
-```text
-/enviar_mc ch5 --scope zaragoza Hola
-```
-
-MeshNet-Bot lo normaliza internamente a:
-
-```text
-#zaragoza
-```
-
-El modificador puede escribirse como:
-
-```text
---scope #zaragoza
-```
-
-O:
-
-```text
---scope=#zaragoza
-```
-
-### Scope con transporte MeshCore + APRS
-
-```text
-/enviar_mc ambos ch5 --scope #zaragoza aprs broadcast Aviso doble
-```
-
-El scope se aplica únicamente al TX MeshCore. La parte APRS mantiene exactamente su funcionamiento actual.
-
-## 4. Valores especiales de scope
-
-### Usar el scope por defecto del nodo
-
-```text
-/enviar_mc ch5 --scope 0 Hola
+/enviar_mc canal 5 scope#utebo Prueba envio a Utebo
 ```
 
 También:
 
 ```text
-/enviar_mc ch5 --scope default Hola
+/enviar_mc ch5 scope#utebo Hola
+/enviar_mc 5 scope#utebo Hola
+/enviar_mc [ch5] scope#utebo Hola
 ```
 
-`0` indica a MeshCore que utilice el default scope configurado en el nodo Companion.
-
-### Forzar un mensaje sin scope
+El token `scope#utebo` se normaliza internamente a:
 
 ```text
-/enviar_mc ch5 --scope * Hola
+#utebo
 ```
 
-Esto genera tráfico unscoped/global. Debe utilizarse de forma consciente porque repetidores que acepten tráfico global pueden retransmitirlo.
+El scope puede colocarse en cualquier posición de los argumentos, siempre que no rompa la sintaxis histórica del destino. Por ejemplo:
 
-## 5. Confirmación visible en Telegram
+```text
+/enviar_mc ambos ch5 scope#zaragoza aprs broadcast Aviso doble
+```
+
+## 3. Compatibilidad con la sintaxis anterior
+
+Las formas anteriores siguen aceptándose:
+
+```text
+/enviar_mc ch5 --scope #utebo Hola
+/enviar_mc ch5 --scope=#utebo Hola
+```
+
+No obstante, la forma recomendada para uso diario es `scope#region` porque no depende de que Telegram, el teclado o el sistema operativo conserven dos guiones ASCII consecutivos.
+
+No se permite mezclar en el mismo TX `scope#region` y `--scope`.
+
+## 4. Envío sin scope explícito
+
+La sintaxis histórica continúa funcionando sin cambios:
+
+```text
+/enviar_mc ch5 Hola
+/enviar_mc canal 5 Hola
+/enviar_mc ambos ch5 aprs broadcast Aviso
+```
+
+Si no se indica ningún modificador de scope, se delega en el flujo histórico.
+
+## 5. Valores especiales
+
+### Default scope del nodo
+
+```text
+/enviar_mc canal 5 scope#0 Hola
+```
+
+`scope#0` equivale a `set_flood_scope("0")` y utiliza el default scope configurado en el Companion.
+
+### TX explícitamente unscoped
+
+```text
+/enviar_mc canal 5 scope#* Hola
+```
+
+Esto fuerza tráfico sin scope. Debe utilizarse de forma consciente porque repetidores que acepten tráfico global/unscoped pueden retransmitirlo.
+
+## 6. Confirmación visible en Telegram
 
 Cuando el TX utiliza un scope explícito, la confirmación muestra el valor aplicado:
 
@@ -109,27 +88,33 @@ Cuando el TX utiliza un scope explícito, la confirmación muestra el valor apli
 Envío MeshCore
 Transporte: MESH
 Malla MeshCore -> Canal (channel_idx): 5
-Scope TX: #zaragoza
+Scope TX: #utebo
 Resultado MeshCore: OK
 ```
 
-Si no se indica `--scope`, la confirmación mantiene el formato histórico y no añade una línea artificial.
+Si no se indica scope, la confirmación mantiene el formato histórico.
 
-## 6. Funcionamiento interno
+## 7. Funcionamiento interno
 
-La secuencia lógica es:
+Ejemplo:
+
+```text
+/enviar_mc canal 5 scope#utebo Hola
+```
+
+Flujo:
 
 ```text
 Telegram
    |
-   | /enviar_mc ch5 --scope #zaragoza Hola
+   | scope#utebo
    v
 MeshNet-Bot
    |
    | MESHCORE_SEND
    | channel_idx = 5
    | text = Hola
-   | scope = #zaragoza
+   | scope = #utebo
    v
 Broker MeshNet
    |
@@ -141,32 +126,28 @@ Cola MeshCore
    v
 meshcore_py
    |
-   | set_flood_scope("#zaragoza")
+   | set_flood_scope("#utebo")
    | send_chan_msg(5, "Hola")
    v
 Radio MeshCore
 ```
 
-El scope forma parte del **item lógico de transmisión**, no del canal.
+El scope pertenece al **TX**, no al canal.
 
-## 7. Mensajes largos y fragmentación
+## 8. Fragmentación
 
-Los mensajes largos siguen utilizando la fragmentación ya existente de MeshNet-Bot.
-
-El scope se conserva junto al item de cola y se selecciona antes de procesar sus partes. Cada llamada efectiva a `send_chan_msg()` aplica el scope correspondiente antes de transmitir.
-
-Por tanto:
+Los mensajes largos siguen utilizando la fragmentación existente. El scope se conserva junto al item de cola durante todas sus partes:
 
 ```text
-TX scope #zaragoza
-  parte 1/3 -> #zaragoza
-  parte 2/3 -> #zaragoza
-  parte 3/3 -> #zaragoza
+TX scope #utebo
+  parte 1/3 -> #utebo
+  parte 2/3 -> #utebo
+  parte 3/3 -> #utebo
 ```
 
-No se ha sustituido la lógica actual de fragmentación.
+No se sustituye la lógica actual de fragmentación.
 
-## 8. Reintentos y reconexiones
+## 9. Reintentos y reconexiones
 
 El scope se guarda dentro del destino del item de cola:
 
@@ -174,68 +155,62 @@ El scope se guarda dentro del destino del item de cola:
 {
   kind: chan,
   channel_idx: 5,
-  scope: #zaragoza
+  scope: #utebo
 }
 ```
 
-Si la conexión MeshCore cae y el TX pasa al spool de reintentos, el scope permanece asociado al mensaje.
+Si la conexión cae y el TX pasa al spool, el scope permanece asociado al mensaje y se reutiliza tras la reconexión.
 
-Cuando el item se recupera después de una reconexión, vuelve a utilizar el mismo scope.
+## 10. Protección fail-closed
 
-## 9. Protección frente a fugas unscoped
-
-Si un TX solicita un scope y `set_flood_scope()` devuelve un error, **esa parte no se transmite**.
-
-La política es fail-closed:
+Si `set_flood_scope()` devuelve un error, esa parte no se transmite:
 
 ```text
-set_flood_scope(#zaragoza) -> ERROR
-send_chan_msg(...)         -> NO se ejecuta
+set_flood_scope(#utebo) -> ERROR
+send_chan_msg(...)      -> NO se ejecuta
 ```
 
-Esto evita que un mensaje que debía permanecer dentro de una región pueda salir accidentalmente como tráfico global.
+Así un mensaje regional no puede salir accidentalmente como tráfico global.
 
-## 10. Restauración después de un TX scoped
+## 11. Restauración después de un TX scoped
 
-Un scope explícito es un override temporal del Companion.
-
-Después de un TX con scope, el siguiente TX de canal que no tenga `--scope` restaura primero:
+Después de un TX scoped, el siguiente TX de canal sin scope explícito restaura primero:
 
 ```text
 set_flood_scope("0")
 ```
 
-Así vuelve al default scope del nodo y un envío regional no contamina mensajes posteriores.
+Esto evita que el scope anterior contamine mensajes posteriores.
 
-Antes de utilizar por primera vez un scope explícito, los TX históricos sin `--scope` no se modifican.
+## 12. RX
 
-## 11. RX: limitación actual
+En TX conocemos el scope solicitado y aplicado.
 
-En TX conocemos exactamente el scope solicitado y aplicado.
+En RX, la versión actual de `meshcore_py` no expone de forma fiable el scope real en `CHANNEL_MSG_RECV`. Por ese motivo MeshNet-Bot **no inventa ni infiere un scope recibido**.
 
-En RX, la versión actual de `meshcore_py` no expone de forma fiable el scope real dentro del evento `CHANNEL_MSG_RECV`.
+Se mantienen los datos RX existentes: canal, alias, RSSI, SNR, repetidores, traza y mapa cuando esté configurado.
 
-Por ese motivo MeshNet-Bot **no muestra un scope inferido o inventado en RX**.
+## 13. Ayuda del bot
 
-Se mantienen sin cambios los datos RX ya disponibles:
+El menú `/` muestra que `/enviar_mc` admite `scope#region` opcional por TX.
 
-- canal MeshCore;
-- emisor/alias;
-- RSSI;
-- SNR;
-- repetidores;
-- ruta/traza;
-- enlace al mapa cuando está configurado.
+`/ayuda` y `/enviar_mc` sin parámetros incluyen ejemplos como:
 
-Cuando `meshcore_py` exponga el scope RX de forma oficial, podrá añadirse como dato real del paquete.
+```text
+/enviar_mc canal 5 scope#utebo Hola
+/enviar_mc ch5 scope#zaragoza Hola
+/enviar_mc ambos ch5 scope#zaragoza aprs broadcast Aviso
+/enviar_mc ch5 scope#0 Hola
+/enviar_mc ch5 scope#* Hola
+```
 
-## 12. Compatibilidad
+La ayuda histórica no se elimina; sólo se añade este bloque.
 
-La funcionalidad está diseñada para no alterar los flujos existentes.
+## 14. Compatibilidad protegida
 
 No se modifica el comportamiento de:
 
-- `/enviar_mc` cuando no incluye `--scope`;
+- `/enviar_mc` sin scope;
 - `/enviar_mc_dm` y `/dm_mc`;
 - APRS;
 - cola TX existente;
@@ -251,112 +226,79 @@ No se modifica el comportamiento de:
 - ZaragozaNoticias;
 - Channel Gateway.
 
-Los clientes antiguos que envíen `MESHCORE_SEND` sin el campo `scope` continúan siendo válidos.
+Los clientes antiguos que envían `MESHCORE_SEND` sin `scope` siguen siendo válidos.
 
-## 13. Ayuda del bot
+## 15. Pruebas RF recomendadas
 
-El menú `/` actualiza la descripción de `/enviar_mc` para indicar que existe scope opcional por TX.
-
-`/ayuda` añade un bloque específico con:
+### A. Scope Utebo
 
 ```text
-/enviar_mc ch5 --scope #zaragoza Hola
-/enviar_mc ambos ch5 --scope #zaragoza aprs broadcast Aviso
-/enviar_mc ch5 --scope 0 Hola
-/enviar_mc ch5 --scope * Hola
-```
-
-Además, ejecutar `/enviar_mc` sin parámetros conserva su ayuda histórica y añade el bloque de `--scope`.
-
-No se elimina ni sustituye la ayuda histórica.
-
-## 14. Prueba RF recomendada
-
-### Prueba A - scope regional
-
-```text
-/enviar_mc ch5 --scope #zaragoza PRUEBA SCOPE REGIONAL
+/enviar_mc canal 5 scope#utebo PRUEBA SCOPE UTEBO
 ```
 
 Comprobar:
 
-1. Telegram muestra `Scope TX: #zaragoza`.
-2. El repetidor perteneciente a esa región retransmite el mensaje.
-3. Un repetidor que no pertenece a esa región no aparece en la traza.
+1. Telegram muestra `Scope TX: #utebo`.
+2. El repetidor de Utebo retransmite.
+3. Un repetidor fuera de esa región no aparece en la traza.
 
-### Prueba B - mismo canal, otro scope
-
-```text
-/enviar_mc ch5 --scope #otra-region PRUEBA OTRA REGION
-```
-
-El `channel_idx` es exactamente el mismo; cambia únicamente el alcance regional.
-
-### Prueba C - default del nodo
+### B. Mismo canal, otro scope
 
 ```text
-/enviar_mc ch5 --scope 0 PRUEBA DEFAULT
+/enviar_mc canal 5 scope#zaragoza PRUEBA OTRO SCOPE
 ```
 
-Debe utilizar el default scope del Companion.
+El canal sigue siendo `5`; cambia sólo el alcance regional.
 
-### Prueba D - unscoped explícito
+### C. Default
 
 ```text
-/enviar_mc ch5 --scope * PRUEBA UNSCOPED
+/enviar_mc canal 5 scope#0 PRUEBA DEFAULT
 ```
 
-Es esperable que puedan retransmitirlo repetidores que admitan tráfico global/unscoped.
-
-### Prueba E - regresión
+### D. Unscoped explícito
 
 ```text
-/enviar_mc ch5 PRUEBA SIN MODIFICADOR
+/enviar_mc canal 5 scope#* PRUEBA UNSCOPED
 ```
 
-Debe conservar la sintaxis y el funcionamiento histórico.
-
-## 15. Diagnóstico en logs
-
-En un TX scoped debe aparecer el scope en el encolado diagnóstico, por ejemplo:
+### E. Regresión histórica
 
 ```text
-[meshcore] enqueue -> chan_idx=5 ... scope=#zaragoza
+/enviar_mc canal 5 PRUEBA SIN SCOPE
 ```
 
-La cola continúa mostrando su `tx_id`, partes y reintentos habituales.
+Debe conservar el comportamiento histórico.
 
-## 16. Seguridad operativa
+## 16. Diagnóstico
 
-- No usar `--scope *` salvo que se quiera explícitamente tráfico unscoped.
-- Utilizar el nombre exacto de la región MeshCore.
-- Preferir `#region` para hacer explícito que se trata de un flood scope.
-- Verificar primero mediante un mensaje corto antes de pruebas de tráfico intensivo.
-- Si `set_flood_scope()` falla, no forzar manualmente el envío sin investigar la causa.
+En un TX scoped debe aparecer en el log del broker algo equivalente a:
+
+```text
+[meshcore] enqueue -> chan_idx=5 ... scope=#utebo
+```
+
+Telegram debe mostrar:
+
+```text
+Scope TX: #utebo
+```
+
+Si falta esa línea, el modificador no ha sido reconocido y no debe darse por validado el scope.
 
 ## 17. Resumen
 
-La nueva semántica es:
+La semántica final es:
 
 ```text
 channel_idx = por dónde sale
 scope       = hasta dónde se propaga
 ```
 
-Ejemplo final:
+Sintaxis recomendada:
 
 ```text
-/enviar_mc ch5 --scope #zaragoza Hola
+/enviar_mc canal 5 scope#utebo Hola
 ```
 
-El canal 5 no queda asociado permanentemente a `#zaragoza`. Un segundo mensaje puede utilizar el mismo canal con otro scope:
-
-```text
-/enviar_mc ch5 --scope #aragon Hola Aragón
-```
-
-O volver al scope por defecto:
-
-```text
-/enviar_mc ch5 --scope 0 Hola default
-```
+El canal 5 no queda asociado permanentemente a `#utebo`. El siguiente mensaje puede usar otro scope o ninguno.
