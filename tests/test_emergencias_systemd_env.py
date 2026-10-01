@@ -13,9 +13,9 @@ class EmergenciasSystemdEnvTests(unittest.TestCase):
         self.assertIn(local, text)
         self.assertLess(text.index(main), text.index(local))
 
-    def test_notify_changes_command_is_preserved(self):
+    def test_notify_changes_command_is_preserved_through_scoped_launcher(self):
         text = SERVICE.read_text(encoding="utf-8")
-        self.assertIn("emergencias_guardia.py check --notify-changes", text)
+        self.assertIn("emergencias_guardia_scoped.py check --notify-changes", text)
 
 if __name__ == "__main__":
     unittest.main()
