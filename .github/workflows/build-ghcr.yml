@@ -126,10 +126,24 @@ jobs:
             rebuild_broker=true
           fi
 
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
           # Bot
           # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
           # parte de la imagen bot y deben reconstruirla cuando cambien.
           if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
             rebuild_bot=true
           fi
 
