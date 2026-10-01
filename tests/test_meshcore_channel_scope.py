@@ -9,6 +9,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "source"
@@ -129,6 +131,24 @@ def test_scope_error_blocks_radio_send() -> None:
     result = asyncio.run(mc.commands.send_chan_msg(5, "no debe salir"))
     assert result.type.name == "ERROR"
     assert mc.commands.calls == [("scope", "#zaragoza")]
+
+
+def test_missing_scope_api_fails_closed() -> None:
+    class CommandsWithoutScope:
+        async def send_chan_msg(self, chan, msg, timestamp=None):
+            raise AssertionError("send_chan_msg no debe quedar operativo sin set_flood_scope")
+
+    class Factory:
+        @classmethod
+        async def create_serial(cls, *args, **kwargs):
+            mc = type("MC", (), {})()
+            mc.commands = CommandsWithoutScope()
+            return mc
+
+    env = {"MESHCORE_CHANNEL_SCOPE_MAP": "5:#zaragoza"}
+    install_meshcore_channel_scope_runtime(Factory, env=env)
+    with pytest.raises(RuntimeError, match="meshcore_set_flood_scope_unavailable"):
+        asyncio.run(Factory.create_serial("/dev/test"))
 
 
 def test_visual_rx_says_configured_not_received_scope() -> None:
