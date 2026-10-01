@@ -63,11 +63,13 @@ def _install_meshcore_scope_runtime_if_configured() -> None:
 
     Funcionalidad:
         - Si no hay mapa configurado, no cambia absolutamente nada.
-        - Si MeshCore no está disponible, deja que el broker gestione su propio
-          diagnóstico de dependencia como hasta ahora.
-        - Cuando existe mapa, cada ``send_chan_msg`` aplica primero el scope del
-          ``channel_idx``; canales no mapeados vuelven al default scope del nodo.
-        - Si ``set_flood_scope`` falla, ese TX no se emite sin scope por error.
+        - Con mapa configurado, cada ``send_chan_msg`` aplica primero el scope
+          del ``channel_idx``; canales no mapeados vuelven al default del nodo.
+        - Si ``meshcore_py`` no ofrece la API necesaria o no puede instalarse el
+          wrapper, el arranque falla explícitamente. Es preferible no habilitar
+          TX MeshCore a volver silenciosamente al envío unscoped.
+        - Si ``set_flood_scope`` devuelve ERROR durante un TX, dicho mensaje no
+          se transmite.
     """
     if not (os.getenv("MESHCORE_CHANNEL_SCOPE_MAP") or "").strip():
         return
@@ -77,20 +79,19 @@ def _install_meshcore_scope_runtime_if_configured() -> None:
         from meshcore_channel_scope import install_meshcore_channel_scope_runtime
 
         installed = install_meshcore_channel_scope_runtime(MeshCore)
-        if installed:
-            print(
-                "[meshcore-scope] runtime por channel_idx habilitado mediante "
-                "MESHCORE_CHANNEL_SCOPE_MAP",
-                flush=True,
-            )
+        if not installed:
+            raise RuntimeError("meshcore_scope_runtime_not_installed")
     except Exception as exc:
-        # No se aborta el broker por una capa opcional. El fallo queda visible
-        # para diagnóstico y el runtime principal mantiene su comportamiento.
-        print(
-            f"[meshcore-scope] WARN: no se pudo instalar runtime: "
-            f"{type(exc).__name__}: {exc}",
-            flush=True,
-        )
+        raise RuntimeError(
+            "MESHCORE_CHANNEL_SCOPE_MAP está configurado pero no se pudo "
+            f"instalar el runtime seguro de scope: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    print(
+        "[meshcore-scope] runtime por channel_idx habilitado mediante "
+        "MESHCORE_CHANNEL_SCOPE_MAP",
+        flush=True,
+    )
 
 
 def main() -> None:
@@ -99,7 +100,7 @@ def main() -> None:
     original sin modificar sus argumentos ni su código.
 
     Uso:
-        python Meshtastic_Broker_ChannelGateway.py Meshtastic_Broker.py [args]
+        python Meshtastic_Broker_ChannelGateway.py Meshtastic_Broker.py [args...]
 
     Funcionalidad:
         1. Resuelve el script original recibido como primer argumento.
