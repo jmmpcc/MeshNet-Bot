@@ -102,19 +102,25 @@ def _install_on_instance(mc: Any, scope_map: Mapping[int, str]) -> Any:
 
     Antes de cada TX de canal establece el flood scope correspondiente. Cuando
     no existe un scope específico para el canal, envía ``0`` para limpiar
-    cualquier override previo y volver al default scope del nodo. Si la orden de
-    scope falla, el mensaje NO se transmite: se evita una fuga accidental como
-    paquete unscoped.
+    cualquier override previo y volver al default scope del nodo.
+
+    Si la API requerida no está disponible o la orden de scope falla, se aplica
+    una política fail-closed: no se permite continuar con un TX de canal que
+    pudiera salir accidentalmente unscoped.
     """
     commands = getattr(mc, "commands", None)
     if commands is None:
-        return mc
+        raise RuntimeError("meshcore_scope_commands_unavailable")
+
     current = getattr(commands, "send_chan_msg", None)
-    set_scope = getattr(commands, "set_flood_scope", None)
-    if not callable(current) or not callable(set_scope):
-        return mc
+    if not callable(current):
+        raise RuntimeError("meshcore_send_chan_msg_unavailable")
     if getattr(current, _PATCH_MARKER, False):
         return mc
+
+    set_scope = getattr(commands, "set_flood_scope", None)
+    if not callable(set_scope):
+        raise RuntimeError("meshcore_set_flood_scope_unavailable")
 
     original_send_chan_msg = current
 
@@ -122,6 +128,7 @@ def _install_on_instance(mc: Any, scope_map: Mapping[int, str]) -> Any:
         try:
             channel_idx = int(chan)
         except (TypeError, ValueError):
+            # Conserva el error/validación original para índices inválidos.
             return await original_send_chan_msg(chan, msg, timestamp)
 
         selected_scope = scope_map.get(channel_idx)
@@ -159,6 +166,8 @@ def install_meshcore_channel_scope_runtime(
         - Intercepta únicamente las conexiones creadas por ``create_serial``,
           ``create_tcp`` o ``create_ble``.
         - No modifica DM, RX, reintentos, fragmentación ni otras órdenes.
+        - Con mapa configurado exige al menos un constructor compatible; si no,
+          falla explícitamente en vez de dejar TX regionales salir sin scope.
         - Es idempotente: una segunda instalación no duplica wrappers.
     """
     source = os.environ if env is None else env
@@ -182,9 +191,11 @@ def install_meshcore_channel_scope_runtime(
         setattr(meshcore_cls, creator_name, staticmethod(creator_with_scope))
         patched_any = True
 
-    if patched_any:
-        setattr(meshcore_cls, _PATCH_MARKER, True)
-    return patched_any
+    if not patched_any:
+        raise RuntimeError("meshcore_scope_no_supported_creator")
+
+    setattr(meshcore_cls, _PATCH_MARKER, True)
+    return True
 
 
 def annotate_meshcore_scope(text: object, *, env: Mapping[str, str] | None = None) -> object:
