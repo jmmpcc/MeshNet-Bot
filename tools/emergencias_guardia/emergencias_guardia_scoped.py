@@ -22,9 +22,12 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_DIR = Path(__file__).resolve().parents[2]
+BASE_DIR = Path(__file__).resolve().parent
+REPO_DIR = BASE_DIR.parents[1]
 if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 from shared.meshcore_optional_scope import add_optional_channel_scope
 from emergencias import notifier
