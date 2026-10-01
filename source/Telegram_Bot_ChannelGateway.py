@@ -34,16 +34,20 @@ async def _augment_bot_commands_for_scope(app: Any, scope: Any) -> None:
     Funcionalidad:
         - Lee primero los comandos ya publicados por el bot principal.
         - Mantiene su orden y descripciones salvo cuando una descripción necesita
-          indicar funcionalidad añadida sin perder la histórica.
-        - Añade ``/autorespuesta`` sin sustituir comandos previos.
+          indicar que ``/parar_baliza`` sirve también para la baliza periódica.
+        - Añade ``/autorespuesta`` sin sustituir comandos históricos.
         - Añade únicamente las balizas cuyo transporte está habilitado por
           ``RADIO_PROFILE``.
-        - Amplía la descripción de ``/enviar_mc`` para anunciar ``--scope``.
+        - Amplía la descripción de ``/enviar_mc`` cuando MeshCore está disponible
+          para anunciar el modificador opcional ``--scope`` por transmisión.
         - Evita comandos duplicados.
 
     Parámetros:
         app: ``telegram.ext.Application`` ya inicializada.
         scope: ``BotCommandScopeDefault`` o ``BotCommandScopeChat``.
+
+    Se llama desde :func:`_install_visual_extensions` después de ejecutar el
+    ``set_bot_menu`` original, por lo que no sustituye ni pierde comandos previos.
     """
     commands = list(await app.bot.get_my_commands(scope=scope) or [])
     available = beacon_bot._available_transports()
@@ -60,6 +64,8 @@ async def _augment_bot_commands_for_scope(app: Any, scope: Any) -> None:
     if "meshtastic" in available:
         upsert("baliza", "Baliza Meshtastic periódica por nombre")
         upsert("balizas", "Listar balizas Meshtastic activas")
+        # Este comando ya existía para la baliza meteorológica. La descripción
+        # se amplía, no se elimina ni se renombra su funcionalidad histórica.
         upsert("parar_baliza", "Detener baliza Meshtastic por nombre o meteorológica por ID")
 
     if "meshcore" in available:
@@ -72,7 +78,13 @@ async def _augment_bot_commands_for_scope(app: Any, scope: Any) -> None:
 
 
 def _install_visual_extensions() -> None:
-    """Integra extensiones en menú ``/`` y ``/ayuda`` sin reescribir el bot principal."""
+    """Integra extensiones en menú ``/`` y ``/ayuda`` sin reescribir el bot principal.
+
+    Se llama antes de construir la ``Application``. Envuelve las funciones globales
+    que el ``build_application`` original consulta al ejecutarse, de modo que los
+    comandos nuevos aparecen siempre en la interfaz visible de Telegram y respetan
+    las capacidades de ``RADIO_PROFILE``.
+    """
     original_set_bot_menu = bot.set_bot_menu
     original_ayuda = bot.ayuda
 
@@ -90,7 +102,17 @@ def _install_visual_extensions() -> None:
                 bot.log(f"❗ set_my_commands extensiones admin {admin_id}: {exc}")
 
     async def ayuda_with_extensions(update: Any, context: Any) -> None:
-        """Conserva ``/ayuda`` y añade bloques contextuales externos."""
+        """
+        Conserva ``/ayuda`` existente y añade ayudas contextuales externas.
+
+        Orden de salida:
+            1. Ayuda histórica del bot principal.
+            2. Ayuda de scope MeshCore por transmisión.
+            3. Ayuda contextual de balizas.
+            4. Ayuda contextual de autorespuesta.
+
+        Ningún bloque sustituye ni modifica la ayuda histórica existente.
+        """
         await original_ayuda(update, context)
         message = getattr(update, "effective_message", None)
         if message is not None:
@@ -103,7 +125,20 @@ def _install_visual_extensions() -> None:
 
 
 def _replace_parar_baliza_handler(app: Any) -> None:
-    """Unifica ``/parar_baliza`` sin romper la baliza meteorológica histórica."""
+    """Unifica ``/parar_baliza`` sin romper la baliza meteorológica histórica.
+
+    El bot principal ya registraba ``/parar_baliza <task_id>`` para cancelar una
+    baliza meteorológica. La nueva baliza Meshtastic necesita el mismo nombre de
+    comando pero detiene por ``<nombre>``. Esta función localiza el handler antiguo,
+    conserva su callback y lo sustituye por un despachador compatible:
+
+        - si existe una baliza Meshtastic activa con ese nombre, usa el nuevo
+          gestor de balizas periódicas;
+        - en cualquier otro caso delega exactamente al callback meteorológico
+          original.
+
+    De esta forma no se modifica ni se duplica la implementación histórica.
+    """
     original_callback: Callable[[Any, Any], Awaitable[Any]] | None = None
     original_group = 0
     original_handler: CommandHandler | None = None
@@ -143,6 +178,8 @@ def _replace_parar_baliza_handler(app: Any) -> None:
             await original_callback(update, context)
             return
 
+        # Fallback defensivo solo si una futura versión elimina el handler
+        # meteorológico original.
         await parar_baliza_cmd(update, context)
 
     app.add_handler(
@@ -152,26 +189,41 @@ def _replace_parar_baliza_handler(app: Any) -> None:
 
 
 def _install_command_without_touching_original() -> None:
-    """Envuelve ``build_application()`` y añade únicamente handlers externos."""
+    """Envuelve ``build_application()`` y añade únicamente handlers externos.
+
+    Se llama una sola vez desde :func:`main`. Mantiene intacta la construcción
+    histórica de ``Telegram_Bot_Broker.py`` y registra después las extensiones
+    Channel Gateway, autorespuesta y balizas periódicas. El handler histórico de
+    ``/enviar_mc`` se conserva y solo se envuelve para extraer ``--scope`` cuando
+    el usuario lo especifica.
+    """
     original_build_application = bot.build_application
 
     def build_application_with_channel_gateway():
-        """Construye la app original y registra las extensiones sin duplicarlas."""
+        """Construye la app original y registra los comandos de las extensiones."""
         app = original_build_application()
 
-        # Se envuelve el handler histórico, conservando su parser, APRS y UI.
-        # Únicamente se extrae --scope y se añade params.scope a MESHCORE_SEND.
+        # Conserva el parser, transportes y respuestas de /enviar_mc. La capa
+        # adicional únicamente retira --scope de context.args y transporta ese
+        # valor como metadato del TX MeshCore.
         install_enviar_mc_scope_support(app, bot)
 
+        # Extensión ya existente: pasarela interna entre canales.
         app.add_handler(CommandHandler("channel_gateway", channel_gateway_cmd))
         app.add_handler(CommandHandler("pasarela_canales", channel_gateway_cmd))
+
+        # Extensión de administración: reutiliza auto_reply.json sin tocar AutoReply.
         app.add_handler(CommandHandler("autorespuesta", auto_reply_cmd))
+
+        # Nueva extensión: balizas periódicas independientes por transporte.
         app.add_handler(CommandHandler("baliza", baliza_cmd))
         app.add_handler(CommandHandler("baliza_mc", baliza_mc_cmd))
         app.add_handler(CommandHandler("balizas", balizas_cmd))
         app.add_handler(CommandHandler("balizas_mc", balizas_mc_cmd))
         app.add_handler(CommandHandler("parar_baliza_mc", parar_baliza_mc_cmd))
 
+        # /parar_baliza ya existía para meteorología; se conserva mediante un
+        # despachador compatible en lugar de registrar un segundo handler igual.
         _replace_parar_baliza_handler(app)
         return app
 
