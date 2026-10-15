@@ -26,6 +26,16 @@ RUN python -m pip install --no-cache-dir \
     -r /app/requirements/requirements.base.txt \
     -r /app/requirements/requirements.bot.txt
 
+# Guardia de compatibilidad: el broker se ejecuta sobre Python 3.11 y debe
+# poder importar la librería MeshCore instalada. Si una futura publicación de
+# PyPI introduce sintaxis incompatible, el build de GHCR fallará aquí antes de
+# llegar a producción.
+RUN python - <<'PY'
+import meshcore
+from meshcore import MeshCore
+print("MeshCore import smoke test: OK", MeshCore)
+PY
+
 # Código principal del broker/bot.
 # El patrón source/*.py incluye también las extensiones añadidas posteriormente
 # (por ejemplo beacon_bot.py y channel_gateway_bot.py), evitando que un módulo

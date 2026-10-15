@@ -103,3 +103,23 @@ def test_updater_migrates_legacy_data_without_overwrite() -> None:
     assert "tools/emergencias_guardia/data" in text
     assert "bot_data/emergencias_guardia" in text
     assert 'cp -a "${legacy_dir}/." "${docker_dir}/"' in text
+
+
+def test_meshcore_dependency_is_bounded_for_python311_broker() -> None:
+    """Evita que una release 2.3+ incompatible rompa el broker Python 3.11."""
+    requirement_files = [
+        ROOT / "requirements" / "requirements.txt",
+        ROOT / "requirements" / "requirements.base.txt",
+        ROOT / "requirements" / "requirements.bot.txt",
+    ]
+    for requirement_file in requirement_files:
+        text = requirement_file.read_text(encoding="utf-8")
+        assert "meshcore>=2.2.28,<2.3.0" in text
+
+
+def test_broker_image_smoke_imports_meshcore() -> None:
+    """El build principal debe fallar si MeshCore no puede importarse."""
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "import meshcore" in dockerfile
+    assert "from meshcore import MeshCore" in dockerfile
+    assert "MeshCore import smoke test: OK" in dockerfile
