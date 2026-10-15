@@ -47,6 +47,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test runner
+        run: python -m pip install --upgrade pip pytest
+
       - name: Prepare Compose environment
         run: cp .env_example .env
 
