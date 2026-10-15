@@ -146,9 +146,23 @@ def get_db_path() -> str:
     IMPORTANTE: en este proyecto la DB se llama 'bbs_data.db'
     y convive con '-wal' y '-shm' en el mismo directorio.
     """
-    base_dir = (os.getenv("BBS_DB_PATH", "bot_data/bbs") or "").strip() or "bot_data/bbs"
-    os.makedirs(base_dir, exist_ok=True)
-    return os.path.join(base_dir, "bbs_data.db")
+    # La variable compartida con el broker puede representar un fichero SQLite
+    # (bbs/bbs_data.db) o, por compatibilidad, un directorio (bot_data/bbs).
+    # En systemd el WorkingDirectory es webadmin, por lo que nunca debemos
+    # resolver rutas relativas respecto al directorio de trabajo actual.
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    raw_path = (os.getenv("BBS_DB_PATH", "bot_data/bbs") or "").strip() or "bot_data/bbs"
+    if os.path.isabs(raw_path):
+        db_path = raw_path
+    elif raw_path.startswith("bot_data/"):
+        db_path = os.path.join(root_dir, raw_path)
+    else:
+        db_path = os.path.join(root_dir, "bot_data", raw_path)
+    if not db_path.lower().endswith(".db"):
+        db_path = os.path.join(db_path, "bbs_data.db")
+    db_path = os.path.abspath(db_path)
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    return db_path
 
 
 def db_connect(db_path: str) -> sqlite3.Connection:
