@@ -74,3 +74,32 @@ def test_updater_avoids_parallel_legacy_restart_for_docker_profiles() -> None:
     assert "restart_farmacias=false" in text
     assert "restart_emergencias=false" in text
     assert "AVISO: perfil Docker" in text
+
+
+def test_optional_api_ports_are_published_to_configurable_lan_bindings() -> None:
+    text = COMPOSE.read_text(encoding="utf-8")
+
+    assert '${FARMACIAS_API_BIND_HOST:-0.0.0.0}:${FARMACIAS_API_PORT_HOST:-8788}:8788' in text
+    assert '${EMERGENCIAS_API_BIND_HOST:-0.0.0.0}:${EMERGENCIAS_API_PORT_HOST:-8789}:8789' in text
+    assert "FARMACIAS_API_HOST: 0.0.0.0" in text
+    assert "EMERGENCIAS_API_HOST: 0.0.0.0" in text
+
+
+def test_optional_apps_use_compose_dns_for_broker_and_queries() -> None:
+    compose_text = COMPOSE.read_text(encoding="utf-8")
+    env_text = ENV_EXAMPLE.read_text(encoding="utf-8")
+
+    assert "BROKER_CTRL_HOST: broker" in compose_text
+    assert "FARMACIAS_SERVICE_URL=http://farmacias:8788/query" in env_text
+    assert "EMERGENCIAS_SERVICE_URL=http://emergencias:8789/query" in env_text
+
+
+def test_updater_migrates_legacy_data_without_overwrite() -> None:
+    text = UPDATER.read_text(encoding="utf-8")
+
+    assert "migrate_legacy_data_if_needed" in text
+    assert "tools/farmacias_guardia/data" in text
+    assert "bot_data/farmacias_guardia" in text
+    assert "tools/emergencias_guardia/data" in text
+    assert "bot_data/emergencias_guardia" in text
+    assert 'cp -a "${legacy_dir}/." "${docker_dir}/"' in text
