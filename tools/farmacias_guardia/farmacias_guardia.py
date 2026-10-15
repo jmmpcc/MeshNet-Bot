@@ -412,11 +412,42 @@ def compact_address(value: str) -> str:
     return norm(out.replace(",", ""))
 
 
-def byte_chunks(lines: list[str], header: str, max_bytes: int) -> list[str]:
+def byte_chunks(
+    lines: list[str],
+    header: str,
+    max_bytes: int,
+    *,
+    body_separator: str = "\n",
+) -> list[str]:
+    """Agrupa unidades de texto sin superar el límite de bytes indicado.
+
+    Uso:
+        byte_chunks(lines, "GUARDIA 15/10", 140)
+        byte_chunks(blocks, "FARMACIAS GUARDIA 15/10", 140,
+                    body_separator="\\n\\n")
+
+    Parámetros:
+        lines:
+            Unidades lógicas que no deben separarse entre sí. Una unidad puede
+            contener saltos de línea internos.
+        header:
+            Cabecera común que se repetirá en cada fragmento.
+        max_bytes:
+            Tamaño máximo del mensaje completo codificado en UTF-8.
+        body_separator:
+            Separador entre unidades. Por defecto conserva exactamente el
+            comportamiento histórico de una línea por unidad.
+
+    Funcionalidad:
+        - Conserva el algoritmo histórico de fragmentación.
+        - Permite separar visualmente unidades completas sin romperlas.
+        - Recalcula la numeración si la cabecera final obliga a mover una
+          unidad al fragmento siguiente.
+    """
     chunks: list[list[str]] = []
     current: list[str] = []
     for line in lines:
-        probe = "\n".join([header] + current + [line])
+        probe = header + "\n" + body_separator.join(current + [line])
         if current and len(probe.encode("utf-8")) > max_bytes:
             chunks.append(current)
             current = [line]
@@ -424,19 +455,28 @@ def byte_chunks(lines: list[str], header: str, max_bytes: int) -> list[str]:
             current.append(line)
     if current:
         chunks.append(current)
+
     total = len(chunks)
     result = []
     for index, body in enumerate(chunks, 1):
         final_header = f"{header} [{index}/{total}]"
-        while len((final_header + "\n" + "\n".join(body)).encode("utf-8")) > max_bytes and len(body) > 1:
+        while (
+            len((final_header + "\n" + body_separator.join(body)).encode("utf-8")) > max_bytes
+            and len(body) > 1
+        ):
             moved = body.pop()
             chunks.insert(index, [moved])
             total += 1
-        result.append(final_header + "\n" + "\n".join(body))
-    if len(result) != total:
-        return byte_chunks(lines, header, max_bytes)
-    return result
+        result.append(final_header + "\n" + body_separator.join(body))
 
+    if len(result) != total:
+        return byte_chunks(
+            lines,
+            header,
+            max_bytes,
+            body_separator=body_separator,
+        )
+    return result
 
 def grouped_lines(
     pharmacies: list[Pharmacy],
@@ -445,7 +485,7 @@ def grouped_lines(
     *,
     repeat_group: bool = False,
 ) -> list[str]:
-    """Genera las líneas legibles de farmacias agrupadas por sector/localidad.
+    """Genera unidades legibles de farmacias agrupadas por sector/localidad.
 
     Uso:
         grouped_lines(pharmacies)
@@ -460,15 +500,16 @@ def grouped_lines(
             Sector exacto opcional usado por las consultas de farmacias.
         repeat_group:
             Si es False conserva el formato histórico: una cabecera de grupo
-            seguida por sus direcciones. Si es True cada farmacia incorpora
-            su grupo en la misma línea, evitando que una fragmentación deje
-            una dirección sin contexto.
+            seguida por sus direcciones. Si es True cada farmacia se
+            convierte en un bloque indivisible de dos líneas:
+            • SECTOR y dirección · teléfono.
 
     Funcionalidad:
-        - Mantiene intacto el formato histórico de las consultas.
-        - Permite a la difusión Mesh producir unidades autosuficientes
-          SECTOR · dirección · teléfono.
-        - Conserva el mismo orden y los mismos filtros existentes.
+        - Mantiene intacto el formato histórico de las consultas existentes.
+        - Permite a la difusión Mesh separar visualmente cada farmacia.
+        - Mantiene sector/localidad y dirección dentro de la misma unidad para
+          impedir que una fragmentación deje una dirección sin contexto.
+        - Conserva el orden y los filtros existentes.
     """
     selected = []
     for p in pharmacies:
@@ -477,7 +518,14 @@ def grouped_lines(
         if area_filter and key_text(area_filter) != key_text(p.area):
             continue
         selected.append(p)
-    selected.sort(key=lambda p: (key_text(p.locality), key_text(p.area), key_text(p.name), key_text(p.address)))
+    selected.sort(
+        key=lambda p: (
+            key_text(p.locality),
+            key_text(p.area),
+            key_text(p.name),
+            key_text(p.address),
+        )
+    )
 
     lines: list[str] = []
     previous = None
@@ -488,7 +536,7 @@ def grouped_lines(
             details += f" · {p.phone}"
 
         if repeat_group:
-            lines.append(f"{group.upper()} · {details}")
+            lines.append(f"• {group.upper()}\n{details}")
             continue
 
         if group != previous:
@@ -497,28 +545,77 @@ def grouped_lines(
         lines.append(details)
     return lines
 
-
 def format_query(text: str, network: str) -> list[str]:
-    """Responde consultas ``farma`` usando localidad y sector oficial.
+    """Responde consultas farma usando localidad y sector oficial.
 
     Uso desde MeshCore/Meshtastic:
         farma
+        farma ayuda
+        farma utebo
+        farma delicias
         farma zaragoza
         farma zaragoza delicias
 
     Funcionalidad:
-        - Sin argumentos, devuelve todas las farmacias de guardia disponibles.
-        - ``farma ayuda`` enumera localidades.
-        - ``farma zaragoza`` enumera sectores reales distintos de Zaragoza.
-        - ``farma zaragoza <sector>`` filtra por coincidencia exacta o única
-          parcial, tolerando tildes y mayúsculas.
-        - Para otras localidades conserva el comportamiento anterior.
+        - Sin argumentos devuelve todas las farmacias vigentes.
+        - farma ayuda enumera localidades.
+        - farma zaragoza enumera sectores reales de Zaragoza.
+        - farma zaragoza <sector> conserva la sintaxis histórica.
+        - farma <sector> añade acceso directo a un sector de Zaragoza cuando
+          no coincide antes con una localidad real.
+        - Las coincidencias toleran mayúsculas, tildes y una coincidencia
+          parcial única.
+        - En MeshCore limita también las respuestas DM a 140 bytes para evitar
+          una segunda fragmentación del broker.
     """
     pharmacies = load_pharmacies()
     normalized = norm(text)
     words = normalized.split()[1:]
-    max_bytes = int(os.getenv("FARMACIAS_MESHCORE_MAX_BYTES" if network == "meshcore" else "FARMACIAS_MESHTASTIC_MAX_BYTES", "170"))
+
+    if network == "meshcore":
+        max_bytes = int(os.getenv("FARMACIAS_MESHCORE_MAX_BYTES", "140"))
+    else:
+        max_bytes = int(os.getenv("FARMACIAS_MESHTASTIC_MAX_BYTES", "170"))
+
     localities = sorted({p.locality for p in pharmacies}, key=key_text)
+    zaragoza_locality = next(
+        (x for x in localities if key_text(x) == "zaragoza"),
+        "Zaragoza",
+    )
+    zaragoza_areas = sorted(
+        {
+            p.area
+            for p in pharmacies
+            if key_text(p.locality) == "zaragoza"
+            and key_text(p.area) != "zaragoza"
+        },
+        key=key_text,
+    )
+
+    def resolve_unique(value: str, candidates: list[str]) -> str | None:
+        """Resuelve coincidencia exacta o parcial única sobre candidatos."""
+        wanted = key_text(value)
+        exact = next((item for item in candidates if key_text(item) == wanted), None)
+        if exact is not None:
+            return exact
+        matches = [
+            item
+            for item in candidates
+            if wanted in key_text(item) or key_text(item) in wanted
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def format_area(area: str) -> list[str]:
+        """Formatea la guardia de un sector de Zaragoza sin duplicar lógica."""
+        lines = grouped_lines(pharmacies, zaragoza_locality, area)
+        if not lines:
+            return [f"No consta guardia para {area}."]
+        date_text = datetime.now(TZ).strftime("%d/%m")
+        return byte_chunks(
+            lines,
+            f"GUARDIA {area.upper()} {date_text}",
+            max_bytes,
+        )
 
     if not words:
         lines = grouped_lines(pharmacies, None, None)
@@ -534,66 +631,70 @@ def format_query(text: str, network: str) -> list[str]:
         return result
 
     if key_text(" ".join(words)) in {"ayuda", "localidades", "pueblos"}:
-        lines = ["Localidades: " + " · ".join(localities), "Uso: farma <localidad>"]
+        lines = [
+            "Localidades: " + " · ".join(localities),
+            "Uso: farma <localidad> o farma <barrio>",
+        ]
         return byte_chunks(lines, "FARMA", max_bytes)
 
-    # Zaragoza necesita resolución por sector antes de la coincidencia exacta
-    # de localidad; de lo contrario ``farma zaragoza`` mostraría todas las
-    # farmacias y nunca alcanzaría el listado de barrios/sectores.
+    # Zaragoza explícita conserva prioridad y comportamiento histórico.
     if key_text(words[0]) in {"zaragoza", "zgz"}:
-        locality = next((x for x in localities if key_text(x) == "zaragoza"), "Zaragoza")
-        areas = sorted(
-            {p.area for p in pharmacies if key_text(p.locality) == "zaragoza" and key_text(p.area) != "zaragoza"},
-            key=key_text,
-        )
         area_query = key_text(" ".join(words[1:]))
 
         if not area_query:
-            if not areas:
+            if not zaragoza_areas:
                 return byte_chunks(
-                    ["La fuente no ha proporcionado sectores diferenciados.", "Usa: farma zaragoza"],
+                    [
+                        "La fuente no ha proporcionado sectores diferenciados.",
+                        "Usa: farma zaragoza",
+                    ],
                     "FARMA ZARAGOZA",
                     max_bytes,
                 )
             return byte_chunks(
-                ["Barrios/sectores: " + " · ".join(areas), "Uso: farma zaragoza <barrio>"],
+                [
+                    "Barrios/sectores: " + " · ".join(zaragoza_areas),
+                    "Uso: farma zaragoza <barrio>",
+                ],
                 "FARMA ZARAGOZA",
                 max_bytes,
             )
 
-        area = next((x for x in areas if key_text(x) == area_query), None)
-        if area is None:
-            matches = [x for x in areas if area_query in key_text(x) or key_text(x) in area_query]
-            if len(matches) == 1:
-                area = matches[0]
+        area = resolve_unique(area_query, zaragoza_areas)
         if area is None:
             return byte_chunks(
                 ["Barrio/sector no disponible.", "Usa: farma zaragoza"],
                 "FARMA ZARAGOZA",
                 max_bytes,
             )
-
-        lines = grouped_lines(pharmacies, locality, area)
-        if not lines:
-            return [f"No consta guardia para {area}."]
-        date_text = datetime.now(TZ).strftime("%d/%m")
-        return byte_chunks(lines, f"GUARDIA {area.upper()} {date_text}", max_bytes)
+        return format_area(area)
 
     query = key_text(" ".join(words))
-    locality = next((x for x in localities if key_text(x) == query), None)
-    if not locality:
-        matches = [x for x in localities if query in key_text(x) or key_text(x) in query]
-        if len(matches) == 1:
-            locality = matches[0]
-    if not locality:
-        return byte_chunks(["Localidad no disponible.", "Usa: farma"], "FARMA", max_bytes)
 
-    lines = grouped_lines(pharmacies, locality, None)
-    if not lines:
-        return [f"No consta guardia para {locality}."]
-    date_text = datetime.now(TZ).strftime("%d/%m")
-    return byte_chunks(lines, f"GUARDIA {locality.upper()} {date_text}", max_bytes)
+    # Una localidad real conserva prioridad para no alterar casos válidos como
+    # farma utebo.
+    locality = resolve_unique(query, localities)
+    if locality is not None:
+        lines = grouped_lines(pharmacies, locality, None)
+        if not lines:
+            return [f"No consta guardia para {locality}."]
+        date_text = datetime.now(TZ).strftime("%d/%m")
+        return byte_chunks(
+            lines,
+            f"GUARDIA {locality.upper()} {date_text}",
+            max_bytes,
+        )
 
+    # Solo si no era una localidad se prueba el acceso directo por barrio.
+    area = resolve_unique(query, zaragoza_areas)
+    if area is not None:
+        return format_area(area)
+
+    return byte_chunks(
+        ["Localidad o barrio no disponible.", "Usa: farma ayuda"],
+        "FARMA",
+        max_bytes,
+    )
 
 def broker_request(command: str, params: dict[str, Any]) -> dict[str, Any]:
     host = os.getenv("BROKER_CTRL_HOST", "127.0.0.1")
@@ -675,19 +776,24 @@ def broadcast_messages(
         - MeshCore usa 140 bytes por defecto, alineado con el límite efectivo
           del broker para impedir una segunda fragmentación (1/2).
         - Meshtastic conserva su límite histórico de 170 bytes.
-        - Cada farmacia incluye su sector/localidad en la misma unidad de
-          salida para que ningún fragmento empiece con una dirección huérfana.
+        - Cada farmacia es una unidad indivisible de dos líneas.
+        - Se inserta una línea en blanco entre farmacias para distinguirlas
+          visualmente sin desperdiciar un mensaje completo por farmacia.
     """
     pharmacies = load_pharmacies() if pharmacies is None else pharmacies
     if network == "meshcore":
         max_bytes = int(os.getenv("FARMACIAS_MESHCORE_MAX_BYTES", "140"))
     else:
         max_bytes = int(os.getenv("FARMACIAS_MESHTASTIC_MAX_BYTES", "170"))
-    lines = grouped_lines(pharmacies, repeat_group=True)
+
+    blocks = grouped_lines(pharmacies, repeat_group=True)
     title = header or f"FARMACIAS GUARDIA {datetime.now(TZ).strftime('%d/%m')}"
-    return byte_chunks(lines, title, max_bytes)
-
-
+    return byte_chunks(
+        blocks,
+        title,
+        max_bytes,
+        body_separator="\n\n",
+    )
 
 def _farmacias_source_label() -> str:
     """Etiqueta legible de la fuente para el journal de entregas."""
