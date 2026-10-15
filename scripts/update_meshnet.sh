@@ -25,6 +25,10 @@ set -euo pipefail
 # Ejemplo:
 #   COMPOSE_PROFILES=farmacias,emergencias
 #   MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-daily
+#
+# Arranque secuencial:
+#   BROKER_STARTUP_GRACE_SECONDS=60
+#   DOCKER_SERVICE_START_TIMEOUT_SECONDS=60
 #   --from <commit>     Commit inicial para calcular cambios (modo diagnóstico).
 #   --to <commit>       Commit final para calcular cambios (requiere --from).
 #   --dry-run           Mostrar acciones sin modificar Git, Docker ni systemd.
@@ -407,8 +411,112 @@ if ! ${SKIP_DOCKER}; then
         log "actualizando imágenes Docker seleccionadas"
         run docker compose -f "${COMPOSE_FILE}" pull "${selected_docker_services[@]}"
 
-        log "reconciliando sólo los contenedores seleccionados"
-        run docker compose -f "${COMPOSE_FILE}" up -d "${selected_docker_services[@]}"
+        broker_grace_seconds="${BROKER_STARTUP_GRACE_SECONDS:-}"
+        if [[ -z "${broker_grace_seconds}" && -f "${REPO_DIR}/.env" ]]; then
+            broker_grace_seconds="$(env_value_from_file BROKER_STARTUP_GRACE_SECONDS)"
+        fi
+        broker_grace_seconds="${broker_grace_seconds:-60}"
+
+        service_start_timeout_seconds="${DOCKER_SERVICE_START_TIMEOUT_SECONDS:-}"
+        if [[ -z "${service_start_timeout_seconds}" && -f "${REPO_DIR}/.env" ]]; then
+            service_start_timeout_seconds="$(env_value_from_file DOCKER_SERVICE_START_TIMEOUT_SECONDS)"
+        fi
+        service_start_timeout_seconds="${service_start_timeout_seconds:-60}"
+
+        [[ "${broker_grace_seconds}" =~ ^[0-9]+$ ]] ||
+            die "BROKER_STARTUP_GRACE_SECONDS debe ser un entero >= 0"
+        [[ "${service_start_timeout_seconds}" =~ ^[0-9]+$ && "${service_start_timeout_seconds}" -gt 0 ]] ||
+            die "DOCKER_SERVICE_START_TIMEOUT_SECONDS debe ser un entero > 0"
+
+        service_selected() {
+            local wanted="$1"
+            local item
+            for item in "${selected_docker_services[@]}"; do
+                [[ "${item}" == "${wanted}" ]] && return 0
+            done
+            return 1
+        }
+
+        require_selected_dependency() {
+            local service="$1"
+            local dependency="$2"
+            service_selected "${dependency}" ||
+                die "el servicio Docker '${service}' requiere '${dependency}' en MESHNET_DOCKER_SERVICES"
+        }
+
+        # Validación explícita de dependencias. El arranque secuencial usa
+        # --no-deps precisamente para impedir que Compose levante por su cuenta
+        # un contenedor no seleccionado.
+        for service in "${selected_docker_services[@]}"; do
+            case "${service}" in
+                bot|aprs|bridgehub-bc|email-to-mesh|farmacias|emergencias)
+                    require_selected_dependency "${service}" broker
+                    ;;
+                farmacias-check|farmacias-daily)
+                    require_selected_dependency "${service}" broker
+                    require_selected_dependency "${service}" farmacias
+                    ;;
+                emergencias-check)
+                    require_selected_dependency "${service}" broker
+                    require_selected_dependency "${service}" emergencias
+                    ;;
+            esac
+        done
+
+        wait_service_running() {
+            local service="$1"
+            local timeout_seconds="$2"
+            local waited=0
+            local container_id state
+
+            if ${DRY_RUN}; then
+                log "DRY-RUN: se comprobaría que ${service} queda running"
+                return 0
+            fi
+
+            while (( waited < timeout_seconds )); do
+                container_id="$(docker compose -f "${COMPOSE_FILE}" ps -q "${service}" 2>/dev/null || true)"
+                if [[ -n "${container_id}" ]]; then
+                    state="$(docker inspect -f '{{.State.Status}}' "${container_id}" 2>/dev/null || true)"
+                    if [[ "${state}" == "running" ]]; then
+                        log "${service}: running"
+                        return 0
+                    fi
+                fi
+                sleep 2
+                waited=$((waited + 2))
+            done
+
+            docker compose -f "${COMPOSE_FILE}" ps "${service}" || true
+            die "${service} no quedó running en ${timeout_seconds}s; se detiene el arranque secuencial"
+        }
+
+        start_selected_service() {
+            local service="$1"
+            log "arrancando Docker ${service}"
+            run docker compose -f "${COMPOSE_FILE}" up -d --no-deps "${service}"
+            wait_service_running "${service}" "${service_start_timeout_seconds}"
+        }
+
+        # El broker es la base de bot/APRS y de las aplicaciones opcionales.
+        # Si está seleccionado, siempre se inicia primero aunque el CSV tenga
+        # otro orden. Ningún otro servicio se arranca si el broker no estabiliza.
+        if service_selected broker; then
+            start_selected_service broker
+            if (( broker_grace_seconds > 0 )); then
+                log "broker: periodo de estabilización de ${broker_grace_seconds}s antes de arrancar dependientes"
+                run sleep "${broker_grace_seconds}"
+                wait_service_running broker "${service_start_timeout_seconds}"
+            fi
+        fi
+
+        # El resto conserva el orden explícito de MESHNET_DOCKER_SERVICES (o el
+        # orden detectado de los servicios previamente activos), arrancando uno
+        # a uno y comprobando cada contenedor antes de continuar.
+        for service in "${selected_docker_services[@]}"; do
+            [[ "${service}" == "broker" ]] && continue
+            start_selected_service "${service}"
+        done
     fi
 else
     log "Docker omitido por --skip-docker"
