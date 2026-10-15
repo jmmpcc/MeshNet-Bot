@@ -12,4 +12,7 @@ if [[ ! -f "${EMERGENCIAS_DATA_DIR}/config.json" ]]; then
     python -u /app/tools/emergencias_guardia/emergencias_guardia.py init >/dev/null
 fi
 
-exec python -u /app/tools/emergencias_guardia/emergencias_guardia.py serve --host 127.0.0.1 --port 8789
+api_host="${EMERGENCIAS_API_HOST:-0.0.0.0}"
+api_port="${EMERGENCIAS_API_PORT:-8789}"
+
+exec python -u /app/tools/emergencias_guardia/emergencias_guardia.py serve --host "${api_host}" --port "${api_port}"
