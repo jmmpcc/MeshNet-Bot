@@ -89,6 +89,8 @@ jobs:
           rebuild_aprs=false
           rebuild_bridge=false
           rebuild_bridge_bc=false
+          rebuild_farmacias=false
+          rebuild_emergencias=false
 
           # Si cambia el workflow, asume que puede afectar a todos (seguro y simple).
           if changed_match '^\.github/workflows/'; then
@@ -97,6 +99,8 @@ jobs:
             rebuild_aprs=true
             rebuild_bridge=true
             rebuild_bridge_bc=true
+            rebuild_farmacias=true
+            rebuild_emergencias=true
           fi
 
           # Dockerfiles
@@ -106,7 +110,2111 @@ jobs:
           fi
           if changed_match '^Dockerfile\.aprs$'; then rebuild_aprs=true; fi
           if changed_match '^Dockerfile\.bridge$'; then rebuild_bridge=true; fi
-          if changed_match '^Dockerfile\.bridgehub$'; then rebuild_bridge_bc=true; fi
+          if changed_match '^Dockerfile\.bridgehub
+          # Requirements (cualquier cambio en requirements afecta a lo que los instala)
+          if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+            rebuild_aprs=true
+            rebuild_bridge=true
+            rebuild_bridge_bc=true
+          fi
+
+          # Aplicaciones opcionales contenerizadas. Cada una publica su propia
+          # imagen y no obliga a reconstruir broker/bot cuando cambia su lógica.
+          if changed_match '^tools/farmacias_guardia/|^docker/entrypoint_farmacias_.*\.sh          # Broker
+          # El servicio email-to-mesh reutiliza la imagen del broker.
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+            rebuild_broker=true
+          fi
+
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
+          # Bot
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true  
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+          $rebuild_farmacias && targets+=("farmacias")
+          $rebuild_emergencias && targets+=("emergencias")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            farmacias)
+              echo "dockerfile=Dockerfile.farmacias" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            emergencias)
+              echo "dockerfile=Dockerfile.emergencias" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          build-args: ${{ steps.params.outputs.build_args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+; then rebuild_bridge_bc=true; fi
+          if changed_match '^Dockerfile\.farmacias
+          # Requirements (cualquier cambio en requirements afecta a lo que los instala)
+          if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+            rebuild_aprs=true
+            rebuild_bridge=true
+            rebuild_bridge_bc=true
+          fi
+
+          # Código está en source/
+          # Broker
+          # El servicio email-to-mesh reutiliza la imagen del broker.
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+            rebuild_broker=true
+          fi
+
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
+          # Bot
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true  
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          build-args: ${{ steps.params.outputs.build_args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+; then rebuild_farmacias=true; fi
+          if changed_match '^Dockerfile\.emergencias
+          # Requirements (cualquier cambio en requirements afecta a lo que los instala)
+          if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+            rebuild_aprs=true
+            rebuild_bridge=true
+            rebuild_bridge_bc=true
+          fi
+
+          # Código está en source/
+          # Broker
+          # El servicio email-to-mesh reutiliza la imagen del broker.
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+            rebuild_broker=true
+          fi
+
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
+          # Bot
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true  
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          build-args: ${{ steps.params.outputs.build_args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+; then rebuild_emergencias=true; fi
+
+          # Requirements (cualquier cambio en requirements afecta a lo que los instala)
+          if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+            rebuild_aprs=true
+            rebuild_bridge=true
+            rebuild_bridge_bc=true
+          fi
+
+          # Código está en source/
+          # Broker
+          # El servicio email-to-mesh reutiliza la imagen del broker.
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+            rebuild_broker=true
+          fi
+
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
+          # Bot
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true  
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          build-args: ${{ steps.params.outputs.build_args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+; then
+            rebuild_farmacias=true
+          fi
+          if changed_match '^tools/emergencias_guardia/|^docker/entrypoint_emergencias_.*\.sh          # Broker
+          # El servicio email-to-mesh reutiliza la imagen del broker.
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+            rebuild_broker=true
+          fi
+
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
+          # Bot
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true  
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          build-args: ${{ steps.params.outputs.build_args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+; then rebuild_bridge_bc=true; fi
+          if changed_match '^Dockerfile\.farmacias
+          # Requirements (cualquier cambio en requirements afecta a lo que los instala)
+          if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+            rebuild_aprs=true
+            rebuild_bridge=true
+            rebuild_bridge_bc=true
+          fi
+
+          # Código está en source/
+          # Broker
+          # El servicio email-to-mesh reutiliza la imagen del broker.
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+            rebuild_broker=true
+          fi
+
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
+          # Bot
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true  
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          build-args: ${{ steps.params.outputs.build_args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+; then rebuild_farmacias=true; fi
+          if changed_match '^Dockerfile\.emergencias
+          # Requirements (cualquier cambio en requirements afecta a lo que los instala)
+          if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+            rebuild_aprs=true
+            rebuild_bridge=true
+            rebuild_bridge_bc=true
+          fi
+
+          # Código está en source/
+          # Broker
+          # El servicio email-to-mesh reutiliza la imagen del broker.
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+            rebuild_broker=true
+          fi
+
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
+          # Bot
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true  
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          build-args: ${{ steps.params.outputs.build_args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+; then rebuild_emergencias=true; fi
+
+          # Requirements (cualquier cambio en requirements afecta a lo que los instala)
+          if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+            rebuild_aprs=true
+            rebuild_bridge=true
+            rebuild_bridge_bc=true
+          fi
+
+          # Código está en source/
+          # Broker
+          # El servicio email-to-mesh reutiliza la imagen del broker.
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+            rebuild_broker=true
+          fi
+
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
+          # Bot
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true  
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          build-args: ${{ steps.params.outputs.build_args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+; then
+            rebuild_emergencias=true
+          fi
+          # Helpers compartidos cargados por ambas aplicaciones.
+          if changed_match '^shared/'; then
+            rebuild_farmacias=true
+            rebuild_emergencias=true
+          fi
+
+          # Código está en source/
+          # Broker
+          # El servicio email-to-mesh reutiliza la imagen del broker.
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+            rebuild_broker=true
+          fi
+
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
+          # Bot
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true  
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          build-args: ${{ steps.params.outputs.build_args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+; then rebuild_bridge_bc=true; fi
+          if changed_match '^Dockerfile\.farmacias
+          # Requirements (cualquier cambio en requirements afecta a lo que los instala)
+          if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+            rebuild_aprs=true
+            rebuild_bridge=true
+            rebuild_bridge_bc=true
+          fi
+
+          # Código está en source/
+          # Broker
+          # El servicio email-to-mesh reutiliza la imagen del broker.
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+            rebuild_broker=true
+          fi
+
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
+          # Bot
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true  
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          build-args: ${{ steps.params.outputs.build_args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+; then rebuild_farmacias=true; fi
+          if changed_match '^Dockerfile\.emergencias
+          # Requirements (cualquier cambio en requirements afecta a lo que los instala)
+          if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+            rebuild_aprs=true
+            rebuild_bridge=true
+            rebuild_bridge_bc=true
+          fi
+
+          # Código está en source/
+          # Broker
+          # El servicio email-to-mesh reutiliza la imagen del broker.
+          # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
+          # módulos como el entrypoint deben obligar a publicar una nueva imagen.
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+            rebuild_broker=true
+          fi
+
+          # Scope MeshCore compartido entre el cliente Telegram y el runtime del
+          # broker. Cualquier cambio aquí debe publicar ambas imágenes; de lo
+          # contrario el bot puede aceptar scope#region mientras un broker antiguo
+          # sigue transmitiendo sin scope.
+          if changed_match '^source/meshcore_channel_scope\.py$'; then
+            rebuild_broker=true
+            rebuild_bot=true
+          fi
+
+          # Bot
+          # El wrapper de comandos Channel Gateway, balizas y su entrypoint forman
+          # parte de la imagen bot y deben reconstruirla cuando cambien.
+          if changed_match '^(source/)?(Telegram_Bot_Broker\.py|Telegram_Bot_ChannelGateway\.py|Meshtastic_Relay_API\.py|meshtastic_api_adapter\.py|channel_gateway_bot\.py|beacon_bot\.py)$|^docker/entrypoint_bot\.sh$'; then
+            rebuild_bot=true
+          fi
+
+          # Parser/wrapper de scope utilizado exclusivamente por Telegram.
+          if changed_match '^source/(meshcore_scope_bot|meshcore_scope_token)\.py$'; then
+            rebuild_bot=true
+          fi
+
+          # APRS
+          if changed_match '^(source/)?(meshtastic_to_aprs\.py)$'; then
+            rebuild_aprs=true
+          fi
+
+          # Bridge (preset)
+          if changed_match '^(source/)?(preset_bridge\.py|mesh_preset_bridge\.py)$'; then
+            rebuild_bridge=true  
+          fi
+
+          # Bridge BC (triple bridge)
+          if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
+            rebuild_bridge_bc=true
+          fi
+
+
+          # 4) Build JSON array for matrix
+          targets=()
+          $rebuild_broker && targets+=("broker")
+          $rebuild_bot && targets+=("bot")
+          $rebuild_aprs && targets+=("aprs")
+          $rebuild_bridge && targets+=("bridge")
+          $rebuild_bridge_bc && targets+=("bridge-bc")
+
+          # Remove duplicates
+          declare -A seen
+          uniq=()
+          for t in "${targets[@]}"; do
+            if [[ -z "${seen[$t]+x}" ]]; then
+              uniq+=("$t"); seen[$t]=1
+            fi
+          done
+
+          if (( ${#uniq[@]} == 0 )); then
+            echo 'targets_json=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          for i in "${!uniq[@]}"; do
+            [[ $i -gt 0 ]] && json+=','
+            json+="\"${uniq[$i]}\""
+          done
+          json+=']'
+
+          echo "Selected targets: $json"
+          echo "targets_json=$json" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: changes
+    if: ${{ needs.changes.outputs.targets_json != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.targets_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve target params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            broker)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=broker" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bot)
+              echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=TARGET=bot" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            aprs)
+              echo "dockerfile=Dockerfile.aprs" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge)
+              echo "dockerfile=Dockerfile.bridge" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            bridge-bc)
+              echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_PREFIX }}-${{ matrix.target }}
+            org.opencontainers.image.description=MeshNet 'The Boss' component (${{ matrix.target }})
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          build-args: ${{ steps.params.outputs.build_args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ steps.params.outputs.no_cache == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+; then rebuild_emergencias=true; fi
 
           # Requirements (cualquier cambio en requirements afecta a lo que los instala)
           if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
