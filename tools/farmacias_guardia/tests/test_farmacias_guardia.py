@@ -213,6 +213,69 @@ class FarmaciasAppTests(unittest.TestCase):
         finally:
             app.load_pharmacies = original_loader
 
+    def test_format_query_accepts_direct_zaragoza_barrio_by_dm(self):
+        """farma <barrio> debe resolver el sector sin romper la sintaxis histórica."""
+        original_loader = app.load_pharmacies
+        try:
+            app.load_pharmacies = lambda: [
+                app.Pharmacy("A", "Av Madrid 185", "1", "Zaragoza", "Delicias", "G", "2026-10-15", "1"),
+                app.Pharmacy("B", "Pº Sagasta 8", "2", "Zaragoza", "Gran Vía", "G", "2026-10-15", "2"),
+                app.Pharmacy("C", "C/ Mayor 1", "3", "Utebo", "Utebo", "G", "2026-10-15", "3"),
+            ]
+
+            direct = app.format_query("farma delicias", "meshcore")
+            explicit = app.format_query("farma zaragoza delicias", "meshcore")
+            direct_text = "\n".join(direct)
+
+            self.assertEqual(direct, explicit)
+            self.assertIn("GUARDIA DELICIAS", direct_text)
+            self.assertIn("AV MADRID 185", direct_text.upper())
+            self.assertNotIn("SAGASTA", direct_text.upper())
+            self.assertNotIn("MAYOR", direct_text.upper())
+            self.assertTrue(all(len(msg.encode("utf-8")) <= 140 for msg in direct))
+        finally:
+            app.load_pharmacies = original_loader
+
+    def test_format_query_keeps_real_locality_priority(self):
+        """Una localidad válida debe resolverse antes que cualquier barrio."""
+        original_loader = app.load_pharmacies
+        try:
+            app.load_pharmacies = lambda: [
+                app.Pharmacy("A", "Av Madrid 185", "1", "Zaragoza", "Delicias", "G", "2026-10-15", "1"),
+                app.Pharmacy("B", "C/ Mayor 1", "2", "Utebo", "Utebo", "G", "2026-10-15", "2"),
+            ]
+            response = "\n".join(app.format_query("farma utebo", "meshcore"))
+            self.assertIn("GUARDIA UTEBO", response)
+            self.assertIn("C/ MAYOR 1", response.upper())
+            self.assertNotIn("MADRID", response.upper())
+        finally:
+            app.load_pharmacies = original_loader
+
+    def test_format_query_meshcore_default_limit_is_140_bytes(self):
+        """Las respuestas DM MeshCore usan el mismo límite que la difusión."""
+        original_loader = app.load_pharmacies
+        try:
+            app.load_pharmacies = lambda: [
+                app.Pharmacy(
+                    f"F{idx}",
+                    f"Calle Ejemplo {idx}",
+                    f"976000{idx:03d}",
+                    "Zaragoza",
+                    "Delicias",
+                    "G",
+                    "2026-10-15",
+                    str(idx),
+                )
+                for idx in range(1, 8)
+            ]
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("FARMACIAS_MESHCORE_MAX_BYTES", None)
+                messages = app.format_query("farma delicias", "meshcore")
+            self.assertGreaterEqual(len(messages), 2)
+            self.assertTrue(all(len(msg.encode("utf-8")) <= 140 for msg in messages))
+        finally:
+            app.load_pharmacies = original_loader
+
 
     def test_format_query_help_keeps_localities_listing(self):
         original_loader = app.load_pharmacies
@@ -274,21 +337,26 @@ class FarmaciasAppTests(unittest.TestCase):
         chunks = app.byte_chunks(lines, "GUARDIA ZARAGOZA 24/07", 90)
         self.assertGreaterEqual(len(chunks), 2)
         self.assertTrue(all(len(chunk.encode("utf-8")) <= 90 for chunk in chunks))
-    def test_broadcast_meshcore_defaults_to_140_bytes_and_repeats_group(self):
-        """La difusión MeshCore no debe requerir una segunda fragmentación del broker."""
+    def test_broadcast_meshcore_defaults_to_140_bytes_and_separates_pharmacies(self):
+        """Cada farmacia debe ser visible como bloque y caber en el límite MeshCore."""
         pharmacies = [
-            app.Pharmacy("A", "Calle Uno 1", "976111111", "Zaragoza", "Centro", "G", "2026-09-12", "1"),
-            app.Pharmacy("B", "Calle Dos 2", "976222222", "Zaragoza", "Delicias", "G", "2026-09-12", "2"),
+            app.Pharmacy("A", "Calle Uno 1", "1", "Zaragoza", "Centro", "G", "2026-10-15", "1"),
+            app.Pharmacy("B", "Calle Dos 2", "2", "Zaragoza", "Delicias", "G", "2026-10-15", "2"),
         ]
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("FARMACIAS_MESHCORE_MAX_BYTES", None)
-            messages = app.broadcast_messages("meshcore", pharmacies, "NUEVAS FARMACIAS DE GUARDIA")
+            messages = app.broadcast_messages(
+                "meshcore",
+                pharmacies,
+                "NUEVAS FARMACIAS DE GUARDIA",
+            )
 
         self.assertTrue(messages)
         self.assertTrue(all(len(message.encode("utf-8")) <= 140 for message in messages))
         joined = "\n".join(messages)
-        self.assertIn("CENTRO · C/ Uno 1 · 976111111", joined)
-        self.assertIn("DELICIAS · C/ Dos 2 · 976222222", joined)
+        self.assertIn("• CENTRO\nC/ Uno 1 · 1", joined)
+        self.assertIn("• DELICIAS\nC/ Dos 2 · 2", joined)
+        self.assertIn("C/ Uno 1 · 1\n\n• DELICIAS", joined)
 
     def test_grouped_lines_keeps_historical_query_format_by_default(self):
         """El nuevo formato de difusión no modifica la salida histórica de consultas."""
