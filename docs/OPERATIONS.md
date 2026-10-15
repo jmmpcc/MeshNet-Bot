@@ -277,7 +277,7 @@ El procedimiento recomendado es el actualizador coordinado:
 
 ```bash
 cd /home/meshnet/MeshNet-Bot
-sudo ./scripts/update_meshnet.sh
+./scripts/update_meshnet.sh
 ```
 
 El script realiza `git pull --ff-only`, detecta los ficheros cambiados, sincroniza
@@ -288,7 +288,7 @@ servicio inactivo ni descarta cambios locales.
 Para inspeccionar un rango sin modificar el sistema:
 
 ```bash
-sudo ./scripts/update_meshnet.sh --dry-run --skip-docker \
+./scripts/update_meshnet.sh --dry-run --skip-docker \
   --from <commit-anterior> --to <commit-nuevo>
 ```
 
