@@ -13,6 +13,7 @@ Este directorio contiene la documentación vigente del núcleo. Los README situa
 | APRS y APRS-IS | [`APRS_GATEWAY.md`](APRS_GATEWAY.md) | Contenedor, KISS RF, iGate, APRS-IS, mirror Mesh, despliegues, pruebas y recuperación |
 | KISS remoto y emergencias | [`APRS_Remote_KISS_Emergency.md`](APRS_Remote_KISS_Emergency.md) | TNC remoto y flujo especializado de emergencia |
 | Correo ↔ malla | [`EMAIL_TO_MESH.md`](EMAIL_TO_MESH.md) | Contenedor `email-to-mesh`, IMAP, SMTP y contactos |
+| Aplicaciones opcionales | [`OPTIONAL_APPS_DOCKER.md`](OPTIONAL_APPS_DOCKER.md) | Perfiles Docker de Farmacias y Emergencias |
 | Auditorías | [`AUDITORIAS.md`](AUDITORIAS.md) | Informes y análisis de red |
 | Instalación Raspberry Pi | [`Manual_Instalacion_MeshNet_RaspberryPi.md`](Manual_Instalacion_MeshNet_RaspberryPi.md) | Preparación base de la Raspberry |
 | Historial | [`Historial_Versiones.md`](Historial_Versiones.md) y `CHANGELOG_v*.md` | Evolución del proyecto |

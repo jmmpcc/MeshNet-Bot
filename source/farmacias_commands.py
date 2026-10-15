@@ -199,7 +199,7 @@ def handle_farmacias_command(
     El broker aporta un callback distinto para MeshCore y Meshtastic, de modo que
     esta función no puede seleccionar accidentalmente una red incorrecta.
     """
-    if not _env_bool("FARMACIAS_COMMAND_ENABLED", "1") or not is_farmacias_command(ctx.text):
+    if not _env_bool("FARMACIAS_COMMAND_ENABLED", "0") or not is_farmacias_command(ctx.text):
         return False
     if not is_allowed_origin(ctx):
         return False

@@ -89,6 +89,8 @@ jobs:
           rebuild_aprs=false
           rebuild_bridge=false
           rebuild_bridge_bc=false
+          rebuild_farmacias=false
+          rebuild_emergencias=false
 
           # Si cambia el workflow, asume que puede afectar a todos (seguro y simple).
           if changed_match '^\.github/workflows/'; then
@@ -97,6 +99,8 @@ jobs:
             rebuild_aprs=true
             rebuild_bridge=true
             rebuild_bridge_bc=true
+            rebuild_farmacias=true
+            rebuild_emergencias=true
           fi
 
           # Dockerfiles
@@ -107,6 +111,8 @@ jobs:
           if changed_match '^Dockerfile\.aprs$'; then rebuild_aprs=true; fi
           if changed_match '^Dockerfile\.bridge$'; then rebuild_bridge=true; fi
           if changed_match '^Dockerfile\.bridgehub$'; then rebuild_bridge_bc=true; fi
+          if changed_match '^Dockerfile\.farmacias$'; then rebuild_farmacias=true; fi
+          if changed_match '^Dockerfile\.emergencias$'; then rebuild_emergencias=true; fi
 
           # Requirements (cualquier cambio en requirements afecta a lo que los instala)
           if changed_match '^requirements|^requirements/|requirements\.txt$|requirements\.bot\.txt$'; then
@@ -115,6 +121,22 @@ jobs:
             rebuild_aprs=true
             rebuild_bridge=true
             rebuild_bridge_bc=true
+            rebuild_farmacias=true
+            rebuild_emergencias=true
+          fi
+
+          # Aplicaciones opcionales contenerizadas. Cada una publica su propia
+          # imagen y no obliga a reconstruir broker/bot cuando cambia su lógica.
+          if changed_match '^tools/farmacias_guardia/|^docker/entrypoint_farmacias_.*\.sh$'; then
+            rebuild_farmacias=true
+          fi
+          if changed_match '^tools/emergencias_guardia/|^docker/entrypoint_emergencias_.*\.sh$'; then
+            rebuild_emergencias=true
+          fi
+          # Helpers compartidos cargados por ambas aplicaciones.
+          if changed_match '^shared/'; then
+            rebuild_farmacias=true
+            rebuild_emergencias=true
           fi
 
           # Código está en source/
@@ -122,7 +144,7 @@ jobs:
           # El servicio email-to-mesh reutiliza la imagen del broker.
           # Channel Gateway y Zaragoza DM se ejecutan dentro del broker; tanto sus
           # módulos como el entrypoint deben obligar a publicar una nueva imagen.
-          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
+          if changed_match '^(source/)?(Meshtastic_Broker\.py|zaragoza_commands\.py|farmacias_commands\.py|emergencias_commands\.py|broker_task\.py|broker_resilience\.py|positions_store\.py|coverage_backlog\.py|auditoria_red\.py|web_admin\.py|bridge_in_broker\.py|meshnet_broker\.py|email_to_mesh\.py|channel_gateway\.py)$|^docker/entrypoint_broker\.sh$'; then
             rebuild_broker=true
           fi
 
@@ -160,6 +182,8 @@ jobs:
           # Bridge BC (triple bridge)
           if changed_match '^(source/)?(mesh_triple_bridge\.py|mesh_triple_bridge_brokerhub\.py|tcpinterface_persistent\.py)$|^docker-compose\.bridgehub\.yml$'; then
             rebuild_bridge_bc=true
+            rebuild_farmacias=true
+            rebuild_emergencias=true
           fi
 
 
@@ -170,6 +194,8 @@ jobs:
           $rebuild_aprs && targets+=("aprs")
           $rebuild_bridge && targets+=("bridge")
           $rebuild_bridge_bc && targets+=("bridge-bc")
+          $rebuild_farmacias && targets+=("farmacias")
+          $rebuild_emergencias && targets+=("emergencias")
 
           # Remove duplicates
           declare -A seen
@@ -247,6 +273,18 @@ jobs:
               ;;
             bridge-bc)
               echo "dockerfile=Dockerfile.bridgehub" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            farmacias)
+              echo "dockerfile=Dockerfile.farmacias" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
+              echo "no_cache=false" >> "$GITHUB_OUTPUT"
+              ;;
+            emergencias)
+              echo "dockerfile=Dockerfile.emergencias" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
               echo "build_args=" >> "$GITHUB_OUTPUT"
               echo "no_cache=false" >> "$GITHUB_OUTPUT"

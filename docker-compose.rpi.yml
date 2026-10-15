@@ -9,6 +9,12 @@ services:
       net.ipv4.tcp_keepalive_probes: 3
     environment:
       - BROKER_CTRL_BIND=0.0.0.0
+      # En instalaciones Docker nuevas, las APIs opcionales comparten el
+      # namespace de red del broker y responden por localhost. Una instalación
+      # histórica puede conservar host.docker.internal definiendo estas
+      # variables en su .env, sin cambiar la arquitectura existente.
+      - FARMACIAS_SERVICE_URL=${FARMACIAS_SERVICE_URL:-http://127.0.0.1:8788/query}
+      - EMERGENCIAS_SERVICE_URL=${EMERGENCIAS_SERVICE_URL:-http://127.0.0.1:8789/query}
 
     # Permite que el broker acceda de forma estable a servicios que se ejecutan
     # directamente en la Raspberry, como la API independiente de farmacias.
@@ -132,4 +138,111 @@ services:
     volumes:
       - ./bot_data:/app/bot_data:rw
 
+    stop_grace_period: 10s
+
+
+  # --------------------------------------------------------------------------
+  # Farmacias de Guardia (opcional)
+  # Activación:
+  #   docker compose -f docker-compose.rpi.yml --profile farmacias up -d
+  # Requiere FARMACIAS_COMMAND_ENABLED=1 para consultas desde la malla.
+  # --------------------------------------------------------------------------
+  farmacias:
+    image: ghcr.io/jmmpcc/meshnet-bot-farmacias:latest
+    container_name: meshnet-farmacias
+    profiles: ["farmacias"]
+    depends_on:
+      - broker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      FARMACIAS_DATA_DIR: /app/bot_data/farmacias_guardia
+      FARMACIAS_API_HOST: 127.0.0.1
+      FARMACIAS_COMMAND_LISTENER_ENABLED: "0"
+      BROKER_CTRL_HOST: 127.0.0.1
+      BROKER_EVENT_HOST: 127.0.0.1
+    network_mode: "service:broker"
+    volumes:
+      - ./bot_data:/app/bot_data:rw
+    entrypoint: ["/usr/local/bin/entrypoint_farmacias_api.sh"]
+    stop_grace_period: 10s
+
+  farmacias-check:
+    image: ghcr.io/jmmpcc/meshnet-bot-farmacias:latest
+    container_name: meshnet-farmacias-check
+    profiles: ["farmacias"]
+    depends_on:
+      - broker
+      - farmacias
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      FARMACIAS_DATA_DIR: /app/bot_data/farmacias_guardia
+      BROKER_CTRL_HOST: 127.0.0.1
+    network_mode: "service:broker"
+    volumes:
+      - ./bot_data:/app/bot_data:rw
+    entrypoint: ["/usr/local/bin/entrypoint_farmacias_check.sh"]
+    stop_grace_period: 10s
+
+  farmacias-daily:
+    image: ghcr.io/jmmpcc/meshnet-bot-farmacias:latest
+    container_name: meshnet-farmacias-daily
+    profiles: ["farmacias"]
+    depends_on:
+      - broker
+      - farmacias
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      FARMACIAS_DATA_DIR: /app/bot_data/farmacias_guardia
+      BROKER_CTRL_HOST: 127.0.0.1
+    network_mode: "service:broker"
+    volumes:
+      - ./bot_data:/app/bot_data:rw
+    entrypoint: ["/usr/local/bin/entrypoint_farmacias_daily.sh"]
+    stop_grace_period: 10s
+
+  # --------------------------------------------------------------------------
+  # Emergencias (opcional)
+  # Activación:
+  #   docker compose -f docker-compose.rpi.yml --profile emergencias up -d
+  # Requiere EMERGENCIAS_COMMAND_ENABLED=1 para consultas desde la malla.
+  # --------------------------------------------------------------------------
+  emergencias:
+    image: ghcr.io/jmmpcc/meshnet-bot-emergencias:latest
+    container_name: meshnet-emergencias
+    profiles: ["emergencias"]
+    depends_on:
+      - broker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      EMERGENCIAS_DATA_DIR: /app/bot_data/emergencias_guardia
+    network_mode: "service:broker"
+    volumes:
+      - ./bot_data:/app/bot_data:rw
+    entrypoint: ["/usr/local/bin/entrypoint_emergencias_api.sh"]
+    stop_grace_period: 10s
+
+  emergencias-check:
+    image: ghcr.io/jmmpcc/meshnet-bot-emergencias:latest
+    container_name: meshnet-emergencias-check
+    profiles: ["emergencias"]
+    depends_on:
+      - broker
+      - emergencias
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      EMERGENCIAS_DATA_DIR: /app/bot_data/emergencias_guardia
+    network_mode: "service:broker"
+    volumes:
+      - ./bot_data:/app/bot_data:rw
+    entrypoint: ["/usr/local/bin/entrypoint_emergencias_check.sh"]
     stop_grace_period: 10s

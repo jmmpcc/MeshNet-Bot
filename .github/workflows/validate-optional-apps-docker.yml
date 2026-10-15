@@ -1,0 +1,77 @@
+name: Validate optional Docker apps
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile.farmacias"
+      - "Dockerfile.emergencias"
+      - "docker-compose.rpi.yml"
+      - "docker/entrypoint_farmacias_*.sh"
+      - "docker/entrypoint_emergencias_*.sh"
+      - "tools/farmacias_guardia/**"
+      - "tools/emergencias_guardia/**"
+      - "shared/**"
+      - "source/farmacias_commands.py"
+      - "source/emergencias_commands.py"
+      - "scripts/update_meshnet.sh"
+      - "tests/test_optional_apps_docker.py"
+      - "tests/test_update_meshnet_script.py"
+      - ".github/workflows/build-ghcr.yml"
+      - ".github/workflows/validate-optional-apps-docker.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "Dockerfile.farmacias"
+      - "Dockerfile.emergencias"
+      - "docker-compose.rpi.yml"
+      - "docker/entrypoint_farmacias_*.sh"
+      - "docker/entrypoint_emergencias_*.sh"
+      - "tools/farmacias_guardia/**"
+      - "tools/emergencias_guardia/**"
+      - "shared/**"
+      - "source/farmacias_commands.py"
+      - "source/emergencias_commands.py"
+      - "scripts/update_meshnet.sh"
+      - "tests/test_optional_apps_docker.py"
+      - "tests/test_update_meshnet_script.py"
+      - ".github/workflows/build-ghcr.yml"
+      - ".github/workflows/validate-optional-apps-docker.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test runner
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Prepare Compose environment
+        run: cp .env_example .env
+
+      - name: Validate Compose without optional profiles
+        run: docker compose -f docker-compose.rpi.yml config >/dev/null
+
+      - name: Validate Compose with both optional profiles
+        env:
+          COMPOSE_PROFILES: farmacias,emergencias
+        run: docker compose -f docker-compose.rpi.yml config >/dev/null
+
+      - name: Run regression tests
+        run: |
+          python -m pytest -q             tests/test_optional_apps_docker.py             tests/test_update_meshnet_script.py
+
+      - name: Build Farmacias image
+        run: docker build -f Dockerfile.farmacias -t meshnet-bot-farmacias:test .
+
+      - name: Build Emergencias image
+        run: docker build -f Dockerfile.emergencias -t meshnet-bot-emergencias:test .
