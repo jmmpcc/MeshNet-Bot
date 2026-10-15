@@ -90,13 +90,19 @@ APRSIS_PUSH_MIN_GAP_S=2.0
 
 La deduplicación debe impedir que un mensaje originado en APRS vuelva a salir como si fuera un mensaje Mesh nuevo.
 
-## Aplicaciones independientes
+## Aplicaciones opcionales
+
+Farmacias y Emergencias pueden ejecutarse como perfiles Docker opcionales. En
+instalaciones nuevas comparten el namespace de red del broker y se consultan por
+localhost. Las instalaciones systemd antiguas pueden conservar temporalmente
+`host.docker.internal`.
 
 ```env
-FARMACIAS_COMMAND_ENABLED=true
-FARMACIAS_SERVICE_URL=http://host.docker.internal:8788/query
-EMERGENCIAS_COMMAND_ENABLED=true
-EMERGENCIAS_SERVICE_URL=http://host.docker.internal:8789/query
+COMPOSE_PROFILES=farmacias,emergencias
+FARMACIAS_COMMAND_ENABLED=1
+FARMACIAS_SERVICE_URL=http://127.0.0.1:8788/query
+EMERGENCIAS_COMMAND_ENABLED=1
+EMERGENCIAS_SERVICE_URL=http://127.0.0.1:8789/query
 ```
 
 Comprobar desde el contenedor:
