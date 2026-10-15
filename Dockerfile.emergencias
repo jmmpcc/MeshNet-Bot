@@ -1,0 +1,31 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TZ=Europe/Madrid \
+    PYTHONPATH=/app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Imagen independiente de Emergencias. Incluye el paquete completo para mantener
+# fuentes, formateadores, dispatcher y cartografía sin depender del host.
+COPY shared/ /app/shared/
+COPY tools/emergencias_guardia/ /app/tools/emergencias_guardia/
+COPY docker/entrypoint_emergencias_api.sh /usr/local/bin/
+COPY docker/entrypoint_emergencias_check.sh /usr/local/bin/
+
+RUN chmod +x \
+        /usr/local/bin/entrypoint_emergencias_api.sh \
+        /usr/local/bin/entrypoint_emergencias_check.sh \
+    && python -m py_compile \
+        /app/tools/emergencias_guardia/emergencias_guardia.py \
+        /app/tools/emergencias_guardia/emergencias_guardia_scoped.py \
+    && PYTHONPATH=/app python -c "from tools.emergencias_guardia.emergencias.cli import parser; parser()"
+
+VOLUME ["/app/bot_data"]
+
+CMD ["/usr/local/bin/entrypoint_emergencias_api.sh"]
