@@ -173,3 +173,24 @@ fuente, medio, resultado y periodo, con exportación CSV.
 
 La auditoría es estrictamente best-effort: una avería, bloqueo o falta de permisos
 en SQLite nunca invalida ni retrasa el envío original de la aplicación.
+
+
+## Perfiles Docker opcionales
+
+Cuando `COMPOSE_PROFILES` del `.env` raíz contiene `farmacias` o
+`emergencias`, ControlPanel selecciona automáticamente las acciones Docker de
+esa aplicación. En instalaciones sin esos perfiles conserva las acciones
+systemd históricas.
+
+En modo Docker:
+
+- Farmacias edita los canales en el `.env` raíz.
+- Emergencias usa `bot_data/emergencias_guardia/config.json` y el `.env` raíz.
+- Los comandos operativos se ejecutan dentro del contenedor correspondiente.
+- Los botones iniciar/detener/reiniciar actúan sobre Docker Compose.
+- El panel sigue accesible en `http://IP_RASPBERRY:8790`.
+- Las APIs opcionales pueden consultarse desde la LAN en los puertos 8788/8789
+  cuando su perfil está activo y *_API_BIND_HOST=0.0.0.0.
+
+El cambio de `COMPOSE_PROFILES` requiere reiniciar ControlPanel para que vuelva
+a cargar los manifiestos con el modo de despliegue correcto.
