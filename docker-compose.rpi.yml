@@ -199,8 +199,7 @@ services:
       - .env
     environment:
       FARMACIAS_DATA_DIR: /app/bot_data/farmacias_guardia
-      BROKER_CTRL_HOST: 127.0.0.1
-    network_mode: "service:broker"
+      BROKER_CTRL_HOST: broker
     volumes:
       - ./bot_data:/app/bot_data:rw
     entrypoint: ["/usr/local/bin/entrypoint_farmacias_daily.sh"]
