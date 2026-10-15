@@ -89,13 +89,27 @@ bot_data/emergencias_guardia/
 
 ## Red
 
-Los servicios opcionales comparten el namespace de red del broker, igual que
-`email-to-mesh`. Por tanto las APIs nuevas se consultan por localhost:
+Los servicios opcionales usan la red Docker Compose normal. El broker los
+resuelve por nombre de servicio:
 
 ```env
-FARMACIAS_SERVICE_URL=http://127.0.0.1:8788/query
-EMERGENCIAS_SERVICE_URL=http://127.0.0.1:8789/query
+FARMACIAS_SERVICE_URL=http://farmacias:8788/query
+EMERGENCIAS_SERVICE_URL=http://emergencias:8789/query
 ```
+
+Las APIs se publican además hacia el host. Por defecto quedan accesibles desde
+la LAN de la Raspberry:
+
+```env
+FARMACIAS_API_BIND_HOST=0.0.0.0
+FARMACIAS_API_PORT_HOST=8788
+EMERGENCIAS_API_BIND_HOST=0.0.0.0
+EMERGENCIAS_API_PORT_HOST=8789
+```
+
+Así pueden comprobarse desde otro equipo de la LAN mediante
+`http://IP_RASPBERRY:8788/health` y `http://IP_RASPBERRY:8789/health`.
+Para limitar las APIs al propio host, use `127.0.0.1` como *_API_BIND_HOST.
 
 Una instalación histórica basada en systemd puede mantener temporalmente:
 
@@ -133,7 +147,7 @@ porque podrían duplicar comprobaciones o envíos automáticos.
 ```env
 COMPOSE_PROFILES=farmacias
 FARMACIAS_COMMAND_ENABLED=1
-FARMACIAS_SERVICE_URL=http://127.0.0.1:8788/query
+FARMACIAS_SERVICE_URL=http://farmacias:8788/query
 ```
 
 2. Detenga y deshabilite exclusivamente las unidades legacy:
@@ -159,7 +173,7 @@ docker compose -f docker-compose.rpi.yml --profile farmacias up -d
 ```env
 COMPOSE_PROFILES=emergencias
 EMERGENCIAS_COMMAND_ENABLED=1
-EMERGENCIAS_SERVICE_URL=http://127.0.0.1:8789/query
+EMERGENCIAS_SERVICE_URL=http://emergencias:8789/query
 ```
 
 2. Detenga y deshabilite las unidades legacy:
