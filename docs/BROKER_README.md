@@ -1,4 +1,4 @@
-# Broker MeshNet-Bot — guía de operación v7.0.36
+# Broker MeshNet-Bot — guía de operación actual
 
 El broker es el núcleo de comunicaciones. Mantiene las interfaces MeshCore/Meshtastic permitidas por `RADIO_PROFILE`, procesa recepción y transmisión, aplica colas, deduplicación, ACK, puentes y comandos locales, y expone los puertos utilizados por el bot, APRS y aplicaciones auxiliares.
 
@@ -12,11 +12,22 @@ El broker es el núcleo de comunicaciones. Mantiene las interfaces MeshCore/Mesh
 
 ## Ejecución
 
+Para una instalación gestionada, utilice el actualizador coordinado:
+
 ```bash
 cd /home/meshnet/MeshNet-Bot
-docker compose -f docker-compose.rpi.yml up -d broker
+./scripts/update_meshnet.sh
+```
+
+Para una intervención manual explícita sobre el broker:
+
+```bash
+docker compose -f docker-compose.rpi.yml up -d --no-deps broker
 docker logs -f meshnet-broker
 ```
+
+Cuando se usa el actualizador, el broker arranca primero y dispone de
+`BROKER_STARTUP_GRACE_SECONDS` (60 s por defecto) antes de arrancar dependientes.
 
 ## Puertos relevantes
 
@@ -106,19 +117,29 @@ EMERGENCIAS_COMMAND_ENABLED=1
 EMERGENCIAS_SERVICE_URL=http://emergencias:8789/query
 ```
 
-Comprobar desde el contenedor:
+Comprobar desde el contenedor cuando los perfiles Docker están activos:
 
 ```bash
-docker exec meshnet-broker python3 -c 'import urllib.request; print(urllib.request.urlopen("http://host.docker.internal:8788/health", timeout=3).read().decode())'
-docker exec meshnet-broker python3 -c 'import urllib.request; print(urllib.request.urlopen("http://host.docker.internal:8789/health", timeout=3).read().decode())'
+docker exec meshnet-broker python3 -c 'import urllib.request; print(urllib.request.urlopen("http://farmacias:8788/health", timeout=3).read().decode())'
+docker exec meshnet-broker python3 -c 'import urllib.request; print(urllib.request.urlopen("http://emergencias:8789/health", timeout=3).read().decode())'
 ```
 
-## Ejemplo de despliegue del núcleo
+`host.docker.internal` queda reservado para despliegues legacy donde la API se
+ejecuta directamente en el host.
+
+## Ejemplo de selección del núcleo
+
+```env
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,email-to-mesh
+BROKER_STARTUP_GRACE_SECONDS=60
+DOCKER_SERVICE_START_TIMEOUT_SECONDS=60
+```
+
+Aplicar:
 
 ```bash
 cd /home/meshnet/MeshNet-Bot
-docker compose -f docker-compose.rpi.yml pull broker bot aprs email-to-mesh
-docker compose -f docker-compose.rpi.yml up -d broker bot aprs email-to-mesh
+./scripts/update_meshnet.sh
 docker compose -f docker-compose.rpi.yml ps
 ```
 
@@ -226,3 +247,15 @@ python3 -m unittest tests.test_aprsis_emergency_bulletin
 - [`RADIO_PROFILES.md`](RADIO_PROFILES.md)
 - [`BOT_README.md`](BOT_README.md)
 - [`OPERATIONS.md`](OPERATIONS.md)
+
+## Compatibilidad MeshCore / Python
+
+La imagen principal utiliza Python 3.11. Para evitar que una actualización no
+validada de la dependencia rompa el broker, MeshCore está acotado a:
+
+```text
+meshcore>=2.2.28,<2.3.0
+```
+
+El Dockerfile ejecuta un smoke test de importación durante el build GHCR. Si
+MeshCore no puede importarse, la imagen no debe publicarse.
