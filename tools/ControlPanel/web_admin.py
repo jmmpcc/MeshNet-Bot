@@ -68,6 +68,38 @@ def _expand(value: str) -> str:
     return value.replace("${PYTHON}", sys.executable).replace("${REPO}", str(REPO_DIR))
 
 
+def _compose_profiles() -> set[str]:
+    """Devuelve los perfiles Docker opcionales activos para esta instalación.
+
+    Prioridad:
+    1. COMPOSE_PROFILES del entorno del propio ControlPanel.
+    2. COMPOSE_PROFILES del .env raíz de MeshNet-Bot.
+
+    El ControlPanel se ejecuta como servicio systemd y no carga automáticamente
+    el .env raíz, por lo que esta lectura explícita permite detectar el mismo
+    modo de despliegue que usa Docker Compose sin exponer otras variables.
+    """
+    raw = os.getenv("COMPOSE_PROFILES", "").strip()
+    if not raw:
+        env_path = REPO_DIR / ".env"
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("COMPOSE_PROFILES="):
+                    raw = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+        except FileNotFoundError:
+            pass
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+ACTIVE_COMPOSE_PROFILES = _compose_profiles()
+
+
+def _docker_profile_enabled(profile: str) -> bool:
+    """Indica si una aplicación opcional está desplegada mediante Docker."""
+    return bool(profile and profile in ACTIVE_COMPOSE_PROFILES)
+
+
 def load_tools(root: Path | None = None) -> tuple[ToolDefinition, ...]:
     root = root or Path(os.getenv("CONTROLPANEL_MANIFESTS", str(BASE_DIR / "manifests")))
     tools: list[ToolDefinition] = []
@@ -76,13 +108,26 @@ def load_tools(root: Path | None = None) -> tuple[ToolDefinition, ...]:
         tool_id = str(raw.get("id", ""))
         if not ID_RE.fullmatch(tool_id):
             raise ValueError(f"id de aplicación no válido en {path}")
+        docker_mode = _docker_profile_enabled(str(raw.get("docker_profile", "")).strip())
         actions = []
         for item in raw.get("actions", []):
-            action_id, kind = str(item.get("id", "")), str(item.get("kind", "command"))
+            action_id = str(item.get("id", ""))
+            kind = str(item.get("kind", "command"))
+            argv_values = item.get("argv", [])
+            unit, operation = str(item.get("unit", "")), str(item.get("operation", ""))
+
+            # Cada manifiesto conserva su acción systemd/host histórica y puede
+            # declarar un docker_argv equivalente. Cuando el perfil Docker está
+            # activo se usa exclusivamente esa variante, sin modificar el modo
+            # legacy de otras instalaciones.
+            if docker_mode and item.get("docker_argv"):
+                kind = "command"
+                argv_values = item.get("docker_argv", [])
+                unit, operation = "", ""
+
             if not ID_RE.fullmatch(action_id) or kind not in {"command", "systemd"}:
                 raise ValueError(f"acción no válida en {path}: {action_id}")
-            argv = tuple(_expand(str(value)) for value in item.get("argv", []))
-            unit, operation = str(item.get("unit", "")), str(item.get("operation", ""))
+            argv = tuple(_expand(str(value)) for value in argv_values)
             if kind == "command" and not argv:
                 raise ValueError(f"argv vacío en {path}: {action_id}")
             if kind == "systemd" and (not UNIT_RE.fullmatch(unit) or operation not in SYSTEMD_OPS):
@@ -218,9 +263,13 @@ class AutoReplyPayload(BaseModel):
     meshtastic_channels: list[int] = Field(default_factory=list)
 
 
-FARMACIAS_ENV_FILE = Path(
-    os.getenv("CONTROLPANEL_FARMACIAS_ENV", str(REPO_DIR / "tools/farmacias_guardia/.env"))
-)
+FARMACIAS_DOCKER_MODE = _docker_profile_enabled("farmacias")
+EMERGENCIAS_DOCKER_MODE = _docker_profile_enabled("emergencias")
+
+FARMACIAS_ENV_FILE = Path(os.getenv(
+    "CONTROLPANEL_FARMACIAS_ENV",
+    str(REPO_DIR / ".env") if FARMACIAS_DOCKER_MODE else str(REPO_DIR / "tools/farmacias_guardia/.env"),
+))
 AUTO_REPLY_CONFIG_FILE = Path(os.getenv(
     "CONTROLPANEL_AUTO_REPLY_CONFIG", str(REPO_DIR / "bot_data/auto_reply.json")
 ))
@@ -233,11 +282,15 @@ CHANNEL_KEYS = {
 }
 EMERGENCIAS_CONFIG_FILE = Path(os.getenv(
     "CONTROLPANEL_EMERGENCIAS_CONFIG",
-    str(REPO_DIR / "tools/emergencias_guardia/data/config.json"),
+    str(REPO_DIR / "bot_data/emergencias_guardia/config.json")
+    if EMERGENCIAS_DOCKER_MODE
+    else str(REPO_DIR / "tools/emergencias_guardia/data/config.json"),
 ))
 EMERGENCIAS_ENV_FILE = Path(os.getenv(
     "CONTROLPANEL_EMERGENCIAS_ENV",
-    str(REPO_DIR / "tools/emergencias_guardia/.env"),
+    str(REPO_DIR / ".env")
+    if EMERGENCIAS_DOCKER_MODE
+    else str(REPO_DIR / "tools/emergencias_guardia/.env"),
 ))
 EMERGENCY_SOURCE_IDS = {
     "municipal_json", "dgt_datex", "ign_earthquakes", "nasa_firms", "aemet_cap", "che_saih",
