@@ -1,3 +1,38 @@
+# Actualización operativa — octubre 2026
+
+## Docker opcional, ControlPanel y actualización coordinada
+
+- Farmacias y Emergencias disponen de perfiles Docker opcionales en `docker-compose.rpi.yml`.
+- `COMPOSE_PROFILES` habilita la disponibilidad de perfiles, pero no implica autostart.
+- `MESHNET_DOCKER_SERVICES` permite seleccionar exactamente qué servicios administra el actualizador.
+- Si esa selección está vacía, `scripts/update_meshnet.sh` conserva únicamente los servicios Compose que ya estaban activos.
+- El actualizador ya no usa un `docker compose up -d --remove-orphans` global.
+- El arranque Docker es secuencial: broker primero, espera configurable de 60 s por defecto y resto de servicios uno a uno.
+- Cada servicio debe quedar `running` antes de continuar; el flujo aborta ante el primer fallo.
+- El arranque individual usa `--no-deps` para evitar que Compose inicie servicios no seleccionados.
+- Se validan dependencias explícitas de bot/APRS/email/bridge/Farmacias/Emergencias.
+- Farmacias publica su API en 8788 y Emergencias en 8789; pueden limitarse al host o publicarse en LAN.
+- El broker consume las APIs Docker mediante DNS de Compose (`farmacias`, `emergencias`).
+- Los datos legacy de Farmacias/Emergencias se migran de forma conservadora a `bot_data`: sólo cuando el destino está vacío y sin borrar el origen.
+- ControlPanel detecta `COMPOSE_PROFILES` y conmuta automáticamente sus acciones entre Docker y systemd legacy.
+- Las unidades systemd legacy de Farmacias/Emergencias deben permanecer inactivas cuando se usan sus equivalentes Docker.
+- Se corrigió la compatibilidad de MeshCore con Python 3.11 fijando `meshcore>=2.2.28,<2.3.0`.
+- El Dockerfile principal incorpora un smoke test de importación MeshCore para impedir publicar imágenes incompatibles en GHCR.
+- BBS sigue siendo opcional y compatible con `RADIO_PROFILE=meshcore_only`.
+
+## Procedimiento de actualización vigente
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+git switch main
+git pull --ff-only
+./scripts/update_meshnet.sh
+```
+
+La documentación vigente de este flujo está en `README.md`, `docs/OPERATIONS.md` y `docs/OPTIONAL_APPS_DOCKER.md`.
+
+---
+
 ## v7.0.48 — Journal común de mensajes emitidos
 
 - SQLite común best-effort para auditoría de entregas de aplicaciones independientes.
