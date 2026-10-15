@@ -9,12 +9,12 @@ services:
       net.ipv4.tcp_keepalive_probes: 3
     environment:
       - BROKER_CTRL_BIND=0.0.0.0
-      # En instalaciones Docker nuevas, las APIs opcionales comparten el
-      # namespace de red del broker y responden por localhost. Una instalación
-      # histórica puede conservar host.docker.internal definiendo estas
-      # variables en su .env, sin cambiar la arquitectura existente.
-      - FARMACIAS_SERVICE_URL=${FARMACIAS_SERVICE_URL:-http://127.0.0.1:8788/query}
-      - EMERGENCIAS_SERVICE_URL=${EMERGENCIAS_SERVICE_URL:-http://127.0.0.1:8789/query}
+      # En instalaciones Docker nuevas, las aplicaciones opcionales usan la red
+      # Compose normal y el broker las resuelve por nombre de servicio.
+      # Instalaciones systemd antiguas pueden seguir definiendo
+      # host.docker.internal en .env sin cambiar el comportamiento legacy.
+      - FARMACIAS_SERVICE_URL=${FARMACIAS_SERVICE_URL:-http://farmacias:8788/query}
+      - EMERGENCIAS_SERVICE_URL=${EMERGENCIAS_SERVICE_URL:-http://emergencias:8789/query}
 
     # Permite que el broker acceda de forma estable a servicios que se ejecutan
     # directamente en la Raspberry, como la API independiente de farmacias.
@@ -158,11 +158,12 @@ services:
       - .env
     environment:
       FARMACIAS_DATA_DIR: /app/bot_data/farmacias_guardia
-      FARMACIAS_API_HOST: 127.0.0.1
+      FARMACIAS_API_HOST: 0.0.0.0
       FARMACIAS_COMMAND_LISTENER_ENABLED: "0"
-      BROKER_CTRL_HOST: 127.0.0.1
-      BROKER_EVENT_HOST: 127.0.0.1
-    network_mode: "service:broker"
+      BROKER_CTRL_HOST: broker
+      BROKER_EVENT_HOST: broker
+    ports:
+      - "${FARMACIAS_API_BIND_HOST:-0.0.0.0}:${FARMACIAS_API_PORT_HOST:-8788}:8788"
     volumes:
       - ./bot_data:/app/bot_data:rw
     entrypoint: ["/usr/local/bin/entrypoint_farmacias_api.sh"]
@@ -180,8 +181,7 @@ services:
       - .env
     environment:
       FARMACIAS_DATA_DIR: /app/bot_data/farmacias_guardia
-      BROKER_CTRL_HOST: 127.0.0.1
-    network_mode: "service:broker"
+      BROKER_CTRL_HOST: broker
     volumes:
       - ./bot_data:/app/bot_data:rw
     entrypoint: ["/usr/local/bin/entrypoint_farmacias_check.sh"]
@@ -199,8 +199,7 @@ services:
       - .env
     environment:
       FARMACIAS_DATA_DIR: /app/bot_data/farmacias_guardia
-      BROKER_CTRL_HOST: 127.0.0.1
-    network_mode: "service:broker"
+      BROKER_CTRL_HOST: broker
     volumes:
       - ./bot_data:/app/bot_data:rw
     entrypoint: ["/usr/local/bin/entrypoint_farmacias_daily.sh"]
@@ -223,7 +222,9 @@ services:
       - .env
     environment:
       EMERGENCIAS_DATA_DIR: /app/bot_data/emergencias_guardia
-    network_mode: "service:broker"
+      EMERGENCIAS_API_HOST: 0.0.0.0
+    ports:
+      - "${EMERGENCIAS_API_BIND_HOST:-0.0.0.0}:${EMERGENCIAS_API_PORT_HOST:-8789}:8789"
     volumes:
       - ./bot_data:/app/bot_data:rw
     entrypoint: ["/usr/local/bin/entrypoint_emergencias_api.sh"]
@@ -241,7 +242,7 @@ services:
       - .env
     environment:
       EMERGENCIAS_DATA_DIR: /app/bot_data/emergencias_guardia
-    network_mode: "service:broker"
+      BROKER_CTRL_HOST: broker
     volumes:
       - ./bot_data:/app/bot_data:rw
     entrypoint: ["/usr/local/bin/entrypoint_emergencias_check.sh"]

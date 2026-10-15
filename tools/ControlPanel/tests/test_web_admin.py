@@ -569,3 +569,84 @@ def test_emergency_transport_accepts_both_embedded_nodes(tmp_path, monkeypatch):
     response = client.put("/api/emergencias/transport", json={"transport": "both"})
     assert response.status_code == 200
     assert calls == [("notify", "set-transport", "both")]
+
+
+def test_load_tools_uses_docker_override_when_profile_is_active(tmp_path, monkeypatch):
+    """El mismo manifiesto debe seleccionar Docker sin perder el modo systemd legacy."""
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    (manifests / "demo.json").write_text(json.dumps({
+        "id": "demo",
+        "name": "Demo",
+        "description": "Servicio de prueba",
+        "url": "http://127.0.0.1:9999",
+        "docker_profile": "farmacias",
+        "actions": [{
+            "id": "restart",
+            "name": "Reiniciar",
+            "kind": "systemd",
+            "unit": "meshnet-farmacias-api.service",
+            "operation": "restart",
+            "docker_argv": ["docker", "compose", "restart", "farmacias"],
+        }],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(web_admin, "ACTIVE_COMPOSE_PROFILES", {"farmacias"})
+    tool = web_admin.load_tools(manifests)[0]
+    action = tool.actions[0]
+
+    assert action.kind == "command"
+    assert action.argv == ("docker", "compose", "restart", "farmacias")
+    assert action.unit == ""
+    assert action.operation == ""
+
+
+def test_load_tools_preserves_systemd_when_profile_is_inactive(tmp_path, monkeypatch):
+    """Una instalación legacy conserva exactamente sus acciones systemd históricas."""
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    (manifests / "demo.json").write_text(json.dumps({
+        "id": "demo",
+        "name": "Demo",
+        "description": "Servicio de prueba",
+        "url": "http://127.0.0.1:9999",
+        "docker_profile": "farmacias",
+        "actions": [{
+            "id": "restart",
+            "name": "Reiniciar",
+            "kind": "systemd",
+            "unit": "meshnet-farmacias-api.service",
+            "operation": "restart",
+            "docker_argv": ["docker", "compose", "restart", "farmacias"],
+        }],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(web_admin, "ACTIVE_COMPOSE_PROFILES", set())
+    tool = web_admin.load_tools(manifests)[0]
+    action = tool.actions[0]
+
+    assert action.kind == "systemd"
+    assert action.unit == "meshnet-farmacias-api.service"
+    assert action.operation == "restart"
+
+
+def test_optional_app_manifests_define_docker_actions():
+    """Farmacias y Emergencias deben poder operarse íntegramente desde Docker."""
+    manifest_dir = web_admin.BASE_DIR / "manifests"
+    for name, profile in (
+        ("farmacias_guardia.json", "farmacias"),
+        ("emergencias_guardia.json", "emergencias"),
+    ):
+        payload = json.loads((manifest_dir / name).read_text(encoding="utf-8"))
+        assert payload["docker_profile"] == profile
+        assert payload["actions"]
+        assert all("docker_argv" in action for action in payload["actions"])
+
+
+def test_optional_app_docker_paths_use_root_env_and_bot_data():
+    """En Docker, el panel debe editar los mismos ficheros persistentes que los contenedores."""
+    source = (web_admin.BASE_DIR / "web_admin.py").read_text(encoding="utf-8")
+
+    assert 'str(REPO_DIR / ".env") if FARMACIAS_DOCKER_MODE' in source
+    assert 'str(REPO_DIR / "bot_data/emergencias_guardia/config.json")' in source
+    assert 'str(REPO_DIR / ".env")' in source

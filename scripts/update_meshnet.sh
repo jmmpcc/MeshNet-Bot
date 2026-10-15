@@ -304,16 +304,47 @@ env_value_from_file() {
     sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "${REPO_DIR}/.env" | tail -n1 | tr -d '"' | tr -d "'"
 }
 
+migrate_legacy_data_if_needed() {
+    local app_name="$1"
+    local legacy_dir="$2"
+    local docker_dir="$3"
+
+    # Migración conservadora: sólo copia datos legacy cuando el destino Docker
+    # no existe o está completamente vacío. Nunca sobrescribe datos ya creados
+    # por los contenedores ni modifica/elimina el origen histórico.
+    [[ -d "${legacy_dir}" ]] || return 0
+    if [[ -d "${docker_dir}" ]] && find "${docker_dir}" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+        return 0
+    fi
+
+    log "migrando datos legacy de ${app_name} a ${docker_dir}"
+    run mkdir -p "${docker_dir}"
+    run cp -a "${legacy_dir}/." "${docker_dir}/"
+}
+
+if ${farmacias_docker_profile}; then
+    migrate_legacy_data_if_needed \
+        farmacias \
+        "${REPO_DIR}/tools/farmacias_guardia/data" \
+        "${REPO_DIR}/bot_data/farmacias_guardia"
+fi
+if ${emergencias_docker_profile}; then
+    migrate_legacy_data_if_needed \
+        emergencias \
+        "${REPO_DIR}/tools/emergencias_guardia/data" \
+        "${REPO_DIR}/bot_data/emergencias_guardia"
+fi
+
 if ${farmacias_docker_profile}; then
     farmacias_url="$(env_value_from_file FARMACIAS_SERVICE_URL)"
-    if [[ "${farmacias_url}" == *"host.docker.internal"* ]]; then
-        log "AVISO: perfil Docker farmacias activo pero FARMACIAS_SERVICE_URL apunta al host legacy; use http://127.0.0.1:8788/query para consumir el contenedor"
+    if [[ "${farmacias_url}" == *"host.docker.internal"* || "${farmacias_url}" == http://127.0.0.1:* || "${farmacias_url}" == http://localhost:* ]]; then
+        log "AVISO: perfil Docker farmacias activo pero FARMACIAS_SERVICE_URL apunta al host/loopback; use http://farmacias:8788/query para que el broker consuma el contenedor"
     fi
 fi
 if ${emergencias_docker_profile}; then
     emergencias_url="$(env_value_from_file EMERGENCIAS_SERVICE_URL)"
-    if [[ "${emergencias_url}" == *"host.docker.internal"* ]]; then
-        log "AVISO: perfil Docker emergencias activo pero EMERGENCIAS_SERVICE_URL apunta al host legacy; use http://127.0.0.1:8789/query para consumir el contenedor"
+    if [[ "${emergencias_url}" == *"host.docker.internal"* || "${emergencias_url}" == http://127.0.0.1:* || "${emergencias_url}" == http://localhost:* ]]; then
+        log "AVISO: perfil Docker emergencias activo pero EMERGENCIAS_SERVICE_URL apunta al host/loopback; use http://emergencias:8789/query para que el broker consuma el contenedor"
     fi
 fi
 

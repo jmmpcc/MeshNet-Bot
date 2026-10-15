@@ -1,18 +1,436 @@
-{"id":"emergencias_guardia","name":"Emergencias","description":"Incidencias, fuentes, áreas, categorías, histórico y avisos.","url":"http://127.0.0.1:8789","url_env":"EMERGENCIAS_PANEL_URL","actions":[
-{"id":"api_status","name":"Estado API de consultas","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"status"},
-{"id":"api_start","name":"Iniciar API de consultas","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"start","mutating":true},
-{"id":"api_stop","name":"Detener API de consultas","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"stop","mutating":true,"confirm":true},
-{"id":"api_restart","name":"Reiniciar API de consultas","kind":"systemd","unit":"meshnet-emergencias-api.service","operation":"restart","mutating":true,"confirm":true},
-{"id":"timer","name":"Temporizador","kind":"systemd","unit":"meshnet-emergencias-check.timer","operation":"status"},
-{"id":"status","name":"Estado de fuentes","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","status"]},
-{"id":"events","name":"Ver emergencias","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","list"]},
-{"id":"history","name":"Ver histórico","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","history","--limit","100"]},
-{"id":"sources","name":"Ver fuentes","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","source","list"]},
-{"id":"areas","name":"Ver áreas","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","area","list"]},
-{"id":"categories","name":"Ver categorías","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","category","list"]},
-{"id":"notifications","name":"Estado avisos","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","notify","status"]},
-{"id":"test_zaragoza","name":"Probar fuente Zaragoza","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","source","test","municipal_json"],"timeout":120,"mutating":true},
-{"id":"test_dgt","name":"Probar fuente DGT","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","source","test","dgt_datex"],"timeout":120,"mutating":true},
-{"id":"fetch","name":"Actualizar datos","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","fetch"],"timeout":120,"mutating":true},
-{"id":"check","name":"Comprobar y avisar","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","check","--notify-changes"],"timeout":120,"mutating":true,"confirm":true},
-{"id":"doctor","name":"Diagnóstico","kind":"command","argv":["${PYTHON}","${REPO}/tools/emergencias_guardia/emergencias_guardia.py","doctor"],"timeout":90}]}
+{
+  "id": "emergencias_guardia",
+  "name": "Emergencias",
+  "description": "Incidencias, fuentes, áreas, categorías, histórico y avisos.",
+  "url": "http://127.0.0.1:8789",
+  "url_env": "EMERGENCIAS_PANEL_URL",
+  "actions": [
+    {
+      "id": "api_status",
+      "name": "Estado API de consultas",
+      "kind": "systemd",
+      "unit": "meshnet-emergencias-api.service",
+      "operation": "status",
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "ps",
+        "emergencias"
+      ]
+    },
+    {
+      "id": "api_start",
+      "name": "Iniciar API de consultas",
+      "kind": "systemd",
+      "unit": "meshnet-emergencias-api.service",
+      "operation": "start",
+      "mutating": true,
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "up",
+        "-d",
+        "emergencias",
+        "emergencias-check"
+      ]
+    },
+    {
+      "id": "api_stop",
+      "name": "Detener API de consultas",
+      "kind": "systemd",
+      "unit": "meshnet-emergencias-api.service",
+      "operation": "stop",
+      "mutating": true,
+      "confirm": true,
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "stop",
+        "emergencias",
+        "emergencias-check"
+      ]
+    },
+    {
+      "id": "api_restart",
+      "name": "Reiniciar API de consultas",
+      "kind": "systemd",
+      "unit": "meshnet-emergencias-api.service",
+      "operation": "restart",
+      "mutating": true,
+      "confirm": true,
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "restart",
+        "emergencias",
+        "emergencias-check"
+      ]
+    },
+    {
+      "id": "timer",
+      "name": "Temporizador",
+      "kind": "systemd",
+      "unit": "meshnet-emergencias-check.timer",
+      "operation": "status",
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "ps",
+        "emergencias-check"
+      ]
+    },
+    {
+      "id": "status",
+      "name": "Estado de fuentes",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "status"
+      ],
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "status"
+      ]
+    },
+    {
+      "id": "events",
+      "name": "Ver emergencias",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "list"
+      ],
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "list"
+      ]
+    },
+    {
+      "id": "history",
+      "name": "Ver histórico",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "history",
+        "--limit",
+        "100"
+      ],
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "history",
+        "--limit",
+        "100"
+      ]
+    },
+    {
+      "id": "sources",
+      "name": "Ver fuentes",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "source",
+        "list"
+      ],
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "source",
+        "list"
+      ]
+    },
+    {
+      "id": "areas",
+      "name": "Ver áreas",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "area",
+        "list"
+      ],
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "area",
+        "list"
+      ]
+    },
+    {
+      "id": "categories",
+      "name": "Ver categorías",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "category",
+        "list"
+      ],
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "category",
+        "list"
+      ]
+    },
+    {
+      "id": "notifications",
+      "name": "Estado avisos",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "notify",
+        "status"
+      ],
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "notify",
+        "status"
+      ]
+    },
+    {
+      "id": "test_zaragoza",
+      "name": "Probar fuente Zaragoza",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "source",
+        "test",
+        "municipal_json"
+      ],
+      "timeout": 120,
+      "mutating": true,
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "source",
+        "test",
+        "municipal_json"
+      ]
+    },
+    {
+      "id": "test_dgt",
+      "name": "Probar fuente DGT",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "source",
+        "test",
+        "dgt_datex"
+      ],
+      "timeout": 120,
+      "mutating": true,
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "source",
+        "test",
+        "dgt_datex"
+      ]
+    },
+    {
+      "id": "fetch",
+      "name": "Actualizar datos",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "fetch"
+      ],
+      "timeout": 120,
+      "mutating": true,
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "fetch"
+      ]
+    },
+    {
+      "id": "check",
+      "name": "Comprobar y avisar",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "check",
+        "--notify-changes"
+      ],
+      "timeout": 120,
+      "mutating": true,
+      "confirm": true,
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "check",
+        "--notify-changes"
+      ]
+    },
+    {
+      "id": "doctor",
+      "name": "Diagnóstico",
+      "kind": "command",
+      "argv": [
+        "${PYTHON}",
+        "${REPO}/tools/emergencias_guardia/emergencias_guardia.py",
+        "doctor"
+      ],
+      "timeout": 90,
+      "docker_argv": [
+        "docker",
+        "compose",
+        "-f",
+        "${REPO}/docker-compose.rpi.yml",
+        "--profile",
+        "emergencias",
+        "exec",
+        "-T",
+        "emergencias",
+        "python",
+        "-u",
+        "/app/tools/emergencias_guardia/emergencias_guardia.py",
+        "doctor"
+      ]
+    }
+  ],
+  "docker_profile": "emergencias"
+}
