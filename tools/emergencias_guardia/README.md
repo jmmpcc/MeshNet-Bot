@@ -5,6 +5,30 @@ mantiene una copia local y ofrece una API HTTP para consultas. Está inspirada e
 `farmacias_guardia`, pero no importa código del broker ni altera servicios
 existentes.
 
+## Despliegue actual recomendado
+
+En instalaciones actuales se ejecuta preferentemente mediante el perfil Docker
+`emergencias`, con estado persistente en `bot_data/emergencias_guardia`.
+
+```env
+COMPOSE_PROFILES=emergencias
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,emergencias,emergencias-check
+EMERGENCIAS_SERVICE_URL=http://emergencias:8789/query
+EMERGENCIAS_API_BIND_HOST=0.0.0.0
+EMERGENCIAS_API_PORT_HOST=8789
+```
+
+Puesta en marcha:
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+./scripts/update_meshnet.sh
+curl -fsS http://127.0.0.1:8789/health && echo
+```
+
+La modalidad systemd se conserva para compatibilidad con instalaciones legacy;
+no debe estar activa a la vez que los contenedores equivalentes.
+
 Esta fase mantiene únicamente biblioteca estándar de Python y aporta:
 
 - CLI para fuentes, áreas, categorías, consulta, diagnóstico e histórico.
@@ -342,7 +366,9 @@ v7.0.43 no modifica el comportamiento validado en v7.0.42: los estados
 terminales `resolved`, `cancelled`, `expired` y `closed` pueden omitir únicamente
 el `MIN_INTERVAL` de boletines APRS-IS, manteniendo la deduplicación.
 
-## systemd
+## systemd legacy
+
+Esta sección aplica únicamente a instalaciones antiguas que todavía no han migrado a Docker.
 
 El servicio de comprobación carga primero el `.env` general y después el `.env`
 local de Emergencias:
