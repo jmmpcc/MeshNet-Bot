@@ -247,8 +247,8 @@ def resolve_radio_profile(
             "MESHCORE_ONLY": "1",
             "BRIDGE_ENABLED": "0",
             "BRIDGE_DIRECTION_MODE": "off",
-            "BBS_ENABLED": "0",
-            "BBS_ENABLE": "0",
+            # La BBS es independiente de Meshtastic: respetar BBS_ENABLED/BBS_ENABLE
+            # del entorno (ausencia de ambas variables equivale a desactivada).
         }
         return RadioCapabilities(
             profile=canonical,
