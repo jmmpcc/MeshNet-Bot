@@ -8,8 +8,8 @@ set -euo pipefail
 #   1) imágenes Docker publicadas en GHCR;
 #   2) aplicaciones independientes que se ejecutan mediante systemd en el host.
 #
-# Uso normal:
-#   sudo ./scripts/update_meshnet.sh
+# Uso normal (como usuario propietario del repositorio, sin sudo):
+#   ./scripts/update_meshnet.sh
 #
 # Opciones:
 #   --skip-docker       No ejecutar docker compose pull/up.
@@ -83,6 +83,10 @@ done
 
 if [[ -n "${FROM_COMMIT}" || -n "${TO_COMMIT}" ]]; then
     [[ -n "${FROM_COMMIT}" && -n "${TO_COMMIT}" ]] || die "--from y --to deben usarse juntos"
+fi
+
+if [[ ${EUID} -eq 0 && -n "${SUDO_USER:-}" ]]; then
+    die "no ejecute el actualizador completo con sudo; use ./scripts/update_meshnet.sh como ${SUDO_USER}"
 fi
 
 command -v git >/dev/null 2>&1 || die "git no está disponible"
