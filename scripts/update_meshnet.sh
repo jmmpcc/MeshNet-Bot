@@ -298,6 +298,25 @@ if ${emergencias_docker_profile}; then
         meshnet-emergencias-check.timer
 fi
 
+env_value_from_file() {
+    local key="$1"
+    [[ -f "${REPO_DIR}/.env" ]] || return 0
+    sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "${REPO_DIR}/.env" | tail -n1 | tr -d '"' | tr -d "'"
+}
+
+if ${farmacias_docker_profile}; then
+    farmacias_url="$(env_value_from_file FARMACIAS_SERVICE_URL)"
+    if [[ "${farmacias_url}" == *"host.docker.internal"* ]]; then
+        log "AVISO: perfil Docker farmacias activo pero FARMACIAS_SERVICE_URL apunta al host legacy; use http://127.0.0.1:8788/query para consumir el contenedor"
+    fi
+fi
+if ${emergencias_docker_profile}; then
+    emergencias_url="$(env_value_from_file EMERGENCIAS_SERVICE_URL)"
+    if [[ "${emergencias_url}" == *"host.docker.internal"* ]]; then
+        log "AVISO: perfil Docker emergencias activo pero EMERGENCIAS_SERVICE_URL apunta al host legacy; use http://127.0.0.1:8789/query para consumir el contenedor"
+    fi
+fi
+
 # Docker se actualiza siempre en el flujo normal. Esto cubre imágenes GHCR que
 # puedan haberse republicado aunque el checkout local ya estuviera al día.
 if ! ${SKIP_DOCKER}; then
