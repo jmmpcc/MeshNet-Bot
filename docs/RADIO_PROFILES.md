@@ -33,8 +33,10 @@ cruzar el bridge ni duplicarse en el otro nodo.
 Por defecto se reutilizan `BBS_CHANNELS` / `BBS_CHANNEL` también para los
 índices de canal MeshCore. Si la numeración de ambas radios no coincide, se
 puede definir `BBS_MESHCORE_CHANNELS` con una lista CSV exclusiva para MeshCore.
-El perfil `meshcore_only` conserva deliberadamente la BBS desactivada para no
-alterar su comportamiento actual.
+El perfil `meshcore_only` también admite BBS opcional: con `BBS_ENABLED=1`
+se activa sobre MeshCore sin iniciar Meshtastic ni habilitar el bridge; con
+`BBS_ENABLED=0` (o sin configurar la variable) permanece desactivada.
+Los comandos y respuestas MeshCore reutilizan el motor BBS existente.
 
 Ejemplo para habilitar la BBS en los canales MeshCore con `channel_idx` 2 y 4:
 
