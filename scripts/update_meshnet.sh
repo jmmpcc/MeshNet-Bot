@@ -12,11 +12,19 @@ set -euo pipefail
 #   ./scripts/update_meshnet.sh
 #
 # Opciones:
-#   --skip-docker       No ejecutar docker compose pull/up.
+#   --skip-docker       No ejecutar actualización Docker.
 #
-# Perfiles opcionales se controlan con COMPOSE_PROFILES en .env, por ejemplo:
-#   COMPOSE_PROFILES=farmacias
+# Selección de servicios Docker:
+#   - MESHNET_DOCKER_SERVICES vacío/no definido: sólo se actualizan los
+#     servicios Compose que ya estaban en ejecución antes de actualizar.
+#   - MESHNET_DOCKER_SERVICES=broker,bot,aprs: actualiza/inicia sólo esos
+#     servicios (más dependencias estrictamente requeridas por Compose).
+#   - COMPOSE_PROFILES únicamente habilita la disponibilidad de perfiles
+#     opcionales; por sí solo NO provoca que se arranquen.
+#
+# Ejemplo:
 #   COMPOSE_PROFILES=farmacias,emergencias
+#   MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-daily
 #   --from <commit>     Commit inicial para calcular cambios (modo diagnóstico).
 #   --to <commit>       Commit final para calcular cambios (requiere --from).
 #   --dry-run           Mostrar acciones sin modificar Git, Docker ni systemd.
@@ -348,17 +356,60 @@ if ${emergencias_docker_profile}; then
     fi
 fi
 
-# Docker se actualiza siempre en el flujo normal. Esto cubre imágenes GHCR que
-# puedan haberse republicado aunque el checkout local ya estuviera al día.
+# Docker se actualiza sin alterar qué aplicaciones están activas.
+#
+# Regla de seguridad:
+#   - Si MESHNET_DOCKER_SERVICES está definido, sólo se actualizan/inician los
+#     servicios indicados explícitamente.
+#   - Si no está definido, se captura el conjunto de servicios Compose que ya
+#     estaban activos y sólo se reconcilian esos mismos servicios.
+#   - Nunca se ejecuta "docker compose up -d" sin una lista de servicios.
+#   - No se usa --remove-orphans para no detener/eliminar contenedores ajenos a
+#     la selección actual.
 if ! ${SKIP_DOCKER}; then
     command -v docker >/dev/null 2>&1 || die "docker no está disponible"
     [[ -f "${COMPOSE_FILE}" ]] || die "no existe ${COMPOSE_FILE}"
 
-    log "actualizando imágenes Docker"
-    run docker compose -f "${COMPOSE_FILE}" pull
+    docker_services_value="${MESHNET_DOCKER_SERVICES:-}"
+    if [[ -z "${docker_services_value}" && -f "${REPO_DIR}/.env" ]]; then
+        docker_services_value="$(env_value_from_file MESHNET_DOCKER_SERVICES)"
+    fi
 
-    log "reconciliando contenedores"
-    run docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
+    selected_docker_services=()
+    if [[ -n "${docker_services_value}" ]]; then
+        while IFS= read -r service; do
+            [[ -n "${service}" ]] && selected_docker_services+=("${service}")
+        done < <(
+            tr ',' '\n' <<<"${docker_services_value}" |
+                sed 's/^[[:space:]]*//; s/[[:space:]]*$//' |
+                sed '/^$/d'
+        )
+        log "servicios Docker seleccionados explícitamente: ${selected_docker_services[*]}"
+    else
+        while IFS= read -r service; do
+            [[ -n "${service}" ]] && selected_docker_services+=("${service}")
+        done < <(docker compose -f "${COMPOSE_FILE}" ps --services --status running 2>/dev/null || true)
+
+        if [[ ${#selected_docker_services[@]} -gt 0 ]]; then
+            log "servicios Docker ya activos que se conservarán: ${selected_docker_services[*]}"
+        else
+            log "no hay servicios Docker activos ni MESHNET_DOCKER_SERVICES definido; Docker no arrancará ningún servicio"
+        fi
+    fi
+
+    if [[ ${#selected_docker_services[@]} -gt 0 ]]; then
+        available_services="$(docker compose -f "${COMPOSE_FILE}" config --services)"
+        for service in "${selected_docker_services[@]}"; do
+            grep -Fxq "${service}" <<<"${available_services}" ||
+                die "servicio Docker '${service}' no disponible con COMPOSE_PROFILES='${COMPOSE_PROFILES_VALUE}'"
+        done
+
+        log "actualizando imágenes Docker seleccionadas"
+        run docker compose -f "${COMPOSE_FILE}" pull "${selected_docker_services[@]}"
+
+        log "reconciliando sólo los contenedores seleccionados"
+        run docker compose -f "${COMPOSE_FILE}" up -d "${selected_docker_services[@]}"
+    fi
 else
     log "Docker omitido por --skip-docker"
 fi

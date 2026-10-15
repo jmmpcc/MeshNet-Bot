@@ -50,8 +50,12 @@ def test_update_meshnet_uses_safe_git_and_docker_flow() -> None:
     assert "git pull --ff-only" in text
     assert "git reset" not in text
     assert "git checkout --" not in text
-    assert 'docker compose -f "${COMPOSE_FILE}" pull' in text
-    assert 'docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans' in text
+    assert 'docker compose -f "${COMPOSE_FILE}" pull "${selected_docker_services[@]}"' in text
+    assert 'docker compose -f "${COMPOSE_FILE}" up -d "${selected_docker_services[@]}"' in text
+    assert 'docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans' not in text
+    assert 'MESHNET_DOCKER_SERVICES' in text
+    assert 'ps --services --status running' in text
+    assert 'config --services' in text
 
 
 def test_update_meshnet_maps_host_directories_and_shared_code() -> None:
@@ -74,3 +78,19 @@ def test_update_meshnet_rejects_global_sudo_execution() -> None:
     assert 'EUID} -eq 0 && -n "${SUDO_USER:-}"' in text
     assert "no ejecute el actualizador completo con sudo" in text
     assert "run sudo" in text
+
+
+def test_update_meshnet_never_starts_all_compose_services_implicitly() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'run docker compose -f "${COMPOSE_FILE}" up -d' in text
+    assert 'up -d --remove-orphans' not in text
+    assert 'up -d "${selected_docker_services[@]}"' in text
+    assert 'no hay servicios Docker activos ni MESHNET_DOCKER_SERVICES definido; Docker no arrancará ningún servicio' in text
+
+
+def test_compose_profiles_do_not_imply_autostart() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'COMPOSE_PROFILES únicamente habilita la disponibilidad' in text
+    assert 'por sí solo NO provoca que se arranquen' in text
