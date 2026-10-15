@@ -1,449 +1,247 @@
-# Operación, recuperación y reinstalación — MeshNet-Bot v7.0.36
+# Operación, actualización y recuperación — MeshNet-Bot
+
+Esta guía define el procedimiento operativo actual para Raspberry Pi/Linux.
 
 ## 1. Rutas oficiales
 
 ```text
 Proyecto:       /home/meshnet/MeshNet-Bot
 Configuración:  /home/meshnet/MeshNet-Bot/.env
-Datos Docker:   /home/meshnet/MeshNet-Bot/bot_data
+Datos:          /home/meshnet/MeshNet-Bot/bot_data
+ControlPanel:   /home/meshnet/MeshNet-Bot/tools/ControlPanel
 Farmacias:      /home/meshnet/MeshNet-Bot/tools/farmacias_guardia
 Emergencias:    /home/meshnet/MeshNet-Bot/tools/emergencias_guardia
-ControlPanel:   /home/meshnet/MeshNet-Bot/tools/ControlPanel
-Voice RF:       /home/meshnet/MeshNet-Bot/tools/voice_rf_gateway
 ```
 
-No utilizar rutas antiguas fuera del árbol `MeshNet-Bot`.
-
-## 2. Inventario de servicios
-
-### Docker
+## 2. Inventario Docker
 
 ```bash
 cd /home/meshnet/MeshNet-Bot
 docker compose -f docker-compose.rpi.yml ps
 ```
 
-| Servicio Compose | Contenedor | Función |
+| Servicio | Perfil | Función |
 |---|---|---|
-| `broker` | `meshnet-broker` | MeshCore/Meshtastic, colas y control |
-| `bot` | `meshnet-bot` | Telegram y programación |
-| `aprs` | `meshnet-aprs` | KISS RF, APRS-IS, iGate y pasarela Mesh/APRS |
-| `email-to-mesh` | `meshnet-email-to-mesh` | IMAP, SMTP y contactos |
-| `bridgehub-bc` | `meshnet-bridge-bc` | Puente opcional |
+| `broker` | base | Núcleo MeshCore/Meshtastic |
+| `bot` | base | Telegram |
+| `aprs` | base | APRS RF/APRS-IS |
+| `email-to-mesh` | base/opcional | Correo ↔ malla |
+| `bridgehub-bc` | base/opcional | Bridge externo |
+| `farmacias` | `farmacias` | API Farmacias |
+| `farmacias-check` | `farmacias` | Comprobación periódica |
+| `farmacias-daily` | `farmacias` | Envío diario |
+| `emergencias` | `emergencias` | API Emergencias |
+| `emergencias-check` | `emergencias` | Actualización periódica |
 
-`bot`, `aprs` y `email-to-mesh` comparten la red del servicio `broker` en `docker-compose.rpi.yml`.
+## 3. Tres conceptos que no deben confundirse
 
-### systemd
+### `COMPOSE_PROFILES`
 
-```bash
-systemctl status meshnet-control-panel.service --no-pager
-systemctl status meshnet-farmacias-api.service --no-pager
-systemctl status meshnet-emergencias-api.service --no-pager
-systemctl status meshnet-voice-rf.service --no-pager
-systemctl list-timers --all 'meshnet-*'
-```
-
-## 3. Reinicio normal
-
-### Todo Docker
-
-```bash
-cd /home/meshnet/MeshNet-Bot
-docker compose -f docker-compose.rpi.yml restart
-```
-
-### Componente concreto
-
-```bash
-docker compose -f docker-compose.rpi.yml restart broker
-docker compose -f docker-compose.rpi.yml restart bot
-docker compose -f docker-compose.rpi.yml restart aprs
-docker compose -f docker-compose.rpi.yml restart email-to-mesh
-```
-
-### Aplicaciones independientes
-
-```bash
-sudo systemctl restart meshnet-control-panel.service
-sudo systemctl restart meshnet-farmacias-api.service
-sudo systemctl restart meshnet-emergencias-api.service
-sudo systemctl restart meshnet-voice-rf.service
-```
-
-Los servicios `*-check.service` y `*-daily.service` son normalmente `oneshot`.
-
-## 4. Diagnóstico mínimo
-
-```bash
-cd /home/meshnet/MeshNet-Bot
-docker compose -f docker-compose.rpi.yml ps
-docker logs --tail 200 meshnet-broker
-docker logs --tail 100 meshnet-bot
-docker logs --tail 300 meshnet-aprs
-docker logs --tail 200 meshnet-email-to-mesh
-journalctl -u meshnet-farmacias-api.service -n 100 --no-pager
-journalctl -u meshnet-emergencias-api.service -n 100 --no-pager
-journalctl -u meshnet-control-panel.service -n 100 --no-pager
-```
-
-Puertos locales habituales:
-
-```bash
-sudo ss -ltnup | grep -E ':(8765|8766|8788|8789|8790|8791|9464)\b'
-```
-
-El puerto KISS, normalmente TCP 8100, puede estar en la Raspberry o en otro equipo.
-
-## 5. Recuperar después de `docker compose down`
-
-```bash
-cd /home/meshnet/MeshNet-Bot
-docker compose -f docker-compose.rpi.yml up -d
-docker compose -f docker-compose.rpi.yml ps
-```
-
-`down` elimina contenedores y red, no el código ni los directorios montados. `down -v` puede borrar volúmenes y no debe utilizarse durante mantenimiento normal.
-
-## 6. Operación APRS y APRS-IS
-
-### 6.1 Configuración mínima RF
+Hace disponibles perfiles opcionales:
 
 ```env
-APRS_CALL=EB2XXX-11
-APRS_PATH=WIDE1-1
-KISS_HOST=host.docker.internal
-KISS_PORT=8100
-APRS_CTRL_HOST=127.0.0.1
-APRS_CTRL_PORT=9464
-APRS_GATE_ENABLED=1
-APRS_MAX_LEN=67
-APRS_RF_PART_DELAY_S=2.0
+COMPOSE_PROFILES=farmacias,emergencias
 ```
 
-### 6.2 Añadir APRS-IS
+No implica autostart.
+
+### `MESHNET_DOCKER_SERVICES`
+
+Selecciona servicios para el actualizador:
 
 ```env
-APRSIS_USER=EB2XXX-11
-APRSIS_PASSCODE=12345
-APRSIS_HOST=rotate.aprs2.net
-APRSIS_PORT=14580
-APRSIS_FILTER=m/20
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-daily,emergencias,emergencias-check
 ```
 
-El entrypoint solo activa APRS-IS cuando existen usuario y passcode.
+Si está vacío/no definido, se preservan sólo los servicios Compose que ya estaban `running`.
 
-### 6.3 Arrancar APRS y su dependencia
+### `scripts/update_meshnet.sh`
+
+Es el procedimiento oficial para actualizar y reconciliar el despliegue sin arrancar todo indiscriminadamente.
+
+## 4. Arranque secuencial
+
+Variables:
+
+```env
+BROKER_STARTUP_GRACE_SECONDS=60
+DOCKER_SERVICE_START_TIMEOUT_SECONDS=60
+```
+
+Secuencia:
+
+1. `broker`;
+2. espera de estabilización;
+3. verificación `running`;
+4. servicios restantes uno a uno;
+5. verificación individual;
+6. aborto si falla un servicio.
+
+El script usa `--no-deps` y valida dependencias conocidas, por lo que Compose no debe iniciar un servicio no seleccionado de forma implícita.
+
+## 5. Actualización oficial
+
+Antes:
 
 ```bash
 cd /home/meshnet/MeshNet-Bot
-docker compose -f docker-compose.rpi.yml up -d broker aprs
-docker compose -f docker-compose.rpi.yml ps broker aprs
-docker logs --tail 200 meshnet-aprs
+git status
+cp .env "$HOME/meshnet.env.backup"
+cp -a bot_data "$HOME/meshnet.bot_data.backup"
 ```
 
-### 6.4 Comprobar KISS desde el contenedor
+Actualizar:
 
 ```bash
-docker exec meshnet-aprs python3 -c '
-import os,socket
-h=os.getenv("KISS_HOST","127.0.0.1")
-p=int(os.getenv("KISS_PORT","8100"))
-s=socket.create_connection((h,p),5)
-print(f"KISS OK {h}:{p}")
-s.close()
-'
-```
-
-### 6.5 Ejemplo KISS remoto
-
-```env
-KISS_HOST=192.168.1.30
-KISS_PORT=8100
-```
-
-Prueba desde el host:
-
-```bash
-nc -vz 192.168.1.30 8100
-```
-
-### 6.6 Ejemplo MeshCore
-
-```env
-RADIO_PROFILE=meshcore_only
-APRS_TO_MESHCORE=1
-MESHCORE_CHANNEL_MAP=0:0,1:1,2:2
-```
-
-Mensaje APRS:
-
-```text
-[CH1] Prueba de enlace
-```
-
-Flujo esperado:
-
-```text
-APRS RF/APRS-IS -> meshnet-aprs -> broker -> MeshCore channel_idx resuelto
-```
-
-### 6.7 Prueba del control UDP
-
-```bash
-docker exec -i meshnet-aprs python3 -c '
-import json,socket
-req={"mode":"aprsis_emergency_bulletin","event_id":"TEST-OPS-001","severity":"high","status":"resolved","text":"PRUEBA TECNICA finalizada."}
-s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-s.settimeout(10)
-s.sendto(json.dumps(req).encode(),("127.0.0.1",9464))
-data,_=s.recvfrom(65535)
-print(json.dumps(json.loads(data.decode()),indent=2))
-s.close()
-'
-```
-
-`rate_limited` confirma que el endpoint respondió, aunque no haya transmitido una trama nueva.
-
-### 6.8 Reinicio, recreación y actualización
-
-```bash
-docker compose -f docker-compose.rpi.yml restart aprs
-docker compose -f docker-compose.rpi.yml up -d --force-recreate aprs
-docker compose -f docker-compose.rpi.yml pull aprs
-docker compose -f docker-compose.rpi.yml up -d --force-recreate aprs
-```
-
-### 6.9 Diagnóstico APRS
-
-```bash
-docker logs -f meshnet-aprs 2>&1 | grep --line-buffered -E \
-'KISS|APRS-IS|TX|RF TX|duplicado|DEDUP|rate_limited|error'
-```
-
-Si el bot responde pero no hay RF, revise en este orden:
-
-1. `TX` del contenedor APRS.
-2. Recepción de la trama en Direwolf/Soundmodem.
-3. PTT y audio.
-4. Radio, frecuencia y antena.
-5. Ruta `APRS_PATH`/`APRS_BOT_PATH`.
-
-La guía completa está en [`APRS_GATEWAY.md`](APRS_GATEWAY.md).
-
-## 7. Operación de email-to-mesh
-
-### Arranque y estado
-
-```bash
-cd /home/meshnet/MeshNet-Bot
-docker compose -f docker-compose.rpi.yml up -d email-to-mesh
-docker compose -f docker-compose.rpi.yml ps email-to-mesh
-docker logs --tail 200 meshnet-email-to-mesh
-```
-
-### Reinicio y recreación
-
-```bash
-docker compose -f docker-compose.rpi.yml restart email-to-mesh
-docker compose -f docker-compose.rpi.yml up -d --force-recreate email-to-mesh
-```
-
-### Archivos persistentes
-
-```text
-bot_data/email_contacts.json
-bot_data/email_to_mesh_state.json
-```
-
-### Comprobar contactos
-
-```bash
-chmod +x scripts/email-to-mesh
-scripts/email-to-mesh mail_contactos
-```
-
-La referencia completa está en [`EMAIL_TO_MESH.md`](EMAIL_TO_MESH.md).
-
-## 8. Actualización coordinada del sistema
-
-MeshNet-Bot combina dos planos de despliegue:
-
-- contenedores Docker publicados en GHCR;
-- aplicaciones independientes del host gestionadas por systemd, como Farmacias,
-  Emergencias, ControlPanel, Mobile API y Voice RF.
-
-Por ese motivo, una actualización no debe limitarse a `docker compose pull/up`.
-El procedimiento recomendado es el actualizador coordinado:
-
-```bash
-cd /home/meshnet/MeshNet-Bot
+git switch main
+git pull --ff-only
 ./scripts/update_meshnet.sh
 ```
 
-El script realiza `git pull --ff-only`, detecta los ficheros cambiados, sincroniza
-únicamente unidades systemd ya instaladas, actualiza/reconcilia Docker y reinicia
-solo los servicios host afectados que ya estuvieran activos. Nunca habilita un
-servicio inactivo ni descarta cambios locales.
-
-Para inspeccionar un rango sin modificar el sistema:
+Al terminar:
 
 ```bash
-./scripts/update_meshnet.sh --dry-run --skip-docker \
-  --from <commit-anterior> --to <commit-nuevo>
+docker compose -f docker-compose.rpi.yml ps
 ```
 
-Si existen cambios locales versionados, el actualizador se detiene antes del
-`git pull`. Deben guardarse conscientemente en un commit o `stash`; nunca se
-sobrescriben a ciegas.
+No use como procedimiento normal:
 
-El flujo manual equivalente sigue siendo válido para diagnóstico:
+```text
+docker compose up -d
+docker compose up -d --remove-orphans
+```
+
+## 6. Activar servicios nuevos
+
+Edite primero `.env`.
+
+Ejemplo para habilitar disponibilidad de Farmacias y Emergencias:
+
+```env
+COMPOSE_PROFILES=farmacias,emergencias
+```
+
+Ejemplo de selección:
+
+```env
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-daily
+```
+
+Ejecute después:
 
 ```bash
-git pull --ff-only
-docker compose -f docker-compose.rpi.yml pull
-docker compose -f docker-compose.rpi.yml up -d --remove-orphans
+./scripts/update_meshnet.sh
 ```
 
-pero, si han cambiado aplicaciones del host, deben reiniciarse también sus
-servicios systemd. El actualizador coordinado automatiza precisamente esa parte.
-
-## 9. Reinstalar unidades systemd
-
-### Farmacias
+## 7. Arranque manual puntual
 
 ```bash
-cd /home/meshnet/MeshNet-Bot
-sudo install -m 0644 tools/farmacias_guardia/systemd/meshnet-farmacias-*.service /etc/systemd/system/
-sudo install -m 0644 tools/farmacias_guardia/systemd/meshnet-farmacias-*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now meshnet-farmacias-api.service
-sudo systemctl enable --now meshnet-farmacias-check.timer meshnet-farmacias-daily.timer
+docker compose -f docker-compose.rpi.yml --profile farmacias up -d --no-deps farmacias
+docker compose -f docker-compose.rpi.yml --profile emergencias up -d --no-deps emergencias
 ```
 
-### Emergencias
+Para schedulers, arranque primero API/dependencias.
+
+## 8. Parada
 
 ```bash
-sudo install -m 0644 tools/emergencias_guardia/systemd/meshnet-emergencias-*.service /etc/systemd/system/
-sudo install -m 0644 tools/emergencias_guardia/systemd/meshnet-emergencias-*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now meshnet-emergencias-api.service
-sudo systemctl enable --now meshnet-emergencias-check.timer
+docker compose -f docker-compose.rpi.yml stop farmacias-daily
+docker compose -f docker-compose.rpi.yml stop emergencias-check
 ```
 
-### ControlPanel
+Si existe `MESHNET_DOCKER_SERVICES`, elimine también el servicio de esa lista para que la siguiente actualización no lo reactive.
+
+## 9. Migración desde Farmacias/Emergencias systemd
+
+Desactivar unidades legacy antes de activar Docker:
 
 ```bash
-cd /home/meshnet/MeshNet-Bot/tools/ControlPanel
-sudo ./install_control_panel_service.sh
+sudo systemctl disable --now \
+  meshnet-farmacias-api.service \
+  meshnet-farmacias-check.timer \
+  meshnet-farmacias-daily.timer \
+  meshnet-emergencias-api.service \
+  meshnet-emergencias-check.timer
 ```
 
-### Voice RF Gateway
+Comprobar:
 
 ```bash
-cd /home/meshnet/MeshNet-Bot
-sudo install -m 0644 systemd/meshnet-voice-rf.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now meshnet-voice-rf.service
+systemctl is-active meshnet-farmacias-api.service
+systemctl is-active meshnet-farmacias-check.timer
+systemctl is-active meshnet-farmacias-daily.timer
+systemctl is-active meshnet-emergencias-api.service
+systemctl is-active meshnet-emergencias-check.timer
 ```
 
-No se instalan unidades systemd para `aprs` ni `email-to-mesh`; se administran con Docker Compose.
+Deben quedar `inactive`.
 
-## 10. Reinstalación completa sin perder configuración
+El actualizador copia datos legacy a `bot_data/farmacias_guardia` y `bot_data/emergencias_guardia` sólo cuando el destino está vacío.
 
-Guardar primero:
+## 10. Salud
 
 ```bash
-mkdir -p "$HOME/meshnet-backup"
-cp -a /home/meshnet/MeshNet-Bot/.env "$HOME/meshnet-backup/root.env"
-cp -a /home/meshnet/MeshNet-Bot/bot_data "$HOME/meshnet-backup/bot_data"
-cp -a /home/meshnet/MeshNet-Bot/tools/farmacias_guardia/.env "$HOME/meshnet-backup/farmacias.env" 2>/dev/null || true
-cp -a /home/meshnet/MeshNet-Bot/tools/emergencias_guardia/.env "$HOME/meshnet-backup/emergencias.env" 2>/dev/null || true
-cp -a /home/meshnet/MeshNet-Bot/tools/ControlPanel/.env "$HOME/meshnet-backup/controlpanel.env" 2>/dev/null || true
+curl -fsS http://127.0.0.1:8788/health && echo
+curl -fsS http://127.0.0.1:8789/health && echo
+curl -fsS http://127.0.0.1:8790/health && echo
 ```
 
-Conservar también la configuración del TNC, Direwolf o Soundmodem cuando esté fuera del repositorio.
+Puertos:
 
-Reinstalar:
+- Farmacias: 8788
+- Emergencias: 8789
+- ControlPanel: 8790
+
+## 11. ControlPanel
 
 ```bash
-cd /home/meshnet
-mv MeshNet-Bot "MeshNet-Bot.old.$(date +%Y%m%d-%H%M%S)"
-git clone https://github.com/jmmpcc/MeshNet-Bot.git
-cd MeshNet-Bot
-cp "$HOME/meshnet-backup/root.env" .env
-cp -a "$HOME/meshnet-backup/bot_data/." bot_data/
-docker compose -f docker-compose.rpi.yml pull
-docker compose -f docker-compose.rpi.yml up -d
+systemctl status meshnet-control-panel.service --no-pager
+journalctl -u meshnet-control-panel.service -n 100 --no-pager
 ```
 
-## 11. Validación de componentes
+ControlPanel inspecciona `COMPOSE_PROFILES`. Si detecta `farmacias`/`emergencias`, usa las acciones Docker de los manifests; si no, conserva compatibilidad systemd legacy.
 
-### APRS
+## 12. Diagnóstico del broker
 
 ```bash
-docker compose -f docker-compose.rpi.yml ps aprs
-docker logs --tail 200 meshnet-aprs
+docker logs --tail 200 meshnet-broker
 ```
 
-### Email-to-mesh
+Si `bot` o `aprs` no conectan a `127.0.0.1:8765`, diagnostique primero el broker.
+
+La dependencia MeshCore se mantiene acotada a:
+
+```text
+meshcore>=2.2.28,<2.3.0
+```
+
+El build GHCR incluye un smoke test de importación para evitar publicar una librería MeshCore incompatible con Python 3.11.
+
+## 13. Logs
 
 ```bash
-docker compose -f docker-compose.rpi.yml ps email-to-mesh
-scripts/email-to-mesh mail_contactos
+docker logs -f meshnet-broker
+docker logs -f meshnet-bot
+docker logs -f meshnet-aprs
+docker logs -f meshnet-farmacias
+docker logs -f meshnet-emergencias
 ```
 
-### Farmacias
+## 14. Recuperación
 
-```bash
-cd /home/meshnet/MeshNet-Bot/tools/farmacias_guardia
-python3 farmacias_guardia.py doctor
-curl -fsS http://127.0.0.1:8788/health
-```
+Si una actualización falla:
 
-### Emergencias
+1. no borre `bot_data`;
+2. revise `docker compose ... ps`;
+3. revise el primer servicio que falló en la secuencia;
+4. restaure `.env` sólo si la configuración fue modificada;
+5. vuelva a ejecutar `./scripts/update_meshnet.sh` cuando la causa esté corregida.
 
-```bash
-cd /home/meshnet/MeshNet-Bot/tools/emergencias_guardia
-python3 emergencias_guardia.py doctor
-curl -fsS http://127.0.0.1:8789/health
-```
+Evite `docker compose down -v`: puede eliminar almacenamiento gestionado por Docker.
 
-### ControlPanel
+## 15. Seguridad
 
-```bash
-curl -fsS http://127.0.0.1:8790/health
-```
-
-### Voice RF Gateway
-
-```bash
-python3 /home/meshnet/MeshNet-Bot/tools/voice_rf_gateway/voice_rf_gateway.py doctor
-curl -fsS http://127.0.0.1:8791/health
-```
-
-## 12. Temporizadores
-
-```bash
-systemctl list-timers --all 'meshnet-*'
-systemctl cat meshnet-farmacias-daily.timer
-systemctl cat meshnet-emergencias-check.timer
-```
-
-Ejecutar manualmente:
-
-```bash
-sudo systemctl start meshnet-farmacias-check.service
-sudo systemctl start meshnet-farmacias-daily.service
-sudo systemctl start meshnet-emergencias-check.service
-```
-
-## 13. Criterio de recuperación
-
-1. Verificar `.env` y `RADIO_PROFILE`.
-2. Confirmar contenedores y unidades systemd.
-3. Probar puertos desde el proceso real que los utiliza.
-4. Para APRS, separar fallo de gateway, KISS, TNC, PTT, audio y RF.
-5. Para APRS-IS, comprobar credenciales, DNS y TCP 14580.
-6. Revisar logs antes de reinstalar.
-7. Conservar `.env`, `bot_data/` y configuración externa del TNC.
-8. Reinstalar solo el componente afectado.
+- No versionar `.env`.
+- No mantener timers systemd y schedulers Docker equivalentes simultáneamente.
+- No publicar APIs a Internet sin firewall/autenticación apropiados.
+- Guardar copia de `.env` y `bot_data` antes de cambios importantes.
