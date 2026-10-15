@@ -12,7 +12,7 @@ set -euo pipefail
 #   ./scripts/update_meshnet.sh
 #
 # Opciones:
-#   --skip-docker       No ejecutar docker compose pull/up.
+#   --skip-docker       No ejecutar docker compose pull/up.\n#\n# Perfiles opcionales se controlan con COMPOSE_PROFILES en .env, por ejemplo:\n#   COMPOSE_PROFILES=farmacias\n#   COMPOSE_PROFILES=farmacias,emergencias
 #   --from <commit>     Commit inicial para calcular cambios (modo diagnóstico).
 #   --to <commit>       Commit final para calcular cambios (requiere --from).
 #   --dry-run           Mostrar acciones sin modificar Git, Docker ni systemd.
@@ -132,6 +132,24 @@ changed_match() {
     [[ -n "${CHANGED_FILES}" ]] && grep -E -q "${regex}" <<<"${CHANGED_FILES}"
 }
 
+# Perfiles Docker opcionales activos. Docker Compose lee COMPOSE_PROFILES también
+# desde .env; aquí lo resolvemos para evitar reiniciar en paralelo servicios
+# systemd equivalentes durante una migración.
+COMPOSE_PROFILES_VALUE="${COMPOSE_PROFILES:-}"
+if [[ -z "${COMPOSE_PROFILES_VALUE}" && -f "${REPO_DIR}/.env" ]]; then
+    COMPOSE_PROFILES_VALUE="$(sed -n 's/^[[:space:]]*COMPOSE_PROFILES[[:space:]]*=[[:space:]]*//p' "${REPO_DIR}/.env" | tail -n1 | tr -d '"' | tr -d "'")"
+fi
+
+profile_enabled() {
+    local wanted="$1"
+    tr ',' '\n' <<<"${COMPOSE_PROFILES_VALUE}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -Fxq "${wanted}"
+}
+
+farmacias_docker_profile=false
+emergencias_docker_profile=false
+if profile_enabled farmacias; then farmacias_docker_profile=true; fi
+if profile_enabled emergencias; then emergencias_docker_profile=true; fi
+
 # Matriz de aplicaciones independientes del host.
 restart_farmacias=false
 restart_emergencias=false
@@ -167,6 +185,18 @@ if changed_match '^tools/MobileAPI/systemd/'; then sync_mobile_api_units=true; f
 if changed_match '^systemd/meshnet-voice-rf\.service$'; then
     sync_voice_rf_units=true
     restart_voice_rf=true
+fi
+
+# Si la aplicación ya se ejecuta como perfil Docker, no se reinicia ni se
+# resincroniza su versión systemd legacy. Se conserva el estado del host y se
+# emite un aviso si todavía está activa para evitar planificadores duplicados.
+if ${farmacias_docker_profile}; then
+    restart_farmacias=false
+    sync_farmacias_units=false
+fi
+if ${emergencias_docker_profile}; then
+    restart_emergencias=false
+    sync_emergencias_units=false
 fi
 
 unit_installed() {
@@ -239,6 +269,29 @@ fi
 if ${need_daemon_reload}; then
     log "recargando systemd por cambios en unidades instaladas"
     run_root systemctl daemon-reload
+fi
+
+warn_legacy_parallel_service() {
+    local profile="$1"
+    shift
+    local unit
+    for unit in "$@"; do
+        if unit_installed "${unit}" && systemctl is-active --quiet "${unit}"; then
+            log "AVISO: perfil Docker ${profile} activo y ${unit} también activo; desactive el servicio/timer legacy para evitar ejecuciones duplicadas"
+        fi
+    done
+}
+
+if ${farmacias_docker_profile}; then
+    warn_legacy_parallel_service farmacias \
+        meshnet-farmacias-api.service \
+        meshnet-farmacias-check.timer \
+        meshnet-farmacias-daily.timer
+fi
+if ${emergencias_docker_profile}; then
+    warn_legacy_parallel_service emergencias \
+        meshnet-emergencias-api.service \
+        meshnet-emergencias-check.timer
 fi
 
 # Docker se actualiza siempre en el flujo normal. Esto cubre imágenes GHCR que
