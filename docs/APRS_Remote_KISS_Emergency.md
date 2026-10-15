@@ -123,7 +123,7 @@ Esta segunda prueba es la decisiva porque reproduce la conectividad desde el pro
 
 ```bash
 cd /home/meshnet/MeshNet-Bot
-docker compose -f docker-compose.rpi.yml up -d broker aprs
+./scripts/update_meshnet.sh
 docker compose -f docker-compose.rpi.yml ps broker aprs
 docker logs --tail 200 meshnet-aprs
 ```
@@ -235,13 +235,13 @@ docker logs --tail 200 meshnet-aprs
 ### Recrear el contenedor
 
 ```bash
-docker compose -f docker-compose.rpi.yml up -d --force-recreate aprs
+docker compose -f docker-compose.rpi.yml up -d --no-deps --force-recreate aprs
 ```
 
 ### Recuperar después de `docker compose down`
 
 ```bash
-docker compose -f docker-compose.rpi.yml up -d broker aprs
+./scripts/update_meshnet.sh
 ```
 
 ### Reiniciar el TNC remoto
@@ -311,7 +311,7 @@ Comandos:
 ```bash
 cd /home/meshnet/MeshNet-Bot
 nc -vz 192.168.1.30 8100
-docker compose -f docker-compose.rpi.yml up -d broker aprs
+./scripts/update_meshnet.sh
 docker logs --tail 200 meshnet-aprs
 ```
 
