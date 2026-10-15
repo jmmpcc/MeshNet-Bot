@@ -1,4 +1,4 @@
-# APRS y APRS-IS en MeshNet-Bot — v7.0.42
+# APRS y APRS-IS en MeshNet-Bot — guía operativa actual
 
 Guía operativa completa del contenedor `meshnet-aprs`, servicio Compose `aprs`.
 
@@ -49,6 +49,19 @@ Funciones principales:
 - Tratamiento de emergencias y boletines APRS/APRS-IS.
 - Fragmentación de textos largos y pausa entre partes.
 - Deduplicación y protección frente a bucles.
+
+### Arranque coordinado con broker
+
+`aprs` depende de `broker`. La operación recomendada es incluir ambos en
+`MESHNET_DOCKER_SERVICES` y ejecutar `./scripts/update_meshnet.sh`. El
+actualizador arranca broker primero, espera su estabilización y sólo entonces
+arranca APRS.
+
+Para una intervención manual, después de confirmar broker:
+
+```bash
+docker compose -f docker-compose.rpi.yml up -d --no-deps aprs
+```
 
 ## 3. Requisitos
 
@@ -134,8 +147,7 @@ Debe aparecer el servicio `aprs`.
 ### 6.3 Descargar y arrancar
 
 ```bash
-docker compose -f docker-compose.rpi.yml pull broker aprs
-docker compose -f docker-compose.rpi.yml up -d broker aprs
+./scripts/update_meshnet.sh
 docker compose -f docker-compose.rpi.yml ps broker aprs
 ```
 

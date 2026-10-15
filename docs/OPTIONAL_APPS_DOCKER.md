@@ -1,104 +1,79 @@
-# Aplicaciones opcionales Docker: Farmacias y Emergencias
+# Farmacias y Emergencias como aplicaciones Docker opcionales
 
-MeshNet-Bot puede ejecutar Farmacias de Guardia y Emergencias como aplicaciones
-Docker opcionales e independientes del núcleo.
+Farmacias y Emergencias pueden ejecutarse como perfiles Docker independientes del núcleo. El objetivo es que cada instalación active sólo las aplicaciones que necesite.
 
-## Objetivo
+## 1. Servicios
 
-Las instalaciones que no utilizan estas funciones no descargan ni arrancan sus
-contenedores. Las que sí las utilizan reciben las actualizaciones mediante GHCR,
-igual que el resto de componentes Docker.
+Perfil `farmacias`:
 
-## Perfiles disponibles
+- `farmacias`: API
+- `farmacias-check`: comprobación periódica
+- `farmacias-daily`: envío diario
 
-En el `.env` raíz:
+Perfil `emergencias`:
+
+- `emergencias`: API
+- `emergencias-check`: actualización periódica
+
+## 2. Habilitar perfiles no significa arrancarlos
 
 ```env
-# Sin aplicaciones opcionales
-COMPOSE_PROFILES=
-
-# Solo Farmacias
-COMPOSE_PROFILES=farmacias
-
-# Solo Emergencias
-COMPOSE_PROFILES=emergencias
-
-# Ambas
 COMPOSE_PROFILES=farmacias,emergencias
 ```
 
-Los comandos de consulta permanecen desactivados por defecto:
+Esto permite que Compose y ControlPanel conozcan esos servicios. **No obliga a iniciarlos.**
+
+## 3. Selección explícita
+
+Ejemplo:
 
 ```env
-FARMACIAS_COMMAND_ENABLED=0
-EMERGENCIAS_COMMAND_ENABLED=0
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-daily
 ```
 
-Para habilitar una aplicación hay que activar su perfil y su comando:
+Emergencias no se iniciará porque no está seleccionada.
+
+Si la variable está vacía, el actualizador sólo conserva y actualiza los servicios que ya estaban ejecutándose.
+
+## 4. Dependencias
+
+- `farmacias` requiere `broker`
+- `farmacias-check` requiere `broker` + `farmacias`
+- `farmacias-daily` requiere `broker` + `farmacias`
+- `emergencias` requiere `broker`
+- `emergencias-check` requiere `broker` + `emergencias`
+
+El actualizador valida estas dependencias antes de iniciar.
+
+## 5. Arranque coordinado
 
 ```env
-COMPOSE_PROFILES=farmacias
+BROKER_STARTUP_GRACE_SECONDS=60
+DOCKER_SERVICE_START_TIMEOUT_SECONDS=60
+```
+
+`scripts/update_meshnet.sh`:
+
+1. hace pull sólo de los servicios seleccionados;
+2. arranca `broker`;
+3. espera 60 s por defecto;
+4. verifica que continúe `running`;
+5. inicia cada servicio posterior uno a uno con `--no-deps`;
+6. aborta si cualquiera no queda `running`.
+
+## 6. URLs internas del broker
+
+```env
 FARMACIAS_COMMAND_ENABLED=1
-```
-
-o:
-
-```env
-COMPOSE_PROFILES=emergencias
-EMERGENCIAS_COMMAND_ENABLED=1
-```
-
-## Contenedores de Farmacias
-
-El perfil `farmacias` utiliza una sola imagen:
-
-```text
-ghcr.io/jmmpcc/meshnet-bot-farmacias:latest
-```
-
-y crea tres servicios:
-
-- `meshnet-farmacias`: API local de consultas.
-- `meshnet-farmacias-check`: comprobación cada tres horas.
-- `meshnet-farmacias-daily`: envío diario a las 08:30 Europe/Madrid.
-
-Los datos persistentes se guardan en:
-
-```text
-bot_data/farmacias_guardia/
-```
-
-## Contenedores de Emergencias
-
-El perfil `emergencias` utiliza:
-
-```text
-ghcr.io/jmmpcc/meshnet-bot-emergencias:latest
-```
-
-y crea:
-
-- `meshnet-emergencias`: API local.
-- `meshnet-emergencias-check`: comprobación cada dos minutos.
-
-Los datos persistentes se guardan en:
-
-```text
-bot_data/emergencias_guardia/
-```
-
-## Red
-
-Los servicios opcionales usan la red Docker Compose normal. El broker los
-resuelve por nombre de servicio:
-
-```env
 FARMACIAS_SERVICE_URL=http://farmacias:8788/query
+
+EMERGENCIAS_COMMAND_ENABLED=1
 EMERGENCIAS_SERVICE_URL=http://emergencias:8789/query
 ```
 
-Las APIs se publican además hacia el host. Por defecto quedan accesibles desde
-la LAN de la Raspberry:
+Dentro de Docker no use `127.0.0.1` para estas APIs: broker y aplicaciones opcionales están en servicios diferentes de la red Compose.
+
+## 7. Exposición LAN
 
 ```env
 FARMACIAS_API_BIND_HOST=0.0.0.0
@@ -107,144 +82,108 @@ EMERGENCIAS_API_BIND_HOST=0.0.0.0
 EMERGENCIAS_API_PORT_HOST=8789
 ```
 
-Así pueden comprobarse desde otro equipo de la LAN mediante
-`http://IP_RASPBERRY:8788/health` y `http://IP_RASPBERRY:8789/health`.
-Para limitar las APIs al propio host, use `127.0.0.1` como *_API_BIND_HOST.
-
-Una instalación histórica basada en systemd puede mantener temporalmente:
+Para restringir al host:
 
 ```env
-FARMACIAS_SERVICE_URL=http://host.docker.internal:8788/query
-EMERGENCIAS_SERVICE_URL=http://host.docker.internal:8789/query
+FARMACIAS_API_BIND_HOST=127.0.0.1
+EMERGENCIAS_API_BIND_HOST=127.0.0.1
 ```
 
-## Actualización
+## 8. Datos persistentes
 
-Con `COMPOSE_PROFILES` definido en `.env`, el procedimiento normal actualiza
-únicamente los perfiles activos:
-
-```bash
-cd /home/meshnet/MeshNet-Bot
-./scripts/update_meshnet.sh
+```text
+bot_data/farmacias_guardia
+bot_data/emergencias_guardia
 ```
 
-También puede hacerse manualmente:
+Ambos servicios montan `bot_data`. El actualizador migra datos legacy sólo si el destino Docker está vacío y nunca elimina el origen.
 
-```bash
-docker compose -f docker-compose.rpi.yml pull
-docker compose -f docker-compose.rpi.yml up -d --remove-orphans
-```
+## 9. Migración desde systemd legacy
 
-## Migración desde systemd
-
-No deben coexistir los schedulers Docker y systemd de la misma aplicación,
-porque podrían duplicar comprobaciones o envíos automáticos.
-
-### Migrar Farmacias
-
-1. Configure:
-
-```env
-COMPOSE_PROFILES=farmacias
-FARMACIAS_COMMAND_ENABLED=1
-FARMACIAS_SERVICE_URL=http://farmacias:8788/query
-```
-
-2. Detenga y deshabilite exclusivamente las unidades legacy:
+Antes de arrancar Docker:
 
 ```bash
 sudo systemctl disable --now \
   meshnet-farmacias-api.service \
   meshnet-farmacias-check.timer \
-  meshnet-farmacias-daily.timer
-```
-
-3. Arranque el perfil:
-
-```bash
-docker compose -f docker-compose.rpi.yml --profile farmacias pull
-docker compose -f docker-compose.rpi.yml --profile farmacias up -d
-```
-
-### Migrar Emergencias
-
-1. Configure:
-
-```env
-COMPOSE_PROFILES=emergencias
-EMERGENCIAS_COMMAND_ENABLED=1
-EMERGENCIAS_SERVICE_URL=http://emergencias:8789/query
-```
-
-2. Detenga y deshabilite las unidades legacy:
-
-```bash
-sudo systemctl disable --now \
+  meshnet-farmacias-daily.timer \
   meshnet-emergencias-api.service \
   meshnet-emergencias-check.timer
 ```
 
-3. Arranque:
+Opcionalmente detener oneshots que pudieran seguir ejecutándose:
 
 ```bash
-docker compose -f docker-compose.rpi.yml --profile emergencias pull
-docker compose -f docker-compose.rpi.yml --profile emergencias up -d
+sudo systemctl stop \
+  meshnet-farmacias-check.service \
+  meshnet-farmacias-daily.service \
+  meshnet-emergencias-check.service 2>/dev/null || true
 ```
 
-El actualizador coordinado detecta perfiles activos y no reinicia las versiones
-systemd equivalentes. Si detecta una unidad legacy todavía activa, muestra un
-aviso y conserva su estado para no deshabilitar nada sin autorización explícita.
+Comprobar puertos antes de Docker:
 
-
-## Selección explícita de contenedores durante actualizaciones
-
-`COMPOSE_PROFILES` sólo hace disponibles los perfiles opcionales. No implica
-que `scripts/update_meshnet.sh` deba arrancarlos.
-
-El actualizador preserva el estado Docker:
-
-- si `MESHNET_DOCKER_SERVICES` está vacío o no existe, detecta los servicios
-  Compose que ya estaban en ejecución y sólo actualiza/recrea esos mismos;
-- si `MESHNET_DOCKER_SERVICES` contiene una lista CSV, actúa únicamente sobre
-  esos servicios y sus dependencias obligatorias de Compose;
-- nunca ejecuta `docker compose up -d` sin una lista de servicios;
-- no utiliza `--remove-orphans` durante este flujo.
-
-Ejemplo para mantener únicamente el núcleo:
-
-```env
-COMPOSE_PROFILES=farmacias,emergencias
-MESHNET_DOCKER_SERVICES=broker,bot,aprs
+```bash
+sudo ss -ltnp | grep -E ':(8788|8789)\b' || echo "Puertos libres"
 ```
 
-Ejemplo para añadir Farmacias explícitamente:
+## 10. Puesta en marcha recomendada
 
-```env
-MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-daily
+```bash
+cd /home/meshnet/MeshNet-Bot
+git switch main
+git pull --ff-only
+./scripts/update_meshnet.sh
 ```
 
-La presencia de `emergencias` en `COMPOSE_PROFILES` no la iniciará mientras
-no esté ya activa o se incluya explícitamente en `MESHNET_DOCKER_SERVICES`.
+No sustituya este procedimiento por un `docker compose up -d` global.
 
+## 11. Arranque manual
 
-## Arranque secuencial coordinado
+API Farmacias:
 
-El actualizador arranca los servicios Docker seleccionados de forma ordenada:
-
-1. inicia `broker` primero;
-2. espera `BROKER_STARTUP_GRACE_SECONDS` (60 s por defecto);
-3. confirma que el broker continúa en estado `running`;
-4. inicia el resto de servicios uno a uno;
-5. confirma que cada contenedor queda `running` antes de continuar;
-6. si cualquiera falla, detiene la secuencia y no arranca los siguientes.
-
-El tiempo máximo de espera por servicio se configura con:
-
-```env
-BROKER_STARTUP_GRACE_SECONDS=60
-DOCKER_SERVICE_START_TIMEOUT_SECONDS=60
+```bash
+docker compose -f docker-compose.rpi.yml --profile farmacias up -d --no-deps farmacias
 ```
 
-El arranque usa `--no-deps`, por lo que Docker Compose no puede levantar
-implícitamente servicios que no estén seleccionados. El actualizador valida
-previamente las dependencias conocidas (broker, Farmacias y Emergencias).
+API Emergencias:
+
+```bash
+docker compose -f docker-compose.rpi.yml --profile emergencias up -d --no-deps emergencias
+```
+
+Para activar schedulers manualmente, compruebe primero que broker y API correspondiente ya están `running`.
+
+## 12. Salud
+
+```bash
+curl -fsS http://127.0.0.1:8788/health && echo
+curl -fsS http://127.0.0.1:8789/health && echo
+```
+
+## 13. Logs
+
+```bash
+docker logs --tail 100 meshnet-farmacias
+docker logs --tail 100 meshnet-farmacias-check
+docker logs --tail 100 meshnet-farmacias-daily
+docker logs --tail 100 meshnet-emergencias
+docker logs --tail 100 meshnet-emergencias-check
+```
+
+## 14. ControlPanel
+
+ControlPanel continúa como servicio systemd del host. Lee `COMPOSE_PROFILES` del entorno o del `.env` raíz:
+
+- perfil presente → acciones Docker;
+- perfil ausente → acciones systemd legacy.
+
+Esto permite migrar instalaciones sin duplicar interfaces ni mantener dos paneles.
+
+## 15. Rollback a systemd
+
+1. detenga los contenedores opcionales;
+2. restaure la configuración anterior si procede;
+3. habilite de nuevo únicamente las unidades legacy que antes estaban activas;
+4. reinicie ControlPanel.
+
+Nunca ejecute Docker y systemd para el mismo scheduler simultáneamente.

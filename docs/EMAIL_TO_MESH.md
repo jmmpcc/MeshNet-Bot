@@ -555,3 +555,23 @@ Comprobar:
 | Bot | `/mail_edit nombre_o_num correo` | Edita contacto |
 | Bot | `/mail_del nombre_o_num` | Elimina contacto |
 | Bot | `/mail nombre_o_num texto` | Envía correo |
+
+
+## Arranque bajo la política Docker actual
+
+`email-to-mesh` es opcional y depende de `broker`. Para mantenerlo activo
+durante las actualizaciones inclúyalo explícitamente:
+
+```env
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,email-to-mesh
+```
+
+Después utilice:
+
+```bash
+./scripts/update_meshnet.sh
+```
+
+El actualizador garantiza que broker esté operativo antes de iniciar
+`email-to-mesh`. Si se detiene y debe permanecer apagado, retírelo también de
+`MESHNET_DOCKER_SERVICES`.

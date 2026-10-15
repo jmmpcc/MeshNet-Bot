@@ -1,5 +1,13 @@
 # MeshNet-Bot — Manual operativo de servicios
 
+> **Actualización operativa 2026-10:** para Docker prevalece la política actual
+> documentada en `docs/OPERATIONS.md`: no se arranca todo Compose de forma
+> implícita. `COMPOSE_PROFILES` habilita perfiles, `MESHNET_DOCKER_SERVICES`
+> selecciona servicios y `scripts/update_meshnet.sh` arranca broker primero,
+> espera 60 s por defecto y continúa uno a uno. Las referencias systemd a
+> Farmacias/Emergencias de este manual sólo son válidas para despliegues legacy.
+
+
 ## 1. Objetivo
 
 Este documento es la referencia operativa para administrar los servicios que forman MeshNet-Bot y sus aplicaciones auxiliares.
@@ -216,8 +224,17 @@ docker compose -f docker-compose.rpi.yml ps
 
 ## Arrancar
 
+Procedimiento recomendado:
+
 ```bash
-docker compose -f docker-compose.rpi.yml up -d
+cd /home/meshnet/MeshNet-Bot
+./scripts/update_meshnet.sh
+```
+
+Para un servicio concreto:
+
+```bash
+docker compose -f docker-compose.rpi.yml up -d --no-deps <servicio>
 ```
 
 ## Detener
@@ -249,7 +266,7 @@ Esto no equivale a `stop`.
 ## Reconstrucción después de cambios
 
 ```bash
-docker compose -f docker-compose.rpi.yml up -d --build
+./scripts/update_meshnet.sh
 ```
 
 ## Logs generales
@@ -1091,7 +1108,7 @@ git status
 Si solamente se ha modificado código utilizado por Docker:
 
 ```bash
-docker compose -f docker-compose.rpi.yml up -d --build
+./scripts/update_meshnet.sh
 ```
 
 Si se ha modificado Control Panel:

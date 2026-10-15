@@ -10,7 +10,7 @@ Aplicación web independiente para administrar componentes auxiliares de MeshNet
 
 ## Funciones
 
-- estado y acciones sobre servicios systemd;
+- estado y acciones sobre servicios systemd y Docker según el modo de despliegue;
 - configuración controlada de aplicaciones independientes;
 - formularios específicos para farmacias y emergencias;
 - consulta de logs y diagnóstico;
@@ -117,10 +117,19 @@ python3 -m pytest tools/ControlPanel/tests/test_web_admin.py tests/test_delivery
 
 ## Actualización
 
+La actualización general debe hacerse con el actualizador coordinado del proyecto:
+
 ```bash
 cd /home/meshnet/MeshNet-Bot
+git switch main
 git pull --ff-only
-cd tools/ControlPanel
+./scripts/update_meshnet.sh
+```
+
+Si sólo se está reinstalando ControlPanel:
+
+```bash
+cd /home/meshnet/MeshNet-Bot/tools/ControlPanel
 .venv/bin/pip install -r requirements.txt
 sudo ./install_control_panel_service.sh
 sudo systemctl restart meshnet-control-panel.service
@@ -194,3 +203,11 @@ En modo Docker:
 
 El cambio de `COMPOSE_PROFILES` requiere reiniciar ControlPanel para que vuelva
 a cargar los manifiestos con el modo de despliegue correcto.
+
+`COMPOSE_PROFILES` sólo decide si las aplicaciones opcionales están disponibles
+en modo Docker. No significa que estén arrancadas. La selección operativa de
+contenedores se controla mediante `MESHNET_DOCKER_SERVICES` o, si esa variable
+está vacía, por el conjunto de servicios que ya estaba `running`.
+
+ControlPanel no sustituye esta política de arranque: sus botones actúan únicamente
+sobre la aplicación solicitada.

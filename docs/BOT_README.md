@@ -1,4 +1,4 @@
-# Bot Telegram de MeshNet-Bot — guía v7.0.36
+# Bot Telegram de MeshNet-Bot — guía actual
 
 El bot proporciona control y supervisión mediante Telegram. No abre interfaces de radio directamente: envía solicitudes al broker, consulta estados, programa mensajes y presenta los resultados al operador.
 
@@ -12,9 +12,18 @@ El bot proporciona control y supervisión mediante Telegram. No abre interfaces 
 
 ## Arranque
 
+El bot depende del broker. En operación normal seleccione ambos y utilice:
+
 ```bash
 cd /home/meshnet/MeshNet-Bot
-docker compose -f docker-compose.rpi.yml up -d bot
+./scripts/update_meshnet.sh
+```
+
+El actualizador inicia el broker primero, espera su estabilización y después
+arranca el bot. Para una intervención manual, sólo después de confirmar broker:
+
+```bash
+docker compose -f docker-compose.rpi.yml up -d --no-deps bot
 docker logs -f meshnet-bot
 ```
 
@@ -198,3 +207,14 @@ docker compose -f docker-compose.rpi.yml up -d --force-recreate bot aprs
 - [`EMAIL_TO_MESH.md`](EMAIL_TO_MESH.md)
 - [`APRS_GATEWAY.md`](APRS_GATEWAY.md)
 - [`OPERATIONS.md`](OPERATIONS.md)
+
+## BBS con `meshcore_only`
+
+La BBS puede activarse sin habilitar Meshtastic:
+
+```env
+RADIO_PROFILE=meshcore_only
+BBS_ENABLED=1
+```
+
+El perfil de radio conserva explícitamente esta opción.

@@ -1,98 +1,68 @@
-# COMMANDS.md — Guía completa de comandos del bot
+# Comandos Docker operativos
 
-> Todos los comandos funcionan en chats privados con el bot y en grupos donde esté presente.
-> Cuando aplica, el bot **pausa** el broker, ejecuta CLI y **reanuda** para evitar doble sesión al 4403.
-> Los ejemplos muestran el texto a enviar en Telegram.
+Referencia rápida. Para el procedimiento completo consulte [../../docs/OPERATIONS.md](../../docs/OPERATIONS.md).
 
-## Índice rápido
-/start • /menu • /ayuda • /estado • /ver_nodos • /vecinos • /traceroute • /telemetria •
-/enviar • /enviar_ack • /programar • /en • /manana • /tareas • /cancelar_tarea •
-/escuchar • /parar_escucha • /canales • /position • /position_mapa • /cobertura •
-/reconectar • /estadistica • /lora • (APRS) /aprs /aprs_on /aprs_off /aprs_status
+## Actualizar
 
----
+```bash
+cd /home/meshnet/MeshNet-Bot
+git switch main
+git pull --ff-only
+./scripts/update_meshnet.sh
+```
 
-## 🧭 /menu y /start
-Muestra el menú contextual oficial (SetMyCommands) según tu rol (admin/usuario) y un resumen del sistema.
-- **Ejemplo:** `/start`
+## Estado
 
-## 🆘 /ayuda
-Ayuda corta con comandos frecuentes y enlaces útiles.
+```bash
+docker compose -f docker-compose.rpi.yml ps
+```
 
-## 🛰️ /estado
-Resumen del sistema: latencia del nodo, estado del broker/bot/APRS.
-- **Ejemplo:** `/estado`
+## Logs
 
-## 📡 /ver_nodos [max_n] [timeout]
-Lee **últimos nodos** del pool (recientes). Orden por recencia.
-- **Ejemplos:** `/ver_nodos` | `/ver_nodos 30 4`
+```bash
+docker logs -f meshnet-broker
+docker logs -f meshnet-bot
+docker logs -f meshnet-aprs
+docker logs -f meshnet-farmacias
+docker logs -f meshnet-emergencias
+```
 
-## 🤝 /vecinos [max_n] [hops_max]
-Lista vecinos con **hops**, SNR y recencia (sin abrir TCP nuevo).
-- **Ejemplos:** `/vecinos` | `/vecinos 20 2`
+## Arrancar un servicio explícito
 
-## 🛰️🍞 /traceroute <!id|alias> [timeout]
-Traza saltos hacia un nodo. Pausa broker → CLI → reanuda.
-- **Ejemplos:** `/traceroute !06c756f0` | `/traceroute Zgz_Romareda 35`
+```bash
+docker compose -f docker-compose.rpi.yml up -d --no-deps broker
+```
 
-## 📶 /telemetria [!id|alias] [mins|max_n] [timeout]
-- Sin destino: métricas **en vivo** (top recientes).
-- Con destino: **en vivo + histórico** (ventana `mins`, p. ej. 20–30).
-- **Ejemplos:** `/telemetria` | `/telemetria !06c756f0 20 4`
+Con perfil:
 
-## ✉️ /enviar canal <n> <texto>  •  /enviar <número|!id|alias> <texto>
-Envía por **canal** (broadcast) o **unicast** por `!id/alias`.
-- **Ejemplos:** `/enviar canal 0 Hola red` | `/enviar !ea0a8638 Prueba`
+```bash
+docker compose -f docker-compose.rpi.yml --profile farmacias up -d --no-deps farmacias
+```
 
-## ✅ /enviar_ack <número|!id|alias> <texto>
-Unicast solicitando **ACK** de aplicación.
+## Detener
 
-## ⏱️ /programar  •  /en <min> canal <n> <texto>  •  /manana <hora> canal <n> <texto>
-Planifica envíos y gestiona tareas.
-- **Ejemplos:** `/en 5 canal 0 Recordatorio` | `/manana 09:30 canal 0 Buenos días` | `/tareas` | `/cancelar_tarea <uuid>`
+```bash
+docker compose -f docker-compose.rpi.yml stop <servicio>
+```
 
-## 👂 /escuchar  •  /parar_escucha
-Activa escucha controlada y reporta nodos entrantes.
+## Reiniciar
 
-## 🌐 /canales
-Muestra/gestiona canal lógico por defecto y uso de etiquetas **[CHx]**.
+```bash
+docker compose -f docker-compose.rpi.yml restart <servicio>
+```
 
-## 📍 /position  •  /position_mapa
-Muestra última posición conocida y genera mapa (HTML/KML).
+## Recrear un servicio explícito
 
-## 🗺️ /cobertura [opciones]
-Genera mapas de cobertura y guarda en `./bot_data/maps/`.
+```bash
+docker compose -f docker-compose.rpi.yml up -d --no-deps --force-recreate <servicio>
+```
 
-## 🔌 /reconectar
-Fuerza reconexión del broker con el nodo.
+## No recomendado como operación normal
 
-## 📊 /estadistica (solo admin)
-Estadísticas de uso por usuarios/fecha.
+```text
+docker compose up -d
+docker compose up -d --remove-orphans
+docker compose down -v
+```
 
-## 🪪 /lora
-Resumen de parámetros de enlace LoRa.
-
----
-
-## 📡 APRS
-### /aprs  •  /aprs_on  •  /aprs_off  •  /aprs_status
-**Puente APRS ⇄ Mesh** con **etiqueta obligatoria** para inyección a malla.
-- **Formatos:**
-
-  - `/aprs canal N <texto>` → broadcast a canal N por KISS.
-
-  - `/aprs N <texto>` → atajo.
-
-  - `/aprs <CALL|broadcast>: <texto> [canal N]` → dirigido o broadcast.
-
-- **Troceo:** si payload > ~67 caracteres, se divide en varias tramas.
-
-- **Reinyección a malla:** solo si el comentario contiene `[CHx]` o `[CANAL x]`.
-
-- **APRS‑IS:** si defines `APRSIS_USER`+`APRSIS_PASSCODE`, se suben **posiciones** etiquetadas.
-
-- **Ejemplos:**
-
-  - `/aprs canal 0 [CH0] Saludo` | `/aprs EB2EAS-11: Mensaje`
-
-  - `/aprs_status` | `/aprs_on` | `/aprs_off`
+La selección se controla mediante `MESHNET_DOCKER_SERVICES` y el actualizador coordinado.

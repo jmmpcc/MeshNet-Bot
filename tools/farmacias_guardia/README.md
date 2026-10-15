@@ -1,8 +1,32 @@
 # Farmacias de guardia
 
-Aplicación Python independiente que descarga, normaliza y conserva las farmacias de guardia, ofrece una API local para las consultas `farma` recibidas por el broker y puede publicar automáticamente el listado en un canal MeshCore o Meshtastic.
+Aplicación Python desacoplada del núcleo que descarga, normaliza y conserva las farmacias de guardia, ofrece una API para las consultas `farma` recibidas por el broker y puede publicar automáticamente el listado en un canal MeshCore o Meshtastic.
 
-La aplicación **no forma parte de MeshNet-Bot**, no importa módulos del broker, no necesita Docker y utiliza su propio archivo `.env`.
+## Despliegue actual recomendado
+
+En instalaciones actuales del repositorio se ejecuta preferentemente como perfil
+Docker `farmacias`, reutilizando el `.env` raíz y persistiendo datos en
+`bot_data/farmacias_guardia`. La modalidad systemd descrita más adelante se
+mantiene como **compatibilidad legacy** para instalaciones antiguas.
+
+```env
+COMPOSE_PROFILES=farmacias
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-daily
+FARMACIAS_SERVICE_URL=http://farmacias:8788/query
+FARMACIAS_API_BIND_HOST=0.0.0.0
+FARMACIAS_API_PORT_HOST=8788
+```
+
+Puesta en marcha recomendada:
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+./scripts/update_meshnet.sh
+curl -fsS http://127.0.0.1:8788/health && echo
+```
+
+No mantenga activos simultáneamente `meshnet-farmacias-*.service/timer` y los
+contenedores `farmacias*`.
 
 ## Arquitectura
 
@@ -42,7 +66,9 @@ Canal FARMACIA configurado
 /home/meshnet/MeshNet-Bot/tools/farmacias_guardia/
 ```
 
-No debe instalarse dentro del árbol de código de MeshNet-Bot. Puede estar en cualquier ruta, siempre que los servicios `systemd` y su `.env` apunten a la ubicación correcta.
+La ruta anterior es la incluida en el repositorio. En modo Docker no debe copiarse
+a otra ubicación. Las instrucciones de copia/ruta alternativa sólo aplican a
+despliegues systemd legacy.
 
 ## Requisitos
 
@@ -74,7 +100,9 @@ python3 -m py_compile farmacias_guardia.py
 
 ## Configuración de la aplicación
 
-La aplicación lee exclusivamente su propio `.env`.
+En modo Docker actual, la configuración se obtiene del `.env` raíz del
+repositorio. En despliegue systemd legacy puede seguir utilizándose el
+`.env` local documentado en las secciones históricas siguientes.
 
 ### Conexión con el broker
 
