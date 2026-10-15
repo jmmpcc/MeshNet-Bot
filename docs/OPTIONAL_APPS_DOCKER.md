@@ -194,3 +194,34 @@ docker compose -f docker-compose.rpi.yml --profile emergencias up -d
 El actualizador coordinado detecta perfiles activos y no reinicia las versiones
 systemd equivalentes. Si detecta una unidad legacy todavía activa, muestra un
 aviso y conserva su estado para no deshabilitar nada sin autorización explícita.
+
+
+## Selección explícita de contenedores durante actualizaciones
+
+`COMPOSE_PROFILES` sólo hace disponibles los perfiles opcionales. No implica
+que `scripts/update_meshnet.sh` deba arrancarlos.
+
+El actualizador preserva el estado Docker:
+
+- si `MESHNET_DOCKER_SERVICES` está vacío o no existe, detecta los servicios
+  Compose que ya estaban en ejecución y sólo actualiza/recrea esos mismos;
+- si `MESHNET_DOCKER_SERVICES` contiene una lista CSV, actúa únicamente sobre
+  esos servicios y sus dependencias obligatorias de Compose;
+- nunca ejecuta `docker compose up -d` sin una lista de servicios;
+- no utiliza `--remove-orphans` durante este flujo.
+
+Ejemplo para mantener únicamente el núcleo:
+
+```env
+COMPOSE_PROFILES=farmacias,emergencias
+MESHNET_DOCKER_SERVICES=broker,bot,aprs
+```
+
+Ejemplo para añadir Farmacias explícitamente:
+
+```env
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-daily
+```
+
+La presencia de `emergencias` en `COMPOSE_PROFILES` no la iniciará mientras
+no esté ya activa o se incluya explícitamente en `MESHNET_DOCKER_SERVICES`.
