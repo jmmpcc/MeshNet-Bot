@@ -66,3 +66,11 @@ def test_update_meshnet_maps_host_directories_and_shared_code() -> None:
         "^shared/",
     ):
         assert path in text
+
+
+def test_update_meshnet_rejects_global_sudo_execution() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'EUID} -eq 0 && -n "${SUDO_USER:-}"' in text
+    assert "no ejecute el actualizador completo con sudo" in text
+    assert "run sudo" in text
