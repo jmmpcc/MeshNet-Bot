@@ -103,3 +103,16 @@ python -m compileall -q source
 
 Estas pruebas cubren aliases, capacidades, overrides, conflictos con
 `bridge_config.json` y requisitos mínimos de los tres perfiles.
+
+
+## BBS opcional en meshcore_only
+
+`meshcore_only` no obliga a desactivar BBS. La BBS es una capacidad opcional
+que puede mantenerse activa sobre MeshCore:
+
+```env
+RADIO_PROFILE=meshcore_only
+BBS_ENABLED=1
+```
+
+Desactive `BBS_ENABLED` únicamente cuando la instalación no vaya a ofrecer BBS.
