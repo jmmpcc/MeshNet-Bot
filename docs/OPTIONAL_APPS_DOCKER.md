@@ -225,3 +225,26 @@ MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-dail
 
 La presencia de `emergencias` en `COMPOSE_PROFILES` no la iniciará mientras
 no esté ya activa o se incluya explícitamente en `MESHNET_DOCKER_SERVICES`.
+
+
+## Arranque secuencial coordinado
+
+El actualizador arranca los servicios Docker seleccionados de forma ordenada:
+
+1. inicia `broker` primero;
+2. espera `BROKER_STARTUP_GRACE_SECONDS` (60 s por defecto);
+3. confirma que el broker continúa en estado `running`;
+4. inicia el resto de servicios uno a uno;
+5. confirma que cada contenedor queda `running` antes de continuar;
+6. si cualquiera falla, detiene la secuencia y no arranca los siguientes.
+
+El tiempo máximo de espera por servicio se configura con:
+
+```env
+BROKER_STARTUP_GRACE_SECONDS=60
+DOCKER_SERVICE_START_TIMEOUT_SECONDS=60
+```
+
+El arranque usa `--no-deps`, por lo que Docker Compose no puede levantar
+implícitamente servicios que no estén seleccionados. El actualizador valida
+previamente las dependencias conocidas (broker, Farmacias y Emergencias).
