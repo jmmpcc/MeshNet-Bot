@@ -147,8 +147,7 @@ Debe aparecer el servicio `aprs`.
 ### 6.3 Descargar y arrancar
 
 ```bash
-docker compose -f docker-compose.rpi.yml pull broker aprs
-docker compose -f docker-compose.rpi.yml up -d broker aprs
+./scripts/update_meshnet.sh
 docker compose -f docker-compose.rpi.yml ps broker aprs
 ```
 
