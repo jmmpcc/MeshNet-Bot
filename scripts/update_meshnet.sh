@@ -12,7 +12,11 @@ set -euo pipefail
 #   ./scripts/update_meshnet.sh
 #
 # Opciones:
-#   --skip-docker       No ejecutar docker compose pull/up.\n#\n# Perfiles opcionales se controlan con COMPOSE_PROFILES en .env, por ejemplo:\n#   COMPOSE_PROFILES=farmacias\n#   COMPOSE_PROFILES=farmacias,emergencias
+#   --skip-docker       No ejecutar docker compose pull/up.
+#
+# Perfiles opcionales se controlan con COMPOSE_PROFILES en .env, por ejemplo:
+#   COMPOSE_PROFILES=farmacias
+#   COMPOSE_PROFILES=farmacias,emergencias
 #   --from <commit>     Commit inicial para calcular cambios (modo diagnóstico).
 #   --to <commit>       Commit final para calcular cambios (requiere --from).
 #   --dry-run           Mostrar acciones sin modificar Git, Docker ni systemd.
