@@ -71,7 +71,30 @@ class RadioProfileCapabilityTests(unittest.TestCase):
         self.assertFalse(caps.meshtastic_enabled)
         self.assertEqual(caps.default_transport, "meshcore")
         self.assertEqual(caps.environment_overrides["BRIDGE_ENABLED"], "0")
-        self.assertEqual(caps.environment_overrides["BBS_ENABLED"], "0")
+        self.assertNotIn("BBS_ENABLED", caps.environment_overrides)
+        self.assertNotIn("BBS_ENABLE", caps.environment_overrides)
+
+    def test_meshcore_only_preserves_optional_bbs_enabled(self) -> None:
+        """La BBS activa no debe habilitar Meshtastic ni el bridge."""
+        env = {"RADIO_PROFILE": PROFILE_MESHCORE_ONLY, "BBS_ENABLED": "1"}
+        caps = apply_radio_profile_to_environment(env=env, strict=True)
+        self.assertEqual(env["BBS_ENABLED"], "1")
+        self.assertFalse(caps.meshtastic_enabled)
+        self.assertEqual(env["BRIDGE_ENABLED"], "0")
+
+    def test_meshcore_only_preserves_optional_bbs_disabled(self) -> None:
+        """La BBS desactivada conserva el valor elegido por el operador."""
+        env = {"RADIO_PROFILE": PROFILE_MESHCORE_ONLY, "BBS_ENABLED": "0"}
+        apply_radio_profile_to_environment(env=env, strict=True)
+        self.assertEqual(env["BBS_ENABLED"], "0")
+        self.assertEqual(env["BRIDGE_ENABLED"], "0")
+
+    def test_meshcore_only_keeps_bbs_off_when_unconfigured(self) -> None:
+        """Sin variables BBS, el broker aplica su valor por defecto OFF."""
+        env = {"RADIO_PROFILE": PROFILE_MESHCORE_ONLY}
+        apply_radio_profile_to_environment(env=env, strict=True)
+        self.assertNotIn("BBS_ENABLED", env)
+        self.assertNotIn("BBS_ENABLE", env)
 
     def test_historical_combined_profile_keeps_both_radios(self) -> None:
         caps = resolve_radio_profile(PROFILE_MESHTASTIC_A_MESHCORE_B, env={})
