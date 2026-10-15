@@ -1,37 +1,18 @@
-# Zona horaria del contenedor
-TZ=Europe/Madrid
-
-# Nodo Meshtastic (TCPInterface)
-MESHTASTIC_HOST=192.168.1.201
-MESHTASTIC_PORT=4403
-
-# Puertos del broker (expuestos hacia bot/APRS)
-BROKER_PORT=8765
-BROKER_CTRL_PORT=8766
-
-# Bot de Telegram
-TELEGRAM_TOKEN=pon_tu_token_aqui
-ADMIN_IDS=1111,2222
-BOT_START_DELAY=90
-DISABLE_BOT_TCP=1
-
-# Canal lógico por defecto (para APRS -> Mesh si faltase etiqueta)
-MESHTASTIC_CH=0
-
-# KISS (Direwolf/Soundmodem)
-KISS_HOST=host.docker.internal
-KISS_PORT=8100
-KISS_TXDELAY=30
-KISS_PERSIST=200
-KISS_SLOTTIME=10
-KISS_TXTAIL=3
-
-# APRS-IS (opcional)
-APRSIS_USER=
-APRSIS_PASSCODE=
-APRSIS_HOST=rotate.aprs2.net
-APRSIS_PORT=14580
-APRSIS_FILTER=
-
-# Logging
-LOG_LEVEL=INFO
+# LEGACY REFERENCE
+#
+# No utilizar este fichero como plantilla de una instalación actual.
+# La plantilla oficial es:
+#
+#   /home/meshnet/MeshNet-Bot/.env_example
+#
+# Conceptos actuales:
+#
+# COMPOSE_PROFILES=farmacias,emergencias
+# MESHNET_DOCKER_SERVICES=broker,bot,aprs
+# BROKER_STARTUP_GRACE_SECONDS=60
+# DOCKER_SERVICE_START_TIMEOUT_SECONDS=60
+#
+# Consulte:
+#   README.md
+#   docs/OPERATIONS.md
+#   docs/OPTIONAL_APPS_DOCKER.md
