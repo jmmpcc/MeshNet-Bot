@@ -213,10 +213,11 @@ docker compose -f docker-compose.rpi.yml stop broker
 docker compose -f docker-compose.rpi.yml start broker
 ```
 
-Después de `docker compose down`:
+Después de `docker compose down`, no restaure todo Compose de forma implícita.
+Revise la selección de `MESHNET_DOCKER_SERVICES` y ejecute:
 
 ```bash
-docker compose -f docker-compose.rpi.yml up -d
+./scripts/update_meshnet.sh
 ```
 
 ## Pruebas
