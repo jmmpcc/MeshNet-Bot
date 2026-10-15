@@ -536,86 +536,25 @@ class BbsServer:
     # --------------------------
 
     def _menu(self) -> str:
-        """
-        Menú principal de la BBS.
+        """Menú breve para clientes LoRa; invocado por el despachador BBS.
 
-        Regla de diseño (canal público / multi-BBS):
-            #BBS <BBS_CALLSIGN> <cmd> [parámetros]
-
-        Regla de diseño (DM al nodo BBS):
-            #BBS <cmd> [parámetros]
-        (y para iniciar sesión basta con enviar: "#BBS")
-
-        Ejemplos:
-            Canal: #BBS EB2EAS-5 MENU
-            DM:    #BBS MENU
+        Se muestran comandos DM, conservando la sintaxis de canal multi-BBS.
+        No se modifica el parser, la autenticación ni ningún comando existente.
         """
         cs = self.bbs_callsign
-
         return (
-            f"BBS {cs}\n"
-            "\n"
-            "Sintaxis:\n"
-            f" Canal (multi-BBS): #BBS {cs} <cmd>\n"
-            "  DM (al nodo BBS):  #BBS <cmd>\n"
-            "  Incio por DM:      #BBS\n"
-            "\n"
-            f"MENU: #BBS {cs} MENU  (canal) | #BBS MENU (DM)\n"
-            "\n"
-            "Boletines (usuarios):\n"
-            f" Canal: #BBS {cs} NEWS [p] | #BBS {cs} LISTA [p]\n"
-            "  DM:    #BBS NEWS [p] | #BBS LISTA [p]\n"
-            f" Canal: #BBS {cs} LEER <id> | #BBS {cs} VER <id> | #BBS {cs} CUERPO <id>\n"
-            "  DM:    #BBS LEER <id> | #BBS VER <id> | #BBS CUERPO <id>\n"
-            f" Canal: #BBS {cs} LEIDOS [p]\n"
-            "  DM:    #BBS LEIDOS [p]\n"
-            "\n"
-            "Noticias automáticas:\n"
-            f" Canal: #BBS {cs} NOTICIAS [p]\n"
-            "  DM:    #BBS NOTICIAS [p]\n"
-            f" Canal: #BBS {cs} NOTICIAS CAT\n"
-            "  DM:    #BBS NOTICIAS CAT\n"
-            f" Canal: #BBS {cs} NOTICIAS CAT <categoria> [p]\n"
-            "  DM:    #BBS NOTICIAS CAT <categoria> [p]\n"
-            f" Canal: #BBS {cs} NOTICIAS VER <id>\n"
-            "  DM:    #BBS NOTICIAS VER <id>\n"
-            "\n"
-            "Publicar:\n"
-            f" Canal: #BBS {cs} NUEVA\n"
-            "  DM:    #BBS NUEVA\n"
-            f" Canal: #BBS {cs} ASUNTO <texto>\n"
-            "  DM:    #BBS ASUNTO <texto>\n"
-            f" Canal: #BBS {cs} TEXTO <cuerpo>\n"
-            "  DM:    #BBS TEXTO <cuerpo>\n"
-            "\n"
-            "Buscar:\n"
-            f" Canal: #BBS {cs} BUSCAR <palabra/frase> [p]\n"
-            "  DM:    #BBS BUSCAR <palabra/frase> [p]\n"
-            "\n"
-            "Privados:\n"
-            f" Canal: #BBS {cs} MP DEST:Mensaje | #BBS {cs} BANDEJA [p]\n"
-            "  DM:    #BBS MP DEST:Mensaje | #BBS BANDEJA [p]\n"
-            "\n"
-            "Encuestas:\n"
-            f" Canal: #BBS {cs} ENCUESTA Pregunta?|Op1|Op2|...\n"
-            "  DM:    #BBS ENCUESTA Pregunta?|Op1|Op2|...\n"
-            f" Canal: #BBS {cs} ENCUESTAS | #BBS {cs} VOTO <id> <op>\n"
-            "  DM:    #BBS ENCUESTAS | #BBS VOTO <id> <op>\n"
-            "\n"
-            "Resultados:\n"
-            f" Canal: #BBS {cs} RESULT <id>\n"
-            "  DM:    #BBS RESULT <id>\n"
-            "\n"
-            "Estadísticas:\n"
-            f" Canal: #BBS {cs} ESTADISTICAS\n"
-            "  DM:    #BBS ESTADISTICAS\n"
-            "\n"
-            "Salir:\n"
-            f" Canal: #BBS {cs} SALIR\n"
-            "  DM:    #BBS SALIR"
+            f"BBS {cs} - MENU\n"
+            "DM: #BBS <COMANDO>\n"
+            f"Canal: #BBS {cs} <COMANDO>\n"
+            "Boletines: NEWS [p], LISTA [p], LEER <id>, VER <id>, CUERPO <id>, LEIDOS [p]\n"
+            "Noticias: NOTICIAS [p], NOTICIAS CAT, NOTICIAS CAT <categoria> [p], NOTICIAS VER <id>\n"
+            "Publicar: NUEVA, ASUNTO <texto>, TEXTO <cuerpo>\n"
+            "Buscar: BUSCAR <texto> [p]\n"
+            "Privados: MP DEST:Mensaje, BANDEJA [p]\n"
+            "Encuestas: ENCUESTA Pregunta?|Op1|Op2, ENCUESTAS, VOTO <id> <op>, RESULT <id>\n"
+            "Otros: ESTADISTICAS, MAS, SALIR\n"
+            "Ejemplo DM: #BBS NOTICIAS"
         )
-
-
 
     def send_chunks(self, dest_node_id: str, chunks: List[str], ch: Optional[int] = None) -> None:
         """
