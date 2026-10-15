@@ -264,14 +264,39 @@ scripts/email-to-mesh mail_contactos
 
 La referencia completa está en [`EMAIL_TO_MESH.md`](EMAIL_TO_MESH.md).
 
-## 8. Actualización del repositorio
+## 8. Actualización coordinada del sistema
+
+MeshNet-Bot combina dos planos de despliegue:
+
+- contenedores Docker publicados en GHCR;
+- aplicaciones independientes del host gestionadas por systemd, como Farmacias,
+  Emergencias, ControlPanel, Mobile API y Voice RF.
+
+Por ese motivo, una actualización no debe limitarse a `docker compose pull/up`.
+El procedimiento recomendado es el actualizador coordinado:
 
 ```bash
 cd /home/meshnet/MeshNet-Bot
-git status
+sudo ./scripts/update_meshnet.sh
 ```
 
-Si está limpio:
+El script realiza `git pull --ff-only`, detecta los ficheros cambiados, sincroniza
+únicamente unidades systemd ya instaladas, actualiza/reconcilia Docker y reinicia
+solo los servicios host afectados que ya estuvieran activos. Nunca habilita un
+servicio inactivo ni descarta cambios locales.
+
+Para inspeccionar un rango sin modificar el sistema:
+
+```bash
+sudo ./scripts/update_meshnet.sh --dry-run --skip-docker \
+  --from <commit-anterior> --to <commit-nuevo>
+```
+
+Si existen cambios locales versionados, el actualizador se detiene antes del
+`git pull`. Deben guardarse conscientemente en un commit o `stash`; nunca se
+sobrescriben a ciegas.
+
+El flujo manual equivalente sigue siendo válido para diagnóstico:
 
 ```bash
 git pull --ff-only
@@ -279,7 +304,8 @@ docker compose -f docker-compose.rpi.yml pull
 docker compose -f docker-compose.rpi.yml up -d --remove-orphans
 ```
 
-Si existen cambios locales, guardarlos en un commit o `stash`; nunca sobrescribirlos a ciegas.
+pero, si han cambiado aplicaciones del host, deben reiniciarse también sus
+servicios systemd. El actualizador coordinado automatiza precisamente esa parte.
 
 ## 9. Reinstalar unidades systemd
 
