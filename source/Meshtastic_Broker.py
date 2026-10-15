@@ -408,15 +408,15 @@ def _apply_radio_profile_runtime(verbose: bool = False) -> dict:
         overrides = {
             "MESHCORE_ENABLE": "1",
             "BRIDGE_ENABLED": "0",
-            "BBS_ENABLED": "0",
-            "BBS_ENABLE": "0",
+            # La BBS puede operar sobre MeshCore sin habilitar Meshtastic.
+            # Conservar BBS_ENABLED/BBS_ENABLE tal como fueron configuradas.
             "MESHCORE_ONLY": "1",
         }
         for key, value in overrides.items():
             os.environ[key] = value
         out["applied"] = True
         out["overrides"] = overrides
-        print("[radio-profile] ✅ fallback meshcore_only: Meshtastic/BBS OFF, MeshCore ON", flush=True)
+        print("[radio-profile] ✅ fallback meshcore_only: Meshtastic OFF, MeshCore ON; BBS según .env", flush=True)
         return out
 
 
