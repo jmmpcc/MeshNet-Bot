@@ -1202,10 +1202,10 @@ class BbsServer:
         """
         Lista noticias recientes, opcionalmente filtradas por tag.
 
-        Cambio quirúrgico:
-        - Mostrar URL en el listado sin saturar tramas LoRa.
-        - Se añade un "Más: <url>" recortado (single-line) por cada noticia.
-        - NUEVO: mostrar total de páginas (pág X/Y) en cabecera y mensajes vacíos.
+        Optimización LoRa del listado sin alterar consultas ni paginación:
+        - Una línea por noticia: id, título, fuente y fecha.
+        - La URL íntegra y el resumen permanecen en NOTICIAS VER <id>.
+        - Mantiene categorías, conteo de páginas y comandos de continuación.
         """
         per = max(1, int(self.list_page_size))
         page = max(1, int(page))
@@ -1242,7 +1242,7 @@ class BbsServer:
         if tag_n:
             rows = cur.execute(
                 """
-                SELECT id, title, source, published_at, url, tags
+                SELECT id, title, source, published_at
                 FROM news
                 WHERE LOWER(tags) LIKE ?
                 ORDER BY COALESCE(published_at, created_at) DESC
@@ -1253,7 +1253,7 @@ class BbsServer:
         else:
             rows = cur.execute(
                 """
-                SELECT id, title, source, published_at, url, tags
+                SELECT id, title, source, published_at
                 FROM news
                 ORDER BY COALESCE(published_at, created_at) DESC
                 LIMIT ? OFFSET ?
@@ -1269,18 +1269,12 @@ class BbsServer:
         hdr = f"NOTICIAS (pág {page}/{total_pages})" + (f" — categoría: {tag}" if tag_n else "")
         out = [hdr]
 
-        # IMPORTANTE: dos líneas por noticia (título + URL) para que el enlace sea visible siempre.
-        for nid, title, source, published_at, url, tags in rows:
+        # Una línea por noticia reduce tramas; el detalle conserva el enlace completo.
+        for nid, title, source, published_at in rows:
             d = (published_at or "").split("T")[0] if published_at else ""
             t0 = (title or "").strip()
             src = (source or "").strip()
             out.append(f"[{nid}] {t0} ({src}) {d}".rstrip())
-
-            u = self._short_url(url)
-            if u:
-                out.append(f"Más: {u}")
-            else:
-                out.append("Más: (sin enlace)")
 
         out.append("Ver: #BBS NOTICIAS VER <id>")
         out.append("Más: #BBS NOTICIAS" + (f" CAT {tag} {page + 1}" if tag_n else f" {page + 1}"))
