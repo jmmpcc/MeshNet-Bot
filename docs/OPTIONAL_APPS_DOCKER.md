@@ -187,3 +187,48 @@ Esto permite migrar instalaciones sin duplicar interfaces ni mantener dos panele
 4. reinicie ControlPanel.
 
 Nunca ejecute Docker y systemd para el mismo scheduler simultáneamente.
+
+
+## Conectividad de Emergencias con broker y APRS en Docker (v7.0.60+)
+
+En el perfil Docker, `emergencias-check` tiene su propio namespace de red.
+Por tanto, `127.0.0.1` dentro de ese contenedor **no** apunta al broker ni
+al gateway APRS. El archivo `docker-compose.rpi.yml` configura únicamente en
+ese servicio `BROKER_CTRL_HOST=broker` (TCP, puerto 8766) y
+`APRS_CTRL_HOST=broker` (UDP, puerto 9464).
+
+El comando de comprobación respeta `BROKER_CTRL_HOST` cuando está presente,
+incluso cuando `bot_data/emergencias_guardia/config.json` contiene
+`notifications.broker.host=127.0.0.1`. Este valor es **solo de ejecución**,
+no se reescribe en el archivo persistente, y sin variable de entorno el modo
+legacy/systemd conserva su configuración previa.
+
+El gateway APRS se ejecuta con `network_mode: service:broker` y necesita
+escuchar con `APRS_CTRL_BIND=0.0.0.0`; el puerto publicado del host
+permanece limitado a `127.0.0.1`. No cambie el `.env` global a
+`APRS_CTRL_HOST=broker`, porque bot y APRS comparten el namespace de red
+del broker. No exponga UDP 9464 públicamente.
+
+Comprobación segura de lectura (sin emisiones APRS):
+
+```bash
+docker exec -i meshnet-emergencias-check python - <<'PY'
+import json, socket
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+    client.settimeout(5)
+    client.sendto(json.dumps({"mode": "aprs_status"}).encode(), ("broker", 9464))
+    response, _ = client.recvfrom(4096)
+    print(json.loads(response.decode()))
+PY
+```
+
+El resultado debe tener `ok: true`. Para comprobar el host efectivo
+del broker sin generar ninguna transmisión:
+
+```bash
+docker exec meshnet-emergencias-check python -c 'from tools.emergencias_guardia.emergencias.config import load_config; print(load_config(create=False)["notifications"]["broker"]["host"])'
+```
+
+Un error histórico en el panel de auditoría no cambia de estado después de
+corregir la conexión. La aceptación `queued: true` del broker tampoco
+garantiza por sí sola una transmisión radioeléctrica definitiva.
