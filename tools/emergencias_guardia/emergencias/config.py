@@ -185,6 +185,9 @@ def load_config(create: bool = True) -> dict[str, Any]:
     except (json.JSONDecodeError, OSError):
         supplied = {}
     config = _merge(DEFAULT_CONFIG, supplied)
+    if create and not CONFIG_FILE.exists():
+        # Persistir valores portables, antes del override exclusivo del proceso.
+        atomic_write_json(CONFIG_FILE, config)
     # El host de control es propio del proceso: en Docker se alcanza el broker
     # mediante el nombre de servicio, mientras que las instalaciones systemd
     # mantienen el valor del config.json si la variable no está definida.
@@ -192,6 +195,4 @@ def load_config(create: bool = True) -> dict[str, Any]:
     broker_host = os.getenv("BROKER_CTRL_HOST", "").strip()
     if broker_host:
         config["notifications"]["broker"]["host"] = broker_host
-    if create and not CONFIG_FILE.exists():
-        atomic_write_json(CONFIG_FILE, config)
     return config
