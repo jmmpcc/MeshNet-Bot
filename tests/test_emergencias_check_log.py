@@ -25,6 +25,17 @@ def report(sources=None, **notify):
 
 
 class CheckLogTests(unittest.TestCase):
+    def test_compose_emergency_aprs_host_is_broker(self):
+        """El check usa broker, sin cambiar la red del gateway APRS."""
+        compose = (SCRIPT.parents[1] / "docker-compose.rpi.yml").read_text(encoding="utf-8")
+        # El bloque se delimita por nombre de servicio para no confundirlo
+        # con Farmacias ni con la configuración del gateway APRS.
+        service = compose.split("\n  emergencias-check:\n", 1)[1]
+        self.assertIn("APRS_CTRL_HOST: broker", service)
+        self.assertIn("BROKER_CTRL_HOST: broker", service)
+        aprs = compose.split("\n  aprs:\n", 1)[1].split("\n  bridgehub-bc:\n", 1)[0]
+        self.assertIn('network_mode: "service:broker"', aprs)
+
     def test_success_and_disabled_are_silent(self):
         self.assertEqual(module.diagnostics(report()), [])
 
