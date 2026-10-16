@@ -17,8 +17,13 @@ class PublicEmergencyMapSystemdTests(unittest.TestCase):
         """El observador inmediato continúa vigilando exclusivamente current.json."""
         content = (SYSTEMD_DIR / "meshnet-emergencias-public-map.path").read_text(encoding="utf-8")
 
-        self.assertIn("PathChanged=/home/meshnet/MeshNet-Bot/tools/emergencias_guardia/data/current.json", content)
+        self.assertIn("PathChanged=/home/meshnet/MeshNet-Bot/bot_data/emergencias_guardia/current.json", content)
         self.assertIn("Unit=meshnet-emergencias-public-map.service", content)
+
+    def test_service_points_to_docker_persistent_data(self) -> None:
+        """El publicador debe usar la ruta persistente compartida con Docker."""
+        content = (SYSTEMD_DIR / "meshnet-emergencias-public-map.service").read_text(encoding="utf-8")
+        self.assertIn("EMERGENCIAS_PUBLIC_MAP_CURRENT_FILE=/home/meshnet/MeshNet-Bot/bot_data/emergencias_guardia/current.json", content)
 
     def test_timer_provides_thirty_second_failsafe(self) -> None:
         """El timer recupera cambios perdidos por el .path sin crear otro publicador."""

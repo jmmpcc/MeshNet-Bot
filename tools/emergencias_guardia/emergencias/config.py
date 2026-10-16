@@ -144,6 +144,12 @@ def atomic_write_json(path: Path, data: Any) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        # El mapa publico lee current.json como usuario del host. El temporal
+        # nace con permisos 0600: antes del reemplazo atomico se concede lectura
+        # al grupo propietario del directorio compartido, sin exponer state.json.
+        if path.name == "current.json" and path.parent == DATA_DIR:
+            os.chown(temp_name, -1, path.parent.stat().st_gid)
+            os.chmod(temp_name, 0o640)
         os.replace(temp_name, path)
     finally:
         try:

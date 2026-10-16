@@ -40,6 +40,24 @@ install -m 0644 "$SOURCE_DIR/$SERVICE_NAME" "$SYSTEMD_DIR/$SERVICE_NAME"
 install -m 0644 "$SOURCE_DIR/$PATH_NAME" "$SYSTEMD_DIR/$PATH_NAME"
 install -m 0644 "$SOURCE_DIR/$TIMER_NAME" "$SYSTEMD_DIR/$TIMER_NAME"
 
+# Verificar el volumen que comparte el recolector Docker con el publicador.
+CURRENT_DIR="$REPO_DIR/bot_data/emergencias_guardia"
+mkdir -p "$CURRENT_DIR"
+# Instalaciones antiguas: current.json puede existir como root:root 0600.
+# Reparar solo ese fichero y el grupo del directorio, sin tocar state.json,
+# configuración ni otros datos persistentes. Las siguientes escrituras
+# heredarán el grupo del directorio gracias a atomic_write_json().
+chgrp meshnet "$CURRENT_DIR"
+chmod g+rx "$CURRENT_DIR"
+if [[ -f "$CURRENT_DIR/current.json" ]]; then
+    chgrp meshnet "$CURRENT_DIR/current.json"
+    chmod 0640 "$CURRENT_DIR/current.json"
+fi
+if [[ -f "$CURRENT_DIR/current.json" ]] && ! runuser -u meshnet -- test -r "$CURRENT_DIR/current.json"; then
+    echo "ERROR: el publicador no puede leer current.json" >&2
+    exit 1
+fi
+
 systemctl daemon-reload
 systemctl enable --now "$PATH_NAME" "$TIMER_NAME"
 

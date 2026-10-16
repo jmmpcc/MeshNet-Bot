@@ -12,6 +12,7 @@ EnvironmentFile=-/home/meshnet/MeshNet-Bot/.env
 EnvironmentFile=-/home/meshnet/MeshNet-Bot/tools/emergencias_guardia/.env
 # El publicador está completamente desacoplado del recolector: lee current.json,
 # calcula una revisión y sólo realiza FTPS si el contenido público ha cambiado.
+Environment=EMERGENCIAS_PUBLIC_MAP_CURRENT_FILE=/home/meshnet/MeshNet-Bot/bot_data/emergencias_guardia/current.json
 ExecStart=/usr/bin/python3 -m emergencias.public_map
 
 # Endurecimiento del proceso. Necesita red saliente y escritura únicamente en data/
