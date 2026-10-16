@@ -59,16 +59,16 @@ class CheckLogTests(unittest.TestCase):
 
     def test_report_with_aprs_warning_is_parsed(self):
         """La advertencia previa no invalida un informe de éxito."""
-        message = "[emergencias] APRS-IS bulletin WARN: timeout\\n"
+        message = "[emergencias] APRS-IS bulletin WARN: timeout\n"
         found, warnings = module.parse_check_output(message + json.dumps(report(), indent=2))
         self.assertEqual(found, report())
         self.assertEqual(warnings, message)
 
     def test_report_with_only_warning_is_invalid(self):
         """No se acepta una advertencia aislada como informe."""
-        found, warnings = module.parse_check_output("WARN: timeout\\n")
+        found, warnings = module.parse_check_output("WARN: timeout\n")
         self.assertIsNone(found)
-        self.assertEqual(warnings, "WARN: timeout\\n")
+        self.assertEqual(warnings, "WARN: timeout\n")
 
     @patch.object(module.subprocess, "run")
     def test_warning_and_valid_json_do_not_dump_report(self, run):
@@ -76,7 +76,7 @@ class CheckLogTests(unittest.TestCase):
         import contextlib
         import io
         run.return_value = subprocess.CompletedProcess(
-            [], 0, "APRS-IS WARN: timed out\\n" + json.dumps(report()), ""
+            [], 0, "APRS-IS WARN: timed out\n" + json.dumps(report()), ""
         )
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
