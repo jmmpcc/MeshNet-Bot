@@ -16,6 +16,8 @@ fi
 sleep "${boot_delay}"
 
 while true; do
-    python -u /app/tools/emergencias_guardia/emergencias_guardia_scoped.py check --notify-changes || true
+    # Un check correcto no vuelca el JSON completo en Docker.
+    # El wrapper conserva stderr y los avisos de fuentes/envíos fallidos.
+    python -u /app/tools/emergencias_guardia/emergencias_check_log.py || true
     sleep "${interval}"
 done
