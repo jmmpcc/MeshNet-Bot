@@ -245,3 +245,20 @@ Evite `docker compose down -v`: puede eliminar almacenamiento gestionado por Doc
 - No mantener timers systemd y schedulers Docker equivalentes simultáneamente.
 - No publicar APIs a Internet sin firewall/autenticación apropiados.
 - Guardar copia de `.env` y `bot_data` antes de cambios importantes.
+
+## 16. Verificación de actualización GHCR de Emergencias
+
+Cuando el cambio afecte a `tools/emergencias_guardia/`, GitHub Actions debe
+publicar `ghcr.io/jmmpcc/meshnet-bot-emergencias:latest`. El `git pull` solo
+actualiza el código del host; **no actualiza la imagen del contenedor**.
+
+1. Revise [Build & Push Docker images to GHCR](https://github.com/jmmpcc/MeshNet-Bot/actions/workflows/build-ghcr.yml) y confirme que el build de Emergencias del `main` recién fusionado ha terminado correctamente.
+2. Descargue solo `emergencias-check`: `docker compose -f docker-compose.rpi.yml --profile emergencias pull emergencias-check`.
+3. Antes de reiniciar, compruebe dentro de la imagen descargada que existen `parse_check_output` y el override `BROKER_CTRL_HOST`, siguiendo el comando del [README principal](../README.md#emergencias--aprs-is-instalación-portable-y-verificación).
+4. Si es correcta, recree únicamente el servicio `emergencias-check` con `--no-deps --force-recreate`. No se requiere detener broker, bot, aprs ni farmacias.
+5. Compruebe `BROKER EFECTIVO=broker`, `APRS CONTROL=broker`, la salud de la API y nuevas operaciones en la auditoría. Los registros históricos se conservan.
+
+El `emergencias-check` utiliza red Compose propia; `aprs` y `bot` comparten
+la red del broker. No cambiar `APRS_CTRL_HOST` globalmente en `.env`.
+Si hay cambios locales, no forzar `git pull`: preservar y revisar cada fichero
+antes de sincronizar. No publicar controles UDP APRS en la LAN.
