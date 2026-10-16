@@ -47,3 +47,15 @@ def test_no_config_uses_docker_host_only_in_memory(tmp_path):
         result = emergency_config.load_config(create=False)
     assert result["notifications"]["broker"]["host"] == "broker"
     assert not path.exists()
+
+
+def test_first_boot_does_not_persist_docker_host(tmp_path):
+    """El primer arranque crea un JSON portable y solo devuelve broker en RAM."""
+    path = tmp_path / "config.json"
+    with patch.object(emergency_config, "CONFIG_FILE", path), patch.dict(
+        "os.environ", {"BROKER_CTRL_HOST": "broker"}
+    ):
+        result = emergency_config.load_config(create=True)
+    assert result["notifications"]["broker"]["host"] == "broker"
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["notifications"]["broker"]["host"] == "127.0.0.1"
