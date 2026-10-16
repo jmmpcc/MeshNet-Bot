@@ -211,6 +211,69 @@ bot_data/emergencias_guardia
 
 El actualizador migra datos legacy sólo cuando el destino está vacío; no sobrescribe datos Docker existentes.
 
+## Emergencias + APRS-IS: instalación portable y verificación
+
+En instalaciones Docker, el servicio `emergencias-check` se comunica con el
+broker por **TCP 8766** y con el gateway APRS por **UDP 9464**. Su configuración
+Compose fija `BROKER_CTRL_HOST=broker` y `APRS_CTRL_HOST=broker`. No configure
+`APRS_CTRL_HOST=broker` globalmente en `.env`: los contenedores `bot` y
+`aprs` comparten el espacio de red del broker y conservan su configuración
+de loopback. Consulte
+[la guía completa de topología Docker](docs/OPTIONAL_APPS_DOCKER.md#conectividad-de-emergencias-con-broker-y-aprs-en-docker-v7060)
+para los detalles de seguridad, persistencia y compatibilidad systemd.
+
+El host del broker se adapta **en memoria** cuando existe
+`BROKER_CTRL_HOST`, sin sustituir el contenido persistido en
+`bot_data/emergencias_guardia/config.json`. Por eso una instalación nueva
+no necesita modificar ese JSON a mano.
+
+Tras actualizar el repositorio, **espere a que GitHub Actions publique** la
+imagen `ghcr.io/jmmpcc/meshnet-bot-emergencias:latest`. Compruebe la ejecución
+[Build & Push Docker images to GHCR](https://github.com/jmmpcc/MeshNet-Bot/actions/workflows/build-ghcr.yml)
+y verifique localmente el contenido *antes de recrear* producción:
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+docker compose -f docker-compose.rpi.yml --profile emergencias pull emergencias-check
+docker run --rm --entrypoint python ghcr.io/jmmpcc/meshnet-bot-emergencias:latest -c '
+from pathlib import Path
+base = Path("/app/tools/emergencias_guardia")
+assert "def parse_check_output" in (base / "emergencias_check_log.py").read_text()
+assert "broker_host = os.getenv" in (base / "emergencias/config.py").read_text()
+print("IMAGEN EMERGENCIAS ACTUALIZADA: OK")
+'
+```
+
+**Solo si la comprobación imprime OK**, y siempre que los servicios necesarios
+ya estén en marcha, puede recrearse exclusivamente el comprobador:
+
+```bash
+docker compose -f docker-compose.rpi.yml --profile emergencias \
+  up -d --no-deps --force-recreate emergencias-check
+docker exec meshnet-emergencias-check python -c '
+import os
+from tools.emergencias_guardia.emergencias.config import load_config
+print("BROKER EFECTIVO:", load_config(create=False)["notifications"]["broker"]["host"])
+print("APRS CONTROL:", os.getenv("APRS_CTRL_HOST"))
+'
+```
+
+Los dos valores anteriores deben ser `broker` en ese servicio. Una comprobación
+de red **sin emitir ningún mensaje por APRS-IS ni radio** utiliza el comando UDP
+`aprs_status`, documentado en
+[OPTIONAL_APPS_DOCKER.md](docs/OPTIONAL_APPS_DOCKER.md).
+
+Para verificar el resultado de envíos reales, consulte la auditoría del
+ControlPanel: `meshcore: sent` y `aprsis: sent` confirman los resultados
+registrados por los respectivos transportes. Eso no sustituye la comprobación
+externa de aparición en [aprs.fi](https://aprs.fi/). Los errores históricos
+`PARCIAL` o `ERROR` no se reescriben al reparar la conexión.
+
+**Si Git detecta modificaciones locales**, no ejecute `git reset --hard`,
+`git clean` ni restaure el archivo de Compose indiscriminadamente: compare
+primero los cambios, guárdelos individualmente y sincronice solo los archivos
+necesarios. Nunca borre `bot_data` ni copie el `.env` a un worktree público.
+
 ## ControlPanel
 
 ControlPanel sigue siendo un servicio del host:
