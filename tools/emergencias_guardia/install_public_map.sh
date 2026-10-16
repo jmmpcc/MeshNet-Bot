@@ -40,6 +40,13 @@ install -m 0644 "$SOURCE_DIR/$SERVICE_NAME" "$SYSTEMD_DIR/$SERVICE_NAME"
 install -m 0644 "$SOURCE_DIR/$PATH_NAME" "$SYSTEMD_DIR/$PATH_NAME"
 install -m 0644 "$SOURCE_DIR/$TIMER_NAME" "$SYSTEMD_DIR/$TIMER_NAME"
 
+# Verificar el volumen que comparte el recolector Docker con el publicador.
+CURRENT_DIR="$REPO_DIR/bot_data/emergencias_guardia"
+mkdir -p "$CURRENT_DIR"
+if [[ -f "$CURRENT_DIR/current.json" ]] && ! runuser -u meshnet -- test -r "$CURRENT_DIR/current.json"; then
+    echo "AVISO: current.json no es legible por meshnet; el recolector debe regenerarlo con grupo compartido y modo 0640." >&2
+fi
+
 systemctl daemon-reload
 systemctl enable --now "$PATH_NAME" "$TIMER_NAME"
 
