@@ -124,5 +124,73 @@ class BbsTransportTests(unittest.TestCase):
         self.assertEqual(result, ())
 
 
+
+class BbsCompactNewsTests(unittest.TestCase):
+    """Regresión aislada de NOTICIAS: no arranca broker ni modifica bases reales."""
+
+    def setUp(self) -> None:
+        """Prepara una BBS mínima y una SQLite efímera con paginación reproducible."""
+        import sqlite3
+        from bbs_server import BbsServer
+
+        self.db = sqlite3.connect(":memory:")
+        self.db.execute(
+            "CREATE TABLE news (id INTEGER PRIMARY KEY, title TEXT, summary TEXT, "
+            "source TEXT, published_at TEXT, created_at TEXT, url TEXT, tags TEXT)"
+        )
+        self.db.executemany(
+            "INSERT INTO news VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, "Noticia uno", "Texto uno", "Fuente A", "2026-10-15T10:00:00",
+                 "2026-10-15T10:00:00", "https://example.org/uno?url=muy-larga", "tecnologia"),
+                (2, "Noticia dos", "Texto dos", "Fuente B", "2026-10-16T10:00:00",
+                 "2026-10-16T10:00:00", "https://example.org/dos", "ciencia"),
+                (3, "Noticia tres", "Texto tres", "Fuente C", "2026-10-17T10:00:00",
+                 "2026-10-17T10:00:00", "https://example.org/tres", "tecnologia"),
+            ],
+        )
+        self.bbs = BbsServer.__new__(BbsServer)
+        self.bbs._conn = self.db
+        self.bbs.list_page_size = 2
+
+    def tearDown(self) -> None:
+        """Cierra la conexión temporal sin afectar al servicio."""
+        self.db.close()
+
+    def test_compact_listing_keeps_pagination_without_urls(self) -> None:
+        """Lista dos noticias por página sin transmitir URL ni resumen."""
+        page1 = self.bbs._news_list(page=1)
+        self.assertIn("NOTICIAS (pág 1/2)", page1)
+        self.assertIn("[3] Noticia tres (Fuente C) 2026-10-17", page1)
+        self.assertIn("[2] Noticia dos (Fuente B) 2026-10-16", page1)
+        self.assertNotIn("[1] Noticia uno", page1)
+        self.assertNotIn("https://", page1)
+        self.assertIn("#BBS NOTICIAS 2", page1)
+        self.assertIn("#BBS NOTICIAS VER <id>", page1)
+        page2 = self.bbs._news_list(page=2)
+        self.assertIn("[1] Noticia uno", page2)
+        self.assertIn("pág 2/2", page2)
+
+    def test_filtered_listing_preserves_categories_and_page(self) -> None:
+        """El filtrado por categoría mantiene los identificadores correctos."""
+        listing = self.bbs._news_list(tag="tecnologia", page=1)
+        self.assertIn("categoría: tecnologia", listing)
+        self.assertIn("[3] Noticia tres", listing)
+        self.assertIn("[1] Noticia uno", listing)
+        self.assertNotIn("[2] Noticia dos", listing)
+        self.assertNotIn("https://", listing)
+
+    def test_detail_retains_full_url_and_summary(self) -> None:
+        """VER conserva el enlace íntegro y el resumen sin modificaciones."""
+        detail = self.bbs._news_read(1)
+        self.assertIn("https://example.org/uno?url=muy-larga", detail)
+        self.assertIn("Texto uno", detail)
+        self.assertIn("Fuente A", detail)
+
+    def test_missing_news_keeps_original_response(self) -> None:
+        """Se conserva la respuesta de noticia inexistente."""
+        self.assertEqual(self.bbs._news_read(999), "NOTICIAS: id no encontrado: 999")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
