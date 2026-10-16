@@ -49,7 +49,6 @@ def diagnostics(report: Any) -> list[str]:
     return problems
 
 
-
 def parse_check_output(output: str) -> tuple[dict[str, Any] | None, str]:
     """Separa avisos textuales del informe JSON final del CLI.
 
@@ -86,7 +85,7 @@ def print_diagnostics_text(output: str, *, max_chars: int = 3000) -> None:
     if not content:
         return
     if len(content) > max_chars:
-        content = content[:max_chars] + "\\n[emergencias-check] salida truncada"
+        content = content[:max_chars] + "\n[emergencias-check] salida truncada"
     print(content, file=sys.stderr, flush=True)
 
 
