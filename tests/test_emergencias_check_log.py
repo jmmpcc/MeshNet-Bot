@@ -25,6 +25,17 @@ def report(sources=None, **notify):
 
 
 class CheckLogTests(unittest.TestCase):
+    def test_compose_emergency_aprs_host_is_broker(self):
+        """El check usa broker, sin cambiar la red del gateway APRS."""
+        compose = (SCRIPT.parents[2] / "docker-compose.rpi.yml").read_text(encoding="utf-8")
+        # El bloque se delimita por nombre de servicio para no confundirlo
+        # con Farmacias ni con la configuración del gateway APRS.
+        service = compose.split("\n  emergencias-check:\n", 1)[1]
+        self.assertIn("APRS_CTRL_HOST: broker", service)
+        self.assertIn("BROKER_CTRL_HOST: broker", service)
+        aprs = compose.split("\n  aprs:\n", 1)[1].split("\n  bridgehub-bc:\n", 1)[0]
+        self.assertIn('network_mode: "service:broker"', aprs)
+
     def test_success_and_disabled_are_silent(self):
         self.assertEqual(module.diagnostics(report()), [])
 
@@ -56,6 +67,46 @@ class CheckLogTests(unittest.TestCase):
             [], 0, json.dumps(report()), ""
         )
         self.assertEqual(module.main(), 0)
+
+    def test_report_with_aprs_warning_is_parsed(self):
+        """La advertencia previa no invalida un informe de éxito."""
+        message = "[emergencias] APRS-IS bulletin WARN: timeout\n"
+        found, warnings = module.parse_check_output(message + json.dumps(report(), indent=2))
+        self.assertEqual(found, report())
+        self.assertEqual(warnings, message)
+
+    def test_report_with_only_warning_is_invalid(self):
+        """No se acepta una advertencia aislada como informe."""
+        found, warnings = module.parse_check_output("WARN: timeout\n")
+        self.assertIsNone(found)
+        self.assertEqual(warnings, "WARN: timeout\n")
+
+    @patch.object(module.subprocess, "run")
+    def test_warning_and_valid_json_do_not_dump_report(self, run):
+        """El wrapper conserva el aviso y silencia el JSON normal."""
+        import contextlib
+        import io
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, "APRS-IS WARN: timed out\n" + json.dumps(report()), ""
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = module.main()
+        self.assertEqual(code, 0)
+        self.assertIn("APRS-IS WARN", stderr.getvalue())
+        self.assertNotIn('"fetch"', stderr.getvalue())
+
+    @patch.object(module.subprocess, "run")
+    def test_no_json_is_failure_without_full_dump(self, run):
+        """La salida inválida se limita para evitar llenar Docker logs."""
+        import contextlib
+        import io
+        run.return_value = subprocess.CompletedProcess([], 0, "X" * 9000, "")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = module.main()
+        self.assertEqual(code, 1)
+        self.assertLess(len(stderr.getvalue()), 3500)
 
     @patch.object(module.subprocess, "run")
     def test_failure_preserves_exit_code(self, run):

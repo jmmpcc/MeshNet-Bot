@@ -49,6 +49,46 @@ def diagnostics(report: Any) -> list[str]:
     return problems
 
 
+def parse_check_output(output: str) -> tuple[dict[str, Any] | None, str]:
+    """Separa avisos textuales del informe JSON final del CLI.
+
+    Args:
+        output: stdout íntegro de `check --notify-changes`, que puede incluir
+            advertencias APRS-IS antes de un objeto JSON multilínea.
+
+    Returns:
+        (informe, avisos). Solo acepta un objeto JSON final sin texto posterior
+        salvo espacios; no silencia advertencias ni altera el CLI original.
+    """
+    decoder = json.JSONDecoder()
+    offset = 0
+    for line in output.splitlines(keepends=True):
+        # El informe se imprime como objeto al comienzo de una línea.
+        if not line.lstrip().startswith("{"):
+            offset += len(line)
+            continue
+        candidate = output[offset:].lstrip()
+        try:
+            report, end = decoder.raw_decode(candidate)
+        except ValueError:
+            offset += len(line)
+            continue
+        if isinstance(report, dict) and not candidate[end:].strip():
+            return report, output[:offset]
+        offset += len(line)
+    return None, output
+
+
+def print_diagnostics_text(output: str, *, max_chars: int = 3000) -> None:
+    """Escribe avisos o errores en stderr sin volcar un informe JSON gigante."""
+    content = output.strip()
+    if not content:
+        return
+    if len(content) > max_chars:
+        content = content[:max_chars] + "\n[emergencias-check] salida truncada"
+    print(content, file=sys.stderr, flush=True)
+
+
 def main() -> int:
     """Ejecuta un check y registra solo stderr, fallos y respuestas inválidas.
 
@@ -62,18 +102,16 @@ def main() -> int:
     if result.stderr:
         print(result.stderr, file=sys.stderr,
               end="" if result.stderr.endswith("\n") else "\n", flush=True)
+    report, warnings = parse_check_output(result.stdout)
+    # Las advertencias del CLI son operativas y deben conservarse visibles.
+    print_diagnostics_text(warnings)
     if result.returncode != 0:
         print(f"[emergencias-check] código de salida: {result.returncode}",
               file=sys.stderr, flush=True)
-        if result.stdout:
-            print(result.stdout, file=sys.stderr,
-                  end="" if result.stdout.endswith("\n") else "\n", flush=True)
         return result.returncode
-    try:
-        report = json.loads(result.stdout)
-    except (ValueError, TypeError):
-        print("[emergencias-check] respuesta no válida:", file=sys.stderr, flush=True)
-        print(result.stdout or "(sin salida)", file=sys.stderr, flush=True)
+    if report is None:
+        print("[emergencias-check] respuesta JSON final no válida o ausente",
+              file=sys.stderr, flush=True)
         return 1
     problems = diagnostics(report)
     for problem in problems:

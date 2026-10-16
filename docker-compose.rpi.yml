@@ -243,6 +243,8 @@ services:
     environment:
       EMERGENCIAS_DATA_DIR: /app/bot_data/emergencias_guardia
       BROKER_CTRL_HOST: broker
+      # El gateway APRS comparte la red del broker; localhost apunta al check.
+      APRS_CTRL_HOST: broker
     volumes:
       - ./bot_data:/app/bot_data:rw
     entrypoint: ["/usr/local/bin/entrypoint_emergencias_check.sh"]
