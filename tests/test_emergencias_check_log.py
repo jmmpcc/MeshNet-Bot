@@ -57,6 +57,46 @@ class CheckLogTests(unittest.TestCase):
         )
         self.assertEqual(module.main(), 0)
 
+    def test_report_with_aprs_warning_is_parsed(self):
+        """La advertencia previa no invalida un informe de éxito."""
+        message = "[emergencias] APRS-IS bulletin WARN: timeout\\n"
+        found, warnings = module.parse_check_output(message + json.dumps(report(), indent=2))
+        self.assertEqual(found, report())
+        self.assertEqual(warnings, message)
+
+    def test_report_with_only_warning_is_invalid(self):
+        """No se acepta una advertencia aislada como informe."""
+        found, warnings = module.parse_check_output("WARN: timeout\\n")
+        self.assertIsNone(found)
+        self.assertEqual(warnings, "WARN: timeout\\n")
+
+    @patch.object(module.subprocess, "run")
+    def test_warning_and_valid_json_do_not_dump_report(self, run):
+        """El wrapper conserva el aviso y silencia el JSON normal."""
+        import contextlib
+        import io
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, "APRS-IS WARN: timed out\\n" + json.dumps(report()), ""
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = module.main()
+        self.assertEqual(code, 0)
+        self.assertIn("APRS-IS WARN", stderr.getvalue())
+        self.assertNotIn('"fetch"', stderr.getvalue())
+
+    @patch.object(module.subprocess, "run")
+    def test_no_json_is_failure_without_full_dump(self, run):
+        """La salida inválida se limita para evitar llenar Docker logs."""
+        import contextlib
+        import io
+        run.return_value = subprocess.CompletedProcess([], 0, "X" * 9000, "")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = module.main()
+        self.assertEqual(code, 1)
+        self.assertLess(len(stderr.getvalue()), 3500)
+
     @patch.object(module.subprocess, "run")
     def test_failure_preserves_exit_code(self, run):
         run.return_value = subprocess.CompletedProcess([], 3, "error report", "traceback")
