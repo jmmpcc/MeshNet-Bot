@@ -262,3 +262,68 @@ El `emergencias-check` utiliza red Compose propia; `aprs` y `bot` comparten
 la red del broker. No cambiar `APRS_CTRL_HOST` globalmente en `.env`.
 Si hay cambios locales, no forzar `git pull`: preservar y revisar cada fichero
 antes de sincronizar. No publicar controles UDP APRS en la LAN.
+
+## 17. Arranque automatico de Docker al reiniciar Raspberry Pi
+
+La unidad `systemd/meshnet-docker-start.service` arranca **solo** los servicios
+especificados en `MESHNET_DOCKER_SERVICES` y los perfiles habilitados por
+`COMPOSE_PROFILES`. El nuevo modo `--startup-only` reutiliza el arranque
+secuencial del actualizador, pero **no ejecuta git pull ni docker compose pull**.
+No depende de Internet o GHCR: utiliza exclusivamente las imagenes locales.
+Si falta una imagen, el servicio informa del error en el journal; no intenta
+obtenerla desde Internet.
+
+### Instalacion en Raspberry Pi (una sola vez)
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+bash -n scripts/update_meshnet.sh
+sudo install -m 0644 systemd/meshnet-docker-start.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now meshnet-docker-start.service
+```
+
+La unidad usa `User=meshnet`, por lo que dicho usuario debe poder ejecutar
+Docker sin sudo (habitualmente, pertenecer al grupo `docker`). Es de tipo
+`oneshot` con `RemainAfterExit=yes`; el estado `active (exited)` tras el
+arranque correcto es normal. No contiene `ExecStop`: detener la unidad no
+interrumpe los contenedores ya en funcionamiento.
+
+### Comprobacion
+
+```bash
+systemctl is-enabled meshnet-docker-start.service
+systemctl status meshnet-docker-start.service --no-pager
+journalctl -u meshnet-docker-start.service -b --no-pager
+cd /home/meshnet/MeshNet-Bot
+docker compose -f docker-compose.rpi.yml ps
+```
+
+### Arranque manual sin actualizar
+
+```bash
+./scripts/update_meshnet.sh --startup-only
+```
+
+Esta opcion requiere una lista explicita no vacia de
+`MESHNET_DOCKER_SERVICES` en el entorno o en `.env`: no sustituye la
+seleccion por todos los servicios de Compose ni trata de detectar
+contenedores activos (podrian estar apagados durante el arranque del equipo).
+Respeta el periodo de estabilizacion del broker y el timeout por servicio.
+
+### Actualizacion manual
+
+```bash
+./scripts/update_meshnet.sh
+```
+
+En modo normal, cuando existen archivos Git versionados modificados localmente,
+se omite solamente `git pull` y se continua con Docker sin sobrescribirlos.
+Cuando el repositorio esta limpio, el actualizador conserva el comportamiento
+original de actualizar Git y las imagenes. Los fallos reales de Docker siguen
+siendo errores: no se ocultan ni se marcan como exitosos.
+
+**Importante:** Docker ya puede reiniciar determinados contenedores con sus
+politicas `restart` al arrancar el daemon. La unidad adicional es idempotente:
+`docker compose up -d` reconcilia servicios existentes y garantiza la
+seleccion declarada en `.env`. No instalar una segunda unidad equivalente.
