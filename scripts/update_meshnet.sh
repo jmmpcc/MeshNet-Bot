@@ -525,7 +525,13 @@ if ! ${SKIP_DOCKER}; then
         start_selected_service() {
             local service="$1"
             log "arrancando Docker ${service}"
-            run docker compose -f "${COMPOSE_FILE}" up -d --no-deps "${service}"
+            if ${STARTUP_ONLY}; then
+                # En el arranque de la Raspberry no consultar registros remotos:
+                # usar sólo imágenes ya presentes y comunicar si falta alguna.
+                run docker compose -f "${COMPOSE_FILE}" up -d --no-deps --pull never "${service}"
+            else
+                run docker compose -f "${COMPOSE_FILE}" up -d --no-deps "${service}"
+            fi
             wait_service_running "${service}" "${service_start_timeout_seconds}"
         }
 
