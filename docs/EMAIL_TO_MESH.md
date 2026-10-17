@@ -575,3 +575,179 @@ Después utilice:
 El actualizador garantiza que broker esté operativo antes de iniciar
 `email-to-mesh`. Si se detiene y debe permanecer apagado, retírelo también de
 `MESHNET_DOCKER_SERVICES`.
+
+## 11. Instalación y puesta en marcha Docker (Raspberry Pi)
+
+Esta sección complementa los apartados anteriores con un procedimiento de despliegue
+verificable. En `docker-compose.rpi.yml` el servicio se llama **`email-to-mesh`**,
+su contenedor es `meshnet-email-to-mesh`, utiliza la imagen
+`ghcr.io/jmmpcc/meshnet-bot-broker:latest` y depende de `broker`.
+**No hay que buscar una imagen GHCR exclusiva de correo.**
+
+### 11.1. Configuración inicial, sin alterar otros servicios
+
+Desde `/home/meshnet/MeshNet-Bot`, editar el archivo `.env` existente
+(no reemplazarlo por el ejemplo). Ejemplo **ficticio**, para adaptar al
+proveedor de correo y a la red local:
+
+```env
+# El actualizador solo inicia los servicios enumerados.
+# Añadir email-to-mesh a la lista real, conservando los demás servicios necesarios.
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,email-to-mesh
+
+# Activar recepción IMAP y autorización estricta de remitentes.
+EMAIL_TO_MESH_ENABLED=1
+EMAIL_IMAP_HOST=imap.example.org
+EMAIL_IMAP_PORT=993
+EMAIL_IMAP_SSL=1
+EMAIL_IMAP_STARTTLS=0
+EMAIL_IMAP_USER=nodo@example.org
+EMAIL_IMAP_PASSWORD=CONTRASENA_DE_APLICACION
+EMAIL_IMAP_FOLDER=INBOX
+EMAIL_ALLOWED_SENDERS=avisos@example.org;operador@example.org
+EMAIL_PROCESS_EXISTING=0
+EMAIL_MARK_AS_READ=1
+EMAIL_DELETE_AFTER_SEND=0
+EMAIL_MESH_CHANNEL=0
+EMAIL_MESH_PREFIX=[EMAIL]
+EMAIL_MESH_NETWORK=
+EMAIL_POLL_INTERVAL_SEC=30
+
+# Envío desde malla, Telegram o CLI a contactos de la libreta común.
+EMAIL_CONTACTS_PATH=/app/bot_data/email_contacts.json
+EMAIL_SMTP_HOST=smtp.example.org
+EMAIL_SMTP_PORT=587
+EMAIL_SMTP_SSL=0
+EMAIL_SMTP_STARTTLS=1
+EMAIL_SMTP_USER=nodo@example.org
+EMAIL_SMTP_PASSWORD=CONTRASENA_DE_APLICACION
+EMAIL_FROM=nodo@example.org
+EMAIL_OUT_SUBJECT_PREFIX=[Mesh]
+```
+
+**Seguridad:** utilizar credenciales específicas de aplicación si el proveedor
+las ofrece; no subir `.env`, contraseñas ni `bot_data/email_contacts.json`
+a GitHub. `EMAIL_ALLOWED_SENDERS` limita las direcciones admitidas, pero
+no autentica por sí mismo la identidad criptográfica del remitente: se deben
+mantener los filtros y medidas antisuplantación del proveedor de correo.
+
+Si solo se necesita **malla → correo**, se puede configurar SMTP y contactos
+sin habilitar la lectura IMAP (`EMAIL_TO_MESH_ENABLED=0`). En ese caso
+el contenedor no realiza sondeo de nuevos correos; el envío SMTP se efectúa
+mediante el broker, el bot o la CLI según los componentes habilitados.
+
+### 11.2. Comprobar Compose y arrancar el servicio opcional
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+docker compose -f docker-compose.rpi.yml config --services
+docker compose -f docker-compose.rpi.yml up -d --no-deps email-to-mesh
+docker compose -f docker-compose.rpi.yml ps broker email-to-mesh
+docker logs --tail 60 meshnet-email-to-mesh
+```
+
+**Requisito previo:** `broker` debe estar funcionando. Si todavía no está
+arrancado, iniciarlo primero conforme a `docs/OPERATIONS.md`.
+`--no-deps` evita recrear el broker que ya funciona. En despliegues nuevos,
+también es válido iniciar expresamente broker y correo con
+`docker compose -f docker-compose.rpi.yml up -d broker email-to-mesh`.
+
+El Compose configura `network_mode: "service:broker"`: el contenedor de
+correo comparte **el espacio de red del broker**. Por ello la conexión de
+control a `127.0.0.1:8766` es válida **dentro del contenedor de correo**,
+sin publicar ningún puerto extra. No aplicar ciegamente esta configuración
+a otros contenedores que usen redes Docker separadas.
+
+El script de operación habitual respeta `MESHNET_DOCKER_SERVICES`:
+
+```bash
+./scripts/update_meshnet.sh
+```
+
+Para iniciar solo servicios seleccionados después de reiniciar la Raspberry,
+el mecanismo systemd existente invoca el actualizador con
+`--startup-only`. No añadir indiscriminadamente todos los servicios a
+`MESHNET_DOCKER_SERVICES`; mantener los que realmente utiliza cada cliente.
+
+### 11.3. Ejemplos de envío y pruebas
+
+Probar primero la libreta sin transmitir por radio:
+
+```bash
+docker compose -f docker-compose.rpi.yml exec -T email-to-mesh \
+  python /app/source/email_to_mesh.py contact-add pruebas pruebas@example.org
+
+docker compose -f docker-compose.rpi.yml exec -T email-to-mesh \
+  python /app/source/email_to_mesh.py contacts
+```
+
+El envío de correo real requiere SMTP configurado y una dirección de prueba
+controlada por el operador:
+
+```bash
+docker compose -f docker-compose.rpi.yml exec -T email-to-mesh \
+  python /app/source/email_to_mesh.py send pruebas "Prueba SMTP MeshNet"
+```
+
+Para **correo → Meshtastic**, remitir desde una dirección autorizada un correo
+con asunto `[ch3] Aviso de prueba`. Para **correo → MeshCore**, usar
+`[ch2]M Aviso MeshCore`. Los canales deben existir y estar configurados
+en el nodo de destino. Sin prefijo se aplica `EMAIL_MESH_CHANNEL` y la red
+por defecto; consultar el apartado 3 para las reglas exactas.
+
+Desde un nodo Meshtastic o MeshCore:
+
+```text
+[mail] lista
+[mail] pruebas Mensaje de prueba desde la malla
+```
+
+Desde el bot Telegram, cuando esté autorizado:
+
+```text
+/mail_contactos
+/mail pruebas Mensaje de prueba desde Telegram
+```
+
+**Atención:** el envío por RF puede llegar a toda la cobertura del canal.
+Usar canales de pruebas apropiados y destinatarios autorizados.
+
+### 11.4. Persistencia, mantenimiento y diagnóstico
+
+Los archivos compartidos del host son
+`./bot_data/email_contacts.json` (agenda) y
+`./bot_data/email_to_mesh_state.json` (UID de IMAP y control de duplicados).
+Suprimir o reinicializar el estado puede provocar relectura o reenvío de
+mensajes; no borrar `bot_data` durante actualizaciones.
+
+```bash
+# Consultar estado sin revelar las contraseñas del .env
+docker inspect meshnet-email-to-mesh \
+  --format 'Estado={{.State.Status}} Reinicios={{.RestartCount}}'
+docker logs --since 15m --tail 100 meshnet-email-to-mesh
+docker compose -f docker-compose.rpi.yml ps broker email-to-mesh
+
+# Parar SOLO la pasarela, sin bajar el broker.
+docker compose -f docker-compose.rpi.yml stop email-to-mesh
+
+# Volver a iniciarla si sigue seleccionada.
+docker compose -f docker-compose.rpi.yml up -d --no-deps email-to-mesh
+```
+
+Si hay errores IMAP: comprobar servidor, puerto, TLS, carpeta, credenciales y
+remitentes autorizados. Si no llegan nuevos correos: recordar que
+`EMAIL_PROCESS_EXISTING=0` ignora los anteriores al primer arranque.
+Si falla el envío SMTP: comprobar configuración de puerto 587/STARTTLS o
+465/SSL, contraseña de aplicación y rechazos del servidor.
+Si el broker no responde: confirmar que `meshnet-broker` está funcionando
+antes de reiniciar **solo** la pasarela.
+
+El comando `scripts/email-to-mesh` usa `docker compose exec` desde el
+directorio actual. Para instrucciones independientes del directorio y del
+archivo Compose usar los comandos explícitos de esta sección.
+
+**Desactivar permanentemente:** retirar `email-to-mesh` de
+`MESHNET_DOCKER_SERVICES` y detener el servicio con
+`docker compose -f docker-compose.rpi.yml stop email-to-mesh`.
+Eliminarlo de la selección de arranque **no detiene por sí solo** un
+contenedor que ya estaba ejecutándose.
