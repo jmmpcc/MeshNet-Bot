@@ -1,0 +1,21 @@
+[Unit]
+Description=MeshNet-Bot - arranque Docker secuencial segun .env
+Documentation=https://github.com/jmmpcc/MeshNet-Bot/blob/main/docs/OPERATIONS.md
+Requires=docker.service
+After=docker.service
+
+[Service]
+# El arranque es una reconciliacion puntual: Docker administra despues
+# el ciclo de vida de los contenedores con sus politicas restart.
+Type=oneshot
+User=meshnet
+Group=meshnet
+WorkingDirectory=/home/meshnet/MeshNet-Bot
+# No ejecutar git pull ni acceder a GHCR al encender la Raspberry.
+# Se usan las imagenes locales, la seleccion .env y el orden broker->resto.
+ExecStart=/bin/bash /home/meshnet/MeshNet-Bot/scripts/update_meshnet.sh --startup-only
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

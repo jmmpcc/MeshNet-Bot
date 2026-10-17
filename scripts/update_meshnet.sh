@@ -13,6 +13,7 @@ set -euo pipefail
 #
 # Opciones:
 #   --skip-docker       No ejecutar actualización Docker.
+#   --startup-only      Arranque local sin git pull ni descarga de imágenes.
 #
 # Selección de servicios Docker:
 #   - MESHNET_DOCKER_SERVICES vacío/no definido: sólo se actualizan los
@@ -43,6 +44,7 @@ COMPOSE_FILE="${REPO_DIR}/docker-compose.rpi.yml"
 
 DRY_RUN=false
 SKIP_DOCKER=false
+STARTUP_ONLY=false
 FROM_COMMIT=""
 TO_COMMIT=""
 
@@ -77,6 +79,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_DOCKER=true
             shift
             ;;
+        --startup-only)
+            STARTUP_ONLY=true
+            shift
+            ;;
         --from)
             [[ $# -ge 2 ]] || die "--from requiere un commit"
             FROM_COMMIT="$2"
@@ -100,6 +106,10 @@ done
 if [[ -n "${FROM_COMMIT}" || -n "${TO_COMMIT}" ]]; then
     [[ -n "${FROM_COMMIT}" && -n "${TO_COMMIT}" ]] || die "--from y --to deben usarse juntos"
 fi
+if ${STARTUP_ONLY}; then
+    [[ -z "${FROM_COMMIT}" && -z "${TO_COMMIT}" ]] || die "--startup-only no admite --from/--to"
+    ! ${SKIP_DOCKER} || die "--startup-only no admite --skip-docker"
+fi
 
 if [[ ${EUID} -eq 0 && -n "${SUDO_USER:-}" ]]; then
     die "no ejecute el actualizador completo con sudo; use ./scripts/update_meshnet.sh como ${SUDO_USER}"
@@ -112,7 +122,13 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "${REPO_DIR} no es un
 OLD_COMMIT=""
 NEW_COMMIT=""
 
-if [[ -n "${FROM_COMMIT}" ]]; then
+if ${STARTUP_ONLY}; then
+    # El arranque systemd usa exclusivamente los archivos e imágenes locales.
+    # Nunca depende de red, credenciales GHCR ni del estado del árbol Git.
+    OLD_COMMIT="$(git rev-parse HEAD)"
+    NEW_COMMIT="${OLD_COMMIT}"
+    log "modo arranque local: se omiten git pull y docker compose pull"
+elif [[ -n "${FROM_COMMIT}" ]]; then
     git cat-file -e "${FROM_COMMIT}^{commit}" 2>/dev/null || die "commit inicial no válido: ${FROM_COMMIT}"
     git cat-file -e "${TO_COMMIT}^{commit}" 2>/dev/null || die "commit final no válido: ${TO_COMMIT}"
     OLD_COMMIT="$(git rev-parse "${FROM_COMMIT}^{commit}")"
@@ -408,6 +424,10 @@ if ! ${SKIP_DOCKER}; then
         fi
     fi
 
+    if ${STARTUP_ONLY} && [[ -z "${docker_services_value}" ]]; then
+        die "--startup-only requiere MESHNET_DOCKER_SERVICES en .env para evitar un arranque incompleto"
+    fi
+
     if [[ ${#selected_docker_services[@]} -gt 0 ]]; then
         available_services="$(docker compose -f "${COMPOSE_FILE}" config --services)"
         for service in "${selected_docker_services[@]}"; do
@@ -415,8 +435,12 @@ if ! ${SKIP_DOCKER}; then
                 die "servicio Docker '${service}' no disponible con COMPOSE_PROFILES='${COMPOSE_PROFILES_VALUE}'"
         done
 
-        log "actualizando imágenes Docker seleccionadas"
-        run docker compose -f "${COMPOSE_FILE}" pull "${selected_docker_services[@]}"
+        if ${STARTUP_ONLY}; then
+            log "arranque local: se utilizarán las imágenes Docker ya instaladas"
+        else
+            log "actualizando imágenes Docker seleccionadas"
+            run docker compose -f "${COMPOSE_FILE}" pull "${selected_docker_services[@]}"
+        fi
 
         broker_grace_seconds="${BROKER_STARTUP_GRACE_SECONDS:-}"
         if [[ -z "${broker_grace_seconds}" && -f "${REPO_DIR}/.env" ]]; then
@@ -501,7 +525,13 @@ if ! ${SKIP_DOCKER}; then
         start_selected_service() {
             local service="$1"
             log "arrancando Docker ${service}"
-            run docker compose -f "${COMPOSE_FILE}" up -d --no-deps "${service}"
+            if ${STARTUP_ONLY}; then
+                # En el arranque de la Raspberry no consultar registros remotos:
+                # usar sólo imágenes ya presentes y comunicar si falta alguna.
+                run docker compose -f "${COMPOSE_FILE}" up -d --no-deps --pull never "${service}"
+            else
+                run docker compose -f "${COMPOSE_FILE}" up -d --no-deps "${service}"
+            fi
             wait_service_running "${service}" "${service_start_timeout_seconds}"
         }
 
