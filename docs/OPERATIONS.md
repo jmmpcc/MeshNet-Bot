@@ -327,3 +327,30 @@ siendo errores: no se ocultan ni se marcan como exitosos.
 politicas `restart` al arrancar el daemon. La unidad adicional es idempotente:
 `docker compose up -d` reconcilia servicios existentes y garantiza la
 seleccion declarada en `.env`. No instalar una segunda unidad equivalente.
+
+## Correo ↔ malla opcional: `email-to-mesh`
+
+La pasarela `email-to-mesh` está definida en `docker-compose.rpi.yml`,
+depende de `broker`, utiliza la imagen
+`ghcr.io/jmmpcc/meshnet-bot-broker:latest` y comparte el espacio de red
+del broker (`network_mode: service:broker`). Es normal que
+`meshnet-email-to-mesh` no aparezca en `docker ps` si no se habilitó.
+
+Para habilitarla sin arrancar otros servicios: configurar las variables
+`EMAIL_*` en `.env`, añadir `email-to-mesh` a la lista **existente**
+de `MESHNET_DOCKER_SERVICES`, comprobar que `broker` está activo y ejecutar:
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+docker compose -f docker-compose.rpi.yml up -d --no-deps email-to-mesh
+docker compose -f docker-compose.rpi.yml ps broker email-to-mesh
+docker logs --tail 60 meshnet-email-to-mesh
+```
+
+Para detener solo correo:
+`docker compose -f docker-compose.rpi.yml stop email-to-mesh`.
+El arranque automático dependerá de la selección configurada en
+`MESHNET_DOCKER_SERVICES`. La documentación de IMAP, SMTP,
+encaminamiento `[chN]`/`[chN]M`, libreta de contactos, ejemplos,
+persistencia y resolución de errores está en
+**[docs/EMAIL_TO_MESH.md](EMAIL_TO_MESH.md)**, apartado 11.
