@@ -125,12 +125,19 @@ else
         log "DRY-RUN sin --from/--to: no se ejecuta git pull; se analizará HEAD..HEAD"
         NEW_COMMIT="${OLD_COMMIT}"
     else
+        # Los cambios locales versionados (por ejemplo, desarrollos en curso
+        # de MeshNet Mobile) impiden actualizar Git sin riesgo de sobrescribir
+        # trabajo. Se omite sólo git pull: el arranque y la actualización Docker
+        # continúan usando la configuración .env y el checkout actual.
         if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
-            die "hay cambios locales versionados; no se ejecutará git pull"
+            log "AVISO: hay cambios locales versionados; se conserva el checkout y se omite git pull"
+            log "AVISO: se continuará con Docker sin modificar los archivos locales"
+            NEW_COMMIT="${OLD_COMMIT}"
+        else
+            log "actualizando checkout con git pull --ff-only"
+            git pull --ff-only
+            NEW_COMMIT="$(git rev-parse HEAD)"
         fi
-        log "actualizando checkout con git pull --ff-only"
-        git pull --ff-only
-        NEW_COMMIT="$(git rev-parse HEAD)"
     fi
 fi
 
