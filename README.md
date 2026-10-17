@@ -51,6 +51,8 @@ Para habilitarla, conservar los servicios actuales de `.env` y agregar
 remitentes autorizados y, si se desea envío, SMTP. Ver la
 **[guía Docker completa con ejemplos, pruebas y solución de problemas](docs/EMAIL_TO_MESH.md#11-instalación-y-puesta-en-marcha-docker-raspberry-pi)**.
 
+La administración desde Telegram está explicada en la **[guía paso a paso de comandos `/mail*`](docs/EMAIL_TO_MESH.md#12-guía-detallada-de-telegram-contactos-y-comandos-mail)**: alta, listado, edición, borrado, envío, respuestas y errores.
+
 Ejemplos desde la malla: `[mail] lista`, `[mail] contacto mensaje`.
 Los asuntos entrantes `[ch3] Aviso` y `[ch2]M Aviso` enrutan a
 Meshtastic y MeshCore respectivamente.

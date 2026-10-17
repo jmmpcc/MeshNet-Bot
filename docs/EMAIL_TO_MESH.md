@@ -751,3 +751,245 @@ archivo Compose usar los comandos explícitos de esta sección.
 `docker compose -f docker-compose.rpi.yml stop email-to-mesh`.
 Eliminarlo de la selección de arranque **no detiene por sí solo** un
 contenedor que ya estaba ejecutándose.
+
+## 12. Guía detallada de Telegram: contactos y comandos `/mail*`
+
+Los cinco comandos siguientes están registrados en
+`source/Telegram_Bot_Broker.py` y utilizan las mismas funciones y agenda
+que la CLI y la malla (`source/email_to_mesh.py`). Los ejemplos emplean
+**direcciones ficticias**; sustitúyalas por contactos propios autorizados.
+
+### 12.1. Requisitos antes de utilizar Telegram
+
+1. Tener `meshnet-bot` activo y el acceso habitual al bot de Telegram.
+2. Configurar correctamente SMTP en el `.env` que consume **el bot**:
+   `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`, `EMAIL_SMTP_SSL`,
+   `EMAIL_SMTP_STARTTLS`, `EMAIL_SMTP_USER`,
+   `EMAIL_SMTP_PASSWORD` y `EMAIL_FROM`.
+3. Mantener compartida la ruta
+   `EMAIL_CONTACTS_PATH=/app/bot_data/email_contacts.json` mediante el
+   volumen `./bot_data:/app/bot_data:rw`. La agenda se guarda en disco y
+   no se pierde por reiniciar el contenedor.
+4. Usar preferiblemente un chat privado y un usuario autorizado en la
+   configuración general del bot. **No publicar datos de contacto ni
+   credenciales en grupos abiertos.**
+
+**Importante:** los comandos de Telegram operan sobre el bot y su biblioteca
+Python; **el contenedor independiente `email-to-mesh` no tiene que estar
+arrancado para gestionar contactos o enviar por SMTP desde Telegram**.
+Ese contenedor se usa para la vigilancia IMAP y el reenvío correo → malla.
+El correo saliente necesita conectividad SMTP desde `meshnet-bot`.
+
+### 12.2. Tabla de comandos
+
+| Comando Telegram | Uso | Resultado |
+|---|---|---|
+| `/mail_contactos` | Mostrar agenda | Contactos numerados y sus alias |
+| `/mail_add <alias> <correo>` | Alta o actualización de alias | Guarda contacto; si existe, sustituye su dirección |
+| `/mail_edit <alias_o_numero> <correo>` | Cambiar dirección | Conserva el nombre del contacto |
+| `/mail_del <alias_o_numero>` | Borrar contacto | Elimina la entrada de la agenda compartida |
+| `/mail <alias_o_numero> <mensaje>` | Enviar correo SMTP | Envía el texto al correo del contacto |
+
+Los comandos se escriben **en el chat con el bot de Telegram**; no son
+comandos de shell ni deben copiarse con el prefijo `docker`.
+
+### 12.3. Alta de contactos: `/mail_add`
+
+**Sintaxis:**
+
+```text
+/mail_add alias correo@dominio
+```
+
+Ejemplos:
+
+```text
+/mail_add soporte soporte@example.org
+/mail_add casa casa@example.org
+/mail_add emergencias operador@example.org
+```
+
+Respuesta de ejemplo, según el código actual:
+
+```text
+OK añadido/actualizado: soporte <soporte@example.org> [soporte]
+```
+
+El alias debe escribirse como un solo argumento, sin espacios. La función
+normaliza internamente la clave del contacto. Si el alias ya existe,
+`/mail_add` actualiza su dirección: no crea necesariamente otro contacto.
+Para corregir una dirección existente también puede utilizarse
+`/mail_edit`.
+
+### 12.4. Ver la agenda: `/mail_contactos`
+
+Enviar:
+
+```text
+/mail_contactos
+```
+
+Respuesta ilustrativa:
+
+```text
+Contactos de correo:
+1. casa <casa@example.org> [casa]
+2. emergencias <operador@example.org> [emergencias]
+3. soporte <soporte@example.org> [soporte]
+```
+
+La numeración se calcula al listar por orden de clave, **no es un
+identificador permanente**: puede cambiar al añadir o eliminar contactos.
+Antes de usar un número, consultar otra vez `/mail_contactos`.
+Si no existen contactos, la respuesta es
+`No hay contactos de correo guardados.`.
+
+### 12.5. Modificar direcciones: `/mail_edit`
+
+**Sintaxis:**
+
+```text
+/mail_edit alias_o_numero nuevo@dominio
+```
+
+Ejemplos:
+
+```text
+/mail_edit soporte asistencia@example.org
+/mail_edit 1 domicilio@example.org
+```
+
+Respuesta ilustrativa:
+
+```text
+OK editado: soporte <asistencia@example.org> [soporte]
+```
+
+El comando modifica la dirección del contacto encontrado. Admite alias
+exacto, número de la lista y prefijo si identifica un único contacto.
+**No cambia el alias.** Si el prefijo coincide con varios contactos, el
+bot mostrará un error de contacto ambiguo; utilizar el nombre completo.
+Si se introduce un número inexistente, responderá con error.
+
+### 12.6. Eliminar contactos: `/mail_del`
+
+**Sintaxis:**
+
+```text
+/mail_del alias_o_numero
+```
+
+Ejemplos:
+
+```text
+/mail_del emergencias
+/mail_del 2
+```
+
+Respuesta ilustrativa:
+
+```text
+OK eliminado: emergencias <operador@example.org> [emergencias]
+```
+
+**Advertencia:** el comando actual elimina el contacto directamente;
+no dispone de diálogo de confirmación. Es preferible borrar por alias
+completo y comprobar después con `/mail_contactos`. La eliminación
+afecta a la agenda compartida que también utilizan la CLI y la malla.
+
+### 12.7. Enviar mensajes por correo: `/mail`
+
+**Sintaxis:**
+
+```text
+/mail alias_o_numero Texto completo del correo
+```
+
+Ejemplos:
+
+```text
+/mail soporte La pasarela MeshNet está operativa.
+/mail casa Llegaré más tarde de lo previsto.
+/mail 3 Prueba de envío a mi tercer contacto.
+```
+
+El primer argumento identifica al contacto; todas las palabras restantes
+forman el cuerpo del mensaje. En el código actual se construye un mensaje
+SMTP de texto y se genera automáticamente el asunto a partir de
+`EMAIL_OUT_SUBJECT_PREFIX` y del origen Telegram. El usuario no proporciona
+un asunto independiente mediante `/mail`.
+
+Si el servidor SMTP acepta el envío, el bot responde, por ejemplo:
+
+```text
+Correo enviado a soporte <soporte@example.org>.
+```
+
+Esa respuesta confirma la aceptación por el servidor SMTP, **no** que el
+destinatario lo haya leído o que su buzón finalmente lo haya entregado.
+
+### 12.8. Ejercicio completo, desde cero
+
+En un chat autorizado con el bot:
+
+```text
+/mail_add pruebas pruebas@example.org
+/mail_contactos
+/mail pruebas Prueba de correo desde Telegram con MeshNet-Bot.
+/mail_edit pruebas pruebas-nuevas@example.org
+/mail_contactos
+/mail pruebas Segundo mensaje con la dirección actualizada.
+/mail_del pruebas
+/mail_contactos
+```
+
+Para evitar enviar mensajes a terceros, utilizar dos buzones controlados
+por el operador, o un único buzón de pruebas. **No ejecutar la secuencia
+completa con contactos reales de Emergencias.**
+
+### 12.9. Errores comunes y comprobaciones
+
+| Síntoma | Causa habitual | Acción |
+|---|---|---|
+| Aparece `Uso: /mail_add contacto correo@dominio` | Faltan argumentos | Escribir alias y dirección |
+| Aparece `Uso: /mail_edit contacto_o_numero nuevo@correo` | Faltan argumentos | Añadir contacto y nueva dirección |
+| Aparece `Uso: /mail_del contacto_o_numero` | Falta identificador | Consultar `/mail_contactos` |
+| Aparece `Uso: /mail contacto_o_numero texto mensaje` | Falta identificador o mensaje | Añadir destinatario y texto |
+| `Error: contacto no encontrado` | Alias o número incorrecto | Consultar `/mail_contactos` |
+| `Error: contacto ambiguo` | Prefijo coincide con varios | Utilizar alias completo |
+| `Error: faltan variables SMTP` | Faltan parámetros SMTP en el entorno del bot | Revisar `.env` y recrear solo `bot` si cambió el entorno |
+| El mensaje no llega | Autenticación, TLS, spam o rechazo de SMTP | Revisar registros y configuración SMTP |
+
+Diagnóstico de solo lectura en la Raspberry, sin mostrar las credenciales:
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+docker compose -f docker-compose.rpi.yml ps bot
+docker logs --since 15m --tail 100 meshnet-bot
+test -f bot_data/email_contacts.json && echo "Agenda presente" || echo "Agenda ausente"
+```
+
+Para comprobar **qué variables están definidas sin revelar sus valores**:
+
+```bash
+docker exec meshnet-bot python -c '
+import os
+keys = ("EMAIL_SMTP_HOST", "EMAIL_SMTP_USER", "EMAIL_SMTP_PASSWORD",
+        "EMAIL_FROM", "EMAIL_CONTACTS_PATH")
+for key in keys:
+    print("{}: {}".format(key, "definida" if os.getenv(key) else "no definida"))
+'
+```
+
+Si se modifica `.env` en una instalación operativa, los cambios no se
+inyectan automáticamente en un contenedor ya creado: seguir el procedimiento
+de actualización de `docs/OPERATIONS.md`, limitado al servicio afectado.
+
+### 12.10. Notas sobre permisos
+
+El código registra los cinco comandos y las funciones aquí descritas,
+pero **esta guía no presupone que exista una autorización específica e
+independiente para cada comando `/mail*`**. La protección efectiva depende
+también del control general de acceso y de dónde puedan interactuar los
+usuarios con el bot. En un despliegue multiusuario, comprobar esas reglas
+antes de dar acceso a la administración de contactos.
