@@ -39,6 +39,22 @@ Las antiguas unidades systemd de Farmacias/Emergencias se mantienen únicamente 
 | [tools/emergencias_guardia/README.md](tools/emergencias_guardia/README.md) | Emergencias |
 | [docs/README.md](docs/README.md) | Índice documental completo |
 
+## Correo electrónico ↔ malla: Docker `email-to-mesh`
+
+La pasarela opcional `meshnet-email-to-mesh` permite reenviar asuntos
+autorizados de IMAP a Meshtastic/MeshCore y enviar correo SMTP desde
+la malla, Telegram o CLI. Utiliza **la imagen GHCR del broker** y
+comparte su espacio de red; no necesita una imagen independiente.
+
+Para habilitarla, conservar los servicios actuales de `.env` y agregar
+`email-to-mesh` a `MESHNET_DOCKER_SERVICES`. Configurar IMAP,
+remitentes autorizados y, si se desea envío, SMTP. Ver la
+**[guía Docker completa con ejemplos, pruebas y solución de problemas](docs/EMAIL_TO_MESH.md#11-instalación-y-puesta-en-marcha-docker-raspberry-pi)**.
+
+Ejemplos desde la malla: `[mail] lista`, `[mail] contacto mensaje`.
+Los asuntos entrantes `[ch3] Aviso` y `[ch2]M Aviso` enrutan a
+Meshtastic y MeshCore respectivamente.
+
 ## Instalación base
 
 ```bash
