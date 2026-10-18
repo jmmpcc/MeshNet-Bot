@@ -1,0 +1,308 @@
+# MeshCore 2.3.17 — validación, despliegue y reversión (DRAFT)
+
+> **NO EJECUTAR EL DESPLIEGUE EN PRODUCCIÓN** mientras el PR #214 siga en Draft.
+> Este documento es un procedimiento condicionado a la aprobación de las pruebas,
+> no una instrucción de actualización inmediata.
+
+## Alcance técnico real (revisado en main)
+
+- `docker-compose.rpi.yml`: `broker` usa `ghcr.io/jmmpcc/meshnet-bot-broker:latest`.
+- `bot` y `aprs` usan `network_mode: service:broker`; recrear el broker puede
+  requerir recrear ordenadamente ambos servicios para restablecer su namespace.
+- `email-to-mesh` **comparte la misma imagen del broker** y su namespace de red.
+- `farmacias`, `farmacias-check`, `farmacias-daily`,
+  `emergencias` y `emergencias-check` tienen imágenes independientes y
+  perfiles Compose distintos, pero dependen funcionalmente de `broker`.
+- `.github/workflows/build-ghcr.yml` activa reconstrucción de **todas** las
+  imágenes cuando cambian archivos de `requirements/`. Se debe auditar la
+  publicación de imágenes aunque el cambio en código sea pequeño.
+- `scripts/update_meshnet.sh` es el procedimiento oficial de arranque secuencial.
+  No usar `docker compose up -d` sin lista explícita de servicios y nunca
+  `docker compose down -v`.
+
+## Resultado de los ensayos offline (18 octubre 2026)
+
+- API y Python 3.11/3.13 compatibles con `meshcore==2.3.17`.
+- Comparación A/B de TRACE: ruta dirigida mantiene el paquete de 12 bytes;
+  ruta vacía produce 11 bytes en 2.3.17 frente a 10 en 2.2.31.
+- `trace_contact()`: cuatro escenarios simulados pasan en ambos SDK.
+- `MeshcorePacketParser.parsePacketPayload()`: anuncio incompleto (100 bytes)
+  no propaga `IndexError`; anuncio válido (101 bytes) conserva sus campos.
+- Test del PR: **5 passed, 10 subtests passed**.
+- Selección de regresión del broker: **49 passed, 10 subtests passed**.
+- La suite general NO está certificada como completamente verde: existen
+  fallos anteriores en otras áreas y restricciones del Python de test.
+- **No** se ha validado todavía la respuesta real `PATH_RESPONSE`/
+  `TRACE_DATA`, ni SNR por repetidor en la radio.
+
+## Preflight de solo lectura en Raspberry
+
+Desde `/home/meshnet/MeshNet-Bot`:
+
+```bash
+set -euo pipefail
+pwd
+git status --short
+docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+for name in meshnet-broker meshnet-bot meshnet-aprs meshnet-email-to-mesh \
+    meshnet-farmacias meshnet-emergencias; do
+  docker inspect "$name" --format \
+    '{{.Name}} image_id={{.Image}} status={{.State.Status}} restarts={{.RestartCount}}' \
+    2>/dev/null || true
+done
+docker exec meshnet-broker python -m pip show meshcore | grep '^Version:'
+docker compose -f docker-compose.rpi.yml config --services
+systemctl is-enabled meshnet-docker-start.service || true
+```
+
+Confirmar los servicios realmente activos y guardar un inventario con fecha.
+**No registrar ni publicar el contenido de `.env`**, que contiene secretos.
+
+## Validación de imagen derivada de producción (18 octubre 2026, 22:35 CEST)
+
+En la Raspberry `meshnetwifi`, sin detener los ocho contenedores activos:
+
+- Imagen base productiva: `sha256:1ee5980797afe2325a156fda62e8250d1bdb26b25db1733fbd3b080f37c055cb`; `meshcore==2.2.31`.
+- Copia local de rollback: `meshnet-backup:broker-pre-2317-20261018`. También etiquetadas las imágenes reales de Bot, APRS, Farmacias y Emergencias.
+- Imagen derivada: `meshnet-broker:meshcore-2317-prod-candidate`, creada con `FROM meshnet-backup:broker-pre-2317-20261018`, instalación exclusiva de `meshcore==2.3.17`, `pip check` y smoke imports.
+- Hash SHA256 de `/app/source/Meshtastic_Broker.py` coincidente en productivo y candidata: `ce725cd007e3f29c37ab86bd2007764508a19b3a02d998c450aa6eb3dc90bd4a`.
+- `pip freeze` (productivo versus candidata): **única diferencia `meshcore==2.2.31` → `meshcore==2.3.17`**; sin modificaciones transitivas.
+
+- Comparación adicional de integridad: SHA256 de todos los archivos regulares de `/app/source`, `/app/tools` y entrypoints de `/usr/local/bin` idénticos entre imagen productiva y candidata. Broker permaneció `running`, reinicios 0.
+- Suite de contrato offline sobre la candidata derivada de producción: **5/5 tests OK** mediante `unittest`.
+- Regresión ampliada sobre la imagen previa de pruebas: **49 passed, 10 subtests passed**.
+- Broker productivo: `running`, reinicios 0, versión 2.2.31. Los ocho servicios activos mantienen su ejecución. `email-to-mesh` no figuraba entre los contenedores activos.
+- Almacenamiento antes de crear la candidata: 46 GB libres en `/`.
+
+**Alcance de la evidencia:** las cinco pruebas se han repetido en la candidata productiva. Las 49 pruebas ampliadas se ejecutaron en la imagen `meshcore-2317-pytest-full`, no todavía en la candidata nueva. Coincidencia del archivo principal y de `pip freeze` no implica por sí sola identidad de todos los archivos de la imagen. Sigue pendiente integración con la sesión MeshCore real y confirmación funcional de los servicios dependientes.
+
+## Inventario del namespace de red y arranque (18 octubre 2026)
+
+Comprobado en Raspberry, sin alterar contenedores:
+
+- `meshnet-broker`: red `meshnet-bot_default`, reinicio `unless-stopped`.
+- `meshnet-bot` y `meshnet-aprs`: `HostConfig.NetworkMode=container:<ID broker actual>`; reinicios `on-failure` y `unless-stopped`, respectivamente. Deben recrearse al sustituir el broker, pues el ID cambia.
+- Farmacias (API/check/daily) y Emergencias (API/check): misma red Compose normal, `unless-stopped`. No recrearlas durante el experimento salvo incidencia comprobada.
+- `meshnet-docker-start.service`: `enabled`, `active`; se ejecuta como unit de arranque secuencial. Evitar arranques concurrentes durante ventana de mantenimiento.
+- Imagen candidata: `sha256:2df65e66ac52ee1b14d3fe0e0108b97ed3c7143779c07a2411d2d858b235004c`.
+- Override temporal `/tmp/meshcore-2317-candidate.override.yml`: `docker compose ... config --quiet` correcto. Únicamente broker apunta a la candidata; el resto conserva sus imágenes.
+- `email-to-mesh` no está activo; **no** incluirlo en la selección de servicios de la prueba.
+
+**Secuencia prevista, no ejecutada**: verificar la configuración efectiva y los backups; detener Bot/APRS de forma ordenada; sustituir broker con override ya validado; recrear Bot/APRS contra el broker nuevo; comprobar capacidades y servicios dependientes; en regresión, restaurar imagen del broker original y recrear nuevamente Bot/APRS para reenganchar su namespace. Evitar `docker compose up` general, `down -v` y cualquier segunda sesión MeshCore. Preparar comando de reversión y criterios de parada antes de operar.
+
+## Ensayo Compose dry-run (18 octubre 2026)
+
+En Raspberry, `docker compose version` indica **v5.1.4**. Con el override temporal de la candidata:
+
+```bash
+docker compose --dry-run \
+  -f docker-compose.rpi.yml \
+  -f /tmp/meshcore-2317-candidate.override.yml \
+  up -d --no-deps --pull never broker bot aprs
+```
+
+Resultado simulado: `meshnet-broker`, `meshnet-bot` y `meshnet-aprs` recreados e iniciados; ninguno de los cinco contenedores de Farmacias/Emergencias ni `email-to-mesh` aparece seleccionado. **Dry-run no implica que el despliegue ni sus comprobaciones funcionales se hayan ejecutado.** Preparar y verificar el override de recuperación y la ventana de mantenimiento antes de cualquier `up` real.
+
+## Verificación del override de recuperación (18 octubre 2026)
+
+Se creó `/tmp/meshcore-2317-rollback.override.yml` con el servicio `broker`
+apuntando a `meshnet-backup:broker-pre-2317-20261018`.
+
+- `docker compose ... config --quiet`: correcto.
+- `docker image inspect`: referencia exactamente la imagen productiva
+  `sha256:1ee5980797afe2325a156fda62e8250d1bdb26b25db1733fbd3b080f37c055cb`.
+- `docker compose --dry-run ... up -d --no-deps --pull never broker bot aprs`:
+  emite `Recreated` y `Started` para los tres servicios.
+- Verificación posterior: broker `running`, cero reinicios, `meshcore==2.2.31`.
+
+**Interpretación:** el dry-run no prueba una recuperación efectiva desde 2.3.17,
+ni demuestra recreación real de los contenedores. La validación de rollback
+operativo queda pendiente de una ventana de mantenimiento y verificaciones
+funcionales de broker, Telegram, APRS, BBS y servicios auxiliares.
+
+## Línea base de salud productiva (18 octubre 2026, 22:52:33 CEST)
+
+Resultados aportados desde Raspberry **antes de cualquier sustitución real**:
+
+- Ocho contenedores `running`, sin reinicios observados: broker, bot, aprs,
+  farmacias, farmacias-check, farmacias-daily, emergencias y emergencias-check.
+- Broker original: `sha256:1ee5980797afe2325a156fda62e8250d1bdb26b25db1733fbd3b080f37c055cb`;
+  `meshcore==2.2.31`.
+- Bot original: `sha256:1f42873dc6db4b5bc949293adcfbdd5c9e259c9d4938b1e0038e81af98632fa9`.
+- APRS original: `sha256:7618b52b09b050af968db59b0586199b3adbd295266f8177c84e5b86452df696`.
+- Farmacias `http://127.0.0.1:8788/health`: `ok:true`, actualización
+  `2026-10-18T20:06:19.335620+02:00`.
+- Emergencias `http://127.0.0.1:8789/health`: `ok:true`.
+  DGT `accepted:45` (`records:700`); IGN `accepted:2` (`records:17`);
+  municipal `accepted:47` (`records:53`); NASA FIRMS `accepted:0`
+  (`records:21`) y `ok:true`. AEMET CAP y CHE SAIH deshabilitados.
+  Respuesta `last_success:2026-10-18T20:41:52.816121+00:00` para las fuentes activas.
+- Control Panel `http://127.0.0.1:8790/health`: `ok:true`, versión 1.0.0,
+  dos herramientas registradas y habilitadas, `authentication:false`.
+- Copias locales con etiquetas de referencia verificadas para las cinco imágenes
+  de broker, bot, APRS, Farmacias y Emergencias.
+- `email-to-mesh` no está entre los contenedores activos.
+
+**Limitación:** HTTP 200/`ok:true` y `running` no prueban por sí mismos entrega
+por radio, salud del BBS, funcionamiento real de comandos Telegram ni entrega
+APRS. Estos aspectos requieren comprobación durante la ventana controlada.
+
+**Gate operativo restante:** revisión y aprobación explícita de la interrupción,
+ejecución controlada de despliegue 2.3.17 y recuperación 2.2.31 preparada,
+con validación funcional y observación posterior de errores de lectura.
+No interpretar una ausencia temporal de `IndexError` como corrección RF concluyente
+sin volumen representativo de tráfico.
+
+## Prueba real inicial de MeshCore 2.3.17 (18 octubre 2026)
+
+Tras desplegar la imagen `meshnet-broker:meshcore-2317-prod-candidate`
+mediante el procedimiento de mantenimiento autorizado, el usuario reporta:
+
+- `docker exec meshnet-broker python -m pip show meshcore`: **Version: 2.3.17**.
+- `docker ps`: `meshnet-broker` Up 44 segundos, `meshnet-bot` y
+  `meshnet-aprs` Up 43 segundos.
+- Permanecen activos los cinco contenedores de Farmacias y Emergencias,
+  con una antigüedad cercana a nueve horas (no recreados).
+- `docker logs --since 5m meshnet-broker`: sin coincidencias con
+  `Task exception was never retrieved`, `IndexError` ni `Traceback`.
+  **Esto es una muestra muy breve; todavía no demuestra la resolución
+  definitiva del error de recepción RF**.
+- `GET /health` Farmacias (8788): `ok:true`, timestamp de datos
+  `2026-10-18T20:06:19.335620+02:00`.
+- `GET /health` Emergencias (8789): `ok:true`, fuentes activas
+  DGT/IGN/municipal/NASA con el mismo resumen que antes del despliegue;
+  AEMET/CHE permanecen deshabilitadas. Estos datos de salud **no
+  acreditan todavía nuevas ingestas o entregas**.
+- Quedan pendientes las pruebas funcionales de Bot Telegram, BBS,
+  APRS, consultas de Farmacias/Emergencias a través del broker,
+  estabilidad de conexión MeshCore y recepción RF/trazas.
+
+**El despliegue inicial ha superado las comprobaciones aportadas,
+pero el PR permanece Draft y la integración aún no se da por finalizada.**
+
+## APRS tras la prueba real: conexión recuperada y configuración heredada
+
+Registros del 18 octubre 2026 a las 22:57 CEST:
+
+- `broker→aprs`: dos `ConnectionRefusedError` transitorios a
+  `127.0.0.1:8765`; conectado a las 22:57:22.
+- `mesh→IS push`: rechazos transitorios; conectado a las 22:57:23.
+- Puerto `127.0.0.1:8765`: abierto.
+- Broker/Bot/APRS `running` y reinicios 0.
+- `mesh→IS push` informa `cfg channels=all -> NONE`.
+- Configuración efectiva: `RADIO_PROFILE=meshcore_only`,
+  `APRSIS_PUSH_ENABLED=1`, `APRSIS_PUSH_CHANNELS=all`.
+
+Revisión de `source/meshtastic_to_aprs.py` en GitHub:
+`_parse_push_channel_config("all")` devuelve `{}` para
+`meshcore_only`; `task` de mirror omite mensajes cuyo transporte no figure
+en el diccionario. La sintaxis explícita permitida es
+`APRSIS_PUSH_CHANNELS=meshcore <canales>` o `meshcore all`.
+
+**No se ha modificado APRSIS_PUSH_CHANNELS durante la actualización.**
+Este valor es una configuración heredada no apta para el mirror de
+`meshcore_only` y **no constituye por sí solo regresión del SDK**.
+No autorizar emisión a APRS-IS de todos los canales sin definir los
+canales publicables y comprobar la configuración efectiva del destinatario.
+Las funciones APRS ajenas al mirror tienen flujos independientes.
+
+## Tráfico MeshCore confirmado en APRS (18 octubre 2026, 23:02 CEST)
+
+- `meshnet-aprs` informa `[mesh→IS push] skip transport=meshcore ch=1 (cfg=NONE)`.
+- Confirma que el flujo broker→gateway procesa eventos de canal MeshCore y
+  reconoce el transporte y canal. **No equivale a confirmar entrega a APRS-IS**.
+- El usuario decide **mantener APRS-IS sin cambios** por ahora:
+  `RADIO_PROFILE=meshcore_only`,
+  `APRSIS_PUSH_ENABLED=1`,
+  `APRSIS_PUSH_CHANNELS=all`.
+- Queda expresamente pospuesto cualquier cambio a `APRSIS_PUSH_CHANNELS`;
+  no debe introducirse una modificación de ese ajuste en este PR.
+
+## Validación funcional BBS con radio real (18 octubre 2026)
+
+El usuario confirma que el BBS responde correctamente a la prueba mediante
+companion MeshCore con SDK 2.3.17 desplegado. Esto acredita funcionamiento
+real del flujo de consulta/respuesta BBS por MeshCore, sin implicar que se
+hayan validado todas las operaciones BBS ni el resto de subsistemas.
+Pendiente: Telegram, pruebas de trazas reales, SNR por salto y observación
+prolongada de anuncios incompletos.
+
+## Resultado de descubrimiento RF sobre SDK 2.3.17 (18 octubre 2026)
+
+Prueba de una sola solicitud desde el control JSONL del broker existente
+(`MESHCORE_TRACE_PATH`, `contact_prefix=cfe25e30b3ec`,
+`discover=true`, `timeout=20`), sin abrir una segunda conexión al
+companion. Respuesta:
+
+```json
+{"ok": false, "error": "meshcore_trace_failed: RuntimeError: meshcore_trace_failed: RuntimeError: meshcore_path_discovery_no_response"}
+```
+
+La petición alcanzó la función de traza del motor MeshCore, pero **no llegó
+`PATH_RESPONSE`**; no existe `TRACE_DATA`, ruta ni SNR nuevos que validar.
+En la versión 2.2.31 ya se había observado `meshcore_path_discovery_no_response`
+sobre ese mismo repetidor. **No declarar el descubrimiento reparado ni atribuir
+su ausencia al nuevo SDK sin evidencia adicional.** Mantener el análisis de
+trazas reales como trabajo independiente posterior; no bloquear por sí solo la
+fijación del SDK si los demás contratos operativos permanecen correctos.
+
+Por decisión del usuario, el HTTP 503 del WebPanel y la saturación del
+BacklogServer (24/24 clientes, rechazos controlados) también se investigarán
+después. No se altera `APRSIS_PUSH_CHANNELS=all`, ni el resto del entorno.
+
+**Estado de decisión:** candidato probado en producción; fusión/publicación
+autorizadas por el usuario, con los problemas de WebPanel y descubrimiento
+registrados como pendientes, no como pruebas superadas.
+
+## Gates previos a la aprobación
+
+1. Ejecutar CI y builds correspondientes sobre commit exacto del PR;
+   el workflow GHCR habitual publica en `main`, no en Draft PR.
+2. Identificar y conservar por *image ID* todas las imágenes actualmente
+   utilizadas, no confiar exclusivamente en una etiqueta `:latest` mutable.
+3. Disponer de backups verificados de `.env` y `bot_data`, con permisos y
+   restauración comprobados; nunca reemplazar datos persistentes para probar SDK.
+4. Comprobar `docker compose config` con los perfiles efectivos y revisar
+   `MESHNET_DOCKER_SERVICES`.
+5. Probar integración offline de broker, bot, BBS, email-to-mesh, Farmacias,
+   Emergencias y APRS sin conexiones adicionales al dispositivo.
+6. Programar ventana de mantenimiento y registrar plan de reversión;
+   informar del breve corte posible del broker y dependientes.
+
+## Despliegue controlado (solo tras aprobación)
+
+- Seleccionar la nueva imagen **por digest o etiqueta inmutable probada**.
+  Evitar actualizar a ciegas un `:latest` nuevo.
+- Fijar previamente una etiqueta local de respaldo al *image ID* productivo
+  y comprobar que persiste tras descargar nuevas imágenes.
+- Preparar un fichero Compose de override temporal, revisado con
+  `docker compose -f docker-compose.rpi.yml -f OVERRIDE config`,
+  sin sobrescribir el compose ni el `.env` operativos.
+- Orquestar mediante el arranque secuencial del proyecto y las dependencias
+  comprobadas. No ejecutar `docker run` de un segundo broker que pueda
+  abrir otra sesión MeshCore con el mismo dispositivo.
+- Verificar el estado del broker y de los contenedores dependientes, consulta
+  de farmacias/emergencias, Telegram, BBS, APRS y correo.
+- Evaluar `PATH_RESPONSE` y `TRACE_DATA` en una única conexión; registrar
+  `SNR` únicamente cuando un salto quede identificado inequívocamente.
+
+## Reversión (solo tras preparar y verificar el plan exacto)
+
+- Mantener la imagen antigua accesible por etiqueta local inmutable.
+- Ante regresión, detener/recrear **ordenadamente** el broker y servicios que
+  comparten su namespace de red; no ejecutar `docker compose down -v`.
+- Seleccionar la imagen anterior mediante el override probado y verificar que
+  `pip show meshcore` vuelve a `2.2.31`.
+- Verificar canales, DM, BBS, APRS, email-to-mesh, Farmacias y Emergencias.
+- **No** hacer `git reset --hard`, `git clean`, `git pull` forzado,
+  ni modificar ficheros locales de trabajo.
+- Preservar volúmenes, logs y evidencia para diagnóstico.
+
+## Problemas ajenos al SDK
+
+Los errores conocidos de la suite general en Farmacias, Emergencias y
+AutoReply se investigan en sus contextos de ejecución correctos; no forman
+parte de este cambio. El fallo de `reader.py` en 2.2.31 se ha asociado
+con anuncios incompletos y cuenta con regresión sintética en 2.3.17.
+
+**Estado: validación de SDK suficiente para fusión autorizada; quedan abiertas las limitaciones de trazas RF, WebPanel y comprobaciones posteriores de imágenes GHCR.**
