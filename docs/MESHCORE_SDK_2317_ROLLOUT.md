@@ -218,6 +218,15 @@ Las funciones APRS ajenas al mirror tienen flujos independientes.
 - Queda expresamente pospuesto cualquier cambio a `APRSIS_PUSH_CHANNELS`;
   no debe introducirse una modificación de ese ajuste en este PR.
 
+## Validación funcional BBS con radio real (18 octubre 2026)
+
+El usuario confirma que el BBS responde correctamente a la prueba mediante
+companion MeshCore con SDK 2.3.17 desplegado. Esto acredita funcionamiento
+real del flujo de consulta/respuesta BBS por MeshCore, sin implicar que se
+hayan validado todas las operaciones BBS ni el resto de subsistemas.
+Pendiente: Telegram, pruebas de trazas reales, SNR por salto y observación
+prolongada de anuncios incompletos.
+
 ## Gates previos a la aprobación
 
 1. Ejecutar CI y builds correspondientes sobre commit exacto del PR;
