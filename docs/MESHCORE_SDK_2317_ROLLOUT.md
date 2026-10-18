@@ -103,6 +103,23 @@ docker compose --dry-run \
 
 Resultado simulado: `meshnet-broker`, `meshnet-bot` y `meshnet-aprs` recreados e iniciados; ninguno de los cinco contenedores de Farmacias/Emergencias ni `email-to-mesh` aparece seleccionado. **Dry-run no implica que el despliegue ni sus comprobaciones funcionales se hayan ejecutado.** Preparar y verificar el override de recuperación y la ventana de mantenimiento antes de cualquier `up` real.
 
+## Verificación del override de recuperación (18 octubre 2026)
+
+Se creó `/tmp/meshcore-2317-rollback.override.yml` con el servicio `broker`
+apuntando a `meshnet-backup:broker-pre-2317-20261018`.
+
+- `docker compose ... config --quiet`: correcto.
+- `docker image inspect`: referencia exactamente la imagen productiva
+  `sha256:1ee5980797afe2325a156fda62e8250d1bdb26b25db1733fbd3b080f37c055cb`.
+- `docker compose --dry-run ... up -d --no-deps --pull never broker bot aprs`:
+  emite `Recreated` y `Started` para los tres servicios.
+- Verificación posterior: broker `running`, cero reinicios, `meshcore==2.2.31`.
+
+**Interpretación:** el dry-run no prueba una recuperación efectiva desde 2.3.17,
+ni demuestra recreación real de los contenedores. La validación de rollback
+operativo queda pendiente de una ventana de mantenimiento y verificaciones
+funcionales de broker, Telegram, APRS, BBS y servicios auxiliares.
+
 ## Gates previos a la aprobación
 
 1. Ejecutar CI y builds correspondientes sobre commit exacto del PR;
