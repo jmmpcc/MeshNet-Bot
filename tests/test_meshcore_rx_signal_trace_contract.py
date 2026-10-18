@@ -169,13 +169,13 @@ def test_append_offline_log_preserves_meshcore_trace_metadata(tmp_path) -> None:
     assert row["rx_snr"] == 5.2
 
 
-def test_telegram_listener_surfaces_trace_url_without_changing_send_mode() -> None:
+def test_telegram_listener_keeps_repeater_names_without_coordinates_or_map_url() -> None:
     source = BOT.read_text(encoding="utf-8")
     assert 'pkt.get("meshcore_trace_url")' in source
-    assert '🗺 Ver traza en mapa: {mc_trace_url}' in source
+    assert 'detail_lines.append(f"   • 🗺 Ver traza en mapa:' not in source
+    assert 'r" pos -?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?"' in source
     assert 'pkt.get("meshcore_path_len")' in source
     assert "mc_path_count" in source
     assert "MeshCore repetidores" in source
-    # Se mantiene send_message sin introducir parse_mode, por lo que Telegram
-    # autoenlaza la URL y no cambia el escapado de mensajes ya existente.
+    # El envío de Telegram conserva el mismo modo de texto y escapado.
     assert "await context.bot.send_message(chat_id=chat_id, text=text_out)" in source
