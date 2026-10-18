@@ -76,6 +76,20 @@ En la Raspberry `meshnetwifi`, sin detener los ocho contenedores activos:
 
 **Alcance de la evidencia:** las cinco pruebas se han repetido en la candidata productiva. Las 49 pruebas ampliadas se ejecutaron en la imagen `meshcore-2317-pytest-full`, no todavía en la candidata nueva. Coincidencia del archivo principal y de `pip freeze` no implica por sí sola identidad de todos los archivos de la imagen. Sigue pendiente integración con la sesión MeshCore real y confirmación funcional de los servicios dependientes.
 
+## Inventario del namespace de red y arranque (18 octubre 2026)
+
+Comprobado en Raspberry, sin alterar contenedores:
+
+- `meshnet-broker`: red `meshnet-bot_default`, reinicio `unless-stopped`.
+- `meshnet-bot` y `meshnet-aprs`: `HostConfig.NetworkMode=container:<ID broker actual>`; reinicios `on-failure` y `unless-stopped`, respectivamente. Deben recrearse al sustituir el broker, pues el ID cambia.
+- Farmacias (API/check/daily) y Emergencias (API/check): misma red Compose normal, `unless-stopped`. No recrearlas durante el experimento salvo incidencia comprobada.
+- `meshnet-docker-start.service`: `enabled`, `active`; se ejecuta como unit de arranque secuencial. Evitar arranques concurrentes durante ventana de mantenimiento.
+- Imagen candidata: `sha256:2df65e66ac52ee1b14d3fe0e0108b97ed3c7143779c07a2411d2d858b235004c`.
+- Override temporal `/tmp/meshcore-2317-candidate.override.yml`: `docker compose ... config --quiet` correcto. Únicamente broker apunta a la candidata; el resto conserva sus imágenes.
+- `email-to-mesh` no está activo; **no** incluirlo en la selección de servicios de la prueba.
+
+**Secuencia prevista, no ejecutada**: verificar la configuración efectiva y los backups; detener Bot/APRS de forma ordenada; sustituir broker con override ya validado; recrear Bot/APRS contra el broker nuevo; comprobar capacidades y servicios dependientes; en regresión, restaurar imagen del broker original y recrear nuevamente Bot/APRS para reenganchar su namespace. Evitar `docker compose up` general, `down -v` y cualquier segunda sesión MeshCore. Preparar comando de reversión y criterios de parada antes de operar.
+
 ## Gates previos a la aprobación
 
 1. Ejecutar CI y builds correspondientes sobre commit exacto del PR;
