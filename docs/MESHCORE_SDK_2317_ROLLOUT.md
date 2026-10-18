@@ -67,6 +67,8 @@ En la Raspberry `meshnetwifi`, sin detener los ocho contenedores activos:
 - Imagen derivada: `meshnet-broker:meshcore-2317-prod-candidate`, creada con `FROM meshnet-backup:broker-pre-2317-20261018`, instalación exclusiva de `meshcore==2.3.17`, `pip check` y smoke imports.
 - Hash SHA256 de `/app/source/Meshtastic_Broker.py` coincidente en productivo y candidata: `ce725cd007e3f29c37ab86bd2007764508a19b3a02d998c450aa6eb3dc90bd4a`.
 - `pip freeze` (productivo versus candidata): **única diferencia `meshcore==2.2.31` → `meshcore==2.3.17`**; sin modificaciones transitivas.
+
+- Comparación adicional de integridad: SHA256 de todos los archivos regulares de `/app/source`, `/app/tools` y entrypoints de `/usr/local/bin` idénticos entre imagen productiva y candidata. Broker permaneció `running`, reinicios 0.
 - Suite de contrato offline sobre la candidata derivada de producción: **5/5 tests OK** mediante `unittest`.
 - Regresión ampliada sobre la imagen previa de pruebas: **49 passed, 10 subtests passed**.
 - Broker productivo: `running`, reinicios 0, versión 2.2.31. Los ocho servicios activos mantienen su ejecución. `email-to-mesh` no figuraba entre los contenedores activos.
