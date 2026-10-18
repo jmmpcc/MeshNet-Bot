@@ -68,5 +68,60 @@ class MeshCore2317ContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+
+class MeshCore2317AdvertisementTests(unittest.IsolatedAsyncioTestCase):
+    """Regresión RX_LOG_DATA para anuncios truncados y anuncios válidos.
+
+    La versión 2.2.31 lanzaba IndexError al extraer adv_flags
+    desde un paquete de anuncio que terminaba tras la firma.
+    Estas pruebas ejecutan el parser real, sin I/O de radio.
+    """
+
+    @staticmethod
+    def _rx_payload(advertisement: bytes) -> bytes:
+        """Construye un paquete Advert (tipo 4), ruta directa sin saltos."""
+        return bytes.fromhex("1100") + advertisement
+
+    @staticmethod
+    def _advertisement() -> bytes:
+        """Devuelve un anuncio sintético válido de longitud mínima 101 bytes."""
+        return (
+            bytes(range(32))
+            + (123456789).to_bytes(4, "little")
+            + bytes(range(64))
+            + bytes([0])
+        )
+
+    async def test_truncated_advertisement_does_not_raise(self) -> None:
+        """Si falta adv_flags, el parser no propaga IndexError ni inventa flags."""
+        from meshcore.meshcore_parser import MeshcorePacketParser
+
+        parser = MeshcorePacketParser()
+        incomplete = self._advertisement()[:-1]
+        self.assertEqual(len(incomplete), 100)
+        decoded = await parser.parsePacketPayload(self._rx_payload(incomplete), {})
+        self.assertEqual(decoded["payload_type"], 4)
+        self.assertNotIn("adv_flags", decoded)
+
+    async def test_valid_advertisement_after_truncated_one(self) -> None:
+        """La trama válida sigue conservando clave, fecha, firma y flags."""
+        from meshcore.meshcore_parser import MeshcorePacketParser
+
+        parser = MeshcorePacketParser()
+        await parser.parsePacketPayload(
+            self._rx_payload(self._advertisement()[:-1]), {}
+        )
+
+        complete = self._advertisement()
+        self.assertEqual(len(complete), 101)
+        decoded = await parser.parsePacketPayload(self._rx_payload(complete), {})
+        self.assertEqual(decoded["payload_type"], 4)
+        self.assertEqual(decoded["adv_key"], bytes(range(32)).hex())
+        self.assertEqual(decoded["adv_timestamp"], 123456789)
+        self.assertEqual(decoded["signature"], bytes(range(64)).hex())
+        self.assertEqual(decoded["adv_flags"], 0)
+        self.assertEqual(decoded["adv_type"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
