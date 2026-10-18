@@ -206,6 +206,18 @@ No autorizar emisión a APRS-IS de todos los canales sin definir los
 canales publicables y comprobar la configuración efectiva del destinatario.
 Las funciones APRS ajenas al mirror tienen flujos independientes.
 
+## Tráfico MeshCore confirmado en APRS (18 octubre 2026, 23:02 CEST)
+
+- `meshnet-aprs` informa `[mesh→IS push] skip transport=meshcore ch=1 (cfg=NONE)`.
+- Confirma que el flujo broker→gateway procesa eventos de canal MeshCore y
+  reconoce el transporte y canal. **No equivale a confirmar entrega a APRS-IS**.
+- El usuario decide **mantener APRS-IS sin cambios** por ahora:
+  `RADIO_PROFILE=meshcore_only`,
+  `APRSIS_PUSH_ENABLED=1`,
+  `APRSIS_PUSH_CHANNELS=all`.
+- Queda expresamente pospuesto cualquier cambio a `APRSIS_PUSH_CHANNELS`;
+  no debe introducirse una modificación de ese ajuste en este PR.
+
 ## Gates previos a la aprobación
 
 1. Ejecutar CI y builds correspondientes sobre commit exacto del PR;
