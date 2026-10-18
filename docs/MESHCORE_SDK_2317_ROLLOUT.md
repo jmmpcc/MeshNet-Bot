@@ -180,6 +180,32 @@ mediante el procedimiento de mantenimiento autorizado, el usuario reporta:
 **El despliegue inicial ha superado las comprobaciones aportadas,
 pero el PR permanece Draft y la integración aún no se da por finalizada.**
 
+## APRS tras la prueba real: conexión recuperada y configuración heredada
+
+Registros del 18 octubre 2026 a las 22:57 CEST:
+
+- `broker→aprs`: dos `ConnectionRefusedError` transitorios a
+  `127.0.0.1:8765`; conectado a las 22:57:22.
+- `mesh→IS push`: rechazos transitorios; conectado a las 22:57:23.
+- Puerto `127.0.0.1:8765`: abierto.
+- Broker/Bot/APRS `running` y reinicios 0.
+- `mesh→IS push` informa `cfg channels=all -> NONE`.
+- Configuración efectiva: `RADIO_PROFILE=meshcore_only`,
+  `APRSIS_PUSH_ENABLED=1`, `APRSIS_PUSH_CHANNELS=all`.
+
+Revisión de `source/meshtastic_to_aprs.py` en GitHub:
+`_parse_push_channel_config("all")` devuelve `{}` para
+`meshcore_only`; `task` de mirror omite mensajes cuyo transporte no figure
+en el diccionario. La sintaxis explícita permitida es
+`APRSIS_PUSH_CHANNELS=meshcore <canales>` o `meshcore all`.
+
+**No se ha modificado APRSIS_PUSH_CHANNELS durante la actualización.**
+Este valor es una configuración heredada no apta para el mirror de
+`meshcore_only` y **no constituye por sí solo regresión del SDK**.
+No autorizar emisión a APRS-IS de todos los canales sin definir los
+canales publicables y comprobar la configuración efectiva del destinatario.
+Las funciones APRS ajenas al mirror tienen flujos independientes.
+
 ## Gates previos a la aprobación
 
 1. Ejecutar CI y builds correspondientes sobre commit exacto del PR;
