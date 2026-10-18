@@ -120,6 +120,39 @@ ni demuestra recreación real de los contenedores. La validación de rollback
 operativo queda pendiente de una ventana de mantenimiento y verificaciones
 funcionales de broker, Telegram, APRS, BBS y servicios auxiliares.
 
+## Línea base de salud productiva (18 octubre 2026, 22:52:33 CEST)
+
+Resultados aportados desde Raspberry **antes de cualquier sustitución real**:
+
+- Ocho contenedores `running`, sin reinicios observados: broker, bot, aprs,
+  farmacias, farmacias-check, farmacias-daily, emergencias y emergencias-check.
+- Broker original: `sha256:1ee5980797afe2325a156fda62e8250d1bdb26b25db1733fbd3b080f37c055cb`;
+  `meshcore==2.2.31`.
+- Bot original: `sha256:1f42873dc6db4b5bc949293adcfbdd5c9e259c9d4938b1e0038e81af98632fa9`.
+- APRS original: `sha256:7618b52b09b050af968db59b0586199b3adbd295266f8177c84e5b86452df696`.
+- Farmacias `http://127.0.0.1:8788/health`: `ok:true`, actualización
+  `2026-10-18T20:06:19.335620+02:00`.
+- Emergencias `http://127.0.0.1:8789/health`: `ok:true`.
+  DGT `accepted:45` (`records:700`); IGN `accepted:2` (`records:17`);
+  municipal `accepted:47` (`records:53`); NASA FIRMS `accepted:0`
+  (`records:21`) y `ok:true`. AEMET CAP y CHE SAIH deshabilitados.
+  Respuesta `last_success:2026-10-18T20:41:52.816121+00:00` para las fuentes activas.
+- Control Panel `http://127.0.0.1:8790/health`: `ok:true`, versión 1.0.0,
+  dos herramientas registradas y habilitadas, `authentication:false`.
+- Copias locales con etiquetas de referencia verificadas para las cinco imágenes
+  de broker, bot, APRS, Farmacias y Emergencias.
+- `email-to-mesh` no está entre los contenedores activos.
+
+**Limitación:** HTTP 200/`ok:true` y `running` no prueban por sí mismos entrega
+por radio, salud del BBS, funcionamiento real de comandos Telegram ni entrega
+APRS. Estos aspectos requieren comprobación durante la ventana controlada.
+
+**Gate operativo restante:** revisión y aprobación explícita de la interrupción,
+ejecución controlada de despliegue 2.3.17 y recuperación 2.2.31 preparada,
+con validación funcional y observación posterior de errores de lectura.
+No interpretar una ausencia temporal de `IndexError` como corrección RF concluyente
+sin volumen representativo de tráfico.
+
 ## Gates previos a la aprobación
 
 1. Ejecutar CI y builds correspondientes sobre commit exacto del PR;
