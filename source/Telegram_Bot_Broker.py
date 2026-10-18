@@ -16649,7 +16649,14 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                 except Exception:
                     mc_path_txt = None
                 if isinstance(mc_path_txt, str):
-                    mc_path_txt = mc_path_txt.strip() or None
+                    # Solo presentación Telegram: se eliminan las coordenadas
+                    # de cada repetidor, preservando nombres, orden y SNR.
+                    # El broker mantiene la ruta original para historial y mapa.
+                    mc_path_txt = re.sub(
+                        r" pos -?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?",
+                        "",
+                        mc_path_txt,
+                    ).strip() or None
 
                 # URL de la traza histórica generada por el broker. El BOT no
                 # reconstruye rutas ni coordenadas: solo presenta el enlace
@@ -16759,8 +16766,7 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                             detail_lines.append(f"   • Hops reales: {hops_real_txt}")
                         if extra_meshcore_path:
                             detail_lines.append(extra_meshcore_path.rstrip("\n"))
-                        if mc_trace_url:
-                            detail_lines.append(f"   • 🗺 Ver traza en mapa: {mc_trace_url}")
+
                         if hop_limit is not None or hop_start is not None or relay is not None:
                             detail_lines.append(f"   • hop_limit: {hl_txt} | hop_start: {hs_txt} | relay_node: {rn_txt}")
                         details = ("\n" + "\n".join(detail_lines)) if detail_lines else ""
