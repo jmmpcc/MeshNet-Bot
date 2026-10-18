@@ -60,7 +60,7 @@ class MeshCore2317ContractTests(unittest.IsolatedAsyncioTestCase):
         capture = _CaptureSender()
         await CommandHandler.send_trace(
             capture, auth_code=0x12345678, tag=0x11223344,
-            flags=0, path=b"\\xaa\\xbb",
+            flags=0, path=bytes.fromhex("aabb"),
         )
         self.assertEqual(
             capture.packets,
