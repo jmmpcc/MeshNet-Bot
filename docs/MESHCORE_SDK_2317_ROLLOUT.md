@@ -153,6 +153,33 @@ con validación funcional y observación posterior de errores de lectura.
 No interpretar una ausencia temporal de `IndexError` como corrección RF concluyente
 sin volumen representativo de tráfico.
 
+## Prueba real inicial de MeshCore 2.3.17 (18 octubre 2026)
+
+Tras desplegar la imagen `meshnet-broker:meshcore-2317-prod-candidate`
+mediante el procedimiento de mantenimiento autorizado, el usuario reporta:
+
+- `docker exec meshnet-broker python -m pip show meshcore`: **Version: 2.3.17**.
+- `docker ps`: `meshnet-broker` Up 44 segundos, `meshnet-bot` y
+  `meshnet-aprs` Up 43 segundos.
+- Permanecen activos los cinco contenedores de Farmacias y Emergencias,
+  con una antigüedad cercana a nueve horas (no recreados).
+- `docker logs --since 5m meshnet-broker`: sin coincidencias con
+  `Task exception was never retrieved`, `IndexError` ni `Traceback`.
+  **Esto es una muestra muy breve; todavía no demuestra la resolución
+  definitiva del error de recepción RF**.
+- `GET /health` Farmacias (8788): `ok:true`, timestamp de datos
+  `2026-10-18T20:06:19.335620+02:00`.
+- `GET /health` Emergencias (8789): `ok:true`, fuentes activas
+  DGT/IGN/municipal/NASA con el mismo resumen que antes del despliegue;
+  AEMET/CHE permanecen deshabilitadas. Estos datos de salud **no
+  acreditan todavía nuevas ingestas o entregas**.
+- Quedan pendientes las pruebas funcionales de Bot Telegram, BBS,
+  APRS, consultas de Farmacias/Emergencias a través del broker,
+  estabilidad de conexión MeshCore y recepción RF/trazas.
+
+**El despliegue inicial ha superado las comprobaciones aportadas,
+pero el PR permanece Draft y la integración aún no se da por finalizada.**
+
 ## Gates previos a la aprobación
 
 1. Ejecutar CI y builds correspondientes sobre commit exacto del PR;
