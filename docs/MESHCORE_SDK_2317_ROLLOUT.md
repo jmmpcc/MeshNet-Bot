@@ -90,6 +90,19 @@ Comprobado en Raspberry, sin alterar contenedores:
 
 **Secuencia prevista, no ejecutada**: verificar la configuración efectiva y los backups; detener Bot/APRS de forma ordenada; sustituir broker con override ya validado; recrear Bot/APRS contra el broker nuevo; comprobar capacidades y servicios dependientes; en regresión, restaurar imagen del broker original y recrear nuevamente Bot/APRS para reenganchar su namespace. Evitar `docker compose up` general, `down -v` y cualquier segunda sesión MeshCore. Preparar comando de reversión y criterios de parada antes de operar.
 
+## Ensayo Compose dry-run (18 octubre 2026)
+
+En Raspberry, `docker compose version` indica **v5.1.4**. Con el override temporal de la candidata:
+
+```bash
+docker compose --dry-run \
+  -f docker-compose.rpi.yml \
+  -f /tmp/meshcore-2317-candidate.override.yml \
+  up -d --no-deps --pull never broker bot aprs
+```
+
+Resultado simulado: `meshnet-broker`, `meshnet-bot` y `meshnet-aprs` recreados e iniciados; ninguno de los cinco contenedores de Farmacias/Emergencias ni `email-to-mesh` aparece seleccionado. **Dry-run no implica que el despliegue ni sus comprobaciones funcionales se hayan ejecutado.** Preparar y verificar el override de recuperación y la ventana de mantenimiento antes de cualquier `up` real.
+
 ## Gates previos a la aprobación
 
 1. Ejecutar CI y builds correspondientes sobre commit exacto del PR;
