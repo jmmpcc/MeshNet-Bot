@@ -227,6 +227,33 @@ hayan validado todas las operaciones BBS ni el resto de subsistemas.
 Pendiente: Telegram, pruebas de trazas reales, SNR por salto y observación
 prolongada de anuncios incompletos.
 
+## Resultado de descubrimiento RF sobre SDK 2.3.17 (18 octubre 2026)
+
+Prueba de una sola solicitud desde el control JSONL del broker existente
+(`MESHCORE_TRACE_PATH`, `contact_prefix=cfe25e30b3ec`,
+`discover=true`, `timeout=20`), sin abrir una segunda conexión al
+companion. Respuesta:
+
+```json
+{"ok": false, "error": "meshcore_trace_failed: RuntimeError: meshcore_trace_failed: RuntimeError: meshcore_path_discovery_no_response"}
+```
+
+La petición alcanzó la función de traza del motor MeshCore, pero **no llegó
+`PATH_RESPONSE`**; no existe `TRACE_DATA`, ruta ni SNR nuevos que validar.
+En la versión 2.2.31 ya se había observado `meshcore_path_discovery_no_response`
+sobre ese mismo repetidor. **No declarar el descubrimiento reparado ni atribuir
+su ausencia al nuevo SDK sin evidencia adicional.** Mantener el análisis de
+trazas reales como trabajo independiente posterior; no bloquear por sí solo la
+fijación del SDK si los demás contratos operativos permanecen correctos.
+
+Por decisión del usuario, el HTTP 503 del WebPanel y la saturación del
+BacklogServer (24/24 clientes, rechazos controlados) también se investigarán
+después. No se altera `APRSIS_PUSH_CHANNELS=all`, ni el resto del entorno.
+
+**Estado de decisión:** candidato probado en producción; fusión/publicación
+autorizadas por el usuario, con los problemas de WebPanel y descubrimiento
+registrados como pendientes, no como pruebas superadas.
+
 ## Gates previos a la aprobación
 
 1. Ejecutar CI y builds correspondientes sobre commit exacto del PR;
@@ -278,4 +305,4 @@ AutoReply se investigan en sus contextos de ejecución correctos; no forman
 parte de este cambio. El fallo de `reader.py` en 2.2.31 se ha asociado
 con anuncios incompletos y cuenta con regresión sintética en 2.3.17.
 
-**Estado: DRAFT. No fusionar ni desplegar hasta cumplir los gates.**
+**Estado: validación de SDK suficiente para fusión autorizada; quedan abiertas las limitaciones de trazas RF, WebPanel y comprobaciones posteriores de imágenes GHCR.**
