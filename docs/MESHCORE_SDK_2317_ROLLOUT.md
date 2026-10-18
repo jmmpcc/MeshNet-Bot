@@ -58,6 +58,22 @@ systemctl is-enabled meshnet-docker-start.service || true
 Confirmar los servicios realmente activos y guardar un inventario con fecha.
 **No registrar ni publicar el contenido de `.env`**, que contiene secretos.
 
+## Validación de imagen derivada de producción (18 octubre 2026, 22:35 CEST)
+
+En la Raspberry `meshnetwifi`, sin detener los ocho contenedores activos:
+
+- Imagen base productiva: `sha256:1ee5980797afe2325a156fda62e8250d1bdb26b25db1733fbd3b080f37c055cb`; `meshcore==2.2.31`.
+- Copia local de rollback: `meshnet-backup:broker-pre-2317-20261018`. También etiquetadas las imágenes reales de Bot, APRS, Farmacias y Emergencias.
+- Imagen derivada: `meshnet-broker:meshcore-2317-prod-candidate`, creada con `FROM meshnet-backup:broker-pre-2317-20261018`, instalación exclusiva de `meshcore==2.3.17`, `pip check` y smoke imports.
+- Hash SHA256 de `/app/source/Meshtastic_Broker.py` coincidente en productivo y candidata: `ce725cd007e3f29c37ab86bd2007764508a19b3a02d998c450aa6eb3dc90bd4a`.
+- `pip freeze` (productivo versus candidata): **única diferencia `meshcore==2.2.31` → `meshcore==2.3.17`**; sin modificaciones transitivas.
+- Suite de contrato offline sobre la candidata derivada de producción: **5/5 tests OK** mediante `unittest`.
+- Regresión ampliada sobre la imagen previa de pruebas: **49 passed, 10 subtests passed**.
+- Broker productivo: `running`, reinicios 0, versión 2.2.31. Los ocho servicios activos mantienen su ejecución. `email-to-mesh` no figuraba entre los contenedores activos.
+- Almacenamiento antes de crear la candidata: 46 GB libres en `/`.
+
+**Alcance de la evidencia:** las cinco pruebas se han repetido en la candidata productiva. Las 49 pruebas ampliadas se ejecutaron en la imagen `meshcore-2317-pytest-full`, no todavía en la candidata nueva. Coincidencia del archivo principal y de `pip freeze` no implica por sí sola identidad de todos los archivos de la imagen. Sigue pendiente integración con la sesión MeshCore real y confirmación funcional de los servicios dependientes.
+
 ## Gates previos a la aprobación
 
 1. Ejecutar CI y builds correspondientes sobre commit exacto del PR;
