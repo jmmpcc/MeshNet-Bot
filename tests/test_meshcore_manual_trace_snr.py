@@ -300,3 +300,71 @@ def test_real_repeater_hop_resolution_preserves_missing_snr():
     assert [hop["name"] for hop in hops] == ["REP UTEBO 1", "QSP1", "Destino"]
     assert [hop["snr"] for hop in hops] == [None, 4.5, -1.25]
     assert hops[-1]["destination"] is True
+
+
+@pytest.mark.parametrize("width,path_hex,expected", [
+    (1, "aabbcc", "aabbccbbaa"),
+    (2, "7f15f64ebf27", "7f15f64ebf27f64e7f15"),
+    (1, "aa", "aa"),
+])
+def test_official_style_manual_trace_round_trip(width, path_hex, expected):
+    """Compone ida+vuelta sin repetir el punto de giro, sin PATH_RESPONSE.
+
+    Llamada: pytest -q tests/test_meshcore_manual_trace_snr.py
+    Se usan dobles de `send_trace`; jamás transmite un paquete radio.
+    """
+    labels = [path_hex[pos:pos + width * 2] for pos in range(0, len(path_hex), width * 2)]
+    cache = {h: [{"name": "Repeater " + h}] for h in labels}
+    trace_nodes = [
+        {"hash": h, "snr": float(i + 1)}
+        for i, h in enumerate([
+            expected[pos:pos + width * 2]
+            for pos in range(0, len(expected), width * 2)
+        ])
+    ] + [{"snr": -1.0}]
+    with _active_loop() as loop:
+        engine = _Engine(loop, {"path": trace_nodes}, cache)
+        response = _trace_function()(
+            engine, "ruta", manual_path_hex=path_hex,
+            manual_hash_width=width, manual_return=True, timeout=5,
+        )
+    assert response["ok"] is True
+    assert response["manual_return_used"] is True
+    assert response["manual_forward_hops"] == len(labels)
+    assert response["discovery_used"] is False
+    assert engine._mc.commands.calls[0][3] == bytes.fromhex(expected)
+    assert len(engine._mc.commands.calls) == 1
+
+
+def test_manual_trace_without_contact_does_not_require_discovery():
+    """La traza manual no requiere contacto, PATH_RESPONSE ni nombre remoto."""
+    with _active_loop() as loop:
+        engine = _Engine(
+            loop, {"path": [{"hash": "aa", "snr": 5.0}, {"snr": 0.5}]},
+            {"aa": [{"name": "RPT-A"}]},
+        )
+        response = _trace_function()(
+            engine, "ruta", manual_path_hex="aa", timeout=5,
+        )
+    assert response["contact"]["name"] == "Traza manual"
+    assert response["path_snrs"] == [5.0, 0.5]
+
+
+def test_manual_trace_rejects_return_without_manual_path():
+    """No hay forma segura de construir el regreso desde una ruta no declarada."""
+    with _active_loop() as loop:
+        engine = _Engine(loop, {}, {})
+        with pytest.raises(ValueError, match="return_requires_manual_path"):
+            _trace_function()(engine, "ruta", manual_return=True, timeout=5)
+        assert not engine._mc.commands.calls
+
+
+def test_telegram_official_manual_command_structure():
+    """El bot separa la traza manual del descubrimiento de contacto."""
+    source = BOT.read_text(encoding="utf-8")
+    begin = source.index("async def traza_mc_cmd(")
+    end = source.index("async def mc_contactos_cmd(", begin)
+    handler_source = source[begin:end]
+    assert '"contact_prefix": "ruta"' in handler_source
+    assert '"manual_return": len(args) == 4' in handler_source
+    assert 'direction = " [ida]" if index <= forward else " [vuelta]"' in handler_source
