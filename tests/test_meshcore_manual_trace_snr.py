@@ -203,3 +203,41 @@ def test_telegram_reuses_broker_rpc_and_restricts_admin():
     assert "asyncio.to_thread(" in segment
     assert '"MESHCORE_TRACE_PATH"' in segment
     assert 'CommandHandler("traza_mc", traza_mc_cmd)' in source
+
+
+@pytest.mark.parametrize("payload,expected_error", [
+    ({"path": [{"hash": "aabb", "snr": 4.5}]}, "hash_width_mismatch"),
+    ({"path": [{"snr": 4.5}]}, "without_hops"),
+    ({"path": []}, "without_hops"),
+    ({"path": [{"hash": "aa", "snr": 1}, {"snr": 2}, {"hash": "bb", "snr": 3}]}, "hash_after_destination"),
+    ({"path": [{"hash": "aa", "snr": 1}, {"snr": 2}, {"snr": 3}]}, "multiple_destinations"),
+    ({"path": [{"hash": "xx", "snr": 1}]}, "hash_width_mismatch"),
+])
+def test_trace_rejects_malformed_response_without_inventing_hops(payload, expected_error):
+    """Una respuesta incompleta o ambigua no debe convertirse en una medición válida."""
+    with _active_loop() as loop:
+        engine = _Engine(loop, payload, {"aa": [{"name": "A"}]})
+        with pytest.raises(RuntimeError, match=expected_error):
+            _trace_function()(
+                engine, "cfe25e30b3ec",
+                manual_path_hex="aa", manual_hash_width=1, timeout=5,
+            )
+        assert len(engine._mc.commands.calls) == 1
+
+
+def test_manual_two_byte_route_keeps_width_and_snr():
+    """Las rutas de hashes de dos bytes conservan su ancho y orden."""
+    payload = {"path": [{"hash": "7f15", "snr": 3.25}, {"hash": "f64e", "snr": -2.5}, {"snr": 6.0}]}
+    cache = {"7f15": [{"name": "REP UTEBO 1"}], "f64e": [{"name": "QSP1"}]}
+    with _active_loop() as loop:
+        engine = _Engine(loop, payload, cache)
+        result = _trace_function()(
+            engine, "cfe25e30b3ec",
+            manual_path_hex="7f15f64e", manual_hash_width=2, timeout=5,
+        )
+    assert result["ok"] is True
+    assert result["path_hash_width"] == 2
+    assert result["path_snrs"] == [3.25, -2.5, 6.0]
+    assert [h["hash"] for h in result["hops"]] == ["7f15", "f64e"]
+    assert engine._mc.commands.calls[0][2] == 1
+    assert engine._mc.commands.calls[0][3] == bytes.fromhex("7f15f64e")
