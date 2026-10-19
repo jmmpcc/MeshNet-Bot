@@ -1720,10 +1720,14 @@ class MeshCoreEmbeddedBridge:
         No deduce rutas inversas de recepciones, ni altera los contactos.
         """
         prefix = str(contact_prefix or "").strip()
-        if not prefix or (prefix == "ruta" and manual_path_hex is None):
+        if not prefix:
             raise ValueError("missing_contact_prefix")
+        # Una petición de retorno sin ruta explícita debe producir su error
+        # específico antes de comprobar el modo manual sin parámetros.
         if manual_return and manual_path_hex is None:
             raise ValueError("meshcore_trace_return_requires_manual_path")
+        if prefix == "ruta" and manual_path_hex is None:
+            raise ValueError("missing_contact_prefix")
         mc, loop = self._mc, self._loop
         if mc is None or loop is None or not loop.is_running() or not self._connected:
             raise RuntimeError("meshcore_not_connected")
