@@ -244,17 +244,23 @@ def test_manual_two_byte_route_keeps_width_and_snr():
 
 
 def test_manual_trace_control_requires_explicit_opt_in():
-    """El broker debe bloquear TRACE manual salvo habilitación explícita."""
+    """Comprueba la barrera de habilitación sin recorrer reiteradamente 12.000 líneas.
+
+    Cómo se ejecuta:
+        pytest -q tests/test_meshcore_manual_trace_snr.py
+
+    La comprobación utiliza una única extracción del bloque de control JSONL
+    para asegurar que la rama manual exige opt-in y devuelve el rechazo.
+    Evita ast.get_source_segment dentro de ast.walk (coste cuadrático).
+    """
     source = BROKER.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    handler_code = [
-        ast.get_source_segment(source, node)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Compare)
-        and "MESHCORE_TRACE_MANUAL_ENABLED" in (ast.get_source_segment(source, node) or "")
-    ]
-    assert handler_code, "No se encuentra el control de habilitación explícita"
-    assert '"meshcore_trace_manual_disabled"' in source
+    start = source.index('elif cmd == "MESHCORE_TRACE_PATH":')
+    end = source.index('elif cmd == "MESHCORE_CONTACTS":', start)
+    handler_source = source[start:end]
+    assert 'MESHCORE_TRACE_MANUAL_ENABLED' in handler_source
+    assert 'meshcore_trace_manual_disabled' in handler_source
+    assert 'eng.trace_contact(' in handler_source
+    assert handler_source.index('meshcore_trace_manual_disabled') < handler_source.rindex('manual_path_hex=manual_path_hex')
 
 
 def test_real_repeater_hop_resolution_preserves_missing_snr():
