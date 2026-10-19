@@ -1,3 +1,61 @@
+# PR #216 — Implementación de TRACE manual con regreso (19/10/2026)
+
+## Nuevo procedimiento
+
+El código del broker ahora admite `trace_contact("ruta",
+manual_path_hex=..., manual_hash_width=1|2, manual_return=True|False)`,
+**sin** consultar `PATH_RESPONSE` ni exigir una ruta de salida de un contacto.
+Se sigue usando la misma sesión MeshCore y el mismo evento `TRACE_DATA`
+filtrado por `tag`.
+
+El bot expone, tras desplegar la rama experimental:
+
+```text
+/traza_mc ruta aa 1
+/traza_mc ruta aa,bb,cc 1 volver
+/traza_mc ruta 7f15,f64e,bf27 2 volver
+```
+
+Estos hashes son **ejemplos de sintaxis**, no recomendaciones de TX ni
+confirmación de que esos repetidores estén enlazados en ese orden.
+
+Con `volver`, la ruta de entrada A,B,C se convierte en
+**A,B,C,B,A**. El último repetidor de ida no se duplica. Para un único
+salto A, el recorrido es A (la traza terminada se recibe por radio solo
+si existe cobertura de retorno, no por garantía del software).
+
+El resultado etiqueta `[ida]` y `[vuelta]` según el orden de la ruta
+reportada, y solo muestra SNR recibido en `TRACE_DATA`. El último
+valor sin hash corresponde al receptor final y no se atribuye a un
+repetidor.
+
+### Límites y seguridad
+
+- `MESHCORE_TRACE_MANUAL_ENABLED=0` por defecto: el broker no emite
+  trazas manuales hasta activar expresamente esta bandera **en un
+  despliegue controlado**, revisando antes el acceso al puerto 8766.
+- `ADMIN_IDS` debe incluir al operador del comando de Telegram.
+- Máximo ocho hashes de **ida**, de 1 o 2 bytes cada uno, sin prefijos
+  ambiguos, y un máximo de quince saltos incluyendo vuelta.
+- Una sola traza simultánea por bot y 60 segundos de separación entre
+  intentos. Un segundo cliente del puerto de control podría hacer
+  solicitudes independientes; por eso es imprescindible restringir
+  ese puerto a servicios de confianza.
+- La selección automática por nombre humano no está implementada en
+  esta entrega: los hashes se obtienen primero del catálogo de contactos,
+  se verifican manualmente y nunca se inventan a partir de un RX ambiguo.
+- El resultado offline **no prueba** conectividad RF ni compatibilidad
+  de repetidores antiguos con hashes de dos bytes.
+
+### Pruebas pendientes tras el último cambio
+
+```bash
+python -m pytest -q tests/test_meshcore_manual_trace_snr.py tests/test_meshcore_rx_signal_trace_contract.py tests/test_meshcore_sdk_2317_contract.py
+```
+
+Es preciso ejecutar de nuevo las pruebas de esta revisión; los
+**27 passed** anteriores corresponden a commits previos.
+
 ## Investigación del comportamiento de la aplicación oficial (19/10/2026)
 
 **Resultado fundamental:** la app oficial tiene una herramienta **Trace Path
