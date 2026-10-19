@@ -107,6 +107,69 @@ MESHNET_DOCKER_SERVICES=broker,bot,aprs
 
 Si `MESHNET_DOCKER_SERVICES` está vacío o no existe, `scripts/update_meshnet.sh` detecta los servicios Compose que ya estaban `running` y actualiza/recrea únicamente esos mismos.
 
+### Configuración obligatoria recomendada antes de actualizar o reiniciar
+
+**Defina `MESHNET_DOCKER_SERVICES` expresamente en el archivo `.env`** con los servicios que quiere mantener activos. Esto es especialmente importante si va a realizar una parada completa o si utiliza el arranque automático de systemd: el modo `--startup-only` **exige** esta variable.
+
+Los nombres son **los de los servicios Compose**, no los nombres de contenedor `meshnet-*`:
+
+| Nombre en `MESHNET_DOCKER_SERVICES` | Función | Perfil necesario | Dependencias que también deben seleccionarse |
+| --- | --- | --- | --- |
+| `broker` | Comunicaciones MeshCore/Meshtastic, control y BBS | Ninguno | — |
+| `bot` | Bot Telegram | Ninguno | `broker` |
+| `aprs` | Pasarela APRS RF/APRS-IS | Ninguno | `broker` |
+| `email-to-mesh` | Correo IMAP/SMTP hacia/desde malla | Ninguno | `broker`; configurar correo según [guía](docs/EMAIL_TO_MESH.md) |
+| `bridgehub-bc` | Bridge externo | Ninguno | `broker` |
+| `farmacias` | API de farmacias de guardia | `farmacias` | `broker` |
+| `farmacias-check` | Comprobaciones periódicas de farmacias | `farmacias` | `broker,farmacias` |
+| `farmacias-daily` | Envíos diarios de farmacias | `farmacias` | `broker,farmacias` |
+| `emergencias` | API de emergencias | `emergencias` | `broker` |
+| `emergencias-check` | Recogida y notificación de incidencias | `emergencias` | `broker,emergencias` |
+
+Edite el archivo existente, **sin sustituir ni borrar el resto de sus claves**:
+
+```bash
+cd ~/MeshNet-Bot
+nano .env
+```
+
+Ejemplos; **elija solamente uno**, adaptándolo a su instalación:
+
+```dotenv
+# Instalación básica: solo los servicios principales
+MESHNET_DOCKER_SERVICES=broker,bot,aprs
+# COMPOSE_PROFILES puede quedar sin definir si no hay aplicaciones opcionales
+```
+
+```dotenv
+# Núcleo + Farmacias; los tres procesos de Farmacias quedan seleccionados
+COMPOSE_PROFILES=farmacias
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-daily
+```
+
+```dotenv
+# Núcleo + Emergencias, sin Farmacias
+COMPOSE_PROFILES=emergencias
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,emergencias,emergencias-check
+```
+
+```dotenv
+# Instalación con ambas aplicaciones
+COMPOSE_PROFILES=farmacias,emergencias
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-daily,emergencias,emergencias-check
+```
+
+Para añadir `email-to-mesh` o `bridgehub-bc`, incorpore sus nombres al valor de `MESHNET_DOCKER_SERVICES` **manteniendo `broker`**. Descargar una imagen no habilita por sí solo su servicio ni configura sus credenciales. Para Farmacias/Emergencias, además de seleccionar los servicios y perfiles, siga la [guía de configuración de aplicaciones opcionales](docs/OPTIONAL_APPS_DOCKER.md) y evite duplicar servicios legacy systemd.
+
+Revise los valores sin revelar contraseñas:
+
+```bash
+grep -E '^(COMPOSE_PROFILES|MESHNET_DOCKER_SERVICES|BROKER_STARTUP_GRACE_SECONDS|DOCKER_SERVICE_START_TIMEOUT_SECONDS)=' .env
+docker compose -f docker-compose.rpi.yml config --services
+```
+
+**Si `MESHNET_DOCKER_SERVICES` no está definido:** una actualización normal intenta detectar **solo** los contenedores Compose que ya estaban `running`; si antes se ejecutó `docker compose down`, no encontrará servicios para arrancar. El modo `--startup-only` rechaza expresamente esa configuración. Por ello, **no use `down` como primer paso para actualizar**.
+
 ## Arranque secuencial seguro
 
 El actualizador no levanta todos los contenedores a la vez. Cuando `broker` está seleccionado:
@@ -171,20 +234,28 @@ docker compose -f docker-compose.rpi.yml stop farmacias-daily
 
 Al quedar apagado, una actualización futura no lo volverá a iniciar si `MESHNET_DOCKER_SERVICES` está vacío. Si existe una lista explícita, elimínelo también de esa lista.
 
-## Actualización oficial
+## Actualización oficial de Docker (sin `down` previo)
 
-Éste es el procedimiento recomendado:
+**No ejecute `docker compose down` antes de actualizar.** El actualizador ya realiza `git pull --ff-only` (cuando el árbol versionado está limpio), descarga con `docker compose pull` las imágenes seleccionadas, arranca primero el broker y luego los servicios dependientes, uno a uno, y verifica que queden en estado `running`.
+
+Configure **antes** `MESHNET_DOCKER_SERVICES` en `.env` como se explica arriba. Desde el directorio del repositorio:
 
 ```bash
-cd /home/meshnet/MeshNet-Bot
-git status
-cp .env "$HOME/meshnet.env.backup"
+cd ~/MeshNet-Bot
+git status --short
+cp -p .env "$HOME/meshnet.env.backup"
 cp -a bot_data "$HOME/meshnet.bot_data.backup"
-
-git switch main
-git pull --ff-only
 ./scripts/update_meshnet.sh
+docker compose -f docker-compose.rpi.yml ps
 ```
+
+Si existen cambios locales **versionados**, el script **no los elimina**: omite el `git pull` y continúa con Docker; en ese caso, deberá revisar más adelante la sincronización de Git. Los archivos no versionados y las credenciales también deben protegerse con las copias pertinentes.
+
+**No hace falta un `docker compose pull` adicional**, porque el script ya descarga las imágenes elegidas. Tampoco se debe hacer un `up -d` global: la secuencia controlada evita iniciar servicios que no se han solicitado. `--startup-only` sirve exclusivamente para **arrancar desde imágenes locales sin Git ni descarga**, y requiere la lista `MESHNET_DOCKER_SERVICES`.
+
+Las bases SQLite, JSON e históricos situados en `./bot_data` persisten gracias al montaje `./bot_data:/app/bot_data`, aunque se recreen contenedores. `.env` reside en el host y no se reemplaza por `pull`. **No** utilice `down -v`, borre `bot_data` ni cambie la carpeta de instalación. La persistencia de archivos no sustituye una copia de seguridad ante posibles migraciones de esquema.
+
+Para conocer todas las opciones operativas, consulte [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 **No usar como procedimiento normal:**
 
