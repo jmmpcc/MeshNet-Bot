@@ -29,7 +29,7 @@ accesible desde redes no confiables.
 
 ## Comando de Telegram (exclusivo de ADMIN_IDS)
 
-El nuevo comando **/traza_mc** genera **tráfico RF de diagnóstico** mediante
+El nuevo comando **/traza_mc** (una vez desplegado, no disponible todavía en producción) genera **tráfico RF de diagnóstico** mediante
 el motor MeshCore embebido, sin una segunda conexión serial/TCP/BLE al radio.
 
 - `/traza_mc cfe25e30b3ec`: intenta `PATH_RESPONSE` y luego `TRACE_DATA`
@@ -46,6 +46,37 @@ máximo de ocho saltos y que cada hash identifique un único contacto del
 catálogo. Si el prefijo es ambiguo o desconocido, bloquea la transmisión.
 El bot tiene exclusión mutua y una separación de 60 segundos entre consultas
 RF aceptadas en la misma instancia.
+
+## Comprobación previa obligatoria (sin transmitir)
+
+El firmware MeshCore dirige un paquete TRACE siguiendo los hashes incluidos
+en la ruta. El `contact_prefix` del comando actual sirve al broker para
+identificar un contacto de referencia y resolver su información; **no se
+codifica como dirección de destino independiente en `send_trace()`**. Por
+tanto, una ruta `7f15f64e` no equivale a pedir una traza dirigida a
+`RPT_URZ_SAGASTA` simplemente porque se haya indicado su prefijo.
+
+**No probar con hashes extraídos automáticamente de una ruta RX**. Tampoco
+considerar una coincidencia de hash de un byte como prueba de topología.
+Antes de habilitar RF, el operador debe comprobar físicamente una secuencia
+dirigida de repetidores, incluido el último salto.
+
+En la Raspberry productiva, la siguiente comprobación es de **solo lectura**;
+no hace TX, no cambia el archivo `.env` y no recrea contenedores:
+
+```bash
+cd /home/meshnet/MeshNet-Bot
+docker inspect meshnet-broker --format 'Estado={{.State.Status}} Reinicios={{.RestartCount}} Imagen={{.Image}}'
+docker inspect meshnet-bot --format 'Estado={{.State.Status}} Reinicios={{.RestartCount}} Imagen={{.Image}}'
+docker exec meshnet-broker python -m pip show meshcore | grep -E '^(Name|Version):'
+git -C /tmp/meshnet-snr-pr216-test rev-parse --short HEAD
+git -C /home/meshnet/MeshNet-Bot rev-parse --short HEAD
+```
+
+El worktree de pruebas **no es la imagen Docker productiva**; los cambios
+del PR no estarán disponibles en Telegram hasta una publicación y un
+despliegue explícitos, sujetos a revisión. No montar el worktree directamente
+sobre los scripts de un contenedor activo.
 
 ## Resultados
 
