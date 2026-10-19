@@ -1694,7 +1694,7 @@ class MeshCoreEmbeddedBridge:
             })
         return hops
 
-    def trace_contact(self, contact_prefix: str, *, discover: bool = False, timeout: float = 20.0, manual_path_hex: str | None = None, manual_hash_width: int = 1) -> dict:
+    def trace_contact(self, contact_prefix: str, *, discover: bool = False, timeout: float = 20.0, manual_path_hex: str | None = None, manual_hash_width: int = 1, manual_return: bool = False) -> dict:
         """Consulta/descubre la ruta y ejecuta TRACE_DATA en el loop MeshCore.
 
         No abre otra conexión. El control del WebPanel llama a este método desde
@@ -1707,6 +1707,11 @@ class MeshCoreEmbeddedBridge:
             manual_path_hex: concatenación hexadecimal de hashes de repetidores
                 en orden explícito de TX; ninguno puede ser ambiguo.
             manual_hash_width: tamaño de cada hash manual, 1 o 2 bytes.
+            manual_return: añade la secuencia inversa sin repetir el extremo.
+                Por ejemplo A,B,C -> A,B,C,B,A. No verifica por sí mismo
+                la conectividad ni realiza descubrimiento de la ruta.
+                El prefijo literal "ruta" permite TRACE manual sin asociarlo
+                falsamente al destino de un contacto.
 
         Ejemplo de uso:
             engine.trace_contact(prefix, timeout=20,
@@ -1715,8 +1720,10 @@ class MeshCoreEmbeddedBridge:
         No deduce rutas inversas de recepciones, ni altera los contactos.
         """
         prefix = str(contact_prefix or "").strip()
-        if not prefix:
+        if not prefix or (prefix == "ruta" and manual_path_hex is None):
             raise ValueError("missing_contact_prefix")
+        if manual_return and manual_path_hex is None:
+            raise ValueError("meshcore_trace_return_requires_manual_path")
         mc, loop = self._mc, self._loop
         if mc is None or loop is None or not loop.is_running() or not self._connected:
             raise RuntimeError("meshcore_not_connected")
@@ -1738,16 +1745,33 @@ class MeshCoreEmbeddedBridge:
             hop_count = len(clean) // (2 * width)
             if not (1 <= hop_count <= 8):
                 raise ValueError("meshcore_trace_manual_path_limit")
-            manual_path = bytes.fromhex(clean)
+            forward_hops = [
+                bytes.fromhex(clean[pos:pos + width * 2])
+                for pos in range(0, len(clean), width * 2)
+            ]
+            # Misma secuencia que la opción "return" de Trace Path Manual:
+            # incluir los saltos previos en orden inverso SIN duplicar el
+            # último repetidor, que es el punto de giro de la traza.
+            full_hops = forward_hops + (
+                forward_hops[-2::-1] if manual_return else []
+            )
+            if len(full_hops) > 15:
+                raise ValueError("meshcore_trace_manual_path_limit")
+            manual_path = b"".join(full_hops)
 
         async def _run_trace():
             contact = None
             getter = getattr(mc, "get_contact_by_key_prefix", None)
-            if callable(getter):
-                contact = getter(prefix)
-            if not isinstance(contact, dict):
-                raise RuntimeError("meshcore_contact_not_found")
-            self._meshcore_remember_contact(contact)
+            if prefix != "ruta":
+                if callable(getter):
+                    contact = getter(prefix)
+                if not isinstance(contact, dict):
+                    raise RuntimeError("meshcore_contact_not_found")
+                self._meshcore_remember_contact(contact)
+            else:
+                # TRACE manual oficial prueba una secuencia, NO un destino
+                # almacenado en el catálogo de contactos.
+                contact = {"name": "Traza manual", "public_key": None}
 
             commands = getattr(mc, "commands", None)
             if commands is None:
@@ -1997,6 +2021,8 @@ class MeshCoreEmbeddedBridge:
                 "hops": self._meshcore_resolve_trace_hops(path_hashes, path_snrs, hash_width=hash_width),
                 "discovery_used": bool(manual_path is None and (discover or discovery_payload is not None)),
                 "manual_path_used": manual_path is not None,
+                "manual_return_used": bool(manual_return and manual_path is not None),
+                "manual_forward_hops": hop_count if manual_path is not None else None,
                 "payload": payload,
                 "ts": int(time.time()),
             }
@@ -8420,6 +8446,7 @@ class _BacklogServer(threading.Thread):
                     timeout = float(params.get("timeout") or 20.0)
                     manual_path_hex = params.get("manual_path_hex")
                     manual_hash_width = params.get("manual_hash_width", 1)
+                    manual_return = params.get("manual_return", False) is True
                     eng = globals().get("MESHCORE_ENGINE")
                     if not eng or not hasattr(eng, "trace_contact"):
                         resp = {"ok": False, "error": "meshcore_trace_unavailable"}
@@ -8437,6 +8464,7 @@ class _BacklogServer(threading.Thread):
                                 contact_prefix, discover=False, timeout=timeout,
                                 manual_path_hex=manual_path_hex,
                                 manual_hash_width=manual_hash_width,
+                                manual_return=manual_return,
                             )
                 except Exception as e:
                     resp = {"ok": False, "error": f"meshcore_trace_failed: {type(e).__name__}: {e}"}
