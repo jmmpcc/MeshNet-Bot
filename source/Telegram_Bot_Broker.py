@@ -16803,6 +16803,41 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                         mc_path_txt,
                     ).strip() or None
 
+                # Mostrar automáticamente cada salto MeshCore en el propio
+                # mensaje de Telegram, sin depender de /traza_mc ni generar TX.
+                # El SNR local NO es el SNR del repetidor y nunca se copia a
+                # estos elementos. Se utiliza solo el valor por salto enviado
+                # expresamente por el broker; None se presenta como "—".
+                mc_repeater_lines = []
+                if is_meshcore:
+                    try:
+                        mc_repeaters = (
+                            pkt.get("meshcore_repeaters")
+                            or summary.get("meshcore_repeaters")
+                            or obj.get("meshcore_repeaters")
+                        ) if isinstance(pkt, dict) else (
+                            summary.get("meshcore_repeaters") or obj.get("meshcore_repeaters")
+                        )
+                        if isinstance(mc_repeaters, list):
+                            for hop_index, repeater in enumerate(mc_repeaters[:32], 1):
+                                if not isinstance(repeater, dict):
+                                    continue
+                                hop_name = str(repeater.get("name") or repeater.get("hash") or "desconocido").strip()
+                                hop_snr = repeater.get("snr")
+                                try:
+                                    hop_snr_text = (
+                                        f"{float(hop_snr):+.1f} dB"
+                                        if hop_snr is not None and math.isfinite(float(hop_snr))
+                                        else "no disponible"
+                                    )
+                                except (TypeError, ValueError, OverflowError):
+                                    hop_snr_text = "no disponible"
+                                mc_repeater_lines.append(
+                                    f"   • {hop_index}. {hop_name} | SNR {hop_snr_text}"
+                                )
+                    except Exception:
+                        mc_repeater_lines = []
+
                 # URL de la traza histórica generada por el broker. El BOT no
                 # reconstruye rutas ni coordenadas: solo presenta el enlace
                 # autoritativo asociado a esta recepción concreta.
@@ -16909,7 +16944,14 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                             detail_lines.append(f"   • MeshCore posición emisor: {mc_from_pos_txt}")
                         if hops_real is not None:
                             detail_lines.append(f"   • Hops reales: {hops_real_txt}")
-                        if extra_meshcore_path:
+                        if mc_repeater_lines:
+                            detail_lines.append(
+                                f"   • Ruta MeshCore ({mc_path_count if mc_path_count is not None else len(mc_repeater_lines)} repetidores):"
+                            )
+                            detail_lines.extend(mc_repeater_lines)
+                        elif extra_meshcore_path:
+                            # Compatibilidad con eventos antiguos sin
+                            # meshcore_repeaters, incluyendo el backlog.
                             detail_lines.append(extra_meshcore_path.rstrip("\n"))
 
                         if hop_limit is not None or hop_start is not None or relay is not None:
