@@ -1,3 +1,27 @@
+# Objetivo principal: SNR automático en cada mensaje recibido
+
+**La funcionalidad principal solicitada es la salida de Telegram al recibir
+mensajes MeshCore, sin ejecutar comandos manuales.** La presentación existente
+de `source/Telegram_Bot_Broker.py` ahora lee
+`packet.meshcore_repeaters[]`, imprime la ruta numerada y muestra el
+`snr` de cada salto **solo si está documentado en el evento**. Si un salto
+no tiene medición, escribe `SNR no disponible` en ese mismo mensaje.
+
+El SNR local de recepción (`rxSnr`) se muestra aparte: **no puede
+reasignarse** a los repetidores intermedios.
+
+La serie de 8 recepciones reales de 19/10/2026 confirmó que las rutas
+pasivas aportan hashes/nombres, pero todos los SNR individuales estaban
+a `None`. La modificación de Telegram **no crea esos datos faltantes**.
+Para obtener SNR individual de repetidores sería necesaria una traza RF
+activa posterior, que **no sería la medida histórica del mensaje recibido**.
+
+Por seguridad, el bot **no envía TRACE automáticamente por cada recepción**:
+podría saturar LoRa, cambiar el enlace que se intenta medir, impedir
+la recepción normal y mezclar mediciones de distintos instantes.
+La opción de diagnóstico RF manual en este PR es un complemento
+experimental, no un requisito para recibir mensajes.
+
 # PR #216 — Implementación de TRACE manual con regreso (19/10/2026)
 
 ## Nuevo procedimiento
