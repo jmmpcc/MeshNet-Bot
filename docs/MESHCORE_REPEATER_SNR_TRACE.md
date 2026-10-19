@@ -1,3 +1,46 @@
+## Investigación del comportamiento de la aplicación oficial (19/10/2026)
+
+**Resultado fundamental:** la app oficial tiene una herramienta **Trace Path
+manual** independiente del descubrimiento de ruta de un contacto. En ella se
+indican hashes de repetidores y puede añadirse automáticamente el **camino de
+regreso en orden inverso**; Liam Cottle confirmó que esa mejora estaba ya
+integrada en junio de 2026:
+https://github.com/meshcore-dev/MeshCore/issues/995
+
+Protocolo/fuentes verificables:
+
+- `CMD_SEND_TRACE_PATH` (36) envía la lista de hashes, un `tag` aleatorio y
+  un `auth_code`, con respuesta `PUSH_CODE_TRACE_DATA` (0x89):
+  https://github.com/meshcore-dev/MeshCore/wiki/Companion-Radio-Protocol
+- El firmware `Mesh::onRecvPacket()` en `src/Mesh.cpp` añade al TRACE el
+  SNR de cada repetidor y lo retransmite al siguiente hash de la secuencia.
+  Si llegó al último hash, `onTraceRecv()` genera los datos de retorno:
+  https://github.com/meshcore-dev/MeshCore/blob/main/src/Mesh.cpp
+- El companion exporta `path_hashes`, `path_snrs` y el SNR final al host:
+  https://github.com/meshcore-dev/MeshCore/blob/main/examples/companion_radio/MyMesh.cpp
+- El ejemplo `meshcore_py/examples/serial_trace.py` invoca
+  `send_trace(path=..., tag=...)`, espera `TRACE_DATA` filtrado por
+  `tag` y resuelve cada hash contra repetidores:
+  https://github.com/meshcore-dev/meshcore_py/blob/main/examples/serial_trace.py
+
+### Implicaciones para PR #216
+
+1. **El descubrimiento PATH_RESPONSE no es requisito previo de TRACE manual.**
+   Los errores anteriores `meshcore_no_directed_path` pertenecen a una
+   ruta de diagnóstico distinta de la herramienta manual de la app.
+2. **La lista de ida no basta para medirla desde el emisor**; normalmente se
+   exige una secuencia de retorno verificable, por ejemplo
+   `R1,R2,R3,R2,R1` (representación conceptual).
+3. La validación actual de hashes inequívocos **no comprueba conectividad ni
+   retorno**; el comando experimental del PR todavía no reproduce por
+   completo el flujo oficial y **no debe desplegarse o fusionarse**.
+4. Conviene separar en el diseño un modo `manual_trace(repeater_path)`
+   de las consultas de contactos `trace_contact()`; conservar el código
+   antiguo del WebPanel.
+5. La aplicación Flutter actual no publica su fuente íntegro; estos detalles
+   están respaldados por las fuentes abiertas de protocolo/firmware y por el
+   desarrollador, no por una lectura del código interno de Flutter.
+
 # MeshCore: trazas SNR de repetidores (desarrollo experimental)
 
 ## Alcance y garantías
