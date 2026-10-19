@@ -8427,6 +8427,11 @@ class _BacklogServer(threading.Thread):
                         if manual_path_hex is None:
                             # La API anterior conserva exactamente su conducta.
                             resp = eng.trace_contact(contact_prefix, discover=discover, timeout=timeout)
+                        elif (os.getenv("MESHCORE_TRACE_MANUAL_ENABLED") or "").strip() != "1":
+                            # El puerto 8766 es una interfaz interna JSONL: no
+                            # asumir autenticación de Telegram en clientes externos.
+                            # Exigir activación explícita antes de aceptar ruta RF.
+                            resp = {"ok": False, "error": "meshcore_trace_manual_disabled"}
                         else:
                             resp = eng.trace_contact(
                                 contact_prefix, discover=False, timeout=timeout,
