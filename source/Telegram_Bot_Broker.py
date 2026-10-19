@@ -6605,6 +6605,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("enviar_mc_dm", "Enviar DM MeshCore: /dm_mc <prefix|N|[MC:prefix]> <texto...>"),
         BotCommand("mc_contactos", "Contactos MeshCore numerados con botones DM: /mc_contactos [n]"),
         BotCommand("mc_canales", "Canales MeshCore disponibles: /mc_canales [n]"),
+        BotCommand("traza_mc", "Traza RF MeshCore y SNR por salto (solo admins)"),
         BotCommand("escuchar", "Escuchar broker (canal/all)"),
         BotCommand("parar_escucha", "Detener la escucha del broker"),
         BotCommand("traceroute", "Traceroute a un nodo (!id|número|alias) [Timeout] sg. espera"),
@@ -6973,6 +6974,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <code>/enviar_mc_dm &lt;contact_prefix|[MC:prefix]|N&gt; &lt;texto&gt;</code> — Envía directo a un contacto MeshCore. <code>N</code> funciona después de ejecutar <code>/mc_contactos</code>.\n"
         "• <code>/dm_mc</code> — Alias corto de <code>/enviar_mc_dm</code>.\n"
         "• <code>/mc_contactos [max]</code> — Lista contactos MeshCore en formato numerado, muestra botones <b>DM</b> y guarda los números para usarlos con <code>/dm_mc N texto</code>.\n"
+        "• <code>/traza_mc &lt;prefijo&gt; [ruta_hex ancho]</code> — Diagnóstico RF y SNR de repetidores (solo ADMIN_IDS; ancho 1 o 2 bytes).\n"
         "• <code>/mc_canales [max]</code> — Lista canales MeshCore disponibles desde el perfil embebido o <code>MESHCORE_CHANNEL_MAP</code>.\n"
         "Ej.: <code>/enviar_mc canal 1 Aviso por MeshCore</code>\n"
         "Ej.: <code>/enviar_mc aprs EB2ABC-7: Aviso solo APRS</code>\n"
