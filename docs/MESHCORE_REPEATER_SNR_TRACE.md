@@ -78,6 +78,42 @@ del PR no estarán disponibles en Telegram hasta una publicación y un
 despliegue explícitos, sujetos a revisión. No montar el worktree directamente
 sobre los scripts de un contenedor activo.
 
+## Resultado RF de referencia: 19/10/2026
+
+En la Raspberry de producción (broker SDK 2.3.17, versión de código
+`13f7d6d`) se realizó **un único intento controlado** desde el puerto
+de control del broker, con contacto `RPT_ROMAREDA_RAK`
+(`daa8bd546dd8`), `discover=True` y tiempo configurado de 12 s.
+
+Resultado observado en 3,05 s:
+
+```text
+ok=False
+meshcore_trace_failed: RuntimeError: meshcore_trace_failed:
+RuntimeError: meshcore_no_directed_path
+```
+
+Este error se produce en `trace_contact()` cuando el descubrimiento
+termina sin proporcionar **bytes de ruta no vacíos**. Se produce **antes
+del envío de `TRACE_DATA`**. No demuestra un error de transmisión TRACE,
+un SNR malo ni que el contacto esté desconectado.
+
+**Importante:** una respuesta de descubrimiento de **cero saltos** puede
+ser legítima para un nodo directamente alcanzable. El código actual no
+distingue una ruta válida de cero saltos de la ausencia de ruta y utiliza
+`meshcore_no_directed_path` en ambos casos. Además, la API
+`send_trace()` no incorpora el `contact_prefix` como destinatario
+independiente: no está autorizado convertir un descubrimiento vacío en
+`send_trace(path=b"")` automáticamente.
+
+### Puerta de validación
+
+Antes de otra prueba RF, revisar el contenido real del
+`PATH_RESPONSE` del SDK 2.3.17 (`out_path_len`,
+`out_path_hash_len`, `out_path`) y distinguir el formato de ruta
+directa válida del de ruta desconocida. Mantener el PR experimental
+y la ruta manual deshabilitada hasta disponer de evidencia de TX real.
+
 ## Resultados
 
 Cuando `TRACE_DATA` contenga la secuencia real, Telegram mostrará
