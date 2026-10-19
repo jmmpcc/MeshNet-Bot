@@ -241,3 +241,56 @@ def test_manual_two_byte_route_keeps_width_and_snr():
     assert [h["hash"] for h in result["hops"]] == ["7f15", "f64e"]
     assert engine._mc.commands.calls[0][2] == 1
     assert engine._mc.commands.calls[0][3] == bytes.fromhex("7f15f64e")
+
+
+def test_manual_trace_control_requires_explicit_opt_in():
+    """El broker debe bloquear TRACE manual salvo habilitación explícita."""
+    source = BROKER.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    handler_code = [
+        ast.get_source_segment(source, node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Compare)
+        and "MESHCORE_TRACE_MANUAL_ENABLED" in (ast.get_source_segment(source, node) or "")
+    ]
+    assert handler_code, "No se encuentra el control de habilitación explícita"
+    assert '"meshcore_trace_manual_disabled"' in source
+
+
+def test_real_repeater_hop_resolution_preserves_missing_snr():
+    """Ejercita el resolvedor REAL, no el simulador de los otros casos."""
+    source = BROKER.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    bridge = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "MeshCoreEmbeddedBridge"
+    )
+    method = next(
+        node for node in bridge.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_meshcore_resolve_trace_hops"
+    )
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(BROKER), "exec"), namespace)
+    resolver = namespace["_meshcore_resolve_trace_hops"]
+
+    class Engine:
+        _mc_path_prefix_cache = {
+            "7f15": [{"name": "REP UTEBO 1", "public_key": "7f15" + "0" * 60}],
+            "f64e": [{"name": "QSP1", "public_key": "f64e" + "0" * 60}],
+        }
+
+        @staticmethod
+        def _meshcore_path_bytes(value):
+            return value if isinstance(value, bytes) else bytes.fromhex(value)
+
+        @staticmethod
+        def _meshcore_contact_display(contact, fallback):
+            return contact.get("name", fallback)
+
+    hops = resolver(
+        Engine(), bytes.fromhex("7f15f64e"), [None, 4.5, -1.25], hash_width=2
+    )
+    assert [hop["name"] for hop in hops] == ["REP UTEBO 1", "QSP1", "Destino"]
+    assert [hop["snr"] for hop in hops] == [None, 4.5, -1.25]
+    assert hops[-1]["destination"] is True
