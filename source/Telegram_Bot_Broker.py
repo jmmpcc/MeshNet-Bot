@@ -9577,13 +9577,13 @@ _MESHCORE_TRACE_LAST_SENT_AT = 0.0
 async def traza_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ejecuta /traza_mc PREFIX [RUTA_HEX ANCHO] desde Telegram.
 
-    Llamada: /traza_mc cfe25e30b3ec
-             /traza_mc cfe25e30b3ec 7f15f64e 2
+    Llamada: /traza_mc cfe25e30b3ec (descubrimiento anterior)
+             /traza_mc ruta 7f15,f64e 2 volver (TRACE manual)
 
     - Solo ADMIN_IDS puede originar una transmisión RF diagnóstica.
     - Sin ruta explícita solicita PATH_RESPONSE con la función existente.
-    - Con ruta manual, el broker exige hashes inequívocos de 1/2 bytes;
-      la ruta se usa tal como la indica el operador, sin invertir caminos RX.
+    - Con ruta manual, el broker exige hashes inequívocos de 1/2 bytes.
+      'volver' construye el regreso, sin asegurar conectividad de radio.
     - Reutiliza la sesión radio del broker y _broker_rpc en un hilo para no
       bloquear el bucle asyncio de Telegram mientras espera TRACE_DATA.
     - Nunca inventa SNR: muestra "no disponible" cuando faltan datos.
@@ -9598,41 +9598,63 @@ async def traza_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     args = list(context.args or [])
-    if not (1 <= len(args) <= 3):
+    if not args:
         await message.reply_text(
-            "Uso: /traza_mc <prefijo> [ruta_hex ancho]\n"
-            "Ejemplo: /traza_mc cfe25e30b3ec 7f15f64e 2\n"
-            "Sin ruta intenta descubrirla; con ruta envía TRACE dirigido. "
-            "Este comando genera tráfico RF."
+            "Uso:\n"
+            "/traza_mc <prefijo> — descubrimiento de contacto (modo previo)\n"
+            "/traza_mc ruta <hashes_separados_por_comas> <ancho> [volver]\n"
+            "Ej.: /traza_mc ruta 7f15,f64e 2 volver\n"
+            "Genera tráfico RF; 'volver' añade el regreso invertido."
         )
         return
 
-    prefix = str(args[0]).strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{6,64}", prefix):
-        await message.reply_text("Prefijo inválido: indique 6-64 caracteres hexadecimales.")
-        return
-
-    params = {"contact_prefix": prefix, "discover": True, "timeout": 20}
-    if len(args) > 1:
-        if len(args) != 3:
-            await message.reply_text("Ruta manual: indique ruta hexadecimal y ancho (1 o 2).")
+    # La herramienta manual oficial traza repetidores, no un contacto.
+    # Conservamos por separado el comportamiento histórico con prefijo
+    # para que el WebPanel y los comandos antiguos no cambien.
+    if args[0].strip().lower() == "ruta":
+        if len(args) not in (3, 4):
+            await message.reply_text(
+                "Uso: /traza_mc ruta <hash1,hash2,...> <ancho 1|2> [volver]"
+            )
             return
-        route = str(args[1]).strip().lower()
         if args[2] not in ("1", "2"):
-            await message.reply_text("Ancho de hash admitido: 1 o 2 bytes.")
+            await message.reply_text("Ancho de hash: 1 o 2 bytes.")
+            return
+        if len(args) == 4 and args[3].strip().lower() != "volver":
+            await message.reply_text("La única opción adicional es 'volver'.")
             return
         width = int(args[2])
-        if not re.fullmatch(r"[0-9a-f]+", route) or len(route) % (2 * width):
-            await message.reply_text("La ruta hexadecimal no es válida para ese ancho.")
+        hops = [part.strip().lower() for part in args[1].split(",")]
+        if not (1 <= len(hops) <= 8) or any(
+            not re.fullmatch(r"[0-9a-f]{" + str(width * 2) + r"}", part)
+            for part in hops
+        ):
+            await message.reply_text(
+                "Hashes inválidos: entre 1 y 8 saltos de 1 o 2 bytes "
+                "(longitud idéntica para todos)."
+            )
             return
-        if not (1 <= len(route) // (2 * width) <= 8):
-            await message.reply_text("La ruta manual debe contener entre 1 y 8 saltos.")
-            return
-        params.update({
+        params = {
+            "contact_prefix": "ruta",
             "discover": False,
-            "manual_path_hex": route,
+            "timeout": 20,
+            "manual_path_hex": "".join(hops),
             "manual_hash_width": width,
-        })
+            "manual_return": len(args) == 4,
+        }
+    else:
+        if len(args) != 1:
+            await message.reply_text(
+                "Para trazas manuales usa: /traza_mc ruta aa,bb 1 volver"
+            )
+            return
+        prefix = args[0].strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{6,64}", prefix):
+            await message.reply_text("Prefijo de contacto inválido.")
+            return
+        params = {
+            "contact_prefix": prefix, "discover": True, "timeout": 20
+        }
 
     if _MESHCORE_TRACE_LOCK.locked():
         await message.reply_text("Ya existe otra traza MeshCore en curso.")
@@ -9668,7 +9690,13 @@ async def traza_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except (ValueError, TypeError):
             snr_text = "no disponible"
         ambiguous = " (hash ambiguo)" if hop.get("ambiguous") else ""
-        lines.append(f"• {name}{ambiguous}: SNR {snr_text}")
+        direction = ""
+        if response.get("manual_return_used") and not hop.get("destination"):
+            forward = response.get("manual_forward_hops")
+            index = hop.get("index")
+            if isinstance(forward, int) and isinstance(index, int):
+                direction = " [ida]" if index <= forward else " [vuelta]"
+        lines.append(f"• {name}{direction}{ambiguous}: SNR {snr_text}")
     if len(lines) == 1:
         lines.append("La respuesta no contiene saltos verificables.")
     await message.reply_text("\n".join(lines))
