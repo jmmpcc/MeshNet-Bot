@@ -2605,12 +2605,21 @@ async def _notify_executed_tasks_job__impl(context: ContextTypes.DEFAULT_TYPE):
        # ← el broker lo fija por defecto (puerto del broker + 1)
 BROKER_REQ_TIMEOUT = 8.0
 
-def _broker_rpc(cmd: str, params: dict | None = None) -> dict:
-    """Envía una petición JSONL simple al BacklogServer del broker y devuelve el dict."""
+def _broker_rpc(cmd: str, params: dict | None = None, timeout: float | None = None) -> dict:
+    """Envía JSONL al broker existente y devuelve un dict.
+
+    cmd: instrucción de control; params: diccionario de parámetros.
+    timeout: tiempo de socket opcional en segundos; None conserva el plazo
+    histórico BROKER_REQ_TIMEOUT para todos los llamadores existentes.
+    Ejemplo: _broker_rpc("MESHCORE_TRACE_PATH", parametros, timeout=30).
+    No abre otra conexión al dispositivo radio, solo al control del broker.
+    """
+    timeout_s = float(BROKER_REQ_TIMEOUT if timeout is None else timeout)
+    timeout_s = max(1.0, min(65.0, timeout_s))
     s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(BROKER_REQ_TIMEOUT)
+        s.settimeout(timeout_s)
         s.connect((BROKER_CTRL_HOST, int(BROKER_CTRL_PORT)))
         req = {"cmd": str(cmd).upper(), "params": (params or {})}
         line = json.dumps(req, ensure_ascii=False) + "\n"
@@ -2618,7 +2627,7 @@ def _broker_rpc(cmd: str, params: dict | None = None) -> dict:
 
         # leer UNA línea de respuesta
         data = b""
-        t_end = time.time() + BROKER_REQ_TIMEOUT
+        t_end = time.time() + timeout_s
         while time.time() < t_end:
             ch = s.recv(4096)
             if not ch:
@@ -9555,6 +9564,112 @@ def _format_meshcore_last_seen(value: object) -> str:
         return datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M:%S")
     except Exception:
         return ""
+
+
+# Diagnóstico activo RF exclusivo para administradores. Este bloqueo impide
+# solapar peticiones TRACE desde chats diferentes y protege el BacklogServer.
+_MESHCORE_TRACE_LOCK = asyncio.Lock()
+_MESHCORE_TRACE_LAST_SENT_AT = 0.0
+
+
+async def traza_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ejecuta /traza_mc PREFIX [RUTA_HEX ANCHO] desde Telegram.
+
+    Llamada: /traza_mc cfe25e30b3ec
+             /traza_mc cfe25e30b3ec 7f15f64e 2
+
+    - Solo ADMIN_IDS puede originar una transmisión RF diagnóstica.
+    - Sin ruta explícita solicita PATH_RESPONSE con la función existente.
+    - Con ruta manual, el broker exige hashes inequívocos de 1/2 bytes;
+      la ruta se usa tal como la indica el operador, sin invertir caminos RX.
+    - Reutiliza la sesión radio del broker y _broker_rpc en un hilo para no
+      bloquear el bucle asyncio de Telegram mientras espera TRACE_DATA.
+    - Nunca inventa SNR: muestra "no disponible" cuando faltan datos.
+    """
+    global _MESHCORE_TRACE_LAST_SENT_AT
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        return
+    if user is None or not is_admin(user.id):
+        await message.reply_text("⛔ /traza_mc está reservado a administradores.")
+        return
+
+    args = list(context.args or [])
+    if not (1 <= len(args) <= 3):
+        await message.reply_text(
+            "Uso: /traza_mc <prefijo> [ruta_hex ancho]\n"
+            "Ejemplo: /traza_mc cfe25e30b3ec 7f15f64e 2\n"
+            "Sin ruta intenta descubrirla; con ruta envía TRACE dirigido. "
+            "Este comando genera tráfico RF."
+        )
+        return
+
+    prefix = str(args[0]).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{6,64}", prefix):
+        await message.reply_text("Prefijo inválido: indique 6-64 caracteres hexadecimales.")
+        return
+
+    params = {"contact_prefix": prefix, "discover": True, "timeout": 20}
+    if len(args) > 1:
+        if len(args) != 3:
+            await message.reply_text("Ruta manual: indique ruta hexadecimal y ancho (1 o 2).")
+            return
+        route = str(args[1]).strip().lower()
+        if args[2] not in ("1", "2"):
+            await message.reply_text("Ancho de hash admitido: 1 o 2 bytes.")
+            return
+        width = int(args[2])
+        if not re.fullmatch(r"[0-9a-f]+", route) or len(route) % (2 * width):
+            await message.reply_text("La ruta hexadecimal no es válida para ese ancho.")
+            return
+        if not (1 <= len(route) // (2 * width) <= 8):
+            await message.reply_text("La ruta manual debe contener entre 1 y 8 saltos.")
+            return
+        params.update({
+            "discover": False,
+            "manual_path_hex": route,
+            "manual_hash_width": width,
+        })
+
+    if _MESHCORE_TRACE_LOCK.locked():
+        await message.reply_text("Ya existe otra traza MeshCore en curso.")
+        return
+
+    async with _MESHCORE_TRACE_LOCK:
+        remaining = 60.0 - (time.monotonic() - _MESHCORE_TRACE_LAST_SENT_AT)
+        if remaining > 0:
+            await message.reply_text(f"Espere {int(remaining) + 1} s antes de otra traza RF.")
+            return
+        _MESHCORE_TRACE_LAST_SENT_AT = time.monotonic()
+        await message.reply_text("🔎 Solicitando traza MeshCore; esperando respuesta RF…")
+        response = await asyncio.to_thread(
+            _broker_rpc, "MESHCORE_TRACE_PATH", params, 30.0
+        )
+
+    if not isinstance(response, dict) or not response.get("ok"):
+        reason = (response or {}).get("error", "sin respuesta") if isinstance(response, dict) else "sin respuesta"
+        await message.reply_text(
+            f"Traza MeshCore no completada: {str(reason)[:300]}\n"
+            "No se muestran SNR ni saltos no confirmados."
+        )
+        return
+
+    lines = ["📡 Traza MeshCore (SNR medido por TRACE_DATA)"]
+    for hop in (response.get("hops") or [])[:16]:
+        if not isinstance(hop, dict):
+            continue
+        name = str(hop.get("name") or hop.get("hash") or "desconocido")[:64]
+        snr = hop.get("snr")
+        try:
+            snr_text = f"{float(snr):+.1f} dB" if snr is not None else "no disponible"
+        except (ValueError, TypeError):
+            snr_text = "no disponible"
+        ambiguous = " (hash ambiguo)" if hop.get("ambiguous") else ""
+        lines.append(f"• {name}{ambiguous}: SNR {snr_text}")
+    if len(lines) == 1:
+        lines.append("La respuesta no contiene saltos verificables.")
+    await message.reply_text("\n".join(lines))
 
 
 async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -18285,6 +18400,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("enviar_mc", enviar_mc_cmd))
     app.add_handler(CommandHandler(["enviar_mc_dm", "dm_mc"], enviar_mc_dm_cmd))
     app.add_handler(CommandHandler("mc_contactos", mc_contactos_cmd))
+    app.add_handler(CommandHandler("traza_mc", traza_mc_cmd))
     app.add_handler(CommandHandler("mc_canales", mc_canales_cmd))
     app.add_handler(CommandHandler("mail", mail_cmd))
     app.add_handler(CommandHandler("mail_contactos", mail_contactos_cmd))
