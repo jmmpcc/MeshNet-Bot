@@ -1694,11 +1694,25 @@ class MeshCoreEmbeddedBridge:
             })
         return hops
 
-    def trace_contact(self, contact_prefix: str, *, discover: bool = False, timeout: float = 20.0) -> dict:
+    def trace_contact(self, contact_prefix: str, *, discover: bool = False, timeout: float = 20.0, manual_path_hex: str | None = None, manual_hash_width: int = 1) -> dict:
         """Consulta/descubre la ruta y ejecuta TRACE_DATA en el loop MeshCore.
 
         No abre otra conexión. El control del WebPanel llama a este método desde
         otro hilo y la corrutina se ejecuta mediante ``run_coroutine_threadsafe``.
+
+        Parámetros:
+            contact_prefix: prefijo de la clave del contacto MeshCore destino.
+            discover: solicita PATH_RESPONSE antes de trazar (modo original).
+            timeout: segundos de espera, limitados a 5..60.
+            manual_path_hex: concatenación hexadecimal de hashes de repetidores
+                en orden explícito de TX; ninguno puede ser ambiguo.
+            manual_hash_width: tamaño de cada hash manual, 1 o 2 bytes.
+
+        Ejemplo de uso:
+            engine.trace_contact(prefix, timeout=20,
+                                 manual_path_hex="7f15f64e", manual_hash_width=2)
+
+        No deduce rutas inversas de recepciones, ni altera los contactos.
         """
         prefix = str(contact_prefix or "").strip()
         if not prefix:
@@ -1707,6 +1721,24 @@ class MeshCoreEmbeddedBridge:
         if mc is None or loop is None or not loop.is_running() or not self._connected:
             raise RuntimeError("meshcore_not_connected")
         timeout = max(5.0, min(float(timeout or 20.0), 60.0))
+
+        # Validación previa a RF: prohibir rutas inválidas, demasiado largas
+        # y anchos de hash que el envío TRACE no soporta en este bridge.
+        manual_path: bytes | None = None
+        if manual_path_hex is not None:
+            clean = str(manual_path_hex).strip().lower()
+            try:
+                width = int(manual_hash_width)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("meshcore_trace_invalid_hash_width") from exc
+            if width not in (1, 2):
+                raise ValueError("meshcore_trace_invalid_hash_width")
+            if not re.fullmatch(r"[0-9a-f]+", clean) or len(clean) % (2 * width):
+                raise ValueError("meshcore_trace_invalid_manual_path")
+            hop_count = len(clean) // (2 * width)
+            if not (1 <= hop_count <= 8):
+                raise ValueError("meshcore_trace_manual_path_limit")
+            manual_path = bytes.fromhex(clean)
 
         async def _run_trace():
             contact = None
@@ -1727,7 +1759,19 @@ class MeshCoreEmbeddedBridge:
                 contact.get("out_path_len"),
             )
             discovery_payload = None
-            if discover or not path_bytes:
+            if manual_path is not None:
+                # La ruta explícita solo es válida cuando cada salto coincide
+                # con un único contacto. No se adivina un hash ambiguo.
+                for pos in range(0, len(manual_path), width):
+                    hop_prefix = manual_path[pos:pos + width].hex()
+                    matches = self._mc_path_prefix_cache.get(hop_prefix, [])
+                    if len(matches) != 1:
+                        raise RuntimeError(
+                            f"meshcore_trace_manual_path_unresolved_or_ambiguous: {hop_prefix}"
+                        )
+                path_bytes = manual_path
+                hash_width = width
+            elif discover or not path_bytes:
                 send_discovery_raw = getattr(commands, "_send_path_discovery_raw", None)
                 send_discovery_sync = getattr(commands, "send_path_discovery_sync", None)
                 send_discovery_legacy = getattr(commands, "send_path_discovery", None)
@@ -1911,8 +1955,9 @@ class MeshCoreEmbeddedBridge:
                     node_hash = node.get("hash")
                     if node_hash not in (None, ""):
                         trace_hash_parts.append(str(node_hash))
-                    if node.get("snr") is not None:
-                        trace_snr_values.append(node.get("snr"))
+                    # Conservar huecos de SNR para no desplazar los valores
+                    # correspondientes a los saltos siguientes.
+                    trace_snr_values.append(node.get("snr"))
                 path_hashes = "".join(trace_hash_parts) if trace_hash_parts else path_bytes
                 path_snrs = trace_snr_values
             else:
@@ -1932,7 +1977,8 @@ class MeshCoreEmbeddedBridge:
                 "path_hash_width": hash_width,
                 "path_snrs": list(path_snrs) if isinstance(path_snrs, (list, tuple, bytes, bytearray)) else [],
                 "hops": self._meshcore_resolve_trace_hops(path_hashes, path_snrs, hash_width=hash_width),
-                "discovery_used": bool(discover or discovery_payload is not None),
+                "discovery_used": bool(manual_path is None and (discover or discovery_payload is not None)),
+                "manual_path_used": manual_path is not None,
                 "payload": payload,
                 "ts": int(time.time()),
             }
@@ -8354,11 +8400,21 @@ class _BacklogServer(threading.Thread):
                     contact_prefix = str(params.get("contact_prefix") or params.get("prefix") or "").strip()
                     discover = bool(params.get("discover", False))
                     timeout = float(params.get("timeout") or 20.0)
+                    manual_path_hex = params.get("manual_path_hex")
+                    manual_hash_width = params.get("manual_hash_width", 1)
                     eng = globals().get("MESHCORE_ENGINE")
                     if not eng or not hasattr(eng, "trace_contact"):
                         resp = {"ok": False, "error": "meshcore_trace_unavailable"}
                     else:
-                        resp = eng.trace_contact(contact_prefix, discover=discover, timeout=timeout)
+                        if manual_path_hex is None:
+                            # La API anterior conserva exactamente su conducta.
+                            resp = eng.trace_contact(contact_prefix, discover=discover, timeout=timeout)
+                        else:
+                            resp = eng.trace_contact(
+                                contact_prefix, discover=False, timeout=timeout,
+                                manual_path_hex=manual_path_hex,
+                                manual_hash_width=manual_hash_width,
+                            )
                 except Exception as e:
                     resp = {"ok": False, "error": f"meshcore_trace_failed: {type(e).__name__}: {e}"}
                 conn.sendall((json.dumps(resp, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
