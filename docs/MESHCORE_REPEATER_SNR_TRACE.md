@@ -11,6 +11,22 @@ La única fuente admitida para SNR de repetidores es una respuesta auténtica
 `TRACE_DATA` del SDK MeshCore. El comando de Telegram representa esos valores
 solo cuando el broker recibe la respuesta. No inventa mediciones.
 
+## Activación segura de rutas manuales
+
+La petición TRACE con ruta manual está **deshabilitada por defecto** en el
+broker, porque su puerto de control JSONL no es una frontera de autorización
+equivalente a Telegram. Solo durante una prueba RF supervisada puede habilitarse
+en el archivo `.env`:
+
+```dotenv
+MESHCORE_TRACE_MANUAL_ENABLED=1
+```
+
+Tras la prueba, restaurar `MESHCORE_TRACE_MANUAL_ENABLED=0` y recrear
+únicamente los servicios necesarios durante un mantenimiento controlado. No
+activar esta opción de manera permanente en instalaciones con puerto 8766
+accesible desde redes no confiables.
+
 ## Comando de Telegram (exclusivo de ADMIN_IDS)
 
 El nuevo comando **/traza_mc** genera **tráfico RF de diagnóstico** mediante
@@ -52,6 +68,10 @@ python -m pytest -q tests/test_meshcore_manual_trace_snr.py
 python -m pytest -q tests/test_meshcore_rx_signal_trace_contract.py
 python -m pytest -q tests/test_meshcore_sdk_2317_contract.py
 ```
+
+El retorno del SDK para `TRACE_DATA` debe respetar el ancho de hash
+solicitado y aportar al menos un salto explícito. Si falta información o
+los hashes no cuadran, el broker devuelve error antes de mostrar SNR falsos.
 
 **No fusionar ni desplegar** hasta disponer de pruebas positivas, revisión
 de seguridad del comando y una prueba RF controlada con una ruta conocida.
