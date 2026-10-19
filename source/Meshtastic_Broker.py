@@ -1949,20 +1949,38 @@ class MeshCoreEmbeddedBridge:
             if isinstance(trace_nodes, list):
                 trace_hash_parts = []
                 trace_snr_values = []
+                final_node_seen = False
                 for node in trace_nodes:
                     if not isinstance(node, dict):
-                        continue
+                        raise RuntimeError("meshcore_trace_invalid_node")
                     node_hash = node.get("hash")
                     if node_hash not in (None, ""):
-                        trace_hash_parts.append(str(node_hash))
-                    # Conservar huecos de SNR para no desplazar los valores
-                    # correspondientes a los saltos siguientes.
+                        if final_node_seen:
+                            raise RuntimeError("meshcore_trace_hash_after_destination")
+                        node_hex = str(node_hash).strip().lower()
+                        # No trocear silenciosamente un hash recibido usando
+                        # un tamaño distinto: alteraría los nombres y SNR.
+                        if not re.fullmatch(r"[0-9a-f]+", node_hex) or len(node_hex) != hash_width * 2:
+                            raise RuntimeError("meshcore_trace_response_hash_width_mismatch")
+                        trace_hash_parts.append(node_hex)
+                    else:
+                        # En el formato del SDK solo el elemento final carece
+                        # de hash; representa el SNR del destino.
+                        if final_node_seen:
+                            raise RuntimeError("meshcore_trace_multiple_destinations")
+                        final_node_seen = True
+                    # Conservar huecos: la ausencia de SNR en un salto nunca
+                    # desplaza la señal de los siguientes repetidores.
                     trace_snr_values.append(node.get("snr"))
-                path_hashes = "".join(trace_hash_parts) if trace_hash_parts else path_bytes
+                if not trace_hash_parts:
+                    raise RuntimeError("meshcore_trace_response_without_hops")
+                path_hashes = "".join(trace_hash_parts)
                 path_snrs = trace_snr_values
             else:
-                path_hashes = payload.get("path_hashes", path_bytes)
+                path_hashes = payload.get("path_hashes")
                 path_snrs = payload.get("path_snrs") or []
+                if not path_hashes:
+                    raise RuntimeError("meshcore_trace_response_without_hops")
             return {
                 "ok": True,
                 "contact": {
