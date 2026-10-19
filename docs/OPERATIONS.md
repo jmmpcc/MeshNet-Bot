@@ -90,13 +90,17 @@ cp .env "$HOME/meshnet.env.backup"
 cp -a bot_data "$HOME/meshnet.bot_data.backup"
 ```
 
-Actualizar:
+Actualizar **sin ejecutar `docker compose down` previamente**:
 
 ```bash
-git switch main
-git pull --ff-only
+# Antes: comprobar que .env contiene MESHNET_DOCKER_SERVICES con los servicios deseados
+grep -E '^(MESHNET_DOCKER_SERVICES|COMPOSE_PROFILES)=' .env
 ./scripts/update_meshnet.sh
 ```
+
+Este script incorpora su propio `git pull --ff-only` si no hay cambios locales versionados, ejecuta `docker compose pull` solo para los servicios seleccionados y los arranca secuencialmente. No ejecute un `pull` ni un `up -d` global adicional. Si hay modificaciones versionadas, conserva el checkout, omite el pull de Git y continúa con la actualización Docker; la conciliación de fuentes deberá hacerse por separado.
+
+**Importante:** `MESHNET_DOCKER_SERVICES` debe quedar definido en `.env` para un arranque fiable incluso después de una parada completa y es obligatorio para `--startup-only`. Sin esta clave, en actualización normal el script selecciona solo los servicios que ya están `running`. Después de `docker compose down`, esa detección queda vacía y no se arranca ningún Docker. Las dependencias de cada servicio y todos los nombres seleccionables se explican en el [README](../README.md#configuración-obligatoria-recomendada-antes-de-actualizar-o-reiniciar).
 
 Al terminar:
 
@@ -110,6 +114,25 @@ No use como procedimiento normal:
 docker compose up -d
 docker compose up -d --remove-orphans
 ```
+
+### Ejemplos de selección en `.env`
+
+```dotenv
+# Solo núcleo
+MESHNET_DOCKER_SERVICES=broker,bot,aprs
+```
+
+```dotenv
+# Núcleo y ambos perfiles opcionales
+COMPOSE_PROFILES=farmacias,emergencias
+MESHNET_DOCKER_SERVICES=broker,bot,aprs,farmacias,farmacias-check,farmacias-daily,emergencias,emergencias-check
+```
+
+Servicios Compose disponibles: `broker`, `bot`, `aprs`, `email-to-mesh`, `bridgehub-bc`, `farmacias`, `farmacias-check`, `farmacias-daily`, `emergencias` y `emergencias-check`. No se deben usar nombres de contenedor `meshnet-*` en esta variable.
+
+`COMPOSE_PROFILES` solo habilita los servicios opcionales de Farmacias o Emergencias en Compose; **no** los incorpora automáticamente a la selección del actualizador. Los procesos de comprobación y envío diario requieren también sus APIs y `broker`; `bot`, `aprs`, `email-to-mesh` y `bridgehub-bc` requieren `broker`. Configure previamente los servicios elegidos con las guías respectivas y evite mantener activas simultáneamente las variantes Docker y systemd legacy.
+
+**Persistencia:** todas estas definiciones usan `./bot_data:/app/bot_data` para datos operativos compartidos. `docker compose pull` no modifica los contenedores activos ni elimina SQLite/JSON; `up -d` puede recrear contenedores manteniendo los archivos del host. Evite `down -v`, el borrado manual de `bot_data` y el cambio de ruta de instalación. Haga una copia previa por si una versión futura introduce cambios de esquema.
 
 ## 6. Activar servicios nuevos
 
