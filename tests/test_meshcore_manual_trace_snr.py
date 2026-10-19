@@ -368,3 +368,28 @@ def test_telegram_official_manual_command_structure():
     assert '"contact_prefix": "ruta"' in handler_source
     assert '"manual_return": len(args) == 4' in handler_source
     assert 'direction = " [ida]" if index <= forward else " [vuelta]"' in handler_source
+
+
+def test_telegram_rx_automatically_lists_repeater_snr_without_trace_command():
+    """Comprobar el contrato de presentación RX usando el código existente.
+
+    La recepción pasiva muestra el SNR de cada repetidor solo cuando el
+    broker lo adjunta en meshcore_repeaters. No reutiliza rxSnr del
+    receptor local ni solicita TRACE RF desde el handler de escucha.
+    """
+    source = BOT.read_text(encoding="utf-8")
+    assert 'mc_repeaters = (' in source
+    assert 'pkt.get("meshcore_repeaters")' in source
+    assert 'hop_snr = repeater.get("snr")' in source
+    assert 'hop_snr_text = (' in source
+    assert 'else "no disponible"' in source
+    assert 'detail_lines.extend(mc_repeater_lines)' in source
+    assert 'elif extra_meshcore_path:' in source
+
+
+def test_telegram_rx_preserves_historical_meshcore_path_fallback():
+    """Los mensajes antiguos sin detalle estructurado mantienen su ruta."""
+    source = BOT.read_text(encoding="utf-8")
+    assert 'mc_path_txt = (' in source
+    assert 'detail_lines.append(extra_meshcore_path.rstrip' in source
+    assert 'if mc_repeater_lines:' in source
