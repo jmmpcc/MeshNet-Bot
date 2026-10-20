@@ -7320,43 +7320,351 @@ def emit_meshcore_rx_to_hub_and_log(
     except Exception:
         pass
 
-def _iter_backlog_jsonl(since_ts: int | None, until_ts: int | None, channel: int | None, portnums: list[str] | None, limit: int | None):
+# === [HOTFIX BacklogServer 2026-10-20] Índice disperso del backlog ============
+#
+# Problema corregido:
+#   FETCH_BACKLOG recorría broker_offline_log.jsonl desde el byte 0 en cada RPC,
+#   aunque since_ts fuese reciente. Con WebPanel 24/7 esto podía mantener varios
+#   handlers ocupados, elevar CPU/I/O y dejar sockets CLOSE-WAIT hasta terminar
+#   el escaneo completo.
+#
+# Diseño:
+#   - índice disperso en memoria: (max_rx_time_hasta_aquí, byte_offset);
+#   - actualización incremental: solo parsea bytes añadidos desde la última vez;
+#   - reset automático si el fichero rota, cambia de inode o se trunca;
+#   - el iterador final sigue leyendo hacia delante y conserva el orden histórico;
+#   - consultas sin since_ts mantienen exactamente el comportamiento anterior.
+_BACKLOG_INDEX_LOCK = threading.Lock()
+_BACKLOG_INDEX_STATE = {
+    "dev": None,
+    "ino": None,
+    "size": 0,
+    "indexed_offset": 0,
+    "max_ts": 0,
+    "lines": 0,
+    "checkpoints": [(0, 0)],
+}
+
+try:
+    _BACKLOG_INDEX_STRIDE_LINES = max(
+        32,
+        min(int(os.getenv("BACKLOG_INDEX_STRIDE_LINES", "256") or "256"), 4096),
+    )
+except Exception:
+    _BACKLOG_INDEX_STRIDE_LINES = 256
+
+
+def _backlog_row_timestamp(obj: dict) -> int:
     """
-    NUEVO: iterador que lee el JSONL y filtra. Devuelve dicts ya cargados.
+    Devuelve el timestamp normalizado de una fila de broker_offline_log.jsonl.
+
+    Uso interno:
+        ts = _backlog_row_timestamp(obj)
+
+    Parámetros:
+        obj:
+            Registro JSON ya decodificado.
+
+    Funcionalidad:
+        - Prioriza rx_time, que es el contrato histórico de FETCH_BACKLOG.
+        - Usa ts como fallback defensivo para registros antiguos/manuales.
+        - Devuelve 0 si el valor no es interpretable.
+        - No modifica el objeto recibido.
+    """
+    if not isinstance(obj, dict):
+        return 0
+    raw = obj.get("rx_time")
+    if raw in (None, ""):
+        raw = obj.get("ts")
+    try:
+        return int(float(raw or 0))
+    except Exception:
+        return 0
+
+
+def _backlog_index_reset_locked() -> None:
+    """
+    Reinicia el índice disperso del backlog.
+
+    Uso interno:
+        Debe llamarse con _BACKLOG_INDEX_LOCK adquirido.
+
+    Funcionalidad:
+        - Invalida inode/tamaño/offset/checkpoints.
+        - Se usa cuando el JSONL rota, cambia de fichero o se trunca.
+        - No toca ni recrea broker_offline_log.jsonl.
+    """
+    _BACKLOG_INDEX_STATE.clear()
+    _BACKLOG_INDEX_STATE.update(
+        {
+            "dev": None,
+            "ino": None,
+            "size": 0,
+            "indexed_offset": 0,
+            "max_ts": 0,
+            "lines": 0,
+            "checkpoints": [(0, 0)],
+        }
+    )
+
+
+def _backlog_index_refresh_locked() -> tuple[int | None, int | None]:
+    """
+    Actualiza incrementalmente el índice disperso del backlog.
+
+    Uso interno:
+        dev, ino = _backlog_index_refresh_locked()
+
+    Requisitos:
+        Debe ejecutarse con _BACKLOG_INDEX_LOCK adquirido.
+
+    Funcionalidad:
+        - Detecta rotación mediante st_dev/st_ino y truncado por tamaño.
+        - Lee en binario desde indexed_offset, no desde el inicio.
+        - Añade un checkpoint cada BACKLOG_INDEX_STRIDE_LINES líneas.
+        - Guarda como clave el máximo rx_time observado hasta ese offset.
+          Esto permite saltar solo prefijos que con certeza son anteriores al
+          since_ts, incluso si alguna trama llega con timestamp fuera de orden.
+        - Si encuentra una última línea parcial, no la indexa hasta que termine
+          con salto de línea en una escritura posterior.
+    """
+    try:
+        st = os.stat(OFFLINE_LOG_PATH)
+    except (FileNotFoundError, OSError):
+        _backlog_index_reset_locked()
+        return None, None
+
+    dev = int(getattr(st, "st_dev", 0))
+    ino = int(getattr(st, "st_ino", 0))
+    size = int(getattr(st, "st_size", 0))
+
+    state_dev = _BACKLOG_INDEX_STATE.get("dev")
+    state_ino = _BACKLOG_INDEX_STATE.get("ino")
+    indexed_offset = int(_BACKLOG_INDEX_STATE.get("indexed_offset") or 0)
+
+    if (
+        state_dev is None
+        or state_ino is None
+        or int(state_dev) != dev
+        or int(state_ino) != ino
+        or size < indexed_offset
+    ):
+        _backlog_index_reset_locked()
+        _BACKLOG_INDEX_STATE["dev"] = dev
+        _BACKLOG_INDEX_STATE["ino"] = ino
+        indexed_offset = 0
+
+    if size <= indexed_offset:
+        _BACKLOG_INDEX_STATE["size"] = size
+        return dev, ino
+
+    max_ts = int(_BACKLOG_INDEX_STATE.get("max_ts") or 0)
+    lines = int(_BACKLOG_INDEX_STATE.get("lines") or 0)
+    checkpoints = _BACKLOG_INDEX_STATE.setdefault("checkpoints", [(0, 0)])
+
+    try:
+        with open(OFFLINE_LOG_PATH, "rb") as f:
+            f.seek(indexed_offset)
+
+            while True:
+                line_start = f.tell()
+                raw = f.readline()
+                if not raw:
+                    indexed_offset = f.tell()
+                    break
+
+                # No indexar una línea que todavía está siendo escrita.
+                if not raw.endswith(b"\n"):
+                    indexed_offset = line_start
+                    break
+
+                indexed_offset = f.tell()
+                lines += 1
+
+                try:
+                    obj = json.loads(raw.decode("utf-8", errors="replace"))
+                except Exception:
+                    obj = None
+
+                if isinstance(obj, dict):
+                    row_ts = _backlog_row_timestamp(obj)
+                    if row_ts > max_ts:
+                        max_ts = row_ts
+
+                if lines % _BACKLOG_INDEX_STRIDE_LINES == 0:
+                    checkpoints.append((max_ts, indexed_offset))
+
+    except (OSError, ValueError):
+        # La siguiente llamada volverá a validar inode/tamaño.
+        return dev, ino
+
+    _BACKLOG_INDEX_STATE["dev"] = dev
+    _BACKLOG_INDEX_STATE["ino"] = ino
+    _BACKLOG_INDEX_STATE["size"] = size
+    _BACKLOG_INDEX_STATE["indexed_offset"] = indexed_offset
+    _BACKLOG_INDEX_STATE["max_ts"] = max_ts
+    _BACKLOG_INDEX_STATE["lines"] = lines
+    return dev, ino
+
+
+def _backlog_index_seek_offset(since_ts: int | None) -> tuple[int, int | None, int | None]:
+    """
+    Calcula un offset seguro desde el que comenzar FETCH_BACKLOG.
+
+    Uso interno:
+        offset, dev, ino = _backlog_index_seek_offset(since_ts)
+
+    Parámetros:
+        since_ts:
+            Epoch mínimo solicitado. Si es None o <= 0 se devuelve offset 0.
+
+    Funcionalidad:
+        - Actualiza el índice de forma incremental bajo lock.
+        - Busca el último checkpoint cuyo máximo histórico sea < since_ts.
+        - Nunca salta un bloque que pudiera contener una fila válida.
+        - Devuelve también dev/ino para validar que el fichero no haya rotado
+          entre el cálculo del offset y la apertura posterior.
+    """
+    try:
+        wanted = int(since_ts) if since_ts is not None else 0
+    except Exception:
+        wanted = 0
+
+    if wanted <= 0:
+        return 0, None, None
+
+    with _BACKLOG_INDEX_LOCK:
+        dev, ino = _backlog_index_refresh_locked()
+        checkpoints = list(_BACKLOG_INDEX_STATE.get("checkpoints") or [(0, 0)])
+
+        # Búsqueda binaria manual sobre max_ts, que es monotónico por construcción.
+        lo = 0
+        hi = len(checkpoints)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            try:
+                cp_ts = int(checkpoints[mid][0])
+            except Exception:
+                cp_ts = 0
+
+            if cp_ts < wanted:
+                lo = mid + 1
+            else:
+                hi = mid
+
+        idx = max(0, lo - 1)
+        try:
+            offset = max(0, int(checkpoints[idx][1]))
+        except Exception:
+            offset = 0
+
+        return offset, dev, ino
+
+
+def _iter_backlog_jsonl(
+    since_ts: int | None,
+    until_ts: int | None,
+    channel: int | None,
+    portnums: list[str] | None,
+    limit: int | None,
+):
+    """
+    Itera broker_offline_log.jsonl aplicando filtros sin reescanear siempre desde byte 0.
+
+    Uso interno:
+        rows = list(_iter_backlog_jsonl(since_ts, until_ts, channel, portnums, limit))
+
+    Parámetros:
+        since_ts:
+            Epoch mínimo incluido.
+        until_ts:
+            Epoch máximo incluido.
+        channel:
+            Canal exacto o None.
+        portnums:
+            Lista de portnums permitidos o None.
+        limit:
+            Máximo de filas devueltas.
+
+    Funcionalidad:
+        - Para consultas incrementales usa el índice disperso y seek() a un
+          checkpoint seguro cercano a since_ts.
+        - Si el fichero rotó entre indexado y apertura, vuelve al byte 0.
+        - Conserva el orden original de las líneas y los mismos filtros.
+        - Las consultas sin since_ts continúan leyendo desde el inicio.
+        - No modifica el JSONL, no transmite RF y no cambia el contrato RPC.
     """
     if not os.path.isfile(OFFLINE_LOG_PATH):
         return
+
+    try:
+        since_i = int(since_ts) if since_ts is not None else None
+    except Exception:
+        since_i = None
+
+    try:
+        until_i = int(until_ts) if until_ts is not None else None
+    except Exception:
+        until_i = None
+
+    portnum_set = {str(p) for p in portnums} if portnums else None
     sent = 0
-    with open(OFFLINE_LOG_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
+
+    offset, expected_dev, expected_ino = _backlog_index_seek_offset(since_i)
+
+    try:
+        with open(OFFLINE_LOG_PATH, "rb") as f:
+            # Si hubo rotación entre cálculo del índice y open(), no usar offset viejo.
             try:
-                obj = json.loads(line)
+                fst = os.fstat(f.fileno())
+                if (
+                    expected_dev is not None
+                    and expected_ino is not None
+                    and (
+                        int(getattr(fst, "st_dev", 0)) != int(expected_dev)
+                        or int(getattr(fst, "st_ino", 0)) != int(expected_ino)
+                    )
+                ):
+                    offset = 0
             except Exception:
-                continue
-            # filtros
-            if since_ts is not None:
-                try:
-                    if int(obj.get("rx_time") or 0) < int(since_ts):
-                        continue
-                except Exception:
-                    pass
-            if until_ts is not None:
-                try:
-                    if int(obj.get("rx_time") or 0) > int(until_ts):
-                        continue
-                except Exception:
-                    pass
-            if channel is not None and obj.get("channel") != channel:
-                continue
-            if portnums:
-                if str(obj.get("portnum")) not in [str(p) for p in portnums]:
+                offset = 0
+
+            try:
+                f.seek(max(0, int(offset)))
+            except Exception:
+                f.seek(0)
+
+            for raw in f:
+                if not raw.strip():
                     continue
-            yield obj
-            sent += 1
-            if limit and sent >= limit:
-                return
+
+                try:
+                    obj = json.loads(raw.decode("utf-8", errors="replace"))
+                except Exception:
+                    continue
+
+                row_ts = _backlog_row_timestamp(obj)
+
+                if since_i is not None and row_ts < since_i:
+                    continue
+
+                if until_i is not None and row_ts > until_i:
+                    continue
+
+                if channel is not None and obj.get("channel") != channel:
+                    continue
+
+                if portnum_set is not None and str(obj.get("portnum")) not in portnum_set:
+                    continue
+
+                yield obj
+                sent += 1
+
+                if limit and sent >= limit:
+                    return
+
+    except (FileNotFoundError, OSError):
+        return
 
 
 
