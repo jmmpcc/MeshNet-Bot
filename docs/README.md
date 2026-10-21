@@ -16,6 +16,7 @@ Este directorio separa documentación **operativa vigente** de documentos histó
 | Correo ↔ malla | [EMAIL_TO_MESH.md](EMAIL_TO_MESH.md) |
 | Scope MeshCore | [MESHCORE_TX_SCOPE/README.md](MESHCORE_TX_SCOPE/README.md) |
 | Servicios automáticos y scope | [MESHCORE_TX_SCOPE/AUTOMATIC_SERVICES.md](MESHCORE_TX_SCOPE/AUTOMATIC_SERVICES.md) |
+| **MeshNet Control Center / WebPanel Next — informe técnico vivo** | [WEBPANEL_NEXT_TECHNICAL_REPORT.md](WEBPANEL_NEXT_TECHNICAL_REPORT.md) |
 | ControlPanel | [../tools/ControlPanel/README.md](../tools/ControlPanel/README.md) |
 | Farmacias | [../tools/farmacias_guardia/README.md](../tools/farmacias_guardia/README.md) |
 | Emergencias | [../tools/emergencias_guardia/README.md](../tools/emergencias_guardia/README.md) |
