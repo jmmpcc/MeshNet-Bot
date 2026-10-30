@@ -625,8 +625,18 @@ def create_app(registry: ToolRegistry | None = None, auth_token: str | None = No
         config = _emergency_config()
         try:
             state = json.loads((EMERGENCIAS_CONFIG_FILE.parent / "state.json").read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except FileNotFoundError:
             state = {}
+        except PermissionError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="No se puede leer el estado de Emergencias: permisos insuficientes",
+            ) from exc
+        except (json.JSONDecodeError, OSError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="No se puede leer el estado de Emergencias",
+            ) from exc
         source_states = state.get("sources", {}) if isinstance(state.get("sources", {}), dict) else {}
         enabled = [source_id for source_id, source in config.get("sources", {}).items()
                    if source.get("enabled")]
