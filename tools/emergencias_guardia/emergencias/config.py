@@ -144,11 +144,15 @@ def atomic_write_json(path: Path, data: Any) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        # El mapa publico lee current.json como usuario del host. El temporal
-        # nace con permisos 0600: antes del reemplazo atomico se concede lectura
-        # al grupo propietario del directorio compartido, sin exponer state.json.
-        if path.name == "current.json" and path.parent == DATA_DIR:
-            os.chown(temp_name, -1, path.parent.stat().st_gid)
+        # current.json y state.json se leen desde servicios del host que
+        # pertenecen al grupo del directorio compartido (Control Panel y mapa).
+        # mkstemp crea ficheros 0600; ajustar ANTES de os.replace garantiza
+        # permisos persistentes en todas las escrituras atomicas. config.json
+        # y los demas ficheros permanecen privados (0600).
+        if path.parent == DATA_DIR and path.name in {"current.json", "state.json"}:
+            directory_gid = path.parent.stat().st_gid
+            if os.stat(temp_name).st_gid != directory_gid:
+                os.chown(temp_name, -1, directory_gid)
             os.chmod(temp_name, 0o640)
         os.replace(temp_name, path)
     finally:
