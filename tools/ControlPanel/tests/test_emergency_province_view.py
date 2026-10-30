@@ -140,6 +140,7 @@ def test_panel_reads_current_from_configured_directory(tmp_path, monkeypatch):
     docker_dir.mkdir(parents=True)
     event = {
         "event_id": "docker-current",
+        "source_event_id": "test-current",
         "source": "dgt_datex",
         "title": "Incidencia actual",
         "description": "",
