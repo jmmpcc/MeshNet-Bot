@@ -126,3 +126,37 @@ def test_map_script_auto_refreshes_current_incidents_without_reframing():
     assert "#emergency-province-refresh" in script
     assert "() => loadEmergencyProvinceEvents()" in script
 
+
+
+def test_panel_reads_current_from_configured_directory(tmp_path, monkeypatch):
+    """Docker usa bot_data, nunca el current.json histórico del módulo."""
+    import json
+    from tools.ControlPanel import web_admin
+    from tools.ControlPanel.emergency_province_view import (
+        load_emergency_panel_current_events,
+    )
+
+    docker_dir = tmp_path / "bot_data" / "emergencias_guardia"
+    docker_dir.mkdir(parents=True)
+    event = {
+        "event_id": "docker-current",
+        "source_event_id": "test-current",
+        "source": "dgt_datex",
+        "title": "Incidencia actual",
+        "description": "",
+        "category": "road_closed",
+        "status": "active",
+        "severity": "high",
+        "province": "Zaragoza",
+        "municipality": "Zaragoza",
+        "started_at": "2026-10-30T07:00:00+00:00",
+        "updated_at": "2026-10-30T07:00:00+00:00",
+    }
+    (docker_dir / "current.json").write_text(
+        json.dumps({"events": [event]}), encoding="utf-8"
+    )
+    monkeypatch.setattr(web_admin, "EMERGENCIAS_CONFIG_FILE", docker_dir / "config.json")
+
+    events = load_emergency_panel_current_events()
+    assert len(events) == 1
+    assert events[0].event_id == "docker-current"

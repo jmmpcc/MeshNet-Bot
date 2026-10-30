@@ -20,9 +20,13 @@ from fastapi import FastAPI
 from fastapi.responses import Response
 
 try:
-    from emergency_province_view import build_emergency_snapshot
+    from emergency_province_view import (
+        build_emergency_snapshot, load_emergency_panel_current_events,
+    )
 except ModuleNotFoundError:
-    from tools.ControlPanel.emergency_province_view import build_emergency_snapshot
+    from tools.ControlPanel.emergency_province_view import (
+        build_emergency_snapshot, load_emergency_panel_current_events,
+    )
 
 
 DEFAULT_EMERGENCY_WINDOW_HOURS = 24
@@ -274,10 +278,8 @@ def apply_emergency_current_collapsible(app: FastAPI) -> FastAPI:
         hours: int = DEFAULT_EMERGENCY_WINDOW_HOURS,
     ) -> dict[str, Any]:
         """Devuelve sólo las incidencias comprendidas en el periodo solicitado."""
-        from tools.emergencias_guardia.emergencias.storage import load_current
-
         return build_windowed_emergency_snapshot(
-            load_current().values(),
+            load_emergency_panel_current_events(),
             hours=hours,
         )
 

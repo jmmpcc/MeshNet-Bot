@@ -16,6 +16,36 @@ from fastapi import FastAPI
 from fastapi.responses import Response
 
 
+
+def load_emergency_panel_current_events() -> list[Any]:
+    """Lee las incidencias desde el mismo directorio que el resumen del panel.
+
+    Uso:
+        events = load_emergency_panel_current_events()
+
+    Sin parámetros. Retorna una lista de objetos Event. Reutiliza la ruta
+    EMERGENCIAS_CONFIG_FILE ya resuelta por web_admin para Docker o systemd,
+    evitando que el almacenamiento global del motor apunte al directorio
+    histórico cuando el panel se ejecuta fuera de Docker. Sólo lectura.
+    """
+    import json
+
+    try:
+        import web_admin
+    except ModuleNotFoundError:
+        from tools.ControlPanel import web_admin
+
+    from tools.emergencias_guardia.emergencias.models import Event
+
+    current_file = web_admin.EMERGENCIAS_CONFIG_FILE.parent / "current.json"
+    try:
+        payload = json.loads(current_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        payload = {"events": []}
+
+    return [Event.from_dict(item) for item in payload.get("events", [])]
+
+
 def build_emergency_snapshot(events: Iterable[Any]) -> dict[str, Any]:
     """Construye la instantánea mínima usada por la vista de Emergencias.
 
@@ -517,9 +547,7 @@ def apply_emergency_province_view(app: FastAPI) -> FastAPI:
 
     @app.get("/api/emergencias/current-view")
     def emergency_current_view() -> dict[str, Any]:
-        from tools.emergencias_guardia.emergencias.storage import load_current
-
-        return build_emergency_snapshot(load_current().values())
+        return build_emergency_snapshot(load_emergency_panel_current_events())
 
     script = _extension_script()
 
