@@ -33,14 +33,26 @@ class PublicMapFilePermissionsTests(unittest.TestCase):
                     )
                     self.assertEqual(current.stat().st_gid, data_dir.stat().st_gid)
 
-    def test_state_keeps_private_permissions(self) -> None:
-        """No se amplían los permisos del estado ni de otros archivos."""
+    def test_repeated_state_writes_remain_group_readable(self) -> None:
+        """El Control Panel puede leer state.json tras cada reemplazo atómico."""
         with tempfile.TemporaryDirectory() as root:
             data_dir = Path(root)
             state = data_dir / "state.json"
             with patch.object(config, "DATA_DIR", data_dir):
-                config.atomic_write_json(state, {"secret": "synthetic"})
-                self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o600)
+                for index in range(2):
+                    config.atomic_write_json(state, {"last_success": index})
+                    self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o640)
+                    self.assertEqual(state.stat().st_gid, data_dir.stat().st_gid)
+
+    def test_config_and_other_files_remain_private(self) -> None:
+        """La configuración y ficheros internos conservan permisos 0600."""
+        with tempfile.TemporaryDirectory() as root:
+            data_dir = Path(root)
+            with patch.object(config, "DATA_DIR", data_dir):
+                for name in ("config.json", "internal.json"):
+                    target = data_dir / name
+                    config.atomic_write_json(target, {"synthetic": True})
+                    self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
 
 
 if __name__ == "__main__":
