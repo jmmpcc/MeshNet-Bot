@@ -1,10 +1,12 @@
 [Unit]
-Description=Envío diario de farmacias de guardia
+Description=Farmacias: difusión diaria completa desactivada (compatibilidad)
 After=network-online.target docker.service meshnet-farmacias-api.service
 
 [Service]
 Type=oneshot
 User=meshnet
 WorkingDirectory=/home/meshnet/MeshNet-Bot/tools/farmacias_guardia
-# El launcher scoped delega en el flujo histórico equivalente a: farmacias_guardia.py send
-ExecStart=/usr/bin/python3 /home/meshnet/MeshNet-Bot/tools/farmacias_guardia/farmacias_guardia_scoped.py send
+# No se realiza publicación automática de listados completos.
+# El comando manual farmacias_guardia.py send sigue disponible.
+# Los avisos de nuevas farmacias corresponden exclusivamente a farmacias-check.
+ExecStart=/usr/bin/true
