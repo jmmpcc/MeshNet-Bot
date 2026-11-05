@@ -2605,12 +2605,21 @@ async def _notify_executed_tasks_job__impl(context: ContextTypes.DEFAULT_TYPE):
        # ← el broker lo fija por defecto (puerto del broker + 1)
 BROKER_REQ_TIMEOUT = 8.0
 
-def _broker_rpc(cmd: str, params: dict | None = None) -> dict:
-    """Envía una petición JSONL simple al BacklogServer del broker y devuelve el dict."""
+def _broker_rpc(cmd: str, params: dict | None = None, timeout: float | None = None) -> dict:
+    """Envía JSONL al broker existente y devuelve un dict.
+
+    cmd: instrucción de control; params: diccionario de parámetros.
+    timeout: tiempo de socket opcional en segundos; None conserva el plazo
+    histórico BROKER_REQ_TIMEOUT para todos los llamadores existentes.
+    Ejemplo: _broker_rpc("MESHCORE_TRACE_PATH", parametros, timeout=30).
+    No abre otra conexión al dispositivo radio, solo al control del broker.
+    """
+    timeout_s = float(BROKER_REQ_TIMEOUT if timeout is None else timeout)
+    timeout_s = max(1.0, min(65.0, timeout_s))
     s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(BROKER_REQ_TIMEOUT)
+        s.settimeout(timeout_s)
         s.connect((BROKER_CTRL_HOST, int(BROKER_CTRL_PORT)))
         req = {"cmd": str(cmd).upper(), "params": (params or {})}
         line = json.dumps(req, ensure_ascii=False) + "\n"
@@ -2618,7 +2627,7 @@ def _broker_rpc(cmd: str, params: dict | None = None) -> dict:
 
         # leer UNA línea de respuesta
         data = b""
-        t_end = time.time() + BROKER_REQ_TIMEOUT
+        t_end = time.time() + timeout_s
         while time.time() < t_end:
             ch = s.recv(4096)
             if not ch:
@@ -6596,6 +6605,7 @@ async def set_bot_menu(app: Application) -> None:
         BotCommand("enviar_mc_dm", "Enviar DM MeshCore: /dm_mc <prefix|N|[MC:prefix]> <texto...>"),
         BotCommand("mc_contactos", "Contactos MeshCore numerados con botones DM: /mc_contactos [n]"),
         BotCommand("mc_canales", "Canales MeshCore disponibles: /mc_canales [n]"),
+        BotCommand("traza_mc", "Traza RF MeshCore y SNR por salto (solo admins)"),
         BotCommand("escuchar", "Escuchar broker (canal/all)"),
         BotCommand("parar_escucha", "Detener la escucha del broker"),
         BotCommand("traceroute", "Traceroute a un nodo (!id|número|alias) [Timeout] sg. espera"),
@@ -6964,6 +6974,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <code>/enviar_mc_dm &lt;contact_prefix|[MC:prefix]|N&gt; &lt;texto&gt;</code> — Envía directo a un contacto MeshCore. <code>N</code> funciona después de ejecutar <code>/mc_contactos</code>.\n"
         "• <code>/dm_mc</code> — Alias corto de <code>/enviar_mc_dm</code>.\n"
         "• <code>/mc_contactos [max]</code> — Lista contactos MeshCore en formato numerado, muestra botones <b>DM</b> y guarda los números para usarlos con <code>/dm_mc N texto</code>.\n"
+        "• <code>/traza_mc ruta hash1,hash2 ancho [volver]</code> — Traza RF de repetidores con SNR y regreso opcional (solo ADMIN_IDS).\n"
         "• <code>/mc_canales [max]</code> — Lista canales MeshCore disponibles desde el perfil embebido o <code>MESHCORE_CHANNEL_MAP</code>.\n"
         "Ej.: <code>/enviar_mc canal 1 Aviso por MeshCore</code>\n"
         "Ej.: <code>/enviar_mc aprs EB2ABC-7: Aviso solo APRS</code>\n"
@@ -9555,6 +9566,140 @@ def _format_meshcore_last_seen(value: object) -> str:
         return datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M:%S")
     except Exception:
         return ""
+
+
+# Diagnóstico activo RF exclusivo para administradores. Este bloqueo impide
+# solapar peticiones TRACE desde chats diferentes y protege el BacklogServer.
+_MESHCORE_TRACE_LOCK = asyncio.Lock()
+_MESHCORE_TRACE_LAST_SENT_AT = 0.0
+
+
+async def traza_mc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ejecuta /traza_mc PREFIX [RUTA_HEX ANCHO] desde Telegram.
+
+    Llamada: /traza_mc cfe25e30b3ec (descubrimiento anterior)
+             /traza_mc ruta 7f15,f64e 2 volver (TRACE manual)
+
+    - Solo ADMIN_IDS puede originar una transmisión RF diagnóstica.
+    - Sin ruta explícita solicita PATH_RESPONSE con la función existente.
+    - Con ruta manual, el broker exige hashes inequívocos de 1/2 bytes.
+      'volver' construye el regreso, sin asegurar conectividad de radio.
+    - Reutiliza la sesión radio del broker y _broker_rpc en un hilo para no
+      bloquear el bucle asyncio de Telegram mientras espera TRACE_DATA.
+    - Nunca inventa SNR: muestra "no disponible" cuando faltan datos.
+    """
+    global _MESHCORE_TRACE_LAST_SENT_AT
+    message = update.effective_message
+    user = update.effective_user
+    if message is None:
+        return
+    if user is None or not is_admin(user.id):
+        await message.reply_text("⛔ /traza_mc está reservado a administradores.")
+        return
+
+    args = list(context.args or [])
+    if not args:
+        await message.reply_text(
+            "Uso:\n"
+            "/traza_mc <prefijo> — descubrimiento de contacto (modo previo)\n"
+            "/traza_mc ruta <hashes_separados_por_comas> <ancho> [volver]\n"
+            "Ej.: /traza_mc ruta 7f15,f64e 2 volver\n"
+            "Genera tráfico RF; 'volver' añade el regreso invertido."
+        )
+        return
+
+    # La herramienta manual oficial traza repetidores, no un contacto.
+    # Conservamos por separado el comportamiento histórico con prefijo
+    # para que el WebPanel y los comandos antiguos no cambien.
+    if args[0].strip().lower() == "ruta":
+        if len(args) not in (3, 4):
+            await message.reply_text(
+                "Uso: /traza_mc ruta <hash1,hash2,...> <ancho 1|2> [volver]"
+            )
+            return
+        if args[2] not in ("1", "2"):
+            await message.reply_text("Ancho de hash: 1 o 2 bytes.")
+            return
+        if len(args) == 4 and args[3].strip().lower() != "volver":
+            await message.reply_text("La única opción adicional es 'volver'.")
+            return
+        width = int(args[2])
+        hops = [part.strip().lower() for part in args[1].split(",")]
+        if not (1 <= len(hops) <= 8) or any(
+            not re.fullmatch(r"[0-9a-f]{" + str(width * 2) + r"}", part)
+            for part in hops
+        ):
+            await message.reply_text(
+                "Hashes inválidos: entre 1 y 8 saltos de 1 o 2 bytes "
+                "(longitud idéntica para todos)."
+            )
+            return
+        params = {
+            "contact_prefix": "ruta",
+            "discover": False,
+            "timeout": 20,
+            "manual_path_hex": "".join(hops),
+            "manual_hash_width": width,
+            "manual_return": len(args) == 4,
+        }
+    else:
+        if len(args) != 1:
+            await message.reply_text(
+                "Para trazas manuales usa: /traza_mc ruta aa,bb 1 volver"
+            )
+            return
+        prefix = args[0].strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{6,64}", prefix):
+            await message.reply_text("Prefijo de contacto inválido.")
+            return
+        params = {
+            "contact_prefix": prefix, "discover": True, "timeout": 20
+        }
+
+    if _MESHCORE_TRACE_LOCK.locked():
+        await message.reply_text("Ya existe otra traza MeshCore en curso.")
+        return
+
+    async with _MESHCORE_TRACE_LOCK:
+        remaining = 60.0 - (time.monotonic() - _MESHCORE_TRACE_LAST_SENT_AT)
+        if remaining > 0:
+            await message.reply_text(f"Espere {int(remaining) + 1} s antes de otra traza RF.")
+            return
+        _MESHCORE_TRACE_LAST_SENT_AT = time.monotonic()
+        await message.reply_text("🔎 Solicitando traza MeshCore; esperando respuesta RF…")
+        response = await asyncio.to_thread(
+            _broker_rpc, "MESHCORE_TRACE_PATH", params, 30.0
+        )
+
+    if not isinstance(response, dict) or not response.get("ok"):
+        reason = (response or {}).get("error", "sin respuesta") if isinstance(response, dict) else "sin respuesta"
+        await message.reply_text(
+            f"Traza MeshCore no completada: {str(reason)[:300]}\n"
+            "No se muestran SNR ni saltos no confirmados."
+        )
+        return
+
+    lines = ["📡 Traza MeshCore (SNR medido por TRACE_DATA)"]
+    for hop in (response.get("hops") or [])[:16]:
+        if not isinstance(hop, dict):
+            continue
+        name = str(hop.get("name") or hop.get("hash") or "desconocido")[:64]
+        snr = hop.get("snr")
+        try:
+            snr_text = f"{float(snr):+.1f} dB" if snr is not None else "no disponible"
+        except (ValueError, TypeError):
+            snr_text = "no disponible"
+        ambiguous = " (hash ambiguo)" if hop.get("ambiguous") else ""
+        direction = ""
+        if response.get("manual_return_used") and not hop.get("destination"):
+            forward = response.get("manual_forward_hops")
+            index = hop.get("index")
+            if isinstance(forward, int) and isinstance(index, int):
+                direction = " [ida]" if index <= forward else " [vuelta]"
+        lines.append(f"• {name}{direction}{ambiguous}: SNR {snr_text}")
+    if len(lines) == 1:
+        lines.append("La respuesta no contiene saltos verificables.")
+    await message.reply_text("\n".join(lines))
 
 
 async def mc_contactos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -16658,6 +16803,41 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                         mc_path_txt,
                     ).strip() or None
 
+                # Mostrar automáticamente cada salto MeshCore en el propio
+                # mensaje de Telegram, sin depender de /traza_mc ni generar TX.
+                # El SNR local NO es el SNR del repetidor y nunca se copia a
+                # estos elementos. Se utiliza solo el valor por salto enviado
+                # expresamente por el broker; None se presenta como "—".
+                mc_repeater_lines = []
+                if is_meshcore:
+                    try:
+                        mc_repeaters = (
+                            pkt.get("meshcore_repeaters")
+                            or summary.get("meshcore_repeaters")
+                            or obj.get("meshcore_repeaters")
+                        ) if isinstance(pkt, dict) else (
+                            summary.get("meshcore_repeaters") or obj.get("meshcore_repeaters")
+                        )
+                        if isinstance(mc_repeaters, list):
+                            for hop_index, repeater in enumerate(mc_repeaters[:32], 1):
+                                if not isinstance(repeater, dict):
+                                    continue
+                                hop_name = str(repeater.get("name") or repeater.get("hash") or "desconocido").strip()
+                                hop_snr = repeater.get("snr")
+                                try:
+                                    hop_snr_text = (
+                                        f"{float(hop_snr):+.1f} dB"
+                                        if hop_snr is not None and math.isfinite(float(hop_snr))
+                                        else "no disponible"
+                                    )
+                                except (TypeError, ValueError, OverflowError):
+                                    hop_snr_text = "no disponible"
+                                mc_repeater_lines.append(
+                                    f"   • {hop_index}. {hop_name} | SNR {hop_snr_text}"
+                                )
+                    except Exception:
+                        mc_repeater_lines = []
+
                 # URL de la traza histórica generada por el broker. El BOT no
                 # reconstruye rutas ni coordenadas: solo presenta el enlace
                 # autoritativo asociado a esta recepción concreta.
@@ -16764,7 +16944,14 @@ async def _broker_listen_loop(chat_id: int, listen_chan: Optional[int], context:
                             detail_lines.append(f"   • MeshCore posición emisor: {mc_from_pos_txt}")
                         if hops_real is not None:
                             detail_lines.append(f"   • Hops reales: {hops_real_txt}")
-                        if extra_meshcore_path:
+                        if mc_repeater_lines:
+                            detail_lines.append(
+                                f"   • Ruta MeshCore ({mc_path_count if mc_path_count is not None else len(mc_repeater_lines)} repetidores):"
+                            )
+                            detail_lines.extend(mc_repeater_lines)
+                        elif extra_meshcore_path:
+                            # Compatibilidad con eventos antiguos sin
+                            # meshcore_repeaters, incluyendo el backlog.
                             detail_lines.append(extra_meshcore_path.rstrip("\n"))
 
                         if hop_limit is not None or hop_start is not None or relay is not None:
@@ -18285,6 +18472,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("enviar_mc", enviar_mc_cmd))
     app.add_handler(CommandHandler(["enviar_mc_dm", "dm_mc"], enviar_mc_dm_cmd))
     app.add_handler(CommandHandler("mc_contactos", mc_contactos_cmd))
+    app.add_handler(CommandHandler("traza_mc", traza_mc_cmd))
     app.add_handler(CommandHandler("mc_canales", mc_canales_cmd))
     app.add_handler(CommandHandler("mail", mail_cmd))
     app.add_handler(CommandHandler("mail_contactos", mail_contactos_cmd))
