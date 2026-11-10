@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import ssl
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from ftplib import FTP_TLS
 from io import BytesIO
 from pathlib import Path
@@ -648,22 +648,84 @@ def publish_public_map(current_file: Path) -> dict[str, Any]:
 
 
 def publish_if_changed(current_file: Path, state_file: Path) -> dict[str, Any]:
-    """Publica sólo cuando cambia la revisión pública."""
+    """Publica cambios usando la revisión existente y enfriamiento tras errores.
+
+    Uso: publish_if_changed(current_file, state_file), invocada por main() desde
+    el servicio systemd tanto para eventos .path como para el .timer.
+
+    current_file: JSON consolidado de incidencias, de solo lectura.
+    state_file: estado persistente de última revisión y próximo reintento.
+
+    Si el FTP falla, conserva la revisión anterior y fija un reintento como
+    mínimo diez minutos después. Eventos posteriores no abren conexiones
+    durante ese plazo. El siguiente disparo, tras vencer el plazo, intentará
+    publicar los datos más recientes. Los éxitos limpian el enfriamiento.
+    """
     payload = build_public_payload(current_file)
+    enabled = _enabled("EMERGENCIAS_PUBLIC_MAP_ENABLED", False)
     previous: dict[str, Any] = {}
     if state_file.exists():
         try:
             previous = json.loads(state_file.read_text(encoding="utf-8"))
+            if not isinstance(previous, dict):
+                previous = {}
         except (OSError, json.JSONDecodeError):
             previous = {}
 
+    # Respetar la deduplicación histórica: no conectar si está publicado.
     if previous.get("revision") == payload["revision"]:
-        return {"enabled": _enabled("EMERGENCIAS_PUBLIC_MAP_ENABLED", False), "published": False, "unchanged": True, "revision": payload["revision"]}
+        return {"enabled": enabled, "published": False, "unchanged": True,
+                "revision": payload["revision"]}
 
-    result = publish_public_map(current_file)
+    # La publicación deshabilitada nunca crea un bloqueo ni escribe estado.
+    if not enabled:
+        return {"enabled": False, "published": False}
+
+    now = datetime.now(timezone.utc)
+    retry_after_raw = previous.get("retry_after")
+    if isinstance(retry_after_raw, str):
+        try:
+            retry_after = datetime.fromisoformat(retry_after_raw)
+            if retry_after.tzinfo is None:
+                retry_after = retry_after.replace(tzinfo=timezone.utc)
+            if now < retry_after:
+                return {"enabled": enabled, "published": False, "deferred": True,
+                        "reason": "retry_cooldown",
+                        "retry_after": retry_after.isoformat(),
+                        "revision": payload["revision"]}
+        except ValueError:
+            # Estado legado o dañado: nunca bloquear indefinidamente.
+            pass
+
+    try:
+        # Mantener el publicador existente sin modificar sus transferencias.
+        result = publish_public_map(current_file)
+    except Exception as exc:
+        # Registrar el error sin reemplazar la última revisión publicada.
+        # Conservar el traceback en journald para diagnóstico.
+        failed_at = datetime.now(timezone.utc)
+        failed_state = dict(previous)
+        failed_state["retry_after"] = (
+            failed_at + timedelta(minutes=10)
+        ).isoformat()
+        failed_state["last_failure_at"] = failed_at.isoformat()
+        failed_state["last_error_type"] = type(exc).__name__
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(
+            json.dumps(failed_state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        raise
+
     if result.get("published"):
         state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(json.dumps({"revision": result["revision"], "published_at": result["generated_at"]}, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Al confirmar publicación, eliminar cualquier cooldown anterior.
+        state_file.write_text(
+            json.dumps({"revision": result["revision"],
+                        "published_at": result["generated_at"]},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return result
 
 
