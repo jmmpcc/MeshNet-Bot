@@ -2,12 +2,12 @@
 Description=Comprobación de respaldo del mapa público de emergencias MeshNet
 
 [Timer]
-# Failsafe del observador .path: garantiza que una sustitución atómica de current.json
-# no pueda dejar el mapa remoto desactualizado si systemd no entrega el evento esperado.
-# El servicio llama a publish_if_changed(), por lo que si la revisión pública no cambia
-# no se realiza ninguna conexión ni subida FTPS.
+# Respaldo con reloj independiente de los eventos de .path.
+# La comprobación cada minuto NO implica conexión: publish_if_changed()
+# evita subidas sin cambios y bloquea intentos durante 10 min tras error.
+# El reloj independiente garantiza un reintento aun con cambios frecuentes.
 OnBootSec=30s
-OnUnitActiveSec=30s
+OnCalendar=*-*-* *:*:00
 AccuracySec=5s
 Unit=meshnet-emergencias-public-map.service
 
