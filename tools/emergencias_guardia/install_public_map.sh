@@ -11,7 +11,7 @@
 #
 # El mapa público queda protegido por dos mecanismos complementarios:
 #   1. systemd.path: publicación prácticamente inmediata cuando cambia current.json.
-#   2. systemd.timer: comprobación de respaldo cada 30 s por si una sustitución
+#   2. systemd.timer: comprobación de respaldo cada minuto por si una sustitución
 #      atómica del fichero no genera el evento esperado para el observador .path.
 #
 # Ambos mecanismos invocan el mismo servicio oneshot. publish_if_changed() compara la
@@ -71,6 +71,6 @@ echo "Publicador instalado."
 echo "Antes de activarlo configure tools/emergencias_guardia/.env con"
 echo "EMERGENCIAS_PUBLIC_MAP_* y establezca EMERGENCIAS_PUBLIC_MAP_ENABLED=1."
 echo "El mapa comprobará cambios inmediatamente mediante .path y, como respaldo,"
-echo "cada 30 segundos mediante .timer. Si la revisión no cambia, no se sube nada."
+echo "cada minuto mediante .timer. Si la revisión no cambia, no se sube nada.\nDespués de un fallo FTPS, se espera al menos 10 minutos antes de reconectar."
 echo "Para una primera publicación manual:"
 echo "  sudo systemctl start $SERVICE_NAME"
