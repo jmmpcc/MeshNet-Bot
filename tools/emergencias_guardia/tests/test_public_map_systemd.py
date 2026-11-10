@@ -25,12 +25,13 @@ class PublicEmergencyMapSystemdTests(unittest.TestCase):
         content = (SYSTEMD_DIR / "meshnet-emergencias-public-map.service").read_text(encoding="utf-8")
         self.assertIn("EMERGENCIAS_PUBLIC_MAP_CURRENT_FILE=/home/meshnet/MeshNet-Bot/bot_data/emergencias_guardia/current.json", content)
 
-    def test_timer_provides_thirty_second_failsafe(self) -> None:
+    def test_timer_provides_independent_minute_failsafe(self) -> None:
         """El timer recupera cambios perdidos por el .path sin crear otro publicador."""
         content = (SYSTEMD_DIR / "meshnet-emergencias-public-map.timer").read_text(encoding="utf-8")
 
         self.assertIn("OnBootSec=30s", content)
-        self.assertIn("OnUnitActiveSec=30s", content)
+        self.assertIn("OnCalendar=*-*-* *:*:00", content)
+        self.assertNotIn("OnUnitActiveSec=", content)
         self.assertIn("Unit=meshnet-emergencias-public-map.service", content)
         self.assertIn("WantedBy=timers.target", content)
 
